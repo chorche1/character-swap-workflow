@@ -1,0 +1,21 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# User-supplied inputs and pipeline artifacts
+characters/*
+!characters/.gitkeep
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+state/*
+!state/.gitkeep
+
+# uv
+uv.lock

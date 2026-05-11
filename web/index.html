@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Character Swap Studio</title>
+  <script>
+    window.tailwind = window.tailwind || {};
+    (function () {
+      var t = localStorage.getItem('theme');
+      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      if (t === 'dark' || (!t && prefersDark)) {
+        document.documentElement.classList.add('dark');
+      }
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config = { darkMode: 'class' };</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .card { transition: box-shadow .15s ease, transform .15s ease; }
+    .card:hover { box-shadow: 0 10px 30px -10px rgba(0,0,0,.25); }
+    .dropzone { transition: background-color .15s ease, border-color .15s ease; }
+    .dropzone.dragover { background-color: rgb(238 242 255); border-color: rgb(99 102 241); }
+    .dark .dropzone.dragover { background-color: rgb(30 27 75); border-color: rgb(129 140 248); }
+    [x-cloak] { display: none !important; }
+    .step-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 1.75rem; height: 1.75rem; border-radius: 9999px;
+      background: rgb(17 24 39); color: white; font-weight: 600; font-size: 0.9rem;
+    }
+    .dark .step-num { background: rgb(243 244 246); color: rgb(17 24 39); }
+    .variant-strip {
+      display: grid; grid-auto-flow: column; grid-auto-columns: 14rem; gap: 0.75rem;
+      overflow-x: auto; padding-bottom: 0.5rem;
+    }
+    .video-strip {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+      gap: 0.75rem;
+    }
+    @keyframes pulse-bg {
+      0%, 100% { background-color: rgb(229 231 235); }
+      50%      { background-color: rgb(209 213 219); }
+    }
+    .skeleton { animation: pulse-bg 1.5s ease-in-out infinite; }
+    .dark .skeleton { animation: pulse-bg 1.5s ease-in-out infinite; background-color: rgb(38 38 38); }
+    .sidebar-scroll::-webkit-scrollbar { width: 6px; }
+    .sidebar-scroll::-webkit-scrollbar-thumb {
+      background: rgb(212 212 212); border-radius: 3px;
+    }
+    .dark .sidebar-scroll::-webkit-scrollbar-thumb { background: rgb(64 64 64); }
+  </style>
+</head>
+<body class="bg-neutral-50 dark:bg-neutral-950 text-neutral-900 dark:text-neutral-100 min-h-screen">
+
+<div x-data="studio()" x-init="init()" x-cloak class="flex min-h-screen">
+
+  <!-- SIDEBAR -->
+  <aside class="hidden md:flex flex-col w-64 shrink-0 border-r border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+    <div class="p-4 border-b border-neutral-200 dark:border-neutral-800">
+      <button @click="newJob()"
+              class="w-full px-3 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium hover:opacity-90">
+        + New job
+      </button>
+    </div>
+    <div class="flex-1 overflow-y-auto sidebar-scroll p-2">
+      <template x-if="jobsList.length === 0">
+        <div class="text-xs text-neutral-400 dark:text-neutral-500 p-3 text-center">
+          No jobs yet — drop a scene to start.
+        </div>
+      </template>
+      <template x-for="j in jobsList" :key="j.job_id">
+        <div class="group flex items-start gap-2 p-2 rounded-lg cursor-pointer mb-1"
+             :class="job && job.job_id === j.job_id
+                       ? 'bg-indigo-50 dark:bg-indigo-950 ring-1 ring-indigo-200 dark:ring-indigo-900'
+                       : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'"
+             @click="openJob(j.job_id)">
+          <img x-show="j.scene_image_url" :src="j.scene_image_url"
+               class="w-10 h-10 rounded object-cover shrink-0 border border-neutral-200 dark:border-neutral-800" />
+          <div class="flex-1 min-w-0">
+            <div class="text-sm truncate font-medium" x-text="j.title || j.job_id"></div>
+            <div class="text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5"
+                 x-text="`${j.n_characters} char${j.n_characters === 1 ? '' : 's'} · ${jobBadge(j)}`"></div>
+          </div>
+          <button class="opacity-0 group-hover:opacity-100 text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-1.5 py-0.5 text-xs"
+                  title="Delete job"
+                  @click.stop="deleteJob(j.job_id)">✕</button>
+        </div>
+      </template>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="flex-1 min-w-0 px-6 py-10 space-y-10 max-w-6xl mx-auto w-full">
+
+    <!-- header -->
+    <header class="flex items-center justify-between">
+      <div>
+        <h1 class="text-3xl font-semibold tracking-tight">Character Swap Studio</h1>
+        <p class="text-neutral-500 dark:text-neutral-400 text-sm mt-1">
+          Drop a scene. Pick characters. Generate, approve, edit, animate.
+        </p>
+      </div>
+      <div class="flex items-center gap-4 text-sm">
+        <span class="flex items-center gap-1">
+          <span :class="health.openai_key ? 'bg-emerald-500' : 'bg-red-500'" class="w-2 h-2 rounded-full"></span>
+          OpenAI
+        </span>
+        <span class="flex items-center gap-1">
+          <span :class="health.xai_key ? 'bg-emerald-500' : 'bg-red-500'" class="w-2 h-2 rounded-full"></span>
+          xAI
+        </span>
+        <span :class="wsConnected ? 'text-emerald-600 dark:text-emerald-400' : 'text-neutral-400 dark:text-neutral-600'"
+              x-show="job">
+          <span x-text="wsConnected ? '● live' : '○ offline'"></span>
+        </span>
+        <button @click="toggleTheme()"
+                title="Toggle theme"
+                class="p-2 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">
+          <span x-show="!isDark">🌙</span>
+          <span x-show="isDark">☀️</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- title row (only when a job is loaded) -->
+    <div x-show="job" class="flex items-center gap-2 -mb-4 text-neutral-600 dark:text-neutral-300 text-sm">
+      <span class="text-xs uppercase tracking-wide text-neutral-400 dark:text-neutral-500">Job:</span>
+      <template x-if="!editingTitle">
+        <div class="flex items-center gap-1 group cursor-text"
+             @click="startEditTitle()">
+          <span x-text="job?.title || job?.job_id"></span>
+          <span class="opacity-0 group-hover:opacity-100 text-neutral-400">✎</span>
+        </div>
+      </template>
+      <template x-if="editingTitle">
+        <div class="flex items-center gap-2">
+          <input x-model="draftTitle"
+                 @keydown.enter.prevent="saveTitle()"
+                 @keydown.escape.prevent="cancelEditTitle()"
+                 x-init="$nextTick(() => $el.focus())"
+                 class="px-2 py-1 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 rounded focus:outline-none focus:ring-2 focus:ring-indigo-300 dark:focus:ring-indigo-900 min-w-[20rem]" />
+          <button class="text-xs text-emerald-600 hover:underline" @click="saveTitle()">save</button>
+          <button class="text-xs text-neutral-500 hover:underline" @click="cancelEditTitle()">cancel</button>
+        </div>
+      </template>
+    </div>
+
+    <!-- STEP 1 — Scene -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+      <h2 class="text-lg font-semibold mb-4"><span class="step-num">1</span> <span class="ml-2">Scene</span></h2>
+      <template x-if="!scene">
+        <label class="dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-10 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
+               @dragover.prevent="$event.currentTarget.classList.add('dragover')"
+               @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
+               @drop.prevent="$event.currentTarget.classList.remove('dragover'); uploadScene($event.dataTransfer.files[0])">
+          <div class="text-base">Drop a scene image here</div>
+          <div class="text-xs mt-1">or click to browse — .jpg, .png, .webp</div>
+          <input type="file" class="hidden" accept="image/*" @change="uploadScene($event.target.files[0])" />
+        </label>
+      </template>
+      <template x-if="scene">
+        <div class="flex items-start gap-4">
+          <img :src="scene.url" class="w-40 h-auto rounded-lg border border-neutral-200 dark:border-neutral-800 object-cover" />
+          <div class="flex-1">
+            <div class="text-sm text-neutral-600 dark:text-neutral-300" x-text="scene.original_name"></div>
+            <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1" x-text="scene.scene_id"></div>
+            <button class="mt-3 text-sm text-red-600 dark:text-red-400 hover:underline"
+                    x-show="!job"
+                    @click="scene = null">Replace scene</button>
+          </div>
+        </div>
+      </template>
+    </section>
+
+    <!-- STEP 2 — Characters -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+      <h2 class="text-lg font-semibold mb-4"><span class="step-num">2</span> <span class="ml-2">Characters</span></h2>
+
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        <template x-for="ch in library" :key="ch.char_id">
+          <div class="card relative border rounded-xl overflow-hidden cursor-pointer"
+               :class="selectedCharacters.includes(ch.char_id)
+                         ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900'
+                         : 'border-neutral-200 dark:border-neutral-800'"
+               @click="toggleCharacter(ch.char_id)">
+            <img :src="ch.url" class="w-full h-32 object-cover" />
+            <div class="px-2 py-1 text-xs flex justify-between items-center gap-1 bg-white dark:bg-neutral-900 group/name">
+              <template x-if="editingCharacterId !== ch.char_id">
+                <span class="flex items-center gap-1 truncate" @click.stop>
+                  <span class="truncate" x-text="ch.name"></span>
+                  <button class="opacity-0 group-hover/name:opacity-100 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-[10px]"
+                          title="Rename"
+                          @click.stop="startEditCharacter(ch)">✎</button>
+                </span>
+              </template>
+              <template x-if="editingCharacterId === ch.char_id">
+                <input x-model="draftCharacterName"
+                       @click.stop
+                       @keydown.enter.prevent="saveCharacterName(ch.char_id)"
+                       @keydown.escape.prevent="cancelEditCharacter()"
+                       x-init="$nextTick(() => $el.focus())"
+                       class="px-1 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded w-full focus:outline-none" />
+              </template>
+              <button class="text-neutral-400 hover:text-red-600 text-xs"
+                      x-show="editingCharacterId !== ch.char_id"
+                      @click.stop="deleteCharacter(ch.char_id)">✕</button>
+            </div>
+            <div x-show="selectedCharacters.includes(ch.char_id)"
+                 class="absolute top-1.5 right-1.5 bg-indigo-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">✓</div>
+          </div>
+        </template>
+
+        <label class="card border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl h-[10.25rem] flex flex-col items-center justify-center cursor-pointer text-neutral-400 dark:text-neutral-500 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/40">
+          <span class="text-3xl leading-none">+</span>
+          <span class="text-xs mt-1">Add character</span>
+          <input type="file" class="hidden" accept="image/*" multiple
+                 @change="uploadCharacters($event.target.files)" />
+        </label>
+      </div>
+
+      <div class="mt-5 flex items-center justify-between flex-wrap gap-4">
+        <div class="flex items-center gap-4 text-sm">
+          <div class="text-neutral-500 dark:text-neutral-400">
+            <span x-text="selectedCharacters.length"></span> selected
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-neutral-500 dark:text-neutral-400">Images per character:</span>
+            <div class="inline-flex rounded-lg border border-neutral-200 dark:border-neutral-700 overflow-hidden">
+              <template x-for="n in [1,2,3,4]" :key="n">
+                <button class="w-9 py-1.5 text-sm"
+                        :class="imagesPerChar === n
+                          ? 'bg-neutral-900 text-white dark:bg-white dark:text-neutral-900'
+                          : 'bg-transparent hover:bg-neutral-100 dark:hover:bg-neutral-800'"
+                        @click="imagesPerChar = n" x-text="n"></button>
+              </template>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <div class="text-xs text-neutral-400 dark:text-neutral-500"
+               x-show="selectedCharacters.length > 0 && imagesPerChar > 1"
+               x-text="`will request ${selectedCharacters.length * imagesPerChar} image generations`"></div>
+          <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="!scene || selectedCharacters.length === 0 || generating"
+                  @click="startJob()">
+            <span x-show="!generating">▶ Generate images</span>
+            <span x-show="generating">Generating…</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 3 — Generated images -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6"
+             x-show="job && Object.keys(job.characters).length > 0" x-transition>
+      <h2 class="text-lg font-semibold mb-4">
+        <span class="step-num">3</span>
+        <span class="ml-2">Generated images</span>
+        <span class="text-sm font-normal text-neutral-500 dark:text-neutral-400 ml-2">— approve one per character to proceed</span>
+      </h2>
+
+      <div class="space-y-6">
+        <template x-for="(jc, cid) in (job?.characters || {})" :key="cid">
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-3">
+                <span class="font-medium" x-text="jc.name"></span>
+                <span class="text-xs px-2 py-0.5 rounded-full"
+                      :class="statusBadgeClasses(jc.status)"
+                      x-text="jc.status.replace('_',' ')"></span>
+              </div>
+              <button class="text-xs text-neutral-500 dark:text-neutral-400 hover:underline"
+                      x-show="!job.movement_prompt"
+                      @click="approve(cid, 'regenerate')">↻ regenerate all</button>
+            </div>
+
+            <div class="variant-strip">
+              <template x-for="v in jc.images" :key="v.variant_id">
+                <div class="card border rounded-xl overflow-hidden flex flex-col"
+                     :class="v.variant_id === jc.approved_variant_id
+                              ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900'
+                              : 'border-neutral-200 dark:border-neutral-800'">
+                  <div class="aspect-[9/16] bg-neutral-100 dark:bg-neutral-800 relative flex items-center justify-center">
+                    <template x-if="v.status === 'ready' && v.url">
+                      <img :src="v.url" class="w-full h-full object-cover" />
+                    </template>
+                    <template x-if="v.status === 'generating'">
+                      <div class="skeleton w-full h-full flex items-center justify-center">
+                        <span class="text-neutral-400 dark:text-neutral-500 text-xs">🎨 generating…</span>
+                      </div>
+                    </template>
+                    <template x-if="v.status === 'failed'">
+                      <div class="text-red-500 text-xs text-center p-3">✕ <span x-text="v.error || 'failed'"></span></div>
+                    </template>
+                    <template x-if="v.parent_variant_id">
+                      <div class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded">
+                        ↳ edit
+                      </div>
+                    </template>
+                    <template x-if="v.variant_id === jc.approved_variant_id">
+                      <div class="absolute top-1.5 right-1.5 bg-emerald-500 text-white text-[10px] px-1.5 py-0.5 rounded">
+                        ✓ approved
+                      </div>
+                    </template>
+                  </div>
+
+                  <div class="p-2 flex justify-between items-center">
+                    <div class="flex gap-2 text-[10px]">
+                      <a x-show="v.url" :href="v.url" :download="v.download_name"
+                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                    </div>
+                    <div class="flex gap-1" x-show="v.status === 'ready' && !job.movement_prompt">
+                      <button class="text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950 rounded px-2 py-1 text-sm"
+                              title="Approve this variant"
+                              x-show="v.variant_id !== jc.approved_variant_id"
+                              @click="approve(cid, 'approve', v.variant_id)">✓</button>
+                      <button class="text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded px-2 py-1 text-sm"
+                              title="Edit with custom prompt"
+                              @click="openEdit(cid, v.variant_id)">✎</button>
+                    </div>
+                  </div>
+
+                  <div class="p-2 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950"
+                       x-show="editingVariant && editingVariant.char_id === cid && editingVariant.variant_id === v.variant_id">
+                    <textarea x-model="editPrompt" rows="3"
+                              class="w-full text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 rounded p-2 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900"
+                              placeholder="e.g. make the lighting cooler, add a slight smile, shift camera left…"></textarea>
+                    <div class="flex justify-end gap-2 mt-2">
+                      <button class="text-xs text-neutral-500 hover:underline" @click="closeEdit()">cancel</button>
+                      <button class="text-xs px-3 py-1 rounded bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 disabled:opacity-40"
+                              :disabled="!editPrompt.trim()"
+                              @click="submitEdit()">Submit edit</button>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- STEP 4 — Movement prompt -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6"
+             x-show="job && hasApprovedChar()" x-transition>
+      <h2 class="text-lg font-semibold mb-4"><span class="step-num">4</span> <span class="ml-2">Movement prompt</span></h2>
+
+      <div class="flex items-center gap-3 mb-3 text-sm">
+        <span class="text-neutral-500 dark:text-neutral-400">Videos per approved image:</span>
+        <div class="inline-flex rounded-lg border border-neutral-200 dark:border-neutral-700 overflow-hidden">
+          <template x-for="n in [1,2,3,4]" :key="'v'+n">
+            <button class="w-9 py-1.5 text-sm"
+                    :class="videosPerChar === n
+                      ? 'bg-neutral-900 text-white dark:bg-white dark:text-neutral-900'
+                      : 'bg-transparent hover:bg-neutral-100 dark:hover:bg-neutral-800'"
+                    @click="videosPerChar = n" x-text="n"
+                    :disabled="job?.movement_prompt"></button>
+          </template>
+        </div>
+        <div class="text-xs text-neutral-400 dark:text-neutral-500"
+             x-text="`${approvedCount()} approved × ${videosPerChar} = ${approvedCount() * videosPerChar} video${approvedCount() * videosPerChar === 1 ? '' : 's'}`"></div>
+      </div>
+
+      <div class="flex gap-3 items-start">
+        <textarea x-model="movementPrompt"
+                  rows="3"
+                  class="flex-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
+                  placeholder="e.g. The man cuts the stem of the banana and says to the camera: 'Did you know…'  Active camera. 10 second video. sound on."
+                  :disabled="job?.movement_prompt"></textarea>
+        <button class="px-4 py-3 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed self-start"
+                :disabled="!movementPrompt?.trim() || job?.movement_prompt"
+                @click="submitMovement()">
+          <span x-show="!job?.movement_prompt">▶ Animate</span>
+          <span x-show="job?.movement_prompt">Submitted</span>
+        </button>
+      </div>
+      <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mt-2">
+        Locked. To change, start a new job.
+      </div>
+    </section>
+
+    <!-- STEP 5 — Videos -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6"
+             x-show="job && hasVideoStage()" x-transition>
+      <h2 class="text-lg font-semibold mb-4"><span class="step-num">5</span> <span class="ml-2">Videos</span></h2>
+      <div class="space-y-6">
+        <template x-for="(jc, cid) in (job?.characters || {})" :key="'vchar-'+cid">
+          <div x-show="jc.videos && jc.videos.length > 0">
+            <div class="flex items-center justify-between mb-2">
+              <span class="font-medium" x-text="jc.name"></span>
+              <span class="text-xs text-neutral-500 dark:text-neutral-400"
+                    x-text="jc.videos.filter(v => v.status === 'done').length + ' / ' + jc.videos.length + ' done'"></span>
+            </div>
+            <div class="video-strip">
+              <template x-for="vv in jc.videos" :key="vv.video_id">
+                <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden flex flex-col">
+                  <div class="aspect-[9/16] bg-black relative flex items-center justify-center">
+                    <template x-if="vv.url">
+                      <video :src="vv.url" controls class="w-full h-full"></video>
+                    </template>
+                    <template x-if="!vv.url">
+                      <div class="text-neutral-400 text-xs flex flex-col items-center gap-2 p-4 text-center">
+                        <span x-show="['failed','error'].includes(vv.status)" class="text-red-400">✕ <span x-text="vv.error || 'failed'"></span></span>
+                        <span x-show="!['failed','error'].includes(vv.status)" class="animate-pulse">🎬 <span x-text="vv.status || 'submitting…'"></span></span>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="p-2 flex items-center justify-between">
+                    <div class="text-[10px] text-neutral-400 dark:text-neutral-500 truncate" x-text="vv.download_name || vv.video_id"></div>
+                    <div class="flex gap-2 text-xs">
+                      <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
+                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
