@@ -58,34 +58,152 @@
 
   <!-- SIDEBAR -->
   <aside class="hidden md:flex flex-col w-64 shrink-0 border-r border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
-    <div class="p-4 border-b border-neutral-200 dark:border-neutral-800">
+    <div class="p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-2">
       <button @click="newJob()"
               class="w-full px-3 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium hover:opacity-90">
         + New job
       </button>
+      <template x-if="!creatingProject">
+        <button @click="startCreateProject()"
+                class="w-full px-3 py-1.5 rounded-lg border border-neutral-200 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800">
+          + New project
+        </button>
+      </template>
+      <template x-if="creatingProject">
+        <div class="flex items-center gap-1">
+          <input x-model="draftNewProjectName"
+                 placeholder="Project name"
+                 @keydown.enter.prevent="submitCreateProject()"
+                 @keydown.escape.prevent="cancelCreateProject()"
+                 x-init="$nextTick(() => $el.focus())"
+                 class="flex-1 px-2 py-1 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900" />
+          <button class="text-xs text-emerald-600 hover:underline px-1" @click="submitCreateProject()">save</button>
+          <button class="text-xs text-neutral-500 hover:underline px-1" @click="cancelCreateProject()">×</button>
+        </div>
+      </template>
+    </div>
+    <div class="px-3 py-2 border-b border-neutral-200 dark:border-neutral-800">
+      <input x-model="searchQuery" type="search"
+             placeholder="Search jobs…"
+             class="w-full px-2 py-1 text-xs border border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-950 rounded focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900" />
+    </div>
+    <div x-show="(dailyCost != null && dailyCost > 0) || (disk && disk.output_bytes > 0)"
+         class="px-3 py-1.5 text-[10px] text-neutral-500 dark:text-neutral-400 border-b border-neutral-200 dark:border-neutral-800 space-y-0.5">
+      <div x-show="dailyCost != null && dailyCost > 0" class="flex items-center justify-between">
+        <span>Today (UTC):</span>
+        <span class="font-mono" x-text="formatUsd(dailyCost)"></span>
+      </div>
+      <div x-show="disk && disk.output_bytes > 0" class="flex items-center justify-between cursor-pointer hover:text-neutral-700 dark:hover:text-neutral-200"
+           @click="openDiskModal()">
+        <span>output/:</span>
+        <span class="font-mono" x-text="formatBytes(disk?.output_bytes)"></span>
+      </div>
     </div>
     <div class="flex-1 overflow-y-auto sidebar-scroll p-2">
-      <template x-if="jobsList.length === 0">
+      <template x-if="jobsList.length === 0 && projects.length === 0">
         <div class="text-xs text-neutral-400 dark:text-neutral-500 p-3 text-center">
           No jobs yet — drop a scene to start.
         </div>
       </template>
-      <template x-for="j in jobsList" :key="j.job_id">
-        <div class="group flex items-start gap-2 p-2 rounded-lg cursor-pointer mb-1"
-             :class="job && job.job_id === j.job_id
-                       ? 'bg-indigo-50 dark:bg-indigo-950 ring-1 ring-indigo-200 dark:ring-indigo-900'
-                       : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'"
-             @click="openJob(j.job_id)">
-          <img x-show="j.scene_image_url" :src="j.scene_image_url"
-               class="w-10 h-10 rounded object-cover shrink-0 border border-neutral-200 dark:border-neutral-800" />
-          <div class="flex-1 min-w-0">
-            <div class="text-sm truncate font-medium" x-text="j.title || j.job_id"></div>
-            <div class="text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5"
-                 x-text="`${j.n_characters} char${j.n_characters === 1 ? '' : 's'} · ${jobBadge(j)}`"></div>
+      <template x-if="searchQuery && groupedJobs().every(g => g.jobs.length === 0)">
+        <div class="text-xs text-neutral-400 dark:text-neutral-500 p-3 text-center">
+          No matches for "<span x-text="searchQuery"></span>".
+        </div>
+      </template>
+
+      <template x-for="group in groupedJobs()" :key="group.project ? group.project.project_id : '__unfiled__'">
+        <div class="mb-2">
+          <!-- Project header -->
+          <template x-if="group.project">
+            <div class="group/proj flex items-center gap-1 px-2 py-1.5 rounded-md text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+              <button class="w-4 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                      @click="toggleCollapsed(group.project.project_id)"
+                      x-text="isCollapsed(group.project.project_id) ? '▸' : '▾'"></button>
+              <template x-if="editingProjectId !== group.project.project_id">
+                <div class="flex-1 flex items-center gap-1 min-w-0 cursor-pointer"
+                     @click="toggleCollapsed(group.project.project_id)">
+                  <span class="truncate font-semibold" x-text="group.project.name"></span>
+                  <span class="text-[10px] text-neutral-400 dark:text-neutral-500 normal-case"
+                        x-text="`(${group.jobs.length})`"></span>
+                </div>
+              </template>
+              <template x-if="editingProjectId === group.project.project_id">
+                <input x-model="draftProjectName"
+                       @click.stop
+                       @keydown.enter.prevent="saveProjectName(group.project.project_id)"
+                       @keydown.escape.prevent="cancelEditProject()"
+                       x-init="$nextTick(() => $el.focus())"
+                       class="flex-1 min-w-0 px-1 py-0.5 text-xs uppercase border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded focus:outline-none" />
+              </template>
+              <button class="opacity-0 group-hover/proj:opacity-100 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 px-1"
+                      title="New job in this project"
+                      x-show="editingProjectId !== group.project.project_id"
+                      @click.stop="startNewJobInProject(group.project.project_id)">+</button>
+              <button class="opacity-0 group-hover/proj:opacity-100 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 px-1"
+                      title="Rename project"
+                      x-show="editingProjectId !== group.project.project_id"
+                      @click.stop="startEditProject(group.project)">✎</button>
+              <button class="opacity-0 group-hover/proj:opacity-100 text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-1"
+                      title="Delete project (and its jobs)"
+                      x-show="editingProjectId !== group.project.project_id"
+                      @click.stop="deleteProject(group.project.project_id)">✕</button>
+            </div>
+          </template>
+          <template x-if="!group.project">
+            <div class="flex items-center gap-1 px-2 py-1.5 text-xs uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+              <button class="w-4 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                      @click="toggleCollapsed('__unfiled__')"
+                      x-text="isCollapsed('__unfiled__') ? '▸' : '▾'"></button>
+              <span class="font-semibold">Unfiled</span>
+              <span class="text-[10px] normal-case" x-text="`(${group.jobs.length})`"></span>
+            </div>
+          </template>
+
+          <!-- Project jobs -->
+          <div x-show="!isCollapsed(group.project ? group.project.project_id : '__unfiled__')">
+            <template x-for="j in group.jobs" :key="j.job_id">
+              <div class="group flex items-start gap-2 p-2 rounded-lg cursor-pointer mb-1 ml-2 relative"
+                   :class="job && job.job_id === j.job_id
+                             ? 'bg-indigo-50 dark:bg-indigo-950 ring-1 ring-indigo-200 dark:ring-indigo-900'
+                             : 'hover:bg-neutral-100 dark:hover:bg-neutral-800'"
+                   @click="openJob(j.job_id)">
+                <img x-show="j.scene_image_url" :src="j.scene_image_url"
+                     class="w-10 h-10 rounded object-cover shrink-0 border border-neutral-200 dark:border-neutral-800" />
+                <div class="flex-1 min-w-0">
+                  <div class="text-sm truncate font-medium" x-text="j.title || j.job_id"></div>
+                  <div class="text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5"
+                       x-text="`${j.n_characters} char${j.n_characters === 1 ? '' : 's'} · ${jobBadge(j)}`"></div>
+                </div>
+                <div class="flex items-start gap-0.5 opacity-0 group-hover:opacity-100">
+                  <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 rounded px-1 py-0.5 text-xs"
+                          title="Move to project"
+                          @click.stop="toggleMoveMenu(j.job_id)">⇄</button>
+                  <button class="text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-1.5 py-0.5 text-xs"
+                          title="Delete job"
+                          @click.stop="deleteJob(j.job_id)">✕</button>
+                </div>
+                <!-- Move menu -->
+                <div x-show="moveMenuJobId === j.job_id"
+                     @click.outside="moveMenuJobId = null"
+                     @click.stop
+                     class="absolute right-2 top-12 z-10 w-44 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-md shadow-lg py-1 text-xs">
+                  <div class="px-2 py-1 text-[10px] uppercase tracking-wide text-neutral-400 dark:text-neutral-500">Move to</div>
+                  <button class="w-full text-left px-2 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-40"
+                          :disabled="!j.project_id"
+                          @click="moveJob(j.job_id, null)">Unfiled</button>
+                  <template x-for="p in projects" :key="'mv-'+j.job_id+'-'+p.project_id">
+                    <button class="w-full text-left px-2 py-1 hover:bg-neutral-100 dark:hover:bg-neutral-800 truncate disabled:opacity-40"
+                            :disabled="p.project_id === j.project_id"
+                            @click="moveJob(j.job_id, p.project_id)"
+                            x-text="p.name"></button>
+                  </template>
+                  <template x-if="projects.length === 0">
+                    <div class="px-2 py-1 text-neutral-400 dark:text-neutral-500">No projects yet</div>
+                  </template>
+                </div>
+              </div>
+            </template>
           </div>
-          <button class="opacity-0 group-hover:opacity-100 text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-1.5 py-0.5 text-xs"
-                  title="Delete job"
-                  @click.stop="deleteJob(j.job_id)">✕</button>
         </div>
       </template>
     </div>
@@ -93,6 +211,16 @@
 
   <!-- MAIN -->
   <main class="flex-1 min-w-0 px-6 py-10 space-y-10 max-w-6xl mx-auto w-full">
+
+    <div x-show="!health.openai_key || !health.xai_key"
+         class="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 px-4 py-3 text-sm">
+      <strong>API key(s) missing.</strong>
+      <span x-show="!health.openai_key">OpenAI key not set — image generation disabled.</span>
+      <span x-show="!health.xai_key">xAI/Grok key not set — video animation disabled.</span>
+      Add <code class="font-mono text-xs px-1 rounded bg-red-100 dark:bg-red-900">OPENAI_API_KEY</code> /
+      <code class="font-mono text-xs px-1 rounded bg-red-100 dark:bg-red-900">XAI_API_KEY</code>
+      to <code class="font-mono text-xs">.env</code> and restart the server.
+    </div>
 
     <!-- header -->
     <header class="flex items-center justify-between">
@@ -125,7 +253,7 @@
     </header>
 
     <!-- title row (only when a job is loaded) -->
-    <div x-show="job" class="flex items-center gap-2 -mb-4 text-neutral-600 dark:text-neutral-300 text-sm">
+    <div x-show="job" class="flex items-center gap-2 -mb-4 text-neutral-600 dark:text-neutral-300 text-sm flex-wrap">
       <span class="text-xs uppercase tracking-wide text-neutral-400 dark:text-neutral-500">Job:</span>
       <template x-if="!editingTitle">
         <div class="flex items-center gap-1 group cursor-text"
@@ -145,6 +273,18 @@
           <button class="text-xs text-neutral-500 hover:underline" @click="cancelEditTitle()">cancel</button>
         </div>
       </template>
+      <span x-show="jobCost != null && jobCost > 0"
+            class="text-xs text-neutral-400 dark:text-neutral-500"
+            x-text="`· ${formatUsd(jobCost)} in this job`"></span>
+      <button x-show="job && !editingTitle"
+              title="Duplicate this job (same scene + characters, new generation)"
+              class="ml-2 text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+              @click="duplicateJob(job.job_id)">⎘ duplicate</button>
+      <button x-show="job && !editingTitle && !job.compacted && !isJobInFlight(job)"
+              title="Delete rejected variants and failed videos from disk"
+              class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+              @click="compactJob(job.job_id)">🗜 compact</button>
+      <span x-show="job?.compacted" class="text-xs text-neutral-400 dark:text-neutral-500">· compacted</span>
     </div>
 
     <!-- STEP 1 — Scene -->
@@ -177,6 +317,20 @@
     <!-- STEP 2 — Characters -->
     <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
       <h2 class="text-lg font-semibold mb-4"><span class="step-num">2</span> <span class="ml-2">Characters</span></h2>
+
+      <div x-show="!job && currentProject()"
+           class="mb-4 text-xs px-3 py-2 rounded-md bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900 flex items-center gap-2 flex-wrap">
+        <span>Creating job in project <strong x-text="currentProject()?.name"></strong>.</span>
+        <span x-show="currentProject() && (currentProject().character_ids || []).length > 0"
+              class="text-indigo-500 dark:text-indigo-400">
+          Preset chars loaded (<span x-text="(currentProject()?.character_ids || []).length"></span>).
+        </span>
+        <button x-show="!projectDefaultsMatchSelection()"
+                class="ml-auto px-2 py-0.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-700"
+                @click="saveProjectDefaults()">Save selection as project default</button>
+        <span x-show="projectDefaultsMatchSelection() && (currentProject()?.character_ids || []).length > 0"
+              class="ml-auto text-indigo-500 dark:text-indigo-400">✓ Selection matches project default</span>
+      </div>
 
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
         <template x-for="ch in library" :key="ch.char_id">
@@ -243,7 +397,8 @@
                x-show="selectedCharacters.length > 0 && imagesPerChar > 1"
                x-text="`will request ${selectedCharacters.length * imagesPerChar} image generations`"></div>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                  :disabled="!scene || selectedCharacters.length === 0 || generating"
+                  :disabled="!scene || selectedCharacters.length === 0 || generating || !health.openai_key"
+                  :title="!health.openai_key ? 'OPENAI_API_KEY is not set' : ''"
                   @click="startJob()">
             <span x-show="!generating">▶ Generate images</span>
             <span x-show="generating">Generating…</span>
@@ -363,6 +518,15 @@
              x-text="`${approvedCount()} approved × ${videosPerChar} = ${approvedCount() * videosPerChar} video${approvedCount() * videosPerChar === 1 ? '' : 's'}`"></div>
       </div>
 
+      <div x-show="approvedCount() > 0 && !job?.movement_prompt"
+           class="mb-3 text-xs px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-900">
+        About to submit
+        <strong x-text="approvedCount() * videosPerChar"></strong>
+        Grok video job<span x-show="approvedCount() * videosPerChar !== 1">s</span>
+        (~10s each). Estimated cost
+        <strong x-text="estimatedCost()"></strong>.
+      </div>
+
       <div class="flex gap-3 items-start">
         <textarea x-model="movementPrompt"
                   rows="3"
@@ -370,14 +534,21 @@
                   placeholder="e.g. The man cuts the stem of the banana and says to the camera: 'Did you know…'  Active camera. 10 second video. sound on."
                   :disabled="job?.movement_prompt"></textarea>
         <button class="px-4 py-3 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed self-start"
-                :disabled="!movementPrompt?.trim() || job?.movement_prompt"
+                :disabled="!movementPrompt?.trim() || job?.movement_prompt || !health.xai_key"
+                :title="!health.xai_key ? 'XAI_API_KEY is not set' : ''"
                 @click="submitMovement()">
           <span x-show="!job?.movement_prompt">▶ Animate</span>
           <span x-show="job?.movement_prompt">Submitted</span>
         </button>
       </div>
-      <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mt-2">
-        Locked. To change, start a new job.
+      <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mt-2 flex items-center gap-3">
+        <span>Locked.</span>
+        <button x-show="canUnlockMovement()"
+                class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                @click="unlockMovement()">↺ Unlock movement</button>
+        <span x-show="!canUnlockMovement()" class="text-neutral-400 dark:text-neutral-600">
+          (a video already completed — start a new job to re-prompt)
+        </span>
       </div>
     </section>
 
@@ -412,6 +583,9 @@
                     <div class="flex gap-2 text-xs">
                       <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
                          class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                      <button x-show="['failed','error'].includes(vv.status)"
+                              class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                              @click="retryVideo(cid, vv.video_id)">↻ retry</button>
                     </div>
                   </div>
                 </div>
@@ -422,6 +596,56 @@
       </div>
     </section>
   </main>
+
+  <!-- Disk usage modal -->
+  <div x-show="showDiskModal"
+       @click="showDiskModal = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl max-h-[80vh] flex flex-col">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">Output disk usage</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            Total: <span x-text="formatBytes(disk?.output_bytes)"></span>
+            · <span x-text="(disk?.by_job?.length || 0) + ' job(s)'"></span>
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="showDiskModal = false">✕</button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-2">
+        <template x-for="row in (disk?.by_job || [])" :key="row.job_id">
+          <div class="flex items-center justify-between gap-3 p-2 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 cursor-pointer"
+               @click="showDiskModal = false; openJob(row.job_id)">
+            <div class="flex-1 min-w-0 text-sm truncate" x-text="row.title"></div>
+            <div class="font-mono text-xs text-neutral-500 dark:text-neutral-400 shrink-0"
+                 x-text="formatBytes(row.bytes)"></div>
+          </div>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast container (inside x-data so Alpine state propagates) -->
+  <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="flex items-start gap-2 px-3 py-2 rounded-lg shadow-lg border text-sm"
+           :class="t.kind === 'error'
+                     ? 'bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-900 text-red-800 dark:text-red-200'
+                     : 'bg-emerald-50 dark:bg-emerald-950 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-200'">
+        <div class="flex-1 break-words" x-text="t.msg"></div>
+        <div class="flex items-center gap-1 shrink-0">
+          <button x-show="t.retry"
+                  class="text-xs underline opacity-70 hover:opacity-100"
+                  @click="runToastRetry(t)">retry</button>
+          <button class="text-xs underline opacity-70 hover:opacity-100"
+                  @click="copyToast(t.msg)">copy</button>
+          <button class="text-xs opacity-50 hover:opacity-100" @click="dismissToast(t.id)">✕</button>
+        </div>
+      </div>
+    </template>
+  </div>
 </div>
 
 <script src="/app.js"></script>

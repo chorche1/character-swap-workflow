@@ -17,6 +17,20 @@ class CharStatus(StrEnum):
     FAILED = "failed"
 
 
+class VariantStatus(StrEnum):
+    GENERATING = "generating"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class VideoStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    DONE = "done"
+    FAILED = "failed"
+    ERROR = "error"
+
+
 class SceneAsset(BaseModel):
     scene_id: str
     filename: str
@@ -31,13 +45,23 @@ class CharacterAsset(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class ProjectAsset(BaseModel):
+    project_id: str
+    name: str
+    # Preset character library for this project. New jobs created inside the
+    # project pre-select these characters; users can still adjust per job.
+    character_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class GeneratedImage(BaseModel):
     """One generated image variant for a character within a job."""
     variant_id: str
     path: str
     prompt: str                              # GENERATION_PROMPT for fresh gens, custom for edits
     parent_variant_id: str | None = None     # set when this is an edit
-    status: str = "ready"                    # "generating" | "ready" | "failed"
+    status: VariantStatus = VariantStatus.READY
     error: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -46,7 +70,7 @@ class VideoVariant(BaseModel):
     """One Grok-generated video for a character."""
     video_id: str
     grok_job_id: str
-    status: str = "pending"                  # "pending"|"processing"|"done"|"failed"|"error"
+    status: VideoStatus = VideoStatus.PENDING
     submitted_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
     download_url: str | None = None
@@ -70,12 +94,14 @@ class JobCharacter(BaseModel):
 class Job(BaseModel):
     job_id: str
     title: str | None = None                 # user-editable; falls back to job_id in UI
+    project_id: str | None = None            # None = Unfiled
     scene_id: str
     scene_image_path: str
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     movement_prompt: str | None = None
     images_per_character: int = 1
     videos_per_character: int = 1
+    compacted: bool = False                  # set true after `compact` strips non-approved files
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -83,5 +109,6 @@ class Job(BaseModel):
 class AppState(BaseModel):
     scenes: dict[str, SceneAsset] = Field(default_factory=dict)
     characters: dict[str, CharacterAsset] = Field(default_factory=dict)
+    projects: dict[str, ProjectAsset] = Field(default_factory=dict)
     jobs: dict[str, Job] = Field(default_factory=dict)
     last_updated: datetime = Field(default_factory=datetime.utcnow)

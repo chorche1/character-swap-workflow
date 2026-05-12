@@ -14,7 +14,9 @@ Local web app (FastAPI + Alpine.js + Tailwind) for character-swap-in-scene workf
 4. **Movement prompt** — type one movement prompt + choose **M videos per approved image** (1–4, default 1).
 5. **Videos** — Grok Imagine animates each approved image M times. Live progress + per-video download with friendly filename.
 
-**Sidebar:** shows every past job (scene thumbnail + auto-generated or user-edited title + status summary). Click to open. Hover-✕ to hard-delete (removes state entry + `output/<job_id>/` directory).
+**Sidebar:** jobs are grouped by **project** (collapsible). "+ New project" creates a project; "+" on a project header pre-selects it for the next job. The "⇄" icon on each job opens a move menu to send it to another project (or Unfiled). Unfiled jobs cluster at the bottom. Hover-✕ to hard-delete a job; ✕ on a project header CASCADES (deletes the project AND every job in it AND those jobs' `output/<job_id>/` directories — with a strong confirm that names the project and counts the jobs).
+
+**Project character presets:** each project stores `character_ids: list[str]`. When you start a new job inside a project via the "+" on its header, those characters are auto-selected in Step 2 (filtered against the current library so deleted chars don't show). A "Save selection as project default" button appears in Step 2 when the current selection diverges from the preset — click to update the project. Deleting a character from the library automatically prunes it from every project's preset.
 
 **Renames are everywhere:** characters in library (retroactive — propagates to all past jobs' snapshot names), job titles (inline above step 1), and download filenames are automatically friendly (`<char_name>-variant-N.png`, `<char_name>-edit-N.png`, `<char_name>-video-N.mp4`).
 
@@ -67,6 +69,7 @@ VIDEO_POLL_INTERVAL_SECS=12
 VIDEO_TIMEOUT_SECS=600
 HOST=127.0.0.1
 PORT=8000
+MAX_UPLOAD_BYTES=26214400          # 25 MB — rejects oversize uploads with 413
 ```
 
 Claude / Anthropic key is not required (no QC in this version).
@@ -103,7 +106,7 @@ src/character_swap/
 ├── pipeline.py     — Pure primitives: generate_image, edit_image, submit_video, wait_for_video
 ├── events.py       — Asyncio pub/sub for live updates
 ├── state.py        — Atomic JSON state (scenes, characters, jobs)
-├── models.py       — Pydantic: SceneAsset, CharacterAsset, GeneratedImage, VideoVariant, JobCharacter, Job, AppState
+├── models.py       — Pydantic: SceneAsset, CharacterAsset, ProjectAsset, GeneratedImage, VideoVariant, JobCharacter, Job, AppState + StrEnums (CharStatus, VariantStatus, VideoStatus)
 ├── config.py       — Settings via pydantic-settings
 ├── images.py       — sha256, base64, atomic write/copy
 ├── call_log.py     — JSONL call logger
@@ -143,9 +146,13 @@ Order matters: scene is reference #1, character is reference #2. The user confir
 ```
 GET    /                              → web/index.html
 GET    /app.js                        → web/app.js
-GET    /files/<rel_path>              → static file under project_root
+GET    /files/output/<rel>            → generated outputs (per job)
+GET    /files/input/scenes/<rel>      → uploaded scene images
+GET    /files/characters/<rel>        → uploaded character images
+                                        (state/, .env, source are NOT exposed)
 
 POST   /api/scenes                    multipart upload → {scene_id, url}
+                                      max upload size: MAX_UPLOAD_BYTES (default 25 MB)
 GET    /api/scenes/{scene_id}         metadata
 
 POST   /api/characters                multipart upload → {char_id, name, url}
@@ -153,10 +160,23 @@ GET    /api/characters                list library
 PATCH  /api/characters/{char_id}      body {name} — retroactive rename across all jobs
 DELETE /api/characters/{char_id}      remove from library + disk
 
-POST   /api/jobs                      body {scene_id, character_ids, images_per_character: 1..4, title?}
+POST   /api/projects                  body {name, character_ids?: [...]}
+                                      → {project_id, name, character_ids, n_jobs, ...}
+GET    /api/projects                  list projects (with n_jobs, character_ids)
+PATCH  /api/projects/{project_id}     body {name?, character_ids?} — at least one field
+DELETE /api/projects/{project_id}     CASCADE: deletes project + every job inside
+                                      + each job's output/<job_id>/ directory.
+                                      Returns {ok, deleted_jobs: [...]}.
+
+POST   /api/jobs                      body {scene_id, character_ids,
+                                              images_per_character: 1..4, title?,
+                                              project_id?}
+                                      project_id null/absent = Unfiled
 GET    /api/jobs                      list all jobs (full); ?summary=1 for compact list
 GET    /api/jobs/{job_id}             job state (variants + videos, with download_name fields)
-PATCH  /api/jobs/{job_id}             body {title} — rename a job
+PATCH  /api/jobs/{job_id}             body {title?, project_id?}
+                                      — project_id explicitly null moves job to Unfiled
+                                      — at least one field required
 DELETE /api/jobs/{job_id}             hard delete: state entry + output/<job_id>/ directory
 POST   /api/jobs/{job_id}/approve     body {char_id, action: "approve"|"reject"|"regenerate", variant_id?}
                                       — approve requires variant_id
@@ -181,8 +201,9 @@ queued → generating → awaiting_approval → approved → animating → done
 
 `awaiting_approval` flips on as soon as the **first** variant lands, so the user can start approving while the rest are still generating.
 
-Per-variant status (string on `GeneratedImage.status`): `generating | ready | failed`.
-Per-video status (string on `VideoVariant.status`): `pending | processing | done | failed | error`.
+Per-variant status (`models.VariantStatus`): `generating | ready | failed`.
+Per-video status (`models.VideoStatus`): `pending | processing | done | failed | error`.
+Unknown intermediate states from Grok (e.g. "queued", "running") are coerced to `processing`.
 
 ---
 
@@ -213,7 +234,8 @@ Download: plain GET on the video URL (httpx.stream 300s).
 ## Cost & safety notes
 
 - Server binds to `127.0.0.1` only.
-- Static-file serving mounted at `/files/<relative_path>`; paths constructed via `relative_to(project_root)`. Generated paths stay inside `output/`, `input/scenes/`, `characters/`.
+- Static-file serving uses **three narrow mounts**: `/files/output`, `/files/input/scenes`, `/files/characters`. `state/`, `.env`, source, and call logs are NOT reachable via HTTP — even if HOST is changed.
+- Uploads are streamed in chunks and capped by `MAX_UPLOAD_BYTES` (default 25 MB) to prevent OOM from huge files.
 - Image gen is gated by `IMAGE_CONCURRENCY` (default 2). With 5 chars × 4 variants = 20 calls; at concurrency 2 that's ~30–60s × 10 batches.
 - Video gen fires all in parallel (Grok handles queueing server-side). With 5 chars × 4 videos = 20 Grok jobs; ~5–10 min each. UI shows count hints next to Generate / Animate buttons.
 - Approvals + edits are locked after the movement prompt is submitted — protects the contract that videos came from a specific image.
@@ -223,7 +245,5 @@ Download: plain GET on the video URL (httpx.stream 300s).
 
 ## Pending / nice-to-haves
 
-- Failed-video retry button (currently routes users to "Start a new job"). Easy add: new `/retry_video` endpoint that submits one fresh `VideoVariant` for that character.
-- Multi-job history viewer (`GET /api/jobs` exists; UI only shows the active one).
-- Character name editing in the library (locked at upload, defaults to filename stem).
 - Edit-chain visualization beyond the small "↳ edit" badge (e.g. parent thumbnail on hover).
+- SQLite-backed state (planned in `~/.claude/plans/`) — kills the write-amplification of full-file JSON rewrites.

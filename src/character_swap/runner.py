@@ -11,13 +11,15 @@ from datetime import datetime
 from pathlib import Path
 
 from character_swap import events, pipeline
-from character_swap.clients import grok, openai_image
+from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
     CharStatus,
     GeneratedImage,
     Job,
     JobCharacter,
+    VariantStatus,
+    VideoStatus,
     VideoVariant,
 )
 from character_swap.state import store
@@ -72,21 +74,22 @@ async def _generate_one_variant(
                 character_image=Path(jc.source_image_path),
                 character_name=jc.name,
                 dest=dest,
+                job_id=job.job_id,
             )
-        except (openai_image.OpenAIImageError, Exception) as e:
-            variant.status = "failed"
+        except Exception as e:
+            variant.status = VariantStatus.FAILED
             variant.error = f"{type(e).__name__}: {e}"
             _replace_variant(job, jc, variant)
             await _emit(job.job_id, "variant.failed",
                         char_id=jc.char_id, variant_id=variant.variant_id,
                         error=variant.error)
             # If all variants failed, mark char failed.
-            if all(v.status == "failed" for v in jc.images):
+            if all(v.status == VariantStatus.FAILED for v in jc.images):
                 _persist(job, jc, status=CharStatus.FAILED,
                          error="all variants failed")
             return
 
-        variant.status = "ready"
+        variant.status = VariantStatus.READY
         _replace_variant(job, jc, variant)
         # First successful variant flips char to AWAITING_APPROVAL so user can act early.
         if jc.status != CharStatus.AWAITING_APPROVAL:
@@ -125,7 +128,7 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
             variant_id=variant_id,
             path=str(path),
             prompt=pipeline.GENERATION_PROMPT,
-            status="generating",
+            status=VariantStatus.GENERATING,
         )
         placeholders.append(v)
         jc.images.append(v)
@@ -186,7 +189,7 @@ async def run_edit_variant(
         path=str(dest),
         prompt=custom_prompt,
         parent_variant_id=parent_variant_id,
-        status="generating",
+        status=VariantStatus.GENERATING,
     )
     jc.images.append(variant)
     _persist(job, jc)
@@ -201,16 +204,17 @@ async def run_edit_variant(
             custom_prompt=custom_prompt,
             character_name=jc.name,
             dest=dest,
+            job_id=job_id,
         )
-    except (openai_image.OpenAIImageError, Exception) as e:
-        variant.status = "failed"
+    except Exception as e:
+        variant.status = VariantStatus.FAILED
         variant.error = f"{type(e).__name__}: {e}"
         _replace_variant(job, jc, variant)
         await _emit(job_id, "variant.failed",
                     char_id=char_id, variant_id=variant_id, error=variant.error)
         return
 
-    variant.status = "ready"
+    variant.status = VariantStatus.READY
     _replace_variant(job, jc, variant)
     await _emit(job_id, "variant.ready",
                 char_id=char_id, variant_id=variant_id, path=str(dest))
@@ -236,9 +240,10 @@ async def _animate_one_video(
             image=Path(approved.path),
             movement_prompt=movement_prompt,
             character_name=jc.name,
+            job_id=job.job_id,
         )
     except grok.GrokError as e:
-        video.status = "error"
+        video.status = VideoStatus.ERROR
         video.error = f"submit: {e}"
         _replace_video(job, jc, video)
         await _emit(job.job_id, "video.failed",
@@ -255,14 +260,21 @@ async def _animate_one_video(
     dest = _output_dir(job.job_id, jc.char_id) / f"video_{video.video_id}.mp4"
 
     def _progress(status: str, url: str | None) -> None:
-        if video.status != status:
-            video.status = status
+        # Grok may send intermediate states we don't enumerate (e.g. "queued",
+        # "running"). Bucket those into PROCESSING so video.status stays a valid
+        # VideoStatus.
+        try:
+            new_status = VideoStatus(status)
+        except ValueError:
+            new_status = VideoStatus.PROCESSING
+        if video.status != new_status:
+            video.status = new_status
             video.download_url = url
             _replace_video(job, jc, video)
         events.publish_threadsafe(
             loop, job.job_id,
             {"kind": "video.progress", "job_id": job.job_id, "char_id": jc.char_id,
-             "video_id": video.video_id, "status": status,
+             "video_id": video.video_id, "status": new_status.value,
              "ts": datetime.utcnow().isoformat() + "Z"},
         )
 
@@ -273,9 +285,10 @@ async def _animate_one_video(
             character_name=jc.name,
             dest=dest,
             on_progress=_progress,
+            app_job_id=job.job_id,
         )
     except grok.GrokError as e:
-        video.status = "error"
+        video.status = VideoStatus.ERROR
         video.error = str(e)
         _replace_video(job, jc, video)
         await _emit(job.job_id, "video.failed",
@@ -283,7 +296,7 @@ async def _animate_one_video(
         _maybe_complete_char(job, jc)
         return
 
-    video.status = "done"
+    video.status = VideoStatus.DONE
     video.completed_at = datetime.utcnow()
     video.final_video_path = str(dest)
     _replace_video(job, jc, video)
@@ -302,11 +315,14 @@ def _replace_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None:
     _persist(job, jc)
 
 
+_VIDEO_TERMINAL = {VideoStatus.DONE, VideoStatus.FAILED, VideoStatus.ERROR}
+
+
 def _maybe_complete_char(job: Job, jc: JobCharacter) -> None:
     if not jc.videos:
         return
-    if all(v.status in {"done", "failed", "error"} for v in jc.videos):
-        any_ok = any(v.status == "done" for v in jc.videos)
+    if all(v.status in _VIDEO_TERMINAL for v in jc.videos):
+        any_ok = any(v.status == VideoStatus.DONE for v in jc.videos)
         _persist(
             job, jc,
             status=CharStatus.DONE if any_ok else CharStatus.FAILED,
@@ -326,7 +342,7 @@ async def _animate_character(
         v = VideoVariant(
             video_id=vid,
             grok_job_id="",
-            status="pending",
+            status=VideoStatus.PENDING,
             source_variant_id=jc.approved_variant_id,
         )
         jc.videos.append(v)
@@ -336,6 +352,33 @@ async def _animate_character(
     await asyncio.gather(
         *[_animate_one_video(job, jc, v, movement_prompt) for v in placeholders]
     )
+
+
+async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
+    """Re-submit a single failed video. Replaces the entry in-place with a fresh
+    `VideoVariant` and re-runs `_animate_one_video`."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None or not job.movement_prompt:
+        return
+    jc = job.characters.get(char_id)
+    if jc is None or jc.approved_variant_id is None:
+        return
+    idx = next((i for i, v in enumerate(jc.videos) if v.video_id == video_id), None)
+    if idx is None:
+        return
+    if jc.videos[idx].status not in {VideoStatus.FAILED, VideoStatus.ERROR}:
+        return
+
+    fresh = VideoVariant(
+        video_id=_short("vd_"),
+        grok_job_id="",
+        status=VideoStatus.PENDING,
+        source_variant_id=jc.approved_variant_id,
+    )
+    jc.videos[idx] = fresh
+    _persist(job, jc, status=CharStatus.ANIMATING)
+    await _animate_one_video(job, jc, fresh, job.movement_prompt)
 
 
 async def run_video_synthesis(job_id: str) -> None:
@@ -369,11 +412,11 @@ async def resume_pending(job_id: str) -> None:
     dirty = False
     for jc in job.characters.values():
         for v in jc.images:
-            if v.status == "generating":
-                v.status = "failed"
+            if v.status == VariantStatus.GENERATING:
+                v.status = VariantStatus.FAILED
                 v.error = "interrupted (server restart)"
                 dirty = True
-        if all(v.status == "failed" for v in jc.images) and jc.images:
+        if all(v.status == VariantStatus.FAILED for v in jc.images) and jc.images:
             jc.status = CharStatus.FAILED
             jc.error = "all variants failed"
     if dirty:
@@ -381,7 +424,7 @@ async def resume_pending(job_id: str) -> None:
 
     for jc in job.characters.values():
         for v in jc.videos:
-            if v.grok_job_id and v.status not in {"done", "failed", "error"}:
+            if v.grok_job_id and v.status not in _VIDEO_TERMINAL:
                 asyncio.create_task(_resume_video(job, jc, v))
 
 
@@ -407,9 +450,10 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
             character_name=jc.name,
             dest=dest,
             on_progress=_progress,
+            app_job_id=job.job_id,
         )
     except grok.GrokError as e:
-        video.status = "error"
+        video.status = VideoStatus.ERROR
         video.error = str(e)
         _replace_video(job, jc, video)
         await _emit(job.job_id, "video.failed",
@@ -417,7 +461,7 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
         _maybe_complete_char(job, jc)
         return
 
-    video.status = "done"
+    video.status = VideoStatus.DONE
     video.completed_at = datetime.utcnow()
     video.final_video_path = str(dest)
     _replace_video(job, jc, video)

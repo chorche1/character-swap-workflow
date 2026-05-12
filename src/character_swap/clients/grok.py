@@ -65,7 +65,8 @@ def _retryable_status(response: httpx.Response) -> bool:
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,
 )
-def submit(*, image: Path, prompt: str, character: str) -> str:
+def submit(*, image: Path, prompt: str, character: str,
+           app_job_id: str | None = None) -> str:
     # Per xAI docs, image is supplied via {"url": "..."}. We embed our local
     # image as a data URL so we don't need an external host.
     data_url = f"data:{media_type(image)};base64,{encode_b64(image)}"
@@ -81,6 +82,7 @@ def submit(*, image: Path, prompt: str, character: str) -> str:
         phase="phase4_submit",
         model=settings.grok_video_model,
         character=character,
+        job_id=app_job_id,
     ) as entry, _client() as h:
         r = h.post(SUBMIT_PATH, json=body)
         if _retryable_status(r):
@@ -102,12 +104,14 @@ def submit(*, image: Path, prompt: str, character: str) -> str:
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,
 )
-def status(*, job_id: str, character: str) -> dict:
+def status(*, job_id: str, character: str,
+           app_job_id: str | None = None) -> dict:
     with record(
         phase="phase4_poll",
         model=settings.grok_video_model,
         character=character,
-        job_id=job_id,
+        grok_job_id=job_id,
+        job_id=app_job_id,
     ) as entry, _client() as h:
         r = h.get(STATUS_PATH.format(job_id=job_id))
         if _retryable_status(r):

@@ -34,6 +34,7 @@ def generate_image(
     character_image: Path,
     character_name: str,
     dest: Path,
+    job_id: str | None = None,
 ) -> Path:
     """
     Image-to-image generation using GPT Image 2.
@@ -45,6 +46,7 @@ def generate_image(
         reference_images=[scene_image, character_image],
         phase="generate",
         character=character_name,
+        job_id=job_id,
     )
     atomic_write_bytes(dest, image_bytes)
     return dest
@@ -56,6 +58,7 @@ def edit_image(
     custom_prompt: str,
     character_name: str,
     dest: Path,
+    job_id: str | None = None,
 ) -> Path:
     """
     Refine an existing variant with a user-supplied prompt.
@@ -66,6 +69,7 @@ def edit_image(
         reference_images=[source_image],
         phase="edit",
         character=character_name,
+        job_id=job_id,
     )
     atomic_write_bytes(dest, image_bytes)
     return dest
@@ -76,14 +80,17 @@ def submit_video(
     image: Path,
     movement_prompt: str,
     character_name: str,
+    job_id: str | None = None,
 ) -> str:
-    """Submit a Grok Imagine video job. Returns the job_id."""
-    return grok.submit(image=image, prompt=movement_prompt, character=character_name)
+    """Submit a Grok Imagine video job. Returns the (Grok) job_id."""
+    return grok.submit(image=image, prompt=movement_prompt,
+                       character=character_name, app_job_id=job_id)
 
 
-def poll_video_once(*, job_id: str, character_name: str) -> tuple[str, str | None]:
+def poll_video_once(*, job_id: str, character_name: str,
+                    app_job_id: str | None = None) -> tuple[str, str | None]:
     """One poll. Returns (status, download_url_or_none)."""
-    payload = grok.status(job_id=job_id, character=character_name)
+    payload = grok.status(job_id=job_id, character=character_name, app_job_id=app_job_id)
     return _extract_status(payload)
 
 
@@ -93,6 +100,7 @@ def wait_for_video(
     character_name: str,
     dest: Path,
     on_progress=None,
+    app_job_id: str | None = None,
 ) -> Path:
     """
     Blocking poll loop. Downloads to `dest` on success. Raises grok.GrokError
@@ -103,7 +111,8 @@ def wait_for_video(
     deadline = time.monotonic() + settings.video_timeout_secs
     interval = settings.video_poll_interval_secs
     while time.monotonic() < deadline:
-        status, url = poll_video_once(job_id=job_id, character_name=character_name)
+        status, url = poll_video_once(job_id=job_id, character_name=character_name,
+                                      app_job_id=app_job_id)
         if on_progress is not None:
             on_progress(status, url)
         if status in grok.SUCCESS_STATES:

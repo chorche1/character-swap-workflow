@@ -54,6 +54,7 @@ def generate(
     phase: str,
     character: str,
     size: str | None = None,
+    job_id: str | None = None,
 ) -> bytes:
     """
     Generate an image.
@@ -74,6 +75,7 @@ def generate(
             phase=phase,
             model=model,
             character=character,
+            job_id=job_id,
             mode="edit" if refs else "create",
             n_references=len(refs),
             size=size,

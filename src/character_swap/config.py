@@ -36,6 +36,21 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", validation_alias="HOST")
     port: int = Field(default=8000, validation_alias="PORT")
 
+    max_upload_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        validation_alias="MAX_UPLOAD_BYTES",
+    )
+
+    # Per-call cost estimates used by call_log + the UI cost banner.
+    # Override per-model rates if pricing drifts.
+    openai_image_price_usd: float = Field(default=0.04, validation_alias="OPENAI_IMAGE_PRICE_USD")
+    grok_video_price_usd: float = Field(default=0.40, validation_alias="GROK_VIDEO_PRICE_USD")
+
+    # Opt-in SQLite state backend. Default off — JSON file remains canonical
+    # until the user runs `character-swap migrate` + flips this on. Once stable
+    # the JSON path will be deleted.
+    use_sqlite_state: bool = Field(default=False, validation_alias="USE_SQLITE_STATE")
+
     project_root: Path = PROJECT_ROOT
     characters_dir: Path = PROJECT_ROOT / "characters"
     input_dir: Path = PROJECT_ROOT / "input"
@@ -50,6 +65,10 @@ class Settings(BaseSettings):
     @property
     def state_file(self) -> Path:
         return self.state_dir / "state.json"
+
+    @property
+    def state_db(self) -> Path:
+        return self.state_dir / "state.sqlite3"
 
     @property
     def call_log_file(self) -> Path:

@@ -4,7 +4,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +17,17 @@ def _path() -> Path:
     p = settings.call_log_file
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _cost_usd(phase: str, ok: bool) -> float:
+    """Estimated USD cost for a recorded call. Polls are free; failures don't bill."""
+    if not ok:
+        return 0.0
+    if phase in {"generate", "edit"}:
+        return settings.openai_image_price_usd
+    if phase == "phase4_submit":
+        return settings.grok_video_price_usd
+    return 0.0
 
 
 def append(entry: dict[str, Any]) -> None:
@@ -41,4 +52,44 @@ def record(phase: str, model: str, **extra: Any):
         payload["ok"] = err is None
         if err is not None:
             payload["error"] = f"{type(err).__name__}: {err}"
+        payload["cost_usd"] = _cost_usd(phase, payload["ok"])
         append(payload)
+
+
+def _parse_ts(s: str) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.rstrip("Z"))
+    except ValueError:
+        return None
+
+
+def read_costs(*, job_id: str | None = None, since: datetime | None = None) -> float:
+    """Sum cost_usd in calls.jsonl. Filter by job_id and/or `since` (UTC)."""
+    p = _path()
+    if not p.exists():
+        return 0.0
+    total = 0.0
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if job_id is not None and entry.get("job_id") != job_id:
+                continue
+            if since is not None:
+                ts = _parse_ts(entry.get("ts", ""))
+                if ts is None or ts < since:
+                    continue
+            total += float(entry.get("cost_usd") or 0.0)
+    return round(total, 4)
+
+
+def costs_since(days: float) -> float:
+    """Convenience: sum costs over the last N days."""
+    return read_costs(since=datetime.utcnow() - timedelta(days=days))
