@@ -47,6 +47,8 @@ def migrate(json_path: Path | None = None, db_path: Path | None = None) -> dict:
             db.upsert_project(c, p)
         for j in state.jobs.values():
             db.upsert_job(c, j)
+        for g in state.generations.values():
+            db.upsert_generation(c, g)
 
     # Rename source so re-runs become noop and the user has a backup.
     src.replace(src.with_suffix(".json.migrated"))
@@ -57,6 +59,7 @@ def migrate(json_path: Path | None = None, db_path: Path | None = None) -> dict:
         "characters": len(state.characters),
         "projects": len(state.projects),
         "jobs": len(state.jobs),
+        "generations": len(state.generations),
     }
 
 

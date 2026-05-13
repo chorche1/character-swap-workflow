@@ -38,10 +38,23 @@ class SceneAsset(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class CharacterImage(BaseModel):
+    """One reference image belonging to a character. Stored as a child of CharacterAsset."""
+    image_id: str
+    filename: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class CharacterAsset(BaseModel):
     char_id: str
+    # `filename` is the legacy field — points to the primary/first image. Kept for
+    # backwards compatibility; the canonical list is `images`. Whenever
+    # primary_image_id changes, `filename` is rewritten to match so old code paths
+    # (JobCharacter.source_image_path snapshotting at job-create time) keep working.
     filename: str
     name: str
+    images: list[CharacterImage] = Field(default_factory=list)
+    primary_image_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -98,6 +111,8 @@ class Job(BaseModel):
     scene_id: str
     scene_image_path: str
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
+    prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
+    image_model: str = "gpt-image"           # which adapter generates the variants
     movement_prompt: str | None = None
     images_per_character: int = 1
     videos_per_character: int = 1
@@ -106,9 +121,45 @@ class Job(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class GenKind(StrEnum):
+    IMAGE = "image"
+    VIDEO = "video"
+    AVATAR = "avatar"
+    AUDIO = "audio"
+
+
+class GenStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class MediaGeneration(BaseModel):
+    """A free-form generation in the Image, Video, or Avatar tab. Independent of Jobs."""
+    gen_id: str
+    kind: GenKind
+    model: str                                    # provider+model slug
+    prompt: str                                   # for kind=avatar, this is the spoken script
+    reference_paths: list[str] = Field(default_factory=list)
+    aspect_ratio: str | None = None
+    duration_secs: int | None = None              # video only
+    avatar_id: str | None = None                  # kind=avatar: which HeyGen avatar
+    voice_id: str | None = None                   # kind=avatar/audio: voice id (HeyGen or ElevenLabs depending on provider)
+    voice_provider: str | None = None             # "heygen" or "elevenlabs"; defaults to "heygen" for avatars
+    status: GenStatus = GenStatus.PENDING
+    output_path: str | None = None
+    provider_job_id: str | None = None            # external async id (Grok / Veo / Kling / HeyGen)
+    cost_usd: float | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    completed_at: datetime | None = None
+
+
 class AppState(BaseModel):
     scenes: dict[str, SceneAsset] = Field(default_factory=dict)
     characters: dict[str, CharacterAsset] = Field(default_factory=dict)
     projects: dict[str, ProjectAsset] = Field(default_factory=dict)
     jobs: dict[str, Job] = Field(default_factory=dict)
+    generations: dict[str, MediaGeneration] = Field(default_factory=dict)
     last_updated: datetime = Field(default_factory=datetime.utcnow)

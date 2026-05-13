@@ -26,9 +26,13 @@ from character_swap.config import settings
 from character_swap.models import (
     AppState,
     CharacterAsset,
+    CharacterImage,
     GeneratedImage,
+    GenKind,
+    GenStatus,
     Job,
     JobCharacter,
+    MediaGeneration,
     ProjectAsset,
     SceneAsset,
     VariantStatus,
@@ -49,8 +53,19 @@ CREATE TABLE IF NOT EXISTS characters (
     char_id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
     name TEXT NOT NULL,
+    primary_image_id TEXT,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS character_images (
+    image_id TEXT PRIMARY KEY,
+    char_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (char_id) REFERENCES characters(char_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_char_images_char ON character_images(char_id);
 
 CREATE TABLE IF NOT EXISTS projects (
     project_id TEXT PRIMARY KEY,
@@ -73,6 +88,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     project_id TEXT,
     scene_id TEXT NOT NULL,
     scene_image_path TEXT NOT NULL,
+    prompt TEXT,
+    image_model TEXT NOT NULL DEFAULT 'gpt-image',
     movement_prompt TEXT,
     images_per_character INTEGER NOT NULL DEFAULT 1,
     videos_per_character INTEGER NOT NULL DEFAULT 1,
@@ -128,6 +145,35 @@ CREATE TABLE IF NOT EXISTS videos (
     FOREIGN KEY (job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_videos_jc ON videos(job_id, char_id);
+
+CREATE TABLE IF NOT EXISTS generations (
+    gen_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    aspect_ratio TEXT,
+    duration_secs INTEGER,
+    avatar_id TEXT,
+    voice_id TEXT,
+    voice_provider TEXT,
+    status TEXT NOT NULL,
+    output_path TEXT,
+    provider_job_id TEXT,
+    cost_usd REAL,
+    error TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gens_kind ON generations(kind);
+CREATE INDEX IF NOT EXISTS idx_gens_created ON generations(created_at);
+
+CREATE TABLE IF NOT EXISTS gen_reference_paths (
+    gen_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    PRIMARY KEY (gen_id, position),
+    FOREIGN KEY (gen_id) REFERENCES generations(gen_id) ON DELETE CASCADE
+);
 """
 
 
@@ -156,6 +202,22 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    # Idempotent column additions for installs that came up under an older schema.
+    job_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "prompt" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN prompt TEXT")
+    if "image_model" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN image_model TEXT NOT NULL DEFAULT 'gpt-image'")
+    char_cols = {r["name"] for r in conn.execute("PRAGMA table_info(characters)")}
+    if "primary_image_id" not in char_cols:
+        conn.execute("ALTER TABLE characters ADD COLUMN primary_image_id TEXT")
+    gen_cols = {r["name"] for r in conn.execute("PRAGMA table_info(generations)")}
+    if "avatar_id" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN avatar_id TEXT")
+    if "voice_id" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN voice_id TEXT")
+    if "voice_provider" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN voice_provider TEXT")
 
 
 @contextmanager
@@ -181,11 +243,22 @@ def _scene_from_row(r: sqlite3.Row) -> SceneAsset:
     )
 
 
-def _char_from_row(r: sqlite3.Row) -> CharacterAsset:
+def _char_from_row(r: sqlite3.Row, images: list[CharacterImage]) -> CharacterAsset:
+    keys = r.keys()
     return CharacterAsset(
         char_id=r["char_id"],
         filename=r["filename"],
         name=r["name"],
+        images=images,
+        primary_image_id=r["primary_image_id"] if "primary_image_id" in keys else None,
+        created_at=_parse_iso(r["created_at"]),
+    )
+
+
+def _char_image_from_row(r: sqlite3.Row) -> CharacterImage:
+    return CharacterImage(
+        image_id=r["image_id"],
+        filename=r["filename"],
         created_at=_parse_iso(r["created_at"]),
     )
 
@@ -256,8 +329,13 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
         sa = _scene_from_row(r)
         state.scenes[sa.scene_id] = sa
 
+    imgs_by_char: dict[str, list[CharacterImage]] = {}
+    for r in conn.execute(
+        "SELECT * FROM character_images ORDER BY char_id, position"
+    ):
+        imgs_by_char.setdefault(r["char_id"], []).append(_char_image_from_row(r))
     for r in conn.execute("SELECT * FROM characters"):
-        ca = _char_from_row(r)
+        ca = _char_from_row(r, imgs_by_char.get(r["char_id"], []))
         state.characters[ca.char_id] = ca
 
     project_chars: dict[str, list[str]] = {}
@@ -295,6 +373,8 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
 
     job_cols = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
     has_compacted = "compacted" in job_cols
+    has_prompt = "prompt" in job_cols
+    has_image_model = "image_model" in job_cols
     for r in conn.execute("SELECT * FROM jobs ORDER BY created_at"):
         j = Job(
             job_id=r["job_id"],
@@ -302,6 +382,8 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
             project_id=r["project_id"],
             scene_id=r["scene_id"],
             scene_image_path=r["scene_image_path"],
+            prompt=r["prompt"] if has_prompt else None,
+            image_model=r["image_model"] if has_image_model else "gpt-image",
             movement_prompt=r["movement_prompt"],
             images_per_character=r["images_per_character"],
             videos_per_character=r["videos_per_character"],
@@ -311,6 +393,15 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
             updated_at=_parse_iso(r["updated_at"]),
         )
         state.jobs[j.job_id] = j
+
+    refs_by_gen: dict[str, list[str]] = {}
+    for r in conn.execute(
+        "SELECT gen_id, path FROM gen_reference_paths ORDER BY gen_id, position"
+    ):
+        refs_by_gen.setdefault(r["gen_id"], []).append(r["path"])
+    for r in conn.execute("SELECT * FROM generations ORDER BY created_at"):
+        g = _gen_from_row(r, refs_by_gen.get(r["gen_id"], []))
+        state.generations[g.gen_id] = g
 
     return state
 
@@ -330,17 +421,30 @@ def upsert_scene(conn: sqlite3.Connection, s: SceneAsset) -> None:
 
 def upsert_character(conn: sqlite3.Connection, c: CharacterAsset) -> None:
     conn.execute(
-        """INSERT INTO characters (char_id, filename, name, created_at)
-           VALUES (?, ?, ?, ?)
+        """INSERT INTO characters (char_id, filename, name, primary_image_id, created_at)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(char_id) DO UPDATE SET
              filename = excluded.filename,
-             name = excluded.name""",
-        (c.char_id, c.filename, c.name, _iso(c.created_at)),
+             name = excluded.name,
+             primary_image_id = excluded.primary_image_id""",
+        (c.char_id, c.filename, c.name, c.primary_image_id, _iso(c.created_at)),
+    )
+    # Replace the image rows atomically.
+    conn.execute("DELETE FROM character_images WHERE char_id = ?", (c.char_id,))
+    conn.executemany(
+        """INSERT INTO character_images
+             (image_id, char_id, position, filename, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        [
+            (img.image_id, c.char_id, i, img.filename, _iso(img.created_at))
+            for i, img in enumerate(c.images)
+        ],
     )
 
 
 def delete_character(conn: sqlite3.Connection, char_id: str) -> None:
     conn.execute("DELETE FROM project_characters WHERE char_id = ?", (char_id,))
+    # character_images rows cascade via FK.
     conn.execute("DELETE FROM characters WHERE char_id = ?", (char_id,))
 
 
@@ -376,14 +480,17 @@ def delete_project(conn: sqlite3.Connection, project_id: str) -> list[str]:
 def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
     conn.execute(
         """INSERT INTO jobs (job_id, title, project_id, scene_id, scene_image_path,
+                             prompt, image_model,
                              movement_prompt, images_per_character, videos_per_character,
                              compacted, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(job_id) DO UPDATE SET
              title = excluded.title,
              project_id = excluded.project_id,
              scene_id = excluded.scene_id,
              scene_image_path = excluded.scene_image_path,
+             prompt = excluded.prompt,
+             image_model = excluded.image_model,
              movement_prompt = excluded.movement_prompt,
              images_per_character = excluded.images_per_character,
              videos_per_character = excluded.videos_per_character,
@@ -391,6 +498,7 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
              updated_at = excluded.updated_at""",
         (
             j.job_id, j.title, j.project_id, j.scene_id, j.scene_image_path,
+            j.prompt, j.image_model,
             j.movement_prompt, j.images_per_character, j.videos_per_character,
             1 if j.compacted else 0,
             _iso(j.created_at), _iso(j.updated_at),
@@ -445,7 +553,74 @@ def delete_job(conn: sqlite3.Connection, job_id: str) -> None:
     conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
 
 
+def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
+    conn.execute(
+        """INSERT INTO generations (gen_id, kind, model, prompt, aspect_ratio,
+                                    duration_secs, avatar_id, voice_id, voice_provider,
+                                    status, output_path,
+                                    provider_job_id, cost_usd, error,
+                                    created_at, completed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(gen_id) DO UPDATE SET
+             kind = excluded.kind,
+             model = excluded.model,
+             prompt = excluded.prompt,
+             aspect_ratio = excluded.aspect_ratio,
+             duration_secs = excluded.duration_secs,
+             avatar_id = excluded.avatar_id,
+             voice_id = excluded.voice_id,
+             voice_provider = excluded.voice_provider,
+             status = excluded.status,
+             output_path = excluded.output_path,
+             provider_job_id = excluded.provider_job_id,
+             cost_usd = excluded.cost_usd,
+             error = excluded.error,
+             completed_at = excluded.completed_at""",
+        (
+            g.gen_id, str(g.kind), g.model, g.prompt, g.aspect_ratio,
+            g.duration_secs, g.avatar_id, g.voice_id, g.voice_provider,
+            str(g.status), g.output_path, g.provider_job_id,
+            g.cost_usd, g.error,
+            _iso(g.created_at), _iso(g.completed_at),
+        ),
+    )
+    conn.execute("DELETE FROM gen_reference_paths WHERE gen_id = ?", (g.gen_id,))
+    conn.executemany(
+        "INSERT INTO gen_reference_paths (gen_id, position, path) VALUES (?, ?, ?)",
+        [(g.gen_id, i, p) for i, p in enumerate(g.reference_paths)],
+    )
+
+
+def delete_generation(conn: sqlite3.Connection, gen_id: str) -> None:
+    conn.execute("DELETE FROM generations WHERE gen_id = ?", (gen_id,))
+
+
+def _gen_from_row(r: sqlite3.Row, ref_paths: list[str]) -> MediaGeneration:
+    keys = r.keys()
+    return MediaGeneration(
+        gen_id=r["gen_id"],
+        kind=GenKind(r["kind"]),
+        model=r["model"],
+        prompt=r["prompt"],
+        reference_paths=ref_paths,
+        aspect_ratio=r["aspect_ratio"],
+        duration_secs=r["duration_secs"],
+        avatar_id=r["avatar_id"] if "avatar_id" in keys else None,
+        voice_id=r["voice_id"] if "voice_id" in keys else None,
+        voice_provider=r["voice_provider"] if "voice_provider" in keys else None,
+        status=GenStatus(r["status"]),
+        output_path=r["output_path"],
+        provider_job_id=r["provider_job_id"],
+        cost_usd=r["cost_usd"],
+        error=r["error"],
+        created_at=_parse_iso(r["created_at"]),
+        completed_at=_parse_iso(r["completed_at"]) if r["completed_at"] else None,
+    )
+
+
 def reset_all(conn: sqlite3.Connection) -> None:
-    for table in ("videos", "variants", "job_characters", "jobs",
-                  "project_characters", "projects", "characters", "scenes"):
+    for table in ("gen_reference_paths", "generations",
+                  "videos", "variants", "job_characters", "jobs",
+                  "project_characters", "projects",
+                  "character_images", "characters", "scenes"):
         conn.execute(f"DELETE FROM {table}")

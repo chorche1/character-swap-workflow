@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from character_swap.clients import grok, openai_image
+from character_swap.clients import google_genai, grok, openai_image
 from character_swap.config import settings
 from character_swap.images import atomic_write_bytes
 
@@ -35,14 +35,18 @@ def generate_image(
     character_name: str,
     dest: Path,
     job_id: str | None = None,
+    prompt: str | None = None,
 ) -> Path:
     """
-    Image-to-image generation using GPT Image 2.
+    Image-to-image generation using GPT Image (default).
     Scene is reference #1, character is reference #2 — matches the verbatim prompt.
     Writes the PNG bytes atomically to `dest` and returns it.
+
+    `prompt` overrides `GENERATION_PROMPT` if provided (Swap Step 2 lets the
+    user edit it; this is how that custom string reaches the API).
     """
     image_bytes = openai_image.generate(
-        prompt=GENERATION_PROMPT,
+        prompt=prompt or GENERATION_PROMPT,
         reference_images=[scene_image, character_image],
         phase="generate",
         character=character_name,
@@ -50,6 +54,52 @@ def generate_image(
     )
     atomic_write_bytes(dest, image_bytes)
     return dest
+
+
+def generate_variant(
+    *,
+    model: str,
+    scene_image: Path,
+    character_image: Path,
+    character_name: str,
+    prompt: str,
+    dest: Path,
+    job_id: str | None = None,
+) -> Path:
+    """
+    Dispatch a swap-variant generation to the right model. Used by runner.py
+    so it doesn't need to know provider details.
+
+    - gpt-image:   scene + character as refs (image-to-image)
+    - grok-image:  text-only (Grok image API doesn't take refs today)
+    - nano-banana: scene + character as refs via Gemini multi-image input
+    """
+    if model == "gpt-image":
+        return generate_image(
+            scene_image=scene_image,
+            character_image=character_image,
+            character_name=character_name,
+            dest=dest,
+            job_id=job_id,
+            prompt=prompt,
+        )
+    if model == "grok-image":
+        data = grok.generate_image(
+            prompt=prompt,
+            character=character_name,
+            app_job_id=job_id,
+        )
+        atomic_write_bytes(dest, data)
+        return dest
+    if model == "nano-banana":
+        data = google_genai.generate_nano_banana(
+            prompt=prompt,
+            reference_images=[scene_image, character_image],
+            app_job_id=job_id,
+        )
+        atomic_write_bytes(dest, data)
+        return dest
+    raise ValueError(f"Unknown image model for swap variant: {model}")
 
 
 def edit_image(

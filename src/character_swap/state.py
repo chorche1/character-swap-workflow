@@ -17,9 +17,39 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import secrets
+
 from character_swap import db
 from character_swap.config import settings
-from character_swap.models import AppState, CharacterAsset, Job, ProjectAsset, SceneAsset
+from character_swap.models import (
+    AppState,
+    CharacterAsset,
+    CharacterImage,
+    Job,
+    MediaGeneration,
+    ProjectAsset,
+    SceneAsset,
+)
+
+
+def _backfill_character_images(state: AppState) -> bool:
+    """Ensure every CharacterAsset has at least one CharacterImage matching its
+    primary `filename`. Returns True if anything changed (caller persists)."""
+    changed = False
+    for ch in state.characters.values():
+        if not ch.images and ch.filename:
+            img_id = "im_" + secrets.token_hex(5)
+            ch.images.append(CharacterImage(
+                image_id=img_id,
+                filename=ch.filename,
+                created_at=ch.created_at,
+            ))
+            ch.primary_image_id = img_id
+            changed = True
+        elif ch.images and not ch.primary_image_id:
+            ch.primary_image_id = ch.images[0].image_id
+            changed = True
+    return changed
 
 
 # --- JSON backend (original) ---------------------------------------------------------
@@ -37,11 +67,15 @@ class JsonStateStore:
         try:
             with self.path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            return AppState.model_validate(data)
+            state = AppState.model_validate(data)
         except (json.JSONDecodeError, ValueError):
             backup = self.path.with_suffix(".json.corrupt")
             self.path.replace(backup)
             return AppState()
+        if _backfill_character_images(state):
+            # Persist the synthesized image rows on next save tick (no extra IO here).
+            pass
+        return state
 
     @property
     def state(self) -> AppState:
@@ -121,6 +155,27 @@ class JsonStateStore:
         self.save()
         return removed
 
+    # generations
+    def add_generation(self, gen: MediaGeneration) -> None:
+        self._state.generations[gen.gen_id] = gen
+        self.save()
+
+    def get_generation(self, gen_id: str) -> MediaGeneration | None:
+        return self._state.generations.get(gen_id)
+
+    def list_generations(self) -> list[MediaGeneration]:
+        return list(self._state.generations.values())
+
+    def update_generation(self, gen: MediaGeneration) -> None:
+        self._state.generations[gen.gen_id] = gen
+        self.save()
+
+    def delete_generation(self, gen_id: str) -> MediaGeneration | None:
+        out = self._state.generations.pop(gen_id, None)
+        if out is not None:
+            self.save()
+        return out
+
     def reset(self) -> None:
         self._state = AppState()
         self.save()
@@ -134,6 +189,11 @@ class SqliteStateStore:
         db.ensure_schema(self._conn)
         self._lock = threading.Lock()
         self._state: AppState = db.load_app_state(self._conn)
+        if _backfill_character_images(self._state):
+            # Persist the synthesized rows immediately so the DB matches in-memory.
+            with self._lock, db.transaction(self._conn) as conn:
+                for ch in self._state.characters.values():
+                    db.upsert_character(conn, ch)
 
     @property
     def state(self) -> AppState:
@@ -222,6 +282,30 @@ class SqliteStateStore:
         with self._lock, db.transaction(self._conn) as conn:
             db.delete_project(conn, project_id)
         return removed
+
+    # generations
+    def add_generation(self, gen: MediaGeneration) -> None:
+        self._state.generations[gen.gen_id] = gen
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_generation(conn, gen)
+
+    def get_generation(self, gen_id: str) -> MediaGeneration | None:
+        return self._state.generations.get(gen_id)
+
+    def list_generations(self) -> list[MediaGeneration]:
+        return list(self._state.generations.values())
+
+    def update_generation(self, gen: MediaGeneration) -> None:
+        self._state.generations[gen.gen_id] = gen
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_generation(conn, gen)
+
+    def delete_generation(self, gen_id: str) -> MediaGeneration | None:
+        out = self._state.generations.pop(gen_id, None)
+        if out is not None:
+            with self._lock, db.transaction(self._conn) as conn:
+                db.delete_generation(conn, gen_id)
+        return out
 
     def reset(self) -> None:
         self._state = AppState()

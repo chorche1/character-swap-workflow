@@ -18,6 +18,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "websockets>=13.0",
     "typer>=0.12.3",
+    "imageio-ffmpeg>=0.5.1",
 ]
 
 [project.scripts]

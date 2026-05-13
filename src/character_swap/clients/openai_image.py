@@ -55,6 +55,7 @@ def generate(
     character: str,
     size: str | None = None,
     job_id: str | None = None,
+    model_override: str | None = None,
 ) -> bytes:
     """
     Generate an image.
@@ -67,7 +68,7 @@ def generate(
     """
     client = _client()
     size = size or settings.image_size
-    model = settings.openai_image_model
+    model = model_override or settings.openai_image_model
     refs = reference_images or []
 
     try:

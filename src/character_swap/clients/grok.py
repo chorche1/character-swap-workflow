@@ -122,6 +122,59 @@ def status(*, job_id: str, character: str,
         return r.json()
 
 
+@retry(
+    retry=retry_if_exception_type(_RETRY_EXCS),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=2, max=60),
+    reraise=True,
+)
+def generate_image(*, prompt: str, character: str = "freeform",
+                   aspect_ratio: str | None = None,
+                   app_job_id: str | None = None) -> bytes:
+    """Free-form image generation via xAI's images endpoint.
+
+    Returns raw PNG bytes. Reference images are not part of the request body
+    here — Grok's image gen API is text-only as of writing.
+    """
+    body: dict = {
+        "model": settings.grok_image_model,
+        "prompt": prompt,
+        "n": 1,
+        "response_format": "b64_json",
+    }
+    if aspect_ratio:
+        body["aspect_ratio"] = aspect_ratio
+    with record(
+        phase="image_grok",
+        model=settings.grok_image_model,
+        character=character,
+        job_id=app_job_id,
+    ) as entry, _client() as h:
+        r = h.post("/images/generations", json=body)
+        if _retryable_status(r):
+            r.raise_for_status()
+        if r.status_code >= 400:
+            raise GrokError(f"Image generation failed ({r.status_code}): {r.text[:500]}")
+        data = r.json()
+        entry["request_id"] = r.headers.get("x-request-id")
+
+    items = data.get("data") or []
+    if not items:
+        raise GrokError(f"Image response empty. body={data!r}")
+    item = items[0]
+    b64 = item.get("b64_json")
+    if b64:
+        import base64
+        return base64.b64decode(b64)
+    url = item.get("url")
+    if url:
+        with httpx.Client(timeout=120) as h:
+            rr = h.get(url)
+            rr.raise_for_status()
+            return rr.content
+    raise GrokError(f"Image response had neither b64_json nor url. body={data!r}")
+
+
 def download_video(*, url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")

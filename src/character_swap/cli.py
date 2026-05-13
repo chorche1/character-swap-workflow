@@ -86,7 +86,7 @@ def migrate() -> None:
         typer.echo(f"No migration performed: {result.get('reason')}")
         return
     typer.echo("Migration complete:")
-    for k in ("scenes", "characters", "projects", "jobs"):
+    for k in ("scenes", "characters", "projects", "jobs", "generations"):
         typer.echo(f"  {k}: {result[k]}")
     typer.echo("state.json renamed to state.json.migrated (kept as backup).")
     typer.echo("Set USE_SQLITE_STATE=1 in your .env and restart to use the SQLite backend.")

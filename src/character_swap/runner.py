@@ -69,10 +69,12 @@ async def _generate_one_variant(
         dest = Path(variant.path)
         try:
             await asyncio.to_thread(
-                pipeline.generate_image,
+                pipeline.generate_variant,
+                model=job.image_model,
                 scene_image=Path(job.scene_image_path),
                 character_image=Path(jc.source_image_path),
                 character_name=jc.name,
+                prompt=variant.prompt,
                 dest=dest,
                 job_id=job.job_id,
             )
@@ -127,7 +129,7 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
         v = GeneratedImage(
             variant_id=variant_id,
             path=str(path),
-            prompt=pipeline.GENERATION_PROMPT,
+            prompt=job.prompt or pipeline.GENERATION_PROMPT,
             status=VariantStatus.GENERATING,
         )
         placeholders.append(v)
