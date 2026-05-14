@@ -450,9 +450,16 @@ async def run_avatar_gen(gen_id: str) -> None:
 
 # --- audio generation (ElevenLabs Voice Changer / TTS) -------------------------------
 
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+
+
 async def run_audio_gen(gen_id: str) -> None:
     """ElevenLabs audio generation:
-      - elevenlabs-vc: source audio (reference_paths[0]) + voice_id → re-rendered mp3
+      - elevenlabs-vc: source audio (or video — we extract the audio first)
+        + voice_id → re-rendered mp3. If the source was a video, we ALSO
+        re-mux the new audio back into the original video stream and the
+        output becomes an mp4 (so creators get a "same clip, new voice"
+        result in one step).
       - elevenlabs-tts: prompt-as-text + voice_id → spoken mp3"""
     s = store()
     gen = s.get_generation(gen_id)
@@ -464,18 +471,62 @@ async def run_audio_gen(gen_id: str) -> None:
                  completed_at=datetime.utcnow())
         return
     _persist(gen, status=GenStatus.RUNNING)
-    dest = _output_dir(gen.gen_id) / "result.mp3"
+    out_dir = _output_dir(gen.gen_id)
+    dest_mp3 = out_dir / "result.mp3"
+    dest_mp4 = out_dir / "result.mp4"
 
     try:
         if gen.model == "elevenlabs-vc":
             if not gen.reference_paths:
                 raise ValueError("source audio required for elevenlabs-vc")
+            source = Path(gen.reference_paths[0])
+            is_video = source.suffix.lower() in _VIDEO_EXTS
+
+            # If the upload is a video, extract its audio track first so
+            # ElevenLabs gets something it can chew on.
+            if is_video:
+                from character_swap import video_edit
+                source_for_vc = source.with_suffix(".extracted.wav")
+                # Extract 16kHz mono wav (Whisper-style — VC is fine with this).
+                await asyncio.to_thread(
+                    video_edit._run,
+                    [video_edit._ffmpeg(), "-y", "-i", str(source),
+                     "-vn", "-ac", "1", "-ar", "16000", str(source_for_vc)],
+                )
+            else:
+                source_for_vc = source
+
             data = await asyncio.to_thread(
                 elevenlabs.voice_changer,
                 voice_id=gen.voice_id,
-                source_audio=Path(gen.reference_paths[0]),
+                source_audio=source_for_vc,
                 app_job_id=gen_id,
             )
+            atomic_write_bytes(dest_mp3, data)
+
+            # Video in → re-mux the new audio onto the original video stream
+            # and serve that as the primary output.
+            output_path: Path = dest_mp3
+            if is_video:
+                from character_swap import video_edit
+                await asyncio.to_thread(
+                    video_edit.replace_audio, source, dest_mp3, dest_mp4,
+                )
+                output_path = dest_mp4
+                # Clean up the intermediate audio extraction; keep result.mp3
+                # so users can also pull the standalone voiced audio.
+                source_for_vc.unlink(missing_ok=True)
+
+            info = model_info(gen.model) or {}
+            _persist(
+                gen,
+                output_path=str(output_path),
+                status=GenStatus.DONE,
+                completed_at=datetime.utcnow(),
+                cost_usd=getattr(settings, info.get("price_setting", ""), 0.0) or 0.0,
+            )
+            return
+
         elif gen.model == "elevenlabs-tts":
             data = await asyncio.to_thread(
                 elevenlabs.text_to_speech,
@@ -485,11 +536,11 @@ async def run_audio_gen(gen_id: str) -> None:
         else:
             raise ValueError(f"Unknown audio model: {gen.model}")
 
-        atomic_write_bytes(dest, data)
+        atomic_write_bytes(dest_mp3, data)
         info = model_info(gen.model) or {}
         _persist(
             gen,
-            output_path=str(dest),
+            output_path=str(dest_mp3),
             status=GenStatus.DONE,
             completed_at=datetime.utcnow(),
             cost_usd=getattr(settings, info.get("price_setting", ""), 0.0) or 0.0,

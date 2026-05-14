@@ -66,14 +66,25 @@ def _retryable_status(response: httpx.Response) -> bool:
     reraise=True,
 )
 def submit(*, image: Path, prompt: str, character: str,
+           duration_secs: int | None = None,
            app_job_id: str | None = None) -> str:
+    """Submit an image-to-video job to Grok Imagine.
+
+    `duration_secs` overrides `settings.video_duration_secs` for this call —
+    used by the B-roll runner so each clip's length matches the spoken
+    phrase. xAI's accepted duration buckets aren't documented; we clamp
+    here to a safe integer range [5, 15] and let the retry loop discover
+    rejections.
+    """
     # Per xAI docs, image is supplied via {"url": "..."}. We embed our local
     # image as a data URL so we don't need an external host.
     data_url = f"data:{media_type(image)};base64,{encode_b64(image)}"
+    requested = int(duration_secs) if duration_secs else int(settings.video_duration_secs)
+    clamped = max(5, min(15, requested))
     body = {
         "model": settings.grok_video_model,
         "prompt": prompt,
-        "duration": settings.video_duration_secs,
+        "duration": clamped,
         "aspect_ratio": settings.video_aspect_ratio,
         "resolution": settings.video_resolution,
         "image": {"url": data_url},

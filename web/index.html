@@ -6,13 +6,8 @@
   <title>Character Swap Studio</title>
   <script>
     window.tailwind = window.tailwind || {};
-    (function () {
-      var t = localStorage.getItem('theme');
-      var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      if (t === 'dark' || (!t && prefersDark)) {
-        document.documentElement.classList.add('dark');
-      }
-    })();
+    // Dark mode is the only available theme — force the class on at boot.
+    document.documentElement.classList.add('dark');
   </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' };</script>
@@ -234,13 +229,7 @@
                 class="p-2 rounded-lg border text-base"
                 :class="showCharLib
                           ? 'bg-indigo-100 dark:bg-indigo-950 border-indigo-300 dark:border-indigo-800'
-                          : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'">📚</button>
-        <button @click="toggleTheme()"
-                title="Toggle theme"
-                class="p-2 rounded-lg border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800">
-          <span x-show="!isDark">🌙</span>
-          <span x-show="isDark">☀️</span>
-        </button>
+                          : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'">library</button>
       </div>
     </header>
 
@@ -252,6 +241,7 @@
           {slug: 'video',  label: 'Video'},
           {slug: 'avatar', label: 'Avatar'},
           {slug: 'audio',  label: 'Audio'},
+          {slug: 'broll',  label: 'B-roll'},
           {slug: 'editor', label: 'Editor'},
         ]" :key="t.slug">
         <button @click="switchTab(t.slug)"
@@ -297,7 +287,7 @@
       <button x-show="job && !editingTitle && !job.compacted && !isJobInFlight(job)"
               title="Delete rejected variants and failed videos from disk"
               class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
-              @click="compactJob(job.job_id)">🗜 compact</button>
+              @click="compactJob(job.job_id)">compact</button>
       <span x-show="job?.compacted" class="text-xs text-neutral-400 dark:text-neutral-500">· compacted</span>
     </div>
 
@@ -416,7 +406,7 @@
                   class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
             <template x-for="m in models.image" :key="'sm'+m.slug">
               <option :value="m.slug" :disabled="!m.available"
-                      x-text="m.label + (m.available ? '' : '  🔒')"></option>
+                      x-text="m.label + (m.available ? '' : '  (locked)')"></option>
             </template>
           </select>
         </div>
@@ -514,7 +504,7 @@
                     </template>
                     <template x-if="v.status === 'generating'">
                       <div class="skeleton w-full h-full flex items-center justify-center">
-                        <span class="text-neutral-400 dark:text-neutral-500 text-xs">🎨 generating…</span>
+                        <span class="text-neutral-400 dark:text-neutral-500 text-xs">generating…</span>
                       </div>
                     </template>
                     <template x-if="v.status === 'failed'">
@@ -549,7 +539,7 @@
                               :title="photoAvatarAvailable() ? 'Make this image speak (HeyGen)' : 'Add HEYGEN_API_KEY to .env to unlock'"
                               :disabled="!photoAvatarAvailable()"
                               :class="!photoAvatarAvailable() ? 'opacity-40 cursor-not-allowed' : ''"
-                              @click="openPhotoAvatarModal(v, jc.name)">🎙</button>
+                              @click="openPhotoAvatarModal(v, jc.name)">speak</button>
                       <button class="text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-2 py-1 text-sm"
                               title="Delete this generated image"
                               @click="deleteVariant(cid, v.variant_id)">✕</button>
@@ -694,18 +684,28 @@
                   class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 min-w-[14rem]">
             <template x-for="m in models.image" :key="'im'+m.slug">
               <option :value="m.slug" :disabled="!m.available"
-                      x-text="m.label + (m.available ? '' : '  🔒')"></option>
+                      x-text="m.label + (m.available ? '' : '  (locked)')"></option>
             </template>
           </select>
           <span x-show="currentImageModel() && !currentImageModel().available"
-                class="text-xs text-amber-700 dark:text-amber-400">🔒 needs API key in .env</span>
+                class="text-xs text-amber-700 dark:text-amber-400">(locked) needs API key in .env</span>
         </div>
 
-        <!-- prompt -->
-        <textarea x-model="imageGen.prompt"
-                  rows="3"
-                  class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
-                  placeholder="Describe the image you want…"></textarea>
+        <!-- prompt (also accepts pasted + dragged reference images) -->
+        <div class="relative"
+             @dragover="onPromptDragOver($event)"
+             @dragleave="onPromptDragLeave($event)"
+             @drop="onPromptDrop($event, 'image')">
+          <textarea x-model="imageGen.prompt"
+                    rows="3"
+                    @paste="onPromptPaste($event, 'image')"
+                    class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
+                    placeholder="Describe the image you want… (paste or drop images here as refs)"></textarea>
+          <div x-show="promptDropActive"
+               class="absolute inset-0 bg-indigo-500/10 border-2 border-dashed border-indigo-400 rounded-lg flex items-center justify-center pointer-events-none text-indigo-300 text-sm font-medium">
+            Drop to add as reference image
+          </div>
+        </div>
 
         <!-- aspect ratio + refs row -->
         <div class="mt-3 flex items-center gap-4 flex-wrap text-sm">
@@ -740,7 +740,7 @@
         <div class="mt-4 flex items-center justify-between">
           <div class="text-xs text-neutral-400 dark:text-neutral-500"
                x-show="currentImageModel() && !currentImageModel().available"
-               x-text="`🔒 ${currentImageModel()?.label} needs its API key configured.`"></div>
+               x-text="`(locked) ${currentImageModel()?.label} needs its API key configured.`"></div>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
                   :disabled="!imageGen.prompt.trim() || !currentImageModel()?.available || imageGen.generating"
                   @click="submitImageGen()">
@@ -760,7 +760,7 @@
               </template>
               <template x-if="!g.output_url && g.status !== 'failed'">
                 <div class="skeleton absolute inset-0 flex items-center justify-center">
-                  <span class="text-neutral-400 dark:text-neutral-500 text-xs" x-text="g.status === 'running' ? '🎨 generating…' : '⏳ pending'"></span>
+                  <span class="text-neutral-400 dark:text-neutral-500 text-xs" x-text="g.status === 'running' ? 'generating…' : '⏳ pending'"></span>
                 </div>
               </template>
               <template x-if="g.status === 'failed'">
@@ -776,6 +776,9 @@
                 <div class="flex gap-2">
                   <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.png`"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
+                  <button x-show="g.prompt" @click="reuseImageGen(g)"
+                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                          title="Load this prompt + settings into the form">reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -805,11 +808,11 @@
                   class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 min-w-[14rem]">
             <template x-for="m in models.video" :key="'vm'+m.slug">
               <option :value="m.slug" :disabled="!m.available"
-                      x-text="m.label + (m.available ? '' : '  🔒')"></option>
+                      x-text="m.label + (m.available ? '' : '  (locked)')"></option>
             </template>
           </select>
           <span x-show="currentVideoModel() && !currentVideoModel().available"
-                class="text-xs text-amber-700 dark:text-amber-400">🔒 needs API key in .env</span>
+                class="text-xs text-amber-700 dark:text-amber-400">(locked) needs API key in .env</span>
         </div>
 
         <!-- required image ref -->
@@ -833,10 +836,20 @@
         </div>
 
         <!-- prompt -->
-        <textarea x-model="videoGen.prompt"
-                  rows="3"
-                  class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
-                  placeholder="Describe the motion / camera / scene…"></textarea>
+        <div class="relative"
+             @dragover="onPromptDragOver($event)"
+             @dragleave="onPromptDragLeave($event)"
+             @drop="onPromptDrop($event, 'video')">
+          <textarea x-model="videoGen.prompt"
+                    rows="3"
+                    @paste="onPromptPaste($event, 'video')"
+                    class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
+                    placeholder="Describe the motion / camera / scene… (paste or drop a reference image here)"></textarea>
+          <div x-show="promptDropActive"
+               class="absolute inset-0 bg-indigo-500/10 border-2 border-dashed border-indigo-400 rounded-lg flex items-center justify-center pointer-events-none text-indigo-300 text-sm font-medium">
+            Drop as reference image
+          </div>
+        </div>
 
         <div class="mt-3 flex items-center gap-4 flex-wrap text-sm">
           <div class="flex items-center gap-2">
@@ -868,7 +881,7 @@
         <div class="mt-4 flex items-center justify-between">
           <div class="text-xs text-neutral-400 dark:text-neutral-500"
                x-show="currentVideoModel() && !currentVideoModel().available"
-               x-text="`🔒 ${currentVideoModel()?.label} needs its API key configured.`"></div>
+               x-text="`(locked) ${currentVideoModel()?.label} needs its API key configured.`"></div>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
                   :disabled="!videoGen.prompt.trim() || !videoGen.ref || !currentVideoModel()?.available || videoGen.generating"
                   @click="submitVideoGen()">
@@ -903,6 +916,9 @@
                 <div class="flex gap-2">
                   <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.mp4`"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
+                  <button x-show="g.prompt" @click="reuseVideoGen(g)"
+                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                          title="Load this prompt + settings into the form">reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -940,11 +956,11 @@
                   class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 min-w-[14rem]">
             <template x-for="m in models.avatar" :key="'am'+m.slug">
               <option :value="m.slug" :disabled="!m.available"
-                      x-text="m.label + (m.available ? '' : '  🔒')"></option>
+                      x-text="m.label + (m.available ? '' : '  (locked)')"></option>
             </template>
           </select>
           <span x-show="currentAvatarModel() && !currentAvatarModel().available"
-                class="text-xs text-amber-700 dark:text-amber-400">🔒 add HEYGEN_API_KEY to .env</span>
+                class="text-xs text-amber-700 dark:text-amber-400">(locked) add HEYGEN_API_KEY to .env</span>
         </div>
 
         <!-- avatar + voice catalogue -->
@@ -997,7 +1013,7 @@
                         :class="!elevenlabsAvailable() ? '!opacity-40 !cursor-not-allowed' : ''"
                         @click="if (elevenlabsAvailable()) { avatarGen.voiceProvider = 'elevenlabs'; avatarGen.voiceId = '' }">
                   ElevenLabs
-                  <span x-show="!elevenlabsAvailable()" class="opacity-60">🔒</span>
+                  <span x-show="!elevenlabsAvailable()" class="opacity-60">(locked)</span>
                 </button>
               </div>
             </div>
@@ -1106,6 +1122,9 @@
                 <div class="flex gap-2">
                   <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.mp4`"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
+                  <button x-show="g.prompt" @click="reuseAvatarGen(g)"
+                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                          title="Load this script + avatar + voice">reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -1139,11 +1158,11 @@
                   class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 min-w-[14rem]">
             <template x-for="m in models.audio" :key="'aum'+m.slug">
               <option :value="m.slug" :disabled="!m.available"
-                      x-text="m.label + (m.available ? '' : '  🔒')"></option>
+                      x-text="m.label + (m.available ? '' : '  (locked)')"></option>
             </template>
           </select>
           <span x-show="currentAudioModel() && !currentAudioModel().available"
-                class="text-xs text-amber-700 dark:text-amber-400">🔒 add ELEVENLABS_API_KEY to .env</span>
+                class="text-xs text-amber-700 dark:text-amber-400">(locked) add ELEVENLABS_API_KEY to .env</span>
         </div>
 
         <div x-show="elevenlabsCatalogueError" class="mb-4 text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900">
@@ -1168,26 +1187,37 @@
           </select>
         </div>
 
-        <!-- Source audio (VC) -->
+        <!-- Source audio OR video (VC) -->
         <div class="mb-4" x-show="audioGen.model === 'elevenlabs-vc'">
-          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Source audio</span>
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Source clip</span>
           <template x-if="!audioGen.sourceAudio">
             <label class="mt-1 dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-6 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
                    @dragover.prevent="$event.currentTarget.classList.add('dragover')"
                    @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
                    @drop.prevent="$event.currentTarget.classList.remove('dragover'); setAudioSource($event.dataTransfer.files[0])">
-              <div class="text-sm">Drop an audio file</div>
-              <div class="text-xs mt-1">mp3, wav, m4a, ogg, webm, flac</div>
-              <input type="file" class="hidden" accept="audio/*" @change="setAudioSource($event.target.files[0])" />
+              <div class="text-sm">Drop an audio or video file</div>
+              <div class="text-xs mt-1">audio: mp3, wav, m4a, ogg, webm, flac · video: mp4, mov, webm, mkv, m4v</div>
+              <div class="text-[10px] mt-1 text-neutral-400 dark:text-neutral-500">For videos we extract the audio, swap the voice, then re-mux it back into your video.</div>
+              <input type="file" class="hidden" accept="audio/*,video/*" @change="setAudioSource($event.target.files[0])" />
             </label>
           </template>
           <template x-if="audioGen.sourceAudio">
             <div class="mt-2 flex items-start gap-3 border border-neutral-200 dark:border-neutral-800 rounded-lg p-3">
-              <div class="flex-1">
-                <div class="text-xs text-neutral-600 dark:text-neutral-300 truncate" x-text="audioGen.sourceAudio.name"></div>
-                <audio :src="audioGen.sourceAudio.url" controls class="mt-2 w-full"></audio>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300">
+                  <span class="bg-violet-600 text-white px-1.5 py-0.5 rounded text-[10px]"
+                        x-text="audioGen.sourceAudio.isVideo ? 'VIDEO' : 'AUDIO'"></span>
+                  <span class="truncate" x-text="audioGen.sourceAudio.name"></span>
+                </div>
+                <template x-if="audioGen.sourceAudio.isVideo">
+                  <video :src="audioGen.sourceAudio.url" controls
+                         class="mt-2 w-full max-h-64 rounded bg-black"></video>
+                </template>
+                <template x-if="!audioGen.sourceAudio.isVideo">
+                  <audio :src="audioGen.sourceAudio.url" controls class="mt-2 w-full"></audio>
+                </template>
               </div>
-              <button class="text-xs text-red-600 dark:text-red-400 hover:underline"
+              <button class="text-xs text-red-600 dark:text-red-400 hover:underline shrink-0"
                       @click="audioGen.sourceAudio = null">Replace</button>
             </div>
           </template>
@@ -1224,7 +1254,10 @@
                   <span class="bg-neutral-900/70 text-white px-1.5 py-0.5 rounded text-[10px]" x-text="g.model"></span>
                   <span class="text-neutral-500 dark:text-neutral-400 truncate" :title="g.prompt" x-text="g.prompt"></span>
                 </div>
-                <template x-if="g.output_url">
+                <template x-if="g.output_url && /\.mp4($|\?)/i.test(g.output_url)">
+                  <video :src="g.output_url" controls class="mt-2 w-full max-h-72 rounded bg-black"></video>
+                </template>
+                <template x-if="g.output_url && !/\.mp4($|\?)/i.test(g.output_url)">
                   <audio :src="g.output_url" controls class="mt-2 w-full"></audio>
                 </template>
                 <template x-if="!g.output_url && g.status !== 'failed'">
@@ -1237,8 +1270,12 @@
               </div>
               <div class="flex items-center gap-2 text-xs shrink-0">
                 <span class="text-neutral-500 dark:text-neutral-400" x-text="g.cost_usd != null ? formatUsd(g.cost_usd) : ''"></span>
-                <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.mp3`"
+                <a x-show="g.output_url" :href="g.output_url"
+                   :download="`${g.gen_id}.${/\.mp4($|\?)/i.test(g.output_url || '') ? 'mp4' : 'mp3'}`"
                    class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
+                <button @click="reuseAudioGen(g)"
+                        class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                        title="Load this voice + (TTS) script">reuse</button>
                 <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                 <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -1255,46 +1292,728 @@
       </div>
     </div>
 
+    <!-- ================= B-ROLL TAB (audio → planned clips → final mp4) ================= -->
+    <div x-show="activeTab === 'broll'"
+         x-init="$watch('activeTab', t => { if (t === 'broll' && brollHistory.length === 0) loadBrollHistory() })"
+         class="space-y-6">
+      <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6 max-w-2xl mx-auto">
+        <h2 class="text-lg font-semibold mb-1">B-roll generator</h2>
+        <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
+          Drop a narration audio file (or video — we'll extract the audio).
+          Whisper transcribes it, GPT-4o plans cinematic medical-realism B-roll prompts
+          (BEFORE&nbsp;→&nbsp;TRIGGER&nbsp;→&nbsp;AFTER body-part transformations), each becomes a clip via your
+          chosen video model, and we stitch + mux your narration over the result.
+        </p>
+
+        <!-- Model picker -->
+        <div class="mb-4">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Video model</span>
+          <select x-model="brollGen.videoModel"
+                  class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-2 text-sm">
+            <template x-for="m in (models.video || [])" :key="'brm-'+m.slug">
+              <option :value="m.slug"
+                      :disabled="!m.available"
+                      x-text="`${m.label}${m.available ? '' : ' (locked)'}`"></option>
+            </template>
+          </select>
+          <p class="text-[11px] text-neutral-500 dark:text-neutral-400 mt-1">
+            Default is Grok Imagine. Veo gets a direct text-to-video path; everything else seeds with a gpt-image-2 frame first.
+          </p>
+        </div>
+
+        <!-- Source upload -->
+        <div class="mb-4">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Narration audio (or video)</span>
+          <template x-if="!brollGen.source">
+            <label class="mt-1 dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-6 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
+                   @dragover.prevent="$event.currentTarget.classList.add('dragover')"
+                   @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
+                   @drop.prevent="$event.currentTarget.classList.remove('dragover'); setBrollSource($event.dataTransfer.files[0])">
+              <div class="text-sm">Drop a narration audio file</div>
+              <div class="text-xs mt-1">mp3, wav, m4a, ogg, webm, flac — or any mp4/mov (we'll extract audio)</div>
+              <input type="file" class="hidden" accept="audio/*,video/*"
+                     @change="setBrollSource($event.target.files[0])" />
+            </label>
+          </template>
+          <template x-if="brollGen.source">
+            <div class="mt-2 flex items-start gap-3 border border-neutral-200 dark:border-neutral-800 rounded-lg p-3">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 text-xs text-neutral-600 dark:text-neutral-300">
+                  <span class="bg-violet-600 text-white px-1.5 py-0.5 rounded text-[10px]"
+                        x-text="brollGen.source.isVideo ? 'VIDEO' : 'AUDIO'"></span>
+                  <span class="truncate" x-text="brollGen.source.name"></span>
+                </div>
+                <template x-if="brollGen.source.isVideo">
+                  <video :src="brollGen.source.url" controls
+                         class="mt-2 w-full max-h-64 rounded bg-black"></video>
+                </template>
+                <template x-if="!brollGen.source.isVideo">
+                  <audio :src="brollGen.source.url" controls class="mt-2 w-full"></audio>
+                </template>
+              </div>
+              <button class="text-xs text-red-600 dark:text-red-400 hover:underline shrink-0"
+                      @click="brollGen.source = null">Replace</button>
+            </div>
+          </template>
+        </div>
+
+        <div class="flex items-center justify-end">
+          <button class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="!brollGen.source || brollGen.submitting"
+                  @click="submitBroll()">
+            <span x-show="!brollGen.submitting">▶ Generate B-roll</span>
+            <span x-show="brollGen.submitting">Submitting…</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Active / recent B-roll jobs -->
+      <div class="space-y-4">
+        <template x-for="b in brollHistory" :key="'br-'+b.broll_id">
+          <div class="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 p-4">
+            <div class="flex items-center justify-between gap-3 mb-3">
+              <div class="flex items-center gap-2 text-xs">
+                <span class="bg-violet-600 text-white px-1.5 py-0.5 rounded text-[10px]" x-text="b.video_model"></span>
+                <span class="text-neutral-500 dark:text-neutral-400" x-text="b.broll_id"></span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                      :class="b.status === 'done' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200' :
+                              b.status === 'partial_success' ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-200' :
+                              b.status === 'failed' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-200' :
+                              b.status === 'awaiting_approval' ? 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-200' :
+                              'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200 animate-pulse'"
+                      x-text="b.status"></span>
+                <span x-show="b.n_failed_clips > 0" class="text-rose-600 dark:text-rose-400"
+                      x-text="`${b.n_failed_clips} failed`"></span>
+                <span x-show="b.audio_duration_secs" class="text-neutral-500 dark:text-neutral-400"
+                      x-text="`audio: ${(b.audio_duration_secs || 0).toFixed(1)}s`"></span>
+              </div>
+              <div class="flex items-center gap-2 text-xs">
+                <button @click="refreshBroll(b.broll_id)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↻ refresh</button>
+                <button @click="deleteBroll(b.broll_id)" class="text-rose-600 dark:text-rose-400 hover:underline">✕ delete</button>
+              </div>
+            </div>
+
+            <!-- final video if done -->
+            <template x-if="b.final_video_url">
+              <div class="mb-3">
+                <video :src="b.final_video_url" controls class="w-full max-w-md rounded bg-black"></video>
+                <div class="mt-1 text-xs">
+                  <a :href="b.final_video_url" :download="`broll-${b.broll_id}.mp4`"
+                     class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download final</a>
+                </div>
+              </div>
+            </template>
+
+            <!-- error -->
+            <template x-if="b.error">
+              <div class="text-xs text-rose-600 dark:text-rose-400 mb-3"
+                   x-text="`✕ ${b.error}`"></div>
+            </template>
+
+            <!-- transcript -->
+            <template x-if="b.transcript">
+              <details class="text-xs text-neutral-600 dark:text-neutral-300 mb-3">
+                <summary class="cursor-pointer hover:text-neutral-900 dark:hover:text-neutral-100">
+                  Transcript (<span x-text="b.n_words || 0"></span> words)
+                </summary>
+                <div class="mt-2 p-2 bg-neutral-50 dark:bg-neutral-950 rounded font-mono"
+                     x-text="b.transcript"></div>
+              </details>
+            </template>
+
+            <!-- clip grid -->
+            <template x-if="b.clips && b.clips.length">
+              <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                <template x-for="c in b.clips" :key="'cl-'+b.broll_id+'-'+c.idx">
+                  <div class="border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden bg-neutral-50 dark:bg-neutral-950">
+                    <template x-if="c.video_url">
+                      <video :src="c.video_url" controls class="w-full" style="aspect-ratio: 9/16;"></video>
+                    </template>
+                    <template x-if="!c.video_url && c.image_url">
+                      <img :src="c.image_url" class="w-full" style="aspect-ratio: 9/16; object-fit: cover;" />
+                    </template>
+                    <template x-if="!c.video_url && !c.image_url">
+                      <div class="bg-neutral-200 dark:bg-neutral-800" style="aspect-ratio: 9/16;"></div>
+                    </template>
+                    <div class="p-2 text-[10px]">
+                      <div class="flex items-center justify-between gap-1">
+                        <span class="text-neutral-500 dark:text-neutral-400"
+                              x-text="`#${c.idx + 1}`"></span>
+                        <span class="px-1 py-0.5 rounded text-[9px] font-semibold"
+                              :class="c.status === 'done' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200' :
+                                      c.status === 'failed' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900 dark:text-rose-200' :
+                                      'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200'"
+                              x-text="c.status"></span>
+                      </div>
+                      <div class="mt-1 flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
+                        <span x-show="c.target_duration_secs"
+                              x-text="`target: ${c.target_duration_secs}s`"></span>
+                        <span x-show="c.timing && c.timing.duration"
+                              x-text="`slot: ${(c.timing.duration || 0).toFixed(1)}s`"></span>
+                        <span x-show="c.attempts > 1"
+                              class="text-amber-600 dark:text-amber-400"
+                              x-text="`try ${c.attempts}/${2}`"></span>
+                        <span x-show="c.timing && c.timing.unmatched"
+                              class="text-rose-500 dark:text-rose-400 font-semibold"
+                              title="LLM line didn't fuzzy-match the transcript — timing estimated">unmatched</span>
+                      </div>
+                      <template x-if="c.mode">
+                        <div class="mt-1 inline-block px-1 py-0.5 rounded text-[9px] font-semibold"
+                             :class="
+                                /Mode 1/i.test(c.mode) ? 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200' :
+                                /Mode 2/i.test(c.mode) ? 'bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-200' :
+                                /Mode 3/i.test(c.mode) ? 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200' :
+                                /Mode 4/i.test(c.mode) ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200' :
+                                'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
+                             "
+                             x-text="c.mode"></div>
+                      </template>
+                      <div class="mt-1 text-neutral-700 dark:text-neutral-300 line-clamp-2"
+                           :title="c.line" x-text="c.line"></div>
+                      <details class="mt-1 text-neutral-500 dark:text-neutral-400">
+                        <summary class="cursor-pointer hover:text-neutral-700 dark:hover:text-neutral-200">prompt</summary>
+                        <div class="mt-1 max-h-32 overflow-y-auto" x-text="c.prompt"></div>
+                      </details>
+                      <template x-if="c.error">
+                        <div class="mt-1 text-rose-600 dark:text-rose-400" x-text="`✕ ${c.error}`"></div>
+                      </template>
+                      <!-- Reject + regenerate this clip (shown while job is in review or already finalised) -->
+                      <template x-if="['awaiting_approval','partial_success','done'].includes(b.status) && ['done','failed'].includes(c.status)">
+                        <button class="mt-2 w-full px-2 py-1 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-semibold"
+                                :disabled="b._regenerating_idx === c.idx"
+                                @click="rejectClip(b.broll_id, c.idx)">
+                          <span x-show="b._regenerating_idx !== c.idx">✕ Reject &amp; regenerate</span>
+                          <span x-show="b._regenerating_idx === c.idx">Regenerating…</span>
+                        </button>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <!-- Finalize gate: shown when job is in awaiting_approval (after first generation) or partial_success (so user can iterate further) -->
+            <template x-if="['awaiting_approval','partial_success','done'].includes(b.status)">
+              <div class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800 flex items-center gap-3">
+                <div class="text-xs text-neutral-500 dark:text-neutral-400 flex-1">
+                  <template x-if="b.status === 'awaiting_approval'">
+                    <span>Review each clip. Click <span class="text-rose-600 dark:text-rose-400 font-semibold">✕ Reject</span> on any you don't like — it'll regenerate with the same prompt. Click <span class="text-emerald-600 dark:text-emerald-400 font-semibold">✓ Finalize</span> when you're happy.</span>
+                  </template>
+                  <template x-if="['partial_success','done'].includes(b.status)">
+                    <span>Want to iterate? Reject any clip to regenerate, then click Finalize to re-stitch.</span>
+                  </template>
+                </div>
+                <button class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                        :disabled="b._finalizing || _hasInFlightClips(b)"
+                        @click="finalizeBroll(b.broll_id)">
+                  <span x-show="!b._finalizing && !_hasInFlightClips(b)">✓ Finalize video</span>
+                  <span x-show="b._finalizing">Finalizing…</span>
+                  <span x-show="!b._finalizing && _hasInFlightClips(b)">Waiting on clips…</span>
+                </button>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="brollHistory.length === 0">
+          <div class="text-center text-sm text-neutral-400 dark:text-neutral-500 py-12">
+            No B-roll jobs yet — drop an audio file above to start.
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- ================= EDITOR TAB (silence-trim + captions) ================= -->
     <div x-show="activeTab === 'editor'"
          x-init="$watch('activeTab', t => { if (t === 'editor' && editorTemplates.length === 0) loadEditorTemplates() })"
          class="space-y-6">
-      <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
-        <h2 class="text-lg font-semibold mb-1">Video editor</h2>
-        <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
-          Upload a video, auto-trim silent gaps, and burn in trending-style captions.
-        </p>
+      <!-- Mode toggle -->
+      <div class="flex items-center gap-1 bg-neutral-900 border border-neutral-800 rounded-lg p-1 max-w-md mx-auto">
+        <button class="flex-1 px-4 py-2 rounded text-sm font-medium transition-colors"
+                :class="!multiClipMode
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-neutral-400 hover:text-neutral-200'"
+                @click="multiClipMode = false">
+          Single clip
+        </button>
+        <button class="flex-1 px-4 py-2 rounded text-sm font-medium transition-colors"
+                :class="multiClipMode
+                          ? 'bg-indigo-600 text-white'
+                          : 'text-neutral-400 hover:text-neutral-200'"
+                @click="multiClipMode = true">
+          Multi-clip (auto-order)
+        </button>
+      </div>
 
-        <!-- Source video -->
+      <!-- ================ MULTI-CLIP STUDIO ================ -->
+      <section x-show="multiClipMode"
+               class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 overflow-hidden">
+        <div class="p-6 space-y-5">
+          <div>
+            <h3 class="text-base font-semibold mb-1">Multi-clip auto-order</h3>
+            <p class="text-xs text-neutral-400">
+              Upload clips of your avatar in any order, paste the intended script — Whisper transcribes each clip and the order is matched against the script before the rest of auto-edit runs.
+            </p>
+          </div>
+
+          <!-- Script -->
+          <div>
+            <label class="text-xs uppercase tracking-wide text-neutral-500">Script</label>
+            <textarea x-model="multiScript"
+                      rows="5"
+                      placeholder="Paste the full script your avatar reads. Order of clips will be matched to the order of sentences here."
+                      class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"></textarea>
+          </div>
+
+          <!-- Clips upload -->
+          <div>
+            <div class="flex items-center justify-between mb-2">
+              <label class="text-xs uppercase tracking-wide text-neutral-500">
+                Clips <span class="text-neutral-400" x-text="multiClips.length ? `(${multiClips.length})` : ''"></span>
+              </label>
+              <label class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">
+                + add clips
+                <input type="file" class="hidden" accept="video/*" multiple
+                       @change="addMultiClips($event.target.files); $event.target.value=''" />
+              </label>
+            </div>
+            <template x-if="multiClips.length === 0">
+              <label class="dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-8 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
+                     @dragover.prevent="$event.currentTarget.classList.add('dragover')"
+                     @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
+                     @drop.prevent="$event.currentTarget.classList.remove('dragover'); addMultiClips($event.dataTransfer.files)">
+                <div class="text-sm font-medium">Drop multiple clips here</div>
+                <div class="text-xs mt-1">Any order — they'll be sorted against your script</div>
+                <input type="file" class="hidden" accept="video/*" multiple
+                       @change="addMultiClips($event.target.files); $event.target.value=''" />
+              </label>
+            </template>
+            <div x-show="multiClips.length > 0"
+                 class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              <template x-for="(c, idx) in multiClips" :key="'mc-'+idx">
+                <div class="relative border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden bg-black">
+                  <video :src="c.url" class="w-full h-32 object-cover" muted></video>
+                  <button class="absolute top-1 right-1 bg-black/70 hover:bg-red-600 text-white text-xs w-5 h-5 rounded-full flex items-center justify-center"
+                          @click="removeMultiClip(idx)">✕</button>
+                  <div class="p-1.5 text-[10px] text-neutral-700 dark:text-neutral-300 truncate"
+                       :title="c.name" x-text="c.name"></div>
+                  <div class="px-1.5 pb-1 text-[9px] text-neutral-400 font-mono"
+                       x-text="formatMB(c.size)"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Inline settings: template, voice, trim threshold + step toggles -->
+          <div class="space-y-3 pt-3 border-t border-neutral-200 dark:border-neutral-800">
+            <!-- Voice swap (inline, no need to leave multi mode) -->
+            <div>
+              <label class="text-xs uppercase tracking-wide text-neutral-500">Voice swap (optional)</label>
+              <template x-if="!elevenlabsAvailable()">
+                <div class="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                  Add ELEVENLABS_API_KEY to .env to swap voice.
+                </div>
+              </template>
+              <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+                      class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+                <option value="">— keep original voice —</option>
+                <template x-for="v in elevenlabsVoices" :key="'mc-evc-'+v.voice_id">
+                  <option :value="v.voice_id"
+                          x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
+                </template>
+              </select>
+            </div>
+
+            <!-- Step toggles -->
+            <div class="flex items-center gap-4 text-xs">
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" x-model="editor.enableTrim" />
+                <span class="text-neutral-300">Trim silences</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer">
+                <input type="checkbox" x-model="editor.enableCaptions" />
+                <span class="text-neutral-300">Captions</span>
+              </label>
+              <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
+            </div>
+
+            <div class="text-xs text-neutral-500">
+              Template + trim threshold inherited from Single mode:
+              <span class="font-mono text-neutral-300" x-text="`Template: ${editor.template} · Trim: ${editor.thresholdDb}dB`"></span>
+            </div>
+          </div>
+
+          <!-- Render button -->
+          <button class="w-full px-4 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                  :disabled="!multiScript.trim() || multiClips.length === 0 || multiAutoEditing || !health.openai_key"
+                  :title="!health.openai_key ? 'Whisper needs OPENAI_API_KEY' : ''"
+                  @click="submitMultiAutoEdit()">
+            <span x-show="!multiAutoEditing">Stitch + auto-edit</span>
+            <span x-show="multiAutoEditing">Transcribing + matching + rendering… (~1–2 min)</span>
+          </button>
+
+          <!-- Matching result (per-clip) -->
+          <div x-show="multiResult?.matching" class="pt-3 border-t border-neutral-200 dark:border-neutral-800">
+            <div class="text-xs font-semibold text-neutral-300 mb-2">Match order (script position)</div>
+            <div class="space-y-1.5">
+              <template x-for="(m, i) in (multiResult?.matching || [])" :key="'match-'+i">
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="text-neutral-500 w-5 text-right" x-text="`${i+1}.`"></span>
+                  <span class="text-neutral-300 font-mono w-24"
+                        :class="m.unmatched ? 'text-red-400' : ''"
+                        x-text="`clip ${m.clip_index+1} · ${(m.score*100).toFixed(0)}%`"></span>
+                  <span class="flex-1 text-neutral-500 truncate" x-text="m.transcript_preview"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================ CAPCUT-STYLE STUDIO PANEL (single mode) ================ -->
+      <section x-show="!multiClipMode"
+               class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 overflow-hidden">
+
+        <!-- Upload state -->
         <template x-if="!editor.sourceVideo">
-          <label class="dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-10 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
+          <label class="dropzone block cursor-pointer m-6 border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-12 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
                  @dragover.prevent="$event.currentTarget.classList.add('dragover')"
                  @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
                  @drop.prevent="$event.currentTarget.classList.remove('dragover'); setEditorVideo($event.dataTransfer.files[0])">
-            <div class="text-base">Drop a video here</div>
-            <div class="text-xs mt-1">.mp4, .mov, .webm, .mkv, .avi, .m4v</div>
+            <div class="text-base font-medium">Drop a video to start editing</div>
+            <div class="text-xs mt-1">.mp4, .mov, .webm, .mkv, .avi, .m4v · then pick template, adjust, render</div>
             <input type="file" class="hidden" accept="video/*" @change="setEditorVideo($event.target.files[0])" />
           </label>
         </template>
+
+        <!-- Editing state -->
         <template x-if="editor.sourceVideo">
-          <div class="flex items-start gap-4">
-            <video :src="editor.sourceVideo.url" controls class="w-64 rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
-            <div class="flex-1">
-              <div class="text-sm text-neutral-700 dark:text-neutral-300" x-text="editor.sourceVideo.name"></div>
-              <button class="mt-2 text-xs text-red-600 dark:text-red-400 hover:underline"
+          <div class="grid grid-cols-1 lg:grid-cols-[420px_1fr]">
+
+            <!-- LEFT: video preview with live caption overlay -->
+            <div class="bg-neutral-950 relative flex items-center justify-center p-4">
+              <div class="studio-preview relative w-full max-w-[360px] mx-auto"
+                   style="aspect-ratio: 9 / 16;">
+                <video :src="editor.sourceVideo.url"
+                       @loadedmetadata="onVideoLoaded($event)"
+                       controls playsinline
+                       class="absolute inset-0 w-full h-full object-contain bg-black rounded-lg"></video>
+
+                <!-- Live caption overlay — drag anywhere on screen, resize via corner handle -->
+                <div class="absolute inset-0 pointer-events-none">
+                  <div :style="previewWrapStyle(activeStyle())"
+                       class="pointer-events-auto cursor-grab select-none"
+                       :class="draggingText ? 'cursor-grabbing' : ''"
+                       @mousedown="startTextDrag($event)"
+                       @touchstart.passive="startTextDrag($event)"
+                       @wheel.prevent="onTextWheel($event)">
+                    <span :style="previewWordStyle(activeStyle(), false)"
+                          x-text="activeStyle().all_caps ? 'NEVER' : 'never'"></span>
+                    <span :style="previewWordStyle(activeStyle(), true)"
+                          x-text="activeStyle().all_caps ? 'BUY' : 'buy'"></span>
+                    <span :style="previewWordStyle(activeStyle(), false)"
+                          x-text="activeStyle().all_caps ? 'HONEY' : 'honey'"></span>
+
+                    <!-- Resize handle — drag this square to scale text -->
+                    <div class="absolute -right-2 -bottom-2 w-4 h-4 bg-indigo-500 border-2 border-white rounded-sm cursor-nwse-resize hover:scale-125 transition-transform shadow-md"
+                         @mousedown.stop="startTextResize($event)"
+                         @touchstart.stop.passive="startTextResize($event)"
+                         title="drag to resize"></div>
+                  </div>
+                </div>
+
+                <div class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
+                  drag text · drag corner to resize · scroll also resizes
+                </div>
+              </div>
+
+              <button class="absolute top-2 left-2 text-[10px] text-white/70 hover:text-white bg-black/40 hover:bg-black/60 px-2 py-1 rounded"
                       @click="if (editor.sourceVideo?.url) URL.revokeObjectURL(editor.sourceVideo.url); editor.sourceVideo = null; editor.lastResult = null">
-                Replace video
+                ✕ change video
               </button>
+            </div>
+
+            <!-- RIGHT: tabs + properties + render -->
+            <div class="flex flex-col">
+
+              <!-- Tab bar -->
+              <div class="flex border-b border-neutral-200 dark:border-neutral-800">
+                <template x-for="tab in [
+                  {slug: 'template', label: 'Template'},
+                  {slug: 'style',    label: 'Style'},
+                  {slug: 'voice',    label: 'Voice'},
+                  {slug: 'trim',     label: 'Trim'},
+                ]" :key="'pt-'+tab.slug">
+                  <button class="flex-1 px-3 py-3 text-sm font-medium transition-colors border-b-2"
+                          :class="propTab === tab.slug
+                                    ? 'border-indigo-500 text-indigo-400 bg-indigo-950/20'
+                                    : 'border-transparent text-neutral-400 hover:text-neutral-200'"
+                          @click="propTab = tab.slug; if (tab.slug === 'template' && editorTemplates.length === 0) loadEditorTemplates()"
+                          x-text="tab.label"></button>
+                </template>
+              </div>
+
+              <!-- Tab content -->
+              <div class="flex-1 overflow-y-auto p-4 min-h-[360px] max-h-[460px]"
+                   x-init="if (editorTemplates.length === 0) loadEditorTemplates()">
+
+                <!-- TEMPLATE TAB -->
+                <div x-show="propTab === 'template'">
+                  <template x-if="editorTemplates.length === 0">
+                    <div class="text-center text-xs text-neutral-400 py-12">
+                      <div class="mb-3">Loading templates…</div>
+                      <button class="px-3 py-1.5 rounded border border-neutral-700 hover:border-neutral-500 hover:bg-neutral-800"
+                              @click="loadEditorTemplates()">Reload templates</button>
+                    </div>
+                  </template>
+                  <div x-show="editorTemplates.length > 0" class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    <template x-for="t in editorTemplates" :key="'studio-tpl-'+t.slug">
+                      <button class="border-2 rounded-lg overflow-hidden transition-all text-left"
+                              :class="editor.template === t.slug
+                                        ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 scale-[1.02]'
+                                        : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600'"
+                              @click="selectEditorTemplate(t.slug)">
+                        <div class="relative bg-gradient-to-br from-neutral-700 to-neutral-900"
+                             style="aspect-ratio: 9 / 16;">
+                          <div :style="previewWrapStyle(t)">
+                            <span :style="previewWordStyle(t, false)"
+                                  x-text="t.all_caps ? 'NEVER' : 'never'"></span>
+                            <span :style="previewWordStyle(t, true)"
+                                  x-text="t.all_caps ? 'BUY' : 'buy'"></span>
+                            <span :style="previewWordStyle(t, false)"
+                                  x-text="t.all_caps ? 'HONEY' : 'honey'"></span>
+                          </div>
+                        </div>
+                        <div class="p-1.5 bg-white dark:bg-neutral-900">
+                          <div class="text-[10px] font-semibold capitalize truncate" x-text="t.label"></div>
+                        </div>
+                      </button>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- STYLE TAB -->
+                <div x-show="propTab === 'style'" class="space-y-4">
+                  <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-2">
+                    Tip: drag text on the preview to move · scroll wheel on text to resize.
+                  </div>
+                  <div>
+                    <label class="flex items-center justify-between text-xs">
+                      <span class="text-neutral-600 dark:text-neutral-300">Size</span>
+                      <span class="font-mono text-neutral-400" x-text="`${editor.overrides.size ?? currentTemplate().size}pt`"></span>
+                    </label>
+                    <input type="range" min="30" max="200" step="2"
+                           :value="editor.overrides.size ?? currentTemplate().size"
+                           @input="editor.overrides.size = parseInt($event.target.value)"
+                           class="w-full mt-1" />
+                  </div>
+                  <div>
+                    <label class="flex items-center justify-between text-xs">
+                      <span class="text-neutral-600 dark:text-neutral-300">Vertical position (from bottom)</span>
+                      <span class="font-mono text-neutral-400" x-text="`${editor.overrides.margin_v ?? currentTemplate().margin_v}px`"></span>
+                    </label>
+                    <input type="range" min="0" max="1700" step="20"
+                           :value="editor.overrides.margin_v ?? currentTemplate().margin_v"
+                           @input="editor.overrides.margin_v = parseInt($event.target.value)"
+                           class="w-full mt-1" />
+                  </div>
+                  <div>
+                    <label class="flex items-center justify-between text-xs">
+                      <span class="text-neutral-600 dark:text-neutral-300">Horizontal position (← left / center / right →)</span>
+                      <span class="font-mono text-neutral-400"
+                            x-text="`${editor.overrides.margin_h ?? currentTemplate().margin_h ?? 0}px`"></span>
+                    </label>
+                    <input type="range" min="-540" max="540" step="10"
+                           :value="editor.overrides.margin_h ?? currentTemplate().margin_h ?? 0"
+                           @input="editor.overrides.margin_h = parseInt($event.target.value)"
+                           class="w-full mt-1" />
+                    <button class="mt-1 text-[10px] text-neutral-500 hover:text-indigo-400"
+                            @click="editor.overrides.margin_h = 0">↺ center</button>
+                  </div>
+                  <div>
+                    <label class="text-xs text-neutral-600 dark:text-neutral-300">Horizontal alignment</label>
+                    <div class="mt-1 grid grid-cols-3 gap-1 text-xs">
+                      <template x-for="opt in [
+                        {v: 1, l: '← left'}, {v: 2, l: '◯ center'}, {v: 3, l: '→ right'},
+                      ]" :key="'al-'+opt.v">
+                        <button class="px-2 py-1.5 rounded border"
+                                :class="(editor.overrides.alignment ?? currentTemplate().alignment ?? 2) === opt.v
+                                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                                          : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800'"
+                                @click="editor.overrides.alignment = opt.v"
+                                x-text="opt.l"></button>
+                      </template>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-3">
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Outline</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.outline ?? currentTemplate().outline}`"></span>
+                      </label>
+                      <input type="range" min="0" max="15" step="1"
+                             :value="editor.overrides.outline ?? currentTemplate().outline"
+                             @input="editor.overrides.outline = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Shadow</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow ?? currentTemplate().shadow ?? 0}`"></span>
+                      </label>
+                      <input type="range" min="0" max="15" step="1"
+                             :value="editor.overrides.shadow ?? currentTemplate().shadow ?? 0"
+                             @input="editor.overrides.shadow = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="flex items-center gap-2 text-xs cursor-pointer">
+                      <input type="checkbox"
+                             :checked="editor.overrides.all_caps ?? currentTemplate().all_caps"
+                             @change="editor.overrides.all_caps = $event.target.checked" />
+                      <span class="text-neutral-600 dark:text-neutral-300">All caps</span>
+                    </label>
+                  </div>
+                  <button class="text-xs text-neutral-500 dark:text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
+                          @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, words_per_card: null, margin_v: null, highlight_color: null, box: null, all_caps: null, shadow: null, alignment: null, outline: null }">
+                    ↺ reset to template defaults
+                  </button>
+                </div>
+
+                <!-- VOICE TAB -->
+                <div x-show="propTab === 'voice'" class="space-y-3">
+                  <div class="text-xs text-neutral-500 dark:text-neutral-400">
+                    Optional. Picks one of your ElevenLabs voices and re-renders the speech track.
+                  </div>
+                  <template x-if="!elevenlabsAvailable()">
+                    <div class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900">
+                      (locked) Add <code>ELEVENLABS_API_KEY</code> to .env to enable voice-swap.
+                    </div>
+                  </template>
+                  <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+                          class="w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+                    <option value="">— keep original voice —</option>
+                    <template x-for="v in elevenlabsVoices" :key="'st-evc-'+v.voice_id">
+                      <option :value="v.voice_id"
+                              x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
+                    </template>
+                  </select>
+                  <button x-show="elevenlabsAvailable()" class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                          @click="loadElevenlabsVoices()">refresh voice list</button>
+                </div>
+
+                <!-- TRIM TAB -->
+                <div x-show="propTab === 'trim'" class="space-y-4">
+                  <div>
+                    <div class="text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-2">Auto-trim silences</div>
+                    <div class="space-y-3">
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Silence threshold</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.thresholdDb} dB`"></span>
+                        </label>
+                        <input type="range" min="-60" max="-10" step="1" x-model.number="editor.thresholdDb"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Min silence to cut</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.minSilenceSecs.toFixed(2)}s`"></span>
+                        </label>
+                        <input type="range" min="0.1" max="2" step="0.05" x-model.number="editor.minSilenceSecs"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Padding around speech</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.padSecs.toFixed(2)}s`"></span>
+                        </label>
+                        <input type="range" min="0" max="0.5" step="0.01" x-model.number="editor.padSecs"
+                               class="w-full mt-1" />
+                      </div>
+                    </div>
+                  </div>
+                  <div x-show="duration > 0" class="pt-3 border-t border-neutral-200 dark:border-neutral-800">
+                    <div class="flex items-center justify-between text-xs font-semibold text-neutral-700 dark:text-neutral-300 mb-2">
+                      <span>Manual trim</span>
+                      <span class="font-mono text-neutral-400" x-text="`${formatSecs(trimStartSecs)} – ${trimEndSecs > 0 ? formatSecs(trimEndSecs) : formatSecs(duration)} / ${formatSecs(duration)}`"></span>
+                    </div>
+                    <!-- Timeline bar with highlighted trim range -->
+                    <div class="relative h-2 bg-neutral-200 dark:bg-neutral-800 rounded-full mb-2 overflow-hidden">
+                      <div class="absolute top-0 bottom-0 bg-indigo-500/60"
+                           :style="`left:${(trimStartSecs/Math.max(1,duration))*100}%; right:${((duration-(trimEndSecs>0?trimEndSecs:duration))/Math.max(1,duration))*100}%`"></div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                      <label class="text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Start (s)</span>
+                        <input type="number" min="0" :max="duration" step="0.1"
+                               x-model.number="trimStartSecs"
+                               class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+                      </label>
+                      <label class="text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">End (s, 0=full)</span>
+                        <input type="number" min="0" :max="duration" step="0.1"
+                               x-model.number="trimEndSecs"
+                               class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+                      </label>
+                    </div>
+                    <div class="mt-1 text-[10px] text-neutral-400 dark:text-neutral-500">
+                      Manual trim runs on the final video via the Edit-result panel after rendering. Auto-trim above runs during render.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Render bar -->
+              <div class="border-t border-neutral-200 dark:border-neutral-800 p-4 bg-neutral-50 dark:bg-neutral-900/40 space-y-2">
+                <!-- Step toggles -->
+                <div class="flex items-center justify-center gap-4 text-xs">
+                  <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" x-model="editor.enableTrim" />
+                    <span class="text-neutral-300">Trim silences</span>
+                  </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="checkbox" x-model="editor.enableCaptions" />
+                    <span class="text-neutral-300">Captions</span>
+                  </label>
+                  <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
+                </div>
+
+                <button class="w-full px-4 py-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                        :disabled="!editor.sourceVideo || editor.autoEditing || (editor.enableCaptions && !health.openai_key)"
+                        :title="editor.enableCaptions && !health.openai_key ? 'Whisper needs OPENAI_API_KEY' : ''"
+                        @click="editorAutoEdit()">
+                  <span x-show="!editor.autoEditing">Render video</span>
+                  <span x-show="editor.autoEditing">Rendering… (~30-60s)</span>
+                </button>
+                <div class="mt-2 text-[10px] text-neutral-400 text-center">
+                  <span x-show="editor.enableCaptions">Template: <span x-text="editor.template"></span> · </span>
+                  <span x-show="editor.voiceId">Voice: <span x-text="elevenlabsVoices.find(v=>v.voice_id===editor.voiceId)?.name || 'swap'"></span> · </span>
+                  <span x-show="!editor.voiceId">Voice: keep · </span>
+                  <span x-show="editor.enableTrim">Trim: <span x-text="`${editor.thresholdDb}dB`"></span></span>
+                  <span x-show="!editor.enableTrim">Trim: <span class="text-amber-400">off</span></span>
+                  <span x-show="!editor.enableCaptions"> · Captions: <span class="text-amber-400">off</span></span>
+                </div>
+              </div>
             </div>
           </div>
         </template>
       </section>
 
+      <!-- ================ ADVANCED: legacy single-step cards ================ -->
+      <details class="bg-neutral-50 dark:bg-neutral-900/40 rounded-2xl border border-neutral-200 dark:border-neutral-800 p-4">
+        <summary class="cursor-pointer text-sm font-medium text-neutral-700 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-neutral-100">
+          Advanced: run single steps separately
+        </summary>
+        <div class="mt-4 text-xs text-neutral-500 dark:text-neutral-400 mb-3">
+          The Studio above runs everything in one shot. Use these cards if you want to (a) just trim silences, or (b) just add captions, without going through the full pipeline.
+        </div>
+
       <!-- Two action cards side by side on wide screens -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
         <!-- Card 1: Trim silences -->
-        <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+        <section id="trim-card" class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
           <h3 class="text-base font-semibold mb-1">Trim silences</h3>
           <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
             Detects silent gaps and removes them. ffmpeg silencedetect + concat.
@@ -1337,22 +2056,36 @@
         </section>
 
         <!-- Card 2: Captions -->
-        <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+        <section id="captions-card" class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
           <h3 class="text-base font-semibold mb-1">Add captions</h3>
           <p class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
             Whisper transcription + word-level burned-in captions. Pick a template or roll your own.
           </p>
 
-          <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mb-4">
+          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 mb-4">
             <template x-for="t in editorTemplates" :key="'tpl'+t.slug">
-              <button class="border rounded-lg p-2 text-left transition-colors"
+              <button class="border rounded-lg overflow-hidden transition-colors text-left"
                       :class="editor.template === t.slug
-                                ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 bg-indigo-50 dark:bg-indigo-950/30'
-                                : 'border-neutral-200 dark:border-neutral-800 hover:bg-neutral-50 dark:hover:bg-neutral-800'"
+                                ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900'
+                                : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700'"
                       @click="selectEditorTemplate(t.slug)">
-                <div class="text-xs font-semibold capitalize" x-text="t.label"></div>
-                <div class="text-[10px] text-neutral-500 dark:text-neutral-400 mt-0.5"
-                     x-text="`${t.font} · ${t.size}px · ${t.words_per_card} words${t.highlight_color ? ' · highlight' : ''}${t.box ? ' · boxed' : ''}`"></div>
+                <!-- visual preview tile (9:16 like the source videos) -->
+                <div class="relative bg-gradient-to-br from-neutral-700 to-neutral-900"
+                     style="aspect-ratio: 9 / 16;">
+                  <div :style="previewWrapStyle(t)">
+                    <span :style="previewWordStyle(t, false)"
+                          x-text="t.all_caps ? 'NEVER' : 'never'"></span>
+                    <span :style="previewWordStyle(t, true)"
+                          x-text="t.all_caps ? 'BUY' : 'buy'"></span>
+                    <span :style="previewWordStyle(t, false)"
+                          x-text="t.all_caps ? 'HONEY' : 'honey'"></span>
+                  </div>
+                </div>
+                <div class="p-1.5 bg-white dark:bg-neutral-900">
+                  <div class="text-[11px] font-semibold capitalize truncate" x-text="t.label"></div>
+                  <div class="text-[9px] text-neutral-500 dark:text-neutral-400 truncate"
+                       x-text="`${t.font} · ${t.size}pt · ${t.words_per_card}w${t.shadow > 0 ? ' · shadow' : ''}${t.highlight_color ? ' · hl' : ''}`"></div>
+                </div>
               </button>
             </template>
           </div>
@@ -1360,7 +2093,7 @@
           <!-- Custom override editor -->
           <details class="text-xs">
             <summary class="cursor-pointer text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">
-              ⚙ Customize this template
+              Customize this template
             </summary>
             <div class="mt-3 grid grid-cols-2 gap-3">
               <label class="block">
@@ -1408,6 +2141,34 @@
                 </select>
               </label>
               <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Shadow (px)</span>
+                <input x-model.number="editor.overrides.shadow" type="number" min="0" max="20"
+                       placeholder="0"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Outline (px)</span>
+                <input x-model.number="editor.overrides.outline" type="number" min="0" max="20"
+                       placeholder="0"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block col-span-2">
+                <span class="text-neutral-500 dark:text-neutral-400">Horizontal position</span>
+                <select x-model.number="editor.overrides.alignment"
+                        class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs">
+                  <option :value="null">use template default</option>
+                  <option :value="1">bottom-left</option>
+                  <option :value="2">bottom-center</option>
+                  <option :value="3">bottom-right</option>
+                  <option :value="5">top-left</option>
+                  <option :value="6">top-center</option>
+                  <option :value="7">top-right</option>
+                  <option :value="9">middle-left</option>
+                  <option :value="10">middle-center</option>
+                  <option :value="11">middle-right</option>
+                </select>
+              </label>
+              <label class="block">
                 <span class="text-neutral-500 dark:text-neutral-400">All caps</span>
                 <select x-model="editor.overrides.all_caps"
                         class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs">
@@ -1431,6 +2192,7 @@
           </button>
         </section>
       </div>
+      </details>
 
       <!-- Result + history -->
       <section x-show="editor.lastResult"
@@ -1438,7 +2200,7 @@
         <h3 class="text-base font-semibold mb-2">Latest result</h3>
         <video x-show="editor.lastResult?.output_url" :src="editor.lastResult?.output_url"
                controls class="w-full max-w-md rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
-        <div class="mt-2 text-xs text-neutral-500 dark:text-neutral-400 flex items-center gap-3">
+        <div class="mt-2 text-xs text-neutral-500 dark:text-neutral-400 flex items-center gap-3 flex-wrap">
           <a x-show="editor.lastResult?.output_url" :href="editor.lastResult?.output_url"
              :download="editor.lastResult?.kind === 'trim' ? 'trimmed.mp4' : 'captioned.mp4'"
              class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
@@ -1446,6 +2208,278 @@
                 x-text="`Saved ${editor.lastResult?.saved_secs}s · kept ${editor.lastResult?.n_cuts} segments`"></span>
           <span x-show="editor.lastResult?.kind === 'captions'"
                 x-text="`${editor.lastResult?.n_words} words · ${editor.lastResult?.template}`"></span>
+          <span x-show="editor.lastResult?.kind === 'auto'">
+            <span x-show="editor.lastResult?.version" x-text="`v${editor.lastResult?.version} · `"></span>
+            <span x-text="`${editor.lastResult?.captions?.n_words ?? editor.lastResult?.n_words} words · ${editor.lastResult?.template ?? editor.lastResult?.captions?.template}`"></span>
+          </span>
+          <button x-show="editor.lastResult?.kind === 'auto' && editor.lastResult?.rerender_available !== false"
+                  class="ml-auto px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
+                  @click="openRerenderPanel()">Edit result</button>
+          <button x-show="editor.lastResult?.output_url && editor.lastResult?.edit_id"
+                  class="px-3 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium"
+                  :class="(editor.lastResult?.kind === 'auto' && editor.lastResult?.rerender_available !== false) ? '' : 'ml-auto'"
+                  @click="openTimeline()">Trim &amp; split</button>
+        </div>
+
+        <!-- Re-render panel — change template/size/position/trim on the existing edit -->
+        <div x-show="editor.rerenderOpen"
+             class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h4 class="text-sm font-semibold">Edit final video</h4>
+              <p class="text-[11px] text-neutral-500 dark:text-neutral-400">
+                Re-renders captions on the cached pre-caption video — no Whisper or voice-swap re-run. Free + fast.
+              </p>
+            </div>
+            <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-xs"
+                    @click="editor.rerenderOpen = false">close</button>
+          </div>
+
+          <!-- template gallery (visual previews) -->
+          <div class="grid grid-cols-3 sm:grid-cols-4 gap-2">
+            <template x-for="t in editorTemplates" :key="'rrtpl-'+t.slug">
+              <button class="border rounded-lg overflow-hidden transition-colors text-left"
+                      :class="editor.rerenderTemplate === t.slug
+                                ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900'
+                                : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-300 dark:hover:border-neutral-700'"
+                      @click="editor.rerenderTemplate = t.slug">
+                <div class="relative bg-gradient-to-br from-neutral-700 to-neutral-900"
+                     style="aspect-ratio: 9 / 16;">
+                  <div :style="previewWrapStyle(t)">
+                    <span :style="previewWordStyle(t, false)"
+                          x-text="t.all_caps ? 'NEVER' : 'never'"></span>
+                    <span :style="previewWordStyle(t, true)"
+                          x-text="t.all_caps ? 'BUY' : 'buy'"></span>
+                    <span :style="previewWordStyle(t, false)"
+                          x-text="t.all_caps ? 'HONEY' : 'honey'"></span>
+                  </div>
+                </div>
+                <div class="p-1 bg-white dark:bg-neutral-900">
+                  <div class="text-[10px] font-semibold capitalize truncate" x-text="t.label"></div>
+                </div>
+              </button>
+            </template>
+          </div>
+
+          <!-- trim range -->
+          <div class="grid grid-cols-2 gap-3 text-xs">
+            <label class="block">
+              <span class="text-neutral-500 dark:text-neutral-400">Trim from (s)</span>
+              <input x-model.number="editor.rerenderTrimStart" type="number" min="0" step="0.1"
+                     placeholder="0"
+                     class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+            </label>
+            <label class="block">
+              <span class="text-neutral-500 dark:text-neutral-400">Trim to (s, 0 = end)</span>
+              <input x-model.number="editor.rerenderTrimEnd" type="number" min="0" step="0.1"
+                     placeholder="0"
+                     class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+            </label>
+          </div>
+
+          <!-- customize collapsible -->
+          <details class="text-xs">
+            <summary class="cursor-pointer text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">
+              Customize caption style (size / position / colors / shadow)
+            </summary>
+            <div class="mt-3 grid grid-cols-2 gap-3">
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Size (px)</span>
+                <input x-model.number="editor.rerenderOverrides.size" type="number" min="20" max="200"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Vertical margin (px)</span>
+                <input x-model.number="editor.rerenderOverrides.margin_v" type="number" min="0" max="800"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Shadow (px)</span>
+                <input x-model.number="editor.rerenderOverrides.shadow" type="number" min="0" max="20"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Outline (px)</span>
+                <input x-model.number="editor.rerenderOverrides.outline" type="number" min="0" max="20"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Words per card</span>
+                <input x-model.number="editor.rerenderOverrides.words_per_card" type="number" min="1" max="20"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs" />
+              </label>
+              <label class="block col-span-2">
+                <span class="text-neutral-500 dark:text-neutral-400">Position</span>
+                <select x-model.number="editor.rerenderOverrides.alignment"
+                        class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs">
+                  <option :value="null">template default</option>
+                  <option :value="1">bottom-left</option>
+                  <option :value="2">bottom-center</option>
+                  <option :value="3">bottom-right</option>
+                  <option :value="5">top-left</option>
+                  <option :value="6">top-center</option>
+                  <option :value="7">top-right</option>
+                  <option :value="9">middle-left</option>
+                  <option :value="10">middle-center</option>
+                  <option :value="11">middle-right</option>
+                </select>
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Text color</span>
+                <input x-model="editor.rerenderOverrides.primary_color" type="text"
+                       placeholder="&H00FFFFFF"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs font-mono" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">Highlight color</span>
+                <input x-model="editor.rerenderOverrides.highlight_color" type="text"
+                       placeholder="&H0000FFFF"
+                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs font-mono" />
+              </label>
+              <label class="block">
+                <span class="text-neutral-500 dark:text-neutral-400">All caps</span>
+                <select x-model="editor.rerenderOverrides.all_caps"
+                        class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded text-xs">
+                  <option :value="null">template default</option>
+                  <option :value="true">on</option>
+                  <option :value="false">off</option>
+                </select>
+              </label>
+            </div>
+          </details>
+
+          <button class="w-full px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="editor.rerendering"
+                  @click="submitRerender()">
+            <span x-show="!editor.rerendering">▶ Apply changes</span>
+            <span x-show="editor.rerendering">Rendering…</span>
+          </button>
+        </div>
+
+        <!-- CapCut-style timeline editor: trim + split + delete + reorder segments -->
+        <div x-show="timeline.open"
+             class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h4 class="text-sm font-semibold">Trim &amp; split timeline</h4>
+              <p class="text-[11px] text-neutral-500 dark:text-neutral-400">
+                Drag handles on the edges to trim. Move the playhead and hit <em>Split</em>
+                to cut. <span class="text-violet-600 dark:text-violet-400">×</span> removes a segment;
+                <span class="text-violet-600 dark:text-violet-400">←/→</span> swaps order.
+              </p>
+            </div>
+            <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-xs"
+                    @click="closeTimeline()">close</button>
+          </div>
+
+          <!-- Preview video — scrubbing this drives the playhead position -->
+          <video x-ref="timelineVideo"
+                 :src="timeline.sourceUrl"
+                 controls
+                 @loadedmetadata="onTimelineMeta($event)"
+                 @timeupdate="onTimelineTime($event)"
+                 class="w-full max-w-md mx-auto rounded-lg border border-neutral-200 dark:border-neutral-800 bg-black"></video>
+
+          <!-- Toolbar -->
+          <div class="flex items-center gap-2 text-xs">
+            <button class="px-2 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white font-medium"
+                    @click="splitAtPlayhead()">✂ Split at playhead</button>
+            <button class="px-2 py-1 rounded border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800"
+                    @click="resetTimeline()">↺ Reset</button>
+            <span class="ml-auto text-neutral-500 dark:text-neutral-400 tabular-nums">
+              <span x-text="formatTC(timeline.playhead)"></span>
+              <span class="opacity-50"> / </span>
+              <span x-text="formatTC(timelineOutputDuration())"></span>
+              <span class="ml-2 opacity-60">(source <span x-text="formatTC(timeline.sourceDuration)"></span>)</span>
+            </span>
+          </div>
+
+          <!-- The timeline track itself -->
+          <div class="relative bg-neutral-100 dark:bg-neutral-950 rounded-lg p-2 select-none"
+               style="user-select: none;">
+            <!-- ticks (rough — every 1s, capped to 30 to keep DOM light) -->
+            <div class="relative h-3 mb-1">
+              <template x-for="i in Math.min(30, Math.ceil(timelineOutputDuration()))" :key="'tick-'+i">
+                <div class="absolute top-0 h-2 border-l border-neutral-300 dark:border-neutral-700"
+                     :style="`left: ${(i / timelineOutputDuration()) * 100}%;`"></div>
+              </template>
+            </div>
+
+            <!-- segments row: click-to-seek + visible bars + trim handles + controls -->
+            <div x-ref="timelineTrack"
+                 class="relative h-14 rounded overflow-visible"
+                 @click="seekTimeline($event)">
+              <!-- segment bars, laid out edge-to-edge proportional to their played length -->
+              <div class="absolute inset-0 flex">
+                <template x-for="(seg, i) in timeline.segments" :key="'seg-'+i">
+                  <div class="relative h-full border-r-2 border-white dark:border-neutral-900 group"
+                       :style="`width: ${timelineSegmentWidthPct(seg)}%; background: ${ ['#7c3aed', '#0ea5e9', '#22c55e', '#f59e0b', '#ec4899'][i % 5] };`"
+                       :class="timeline.selectedIdx === i ? 'ring-2 ring-yellow-300 ring-inset' : ''"
+                       @click.stop="timeline.selectedIdx = (timeline.selectedIdx === i ? -1 : i)">
+                    <!-- segment label: index + duration -->
+                    <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <span class="text-[10px] font-bold text-white drop-shadow tabular-nums"
+                            x-text="`#${i + 1} · ${(seg.end - seg.start).toFixed(1)}s`"></span>
+                    </div>
+
+                    <!-- left trim handle -->
+                    <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-white/60 hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity"
+                         :class="timeline.selectedIdx === i ? 'opacity-100' : ''"
+                         @mousedown="startHandleDrag($event, i, 'left')"
+                         @click.stop=""></div>
+                    <!-- right trim handle -->
+                    <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-white/60 hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity"
+                         :class="timeline.selectedIdx === i ? 'opacity-100' : ''"
+                         @mousedown="startHandleDrag($event, i, 'right')"
+                         @click.stop=""></div>
+
+                    <!-- per-segment controls (visible when selected) -->
+                    <div x-show="timeline.selectedIdx === i"
+                         class="absolute -top-7 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-neutral-900 text-white rounded-md px-1.5 py-1 shadow-md whitespace-nowrap z-10"
+                         @click.stop="">
+                      <button class="px-1 hover:text-violet-300 text-xs"
+                              @click="moveSegment(i, -1)" :disabled="i === 0"
+                              :class="i === 0 ? 'opacity-30 cursor-not-allowed' : ''">←</button>
+                      <button class="px-1 hover:text-violet-300 text-xs"
+                              @click="moveSegment(i, 1)" :disabled="i === timeline.segments.length - 1"
+                              :class="i === timeline.segments.length - 1 ? 'opacity-30 cursor-not-allowed' : ''">→</button>
+                      <button class="px-1 hover:text-rose-300 text-xs"
+                              @click="deleteSegment(i)">×</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Playhead -->
+              <div class="absolute top-0 h-full w-0.5 bg-yellow-300 pointer-events-none z-20"
+                   :style="`left: ${timelinePlayheadPct()}%;`">
+                <div class="absolute -top-1 -left-1.5 w-3 h-3 bg-yellow-300 rotate-45"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Segment summary table — gives the user the source ranges as numbers -->
+          <details class="text-[11px] text-neutral-500 dark:text-neutral-400">
+            <summary class="cursor-pointer hover:text-neutral-700 dark:hover:text-neutral-200">
+              Segment ranges (<span x-text="timeline.segments.length"></span> total)
+            </summary>
+            <div class="mt-2 space-y-1 font-mono">
+              <template x-for="(seg, i) in timeline.segments" :key="'sr-'+i">
+                <div class="flex items-center gap-2">
+                  <span class="inline-block w-6 text-right" x-text="`#${i + 1}`"></span>
+                  <span x-text="`${seg.start.toFixed(2)}s → ${seg.end.toFixed(2)}s`"></span>
+                  <span class="opacity-60" x-text="`(${(seg.end - seg.start).toFixed(2)}s played)`"></span>
+                </div>
+              </template>
+            </div>
+          </details>
+
+          <button class="w-full px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                  :disabled="timeline.rendering || timeline.segments.length === 0"
+                  @click="submitTimeline()">
+            <span x-show="!timeline.rendering">▶ Apply timeline (<span x-text="timeline.segments.length"></span> segments, <span x-text="formatTC(timelineOutputDuration())"></span>)</span>
+            <span x-show="timeline.rendering">Rendering…</span>
+          </button>
         </div>
       </section>
 
@@ -1756,7 +2790,7 @@
           </div>
           <template x-if="library.length === 0">
             <div class="text-xs text-neutral-400 dark:text-neutral-500 text-center p-6 border border-dashed border-neutral-200 dark:border-neutral-800 rounded-lg">
-              No characters in your library yet — you can add some now from the 📚 panel, or just create the project and add characters later.
+              No characters in your library yet — you can add some now from the library panel, or just create the project and add characters later.
             </div>
           </template>
           <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2" x-show="library.length > 0">

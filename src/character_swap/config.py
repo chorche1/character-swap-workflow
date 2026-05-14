@@ -39,7 +39,7 @@ class Settings(BaseSettings):
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     grok_video_model: str = Field(default="grok-imagine-video", validation_alias="GROK_VIDEO_MODEL")
-    grok_image_model: str = Field(default="grok-2-image-1212", validation_alias="GROK_IMAGE_MODEL")
+    grok_image_model: str = Field(default="grok-imagine-image", validation_alias="GROK_IMAGE_MODEL")
     grok_base_url: str = Field(default="https://api.x.ai/v1", validation_alias="XAI_BASE_URL")
     gemini_image_model: str = Field(default="gemini-2.5-flash-image-preview",
                                     validation_alias="GEMINI_IMAGE_MODEL")

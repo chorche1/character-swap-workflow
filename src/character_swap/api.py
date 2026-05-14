@@ -68,9 +68,14 @@ def _short_id(prefix: str = "") -> str:
     return prefix + secrets.token_hex(4)
 
 
-def _safe_ext(filename: str, *, allow_audio: bool = False) -> str:
+def _safe_ext(filename: str, *, allow_audio: bool = False, allow_video: bool = False) -> str:
     ext = Path(filename).suffix.lower()
-    allowed = ALLOWED_IMAGE_EXTS | ALLOWED_AUDIO_EXTS if allow_audio else ALLOWED_IMAGE_EXTS
+    allowed = set(ALLOWED_IMAGE_EXTS)
+    if allow_audio:
+        allowed |= ALLOWED_AUDIO_EXTS
+    if allow_video:
+        # Voice-Changer accepts videos too — we extract the audio + re-mux on output.
+        allowed |= {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
     if ext not in allowed:
         raise HTTPException(400, f"Unsupported file type '{ext}'. Allowed: {sorted(allowed)}")
     return ext
@@ -1338,8 +1343,10 @@ async def create_generation(
         if model == "elevenlabs-vc" and not files:
             raise HTTPException(400, "Voice Changer requires a source audio file")
 
-    # Allow audio uploads for the Voice Changer flow; everything else stays image-only.
+    # Allow audio (and video, for VC) uploads for the Voice Changer flow;
+    # everything else stays image-only.
     allow_audio_upload = (kind_enum is GenKind.AUDIO and model == "elevenlabs-vc")
+    allow_video_upload = (kind_enum is GenKind.AUDIO and model == "elevenlabs-vc")
 
     gen_id = "g_" + secrets.token_hex(5)
     gen_dir = settings.output_dir / "generations" / gen_id
@@ -1348,7 +1355,7 @@ async def create_generation(
     for i, f in enumerate(files):
         if not f.filename:
             continue
-        ext = _safe_ext(f.filename, allow_audio=allow_audio_upload)
+        ext = _safe_ext(f.filename, allow_audio=allow_audio_upload, allow_video=allow_video_upload)
         data = await _read_capped(f)
         if not data:
             continue
@@ -1502,7 +1509,10 @@ async def editor_templates() -> list[dict]:
             "words_per_card": style.words_per_card,
             "highlight_color": style.highlight_color,
             "margin_v": style.margin_v,
+            "margin_h": style.margin_h,
             "all_caps": style.all_caps,
+            "shadow": style.shadow,
+            "alignment": style.alignment,
         })
     return out
 
@@ -1598,9 +1608,615 @@ async def editor_captions(
     }
 
 
+@app.post("/api/editor/auto_edit")
+async def editor_auto_edit(
+    file: UploadFile = File(...),
+    threshold_db: float = Form(-30.0),
+    min_silence_secs: float = Form(0.4),
+    pad_secs: float = Form(0.05),
+    voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
+    template: str = Form("popout-yellow"),
+    overrides: str | None = Form(None),
+    enable_trim: bool = Form(True),        # opt-out of auto silence-trim
+    enable_captions: bool = Form(True),    # opt-out of caption burn-in
+) -> dict:
+    """One-shot pipeline. Each step is opt-out:
+      - trim silences (enable_trim)
+      - voice swap (only if voice_id is set)
+      - captions (enable_captions)
+    Returns the final mp4 + per-step summaries."""
+    from character_swap import video_edit
+    from character_swap.clients import elevenlabs as _eleven
+    settings.require_keys("openai")        # Whisper
+
+    ext = _safe_video_ext(file.filename or "video.mp4")
+    edit_id = "ed_" + secrets.token_hex(5)
+    edit_dir = settings.output_dir / "editor" / edit_id
+    edit_dir.mkdir(parents=True, exist_ok=True)
+    src = edit_dir / f"source{ext}"
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    src.write_bytes(data)
+
+    # Whisper is only required if captions are enabled.
+    if enable_captions:
+        settings.require_keys("openai")
+
+    # Step 1: trim silences (optional)
+    current = src
+    trim_summary: dict | None = None
+    if enable_trim:
+        trimmed = edit_dir / "01-trimmed.mp4"
+        try:
+            trim_summary = await asyncio.to_thread(
+                video_edit.trim_silences, src, trimmed,
+                threshold_db=threshold_db, min_silence_secs=min_silence_secs,
+                pad_secs=pad_secs, job_id=edit_id,
+            )
+        except RuntimeError as e:
+            raise HTTPException(500, f"Trim failed: {e}")
+        current = trimmed
+
+    swap_summary: dict | None = None
+
+    # Step 2: optional ElevenLabs voice swap
+    if voice_id:
+        if not settings.has_provider("elevenlabs"):
+            raise HTTPException(503, "ELEVENLABS_API_KEY not set — cannot swap voice")
+        try:
+            tmp_audio_in = edit_dir / "02-original.wav"
+            await asyncio.to_thread(
+                video_edit._run,
+                [video_edit._ffmpeg(), "-y", "-i", str(current),
+                 "-vn", "-ac", "1", "-ar", "44100", str(tmp_audio_in)],
+            )
+            new_audio_bytes = await asyncio.to_thread(
+                _eleven.voice_changer,
+                voice_id=voice_id, source_audio=tmp_audio_in, app_job_id=edit_id,
+            )
+            new_audio = edit_dir / "02-swapped.mp3"
+            new_audio.write_bytes(new_audio_bytes)
+            swapped = edit_dir / "02-swapped.mp4"
+            await asyncio.to_thread(
+                video_edit.replace_audio, current, new_audio, swapped,
+            )
+            current = swapped
+            swap_summary = {"voice_id": voice_id, "audio_path": str(new_audio)}
+            tmp_audio_in.unlink(missing_ok=True)
+        except NotImplementedError as e:
+            raise HTTPException(501, f"ElevenLabs wiring pending: {e}")
+        except Exception as e:
+            raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
+
+    # Step 3: captions (optional)
+    cap_info: dict | None = None
+    if enable_captions:
+        overrides_dict: dict | None = None
+        if overrides:
+            try:
+                overrides_dict = json.loads(overrides)
+            except json.JSONDecodeError:
+                raise HTTPException(400, "overrides must be valid JSON")
+        style = video_edit.style_from_params(template, overrides_dict)
+
+        try:
+            words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
+            if not words:
+                raise HTTPException(422, "No speech detected — nothing to caption")
+            (edit_dir / "words.json").write_text(video_edit.words_to_json(words), encoding="utf-8")
+            (edit_dir / "pre_caption.txt").write_text(str(current), encoding="utf-8")
+            final_out = edit_dir / "03-final.mp4"
+            cap_summary = await asyncio.to_thread(
+                video_edit.render_captions, current, final_out,
+                words=words, style=style, job_id=edit_id,
+            )
+            cap_info = {"n_words": len(words), "template": template, **cap_summary}
+            current = final_out
+        except RuntimeError as e:
+            raise HTTPException(500, f"Caption rendering failed: {e}")
+
+    return {
+        "edit_id": edit_id,
+        "output_url": _file_url(current),
+        "source_url": _file_url(src),
+        "trim": trim_summary,
+        "voice_swap": swap_summary,
+        "captions": cap_info,
+        "rerender_available": bool(enable_captions),
+    }
+
+
+@app.post("/api/editor/multi_auto_edit")
+async def editor_multi_auto_edit(
+    files: list[UploadFile] = File(...),
+    script: str = Form(...),
+    threshold_db: float = Form(-30.0),
+    min_silence_secs: float = Form(0.4),
+    pad_secs: float = Form(0.05),
+    voice_id: str | None = Form(None),
+    template: str = Form("popout-yellow"),
+    overrides: str | None = Form(None),
+    enable_trim: bool = Form(True),
+    enable_captions: bool = Form(True),
+) -> dict:
+    """Multi-clip auto-edit:
+      1. Save each uploaded clip.
+      2. Transcribe each with Whisper.
+      3. Match each transcript to a position in the supplied script and
+         reorder accordingly.
+      4. Concat the clips in script order.
+      5. Continue with the standard auto-edit pipeline:
+         trim silences → (optional) voice swap → captions.
+    """
+    from character_swap import video_edit
+    from character_swap.clients import elevenlabs as _eleven
+    settings.require_keys("openai")
+    if not script.strip():
+        raise HTTPException(400, "Script text is empty")
+    if not files or len(files) < 1:
+        raise HTTPException(400, "Upload at least one clip")
+
+    edit_id = "ed_" + secrets.token_hex(5)
+    edit_dir = settings.output_dir / "editor" / edit_id
+    edit_dir.mkdir(parents=True, exist_ok=True)
+    (edit_dir / "script.txt").write_text(script, encoding="utf-8")
+
+    # 1. Save each upload to disk.
+    clip_paths: list[Path] = []
+    for i, f in enumerate(files):
+        if not f.filename:
+            continue
+        ext = _safe_video_ext(f.filename)
+        dest = edit_dir / f"clip-{i:02d}{ext}"
+        data = await _read_capped(f)
+        if not data:
+            continue
+        dest.write_bytes(data)
+        clip_paths.append(dest)
+    if not clip_paths:
+        raise HTTPException(400, "No valid clips uploaded")
+
+    # 2. Transcribe each clip in parallel via to_thread (Whisper is sync).
+    try:
+        transcripts_per_clip = await asyncio.gather(*[
+            asyncio.to_thread(video_edit.transcribe_words, p, job_id=edit_id)
+            for p in clip_paths
+        ])
+    except RuntimeError as e:
+        raise HTTPException(500, f"Transcription failed: {e}")
+
+    plain_transcripts = [" ".join(w.text for w in words) for words in transcripts_per_clip]
+
+    # 3. Match each clip to a position in the script + sort.
+    placements = video_edit.match_clips_by_transcript(plain_transcripts, script)
+    ordered_paths = [clip_paths[p["idx"]] for p in placements]
+    matching_summary = [{
+        "clip_index": p["idx"],
+        "score": p["score"],
+        "unmatched": p["unmatched"],
+        "transcript_preview": plain_transcripts[p["idx"]][:120],
+    } for p in placements]
+
+    # 4. Concat in script order.
+    concat_out = edit_dir / "01-concat.mp4"
+    try:
+        await asyncio.to_thread(video_edit.concat_videos, ordered_paths, concat_out)
+    except RuntimeError as e:
+        raise HTTPException(500, f"Concat failed: {e}")
+
+    # 5. Trim silences on the concatenated video (optional)
+    current = concat_out
+    trim_summary: dict | None = None
+    if enable_trim:
+        trimmed = edit_dir / "02-trimmed.mp4"
+        try:
+            trim_summary = await asyncio.to_thread(
+                video_edit.trim_silences, concat_out, trimmed,
+                threshold_db=threshold_db, min_silence_secs=min_silence_secs,
+                pad_secs=pad_secs, job_id=edit_id,
+            )
+        except RuntimeError as e:
+            raise HTTPException(500, f"Trim failed: {e}")
+        current = trimmed
+
+    swap_summary: dict | None = None
+
+    # 6. Optional voice swap.
+    if voice_id:
+        if not settings.has_provider("elevenlabs"):
+            raise HTTPException(503, "ELEVENLABS_API_KEY not set — cannot swap voice")
+        try:
+            tmp_audio_in = edit_dir / "03-original.wav"
+            await asyncio.to_thread(
+                video_edit._run,
+                [video_edit._ffmpeg(), "-y", "-i", str(current),
+                 "-vn", "-ac", "1", "-ar", "44100", str(tmp_audio_in)],
+            )
+            new_audio_bytes = await asyncio.to_thread(
+                _eleven.voice_changer,
+                voice_id=voice_id, source_audio=tmp_audio_in, app_job_id=edit_id,
+            )
+            new_audio = edit_dir / "03-swapped.mp3"
+            new_audio.write_bytes(new_audio_bytes)
+            swapped = edit_dir / "03-swapped.mp4"
+            await asyncio.to_thread(
+                video_edit.replace_audio, current, new_audio, swapped,
+            )
+            current = swapped
+            swap_summary = {"voice_id": voice_id}
+            tmp_audio_in.unlink(missing_ok=True)
+        except NotImplementedError as e:
+            raise HTTPException(501, f"ElevenLabs wiring pending: {e}")
+        except Exception as e:
+            raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
+
+    # 7. Captions (optional)
+    cap_info: dict | None = None
+    if enable_captions:
+        overrides_dict: dict | None = None
+        if overrides:
+            try:
+                overrides_dict = json.loads(overrides)
+            except json.JSONDecodeError:
+                raise HTTPException(400, "overrides must be valid JSON")
+        style = video_edit.style_from_params(template, overrides_dict)
+
+        try:
+            words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
+            if not words:
+                raise HTTPException(422, "No speech detected after processing")
+            (edit_dir / "words.json").write_text(video_edit.words_to_json(words), encoding="utf-8")
+            (edit_dir / "pre_caption.txt").write_text(str(current), encoding="utf-8")
+            final_out = edit_dir / "04-final.mp4"
+            cap_summary = await asyncio.to_thread(
+                video_edit.render_captions, current, final_out,
+                words=words, style=style, job_id=edit_id,
+            )
+            cap_info = {"n_words": len(words), "template": template, **cap_summary}
+            current = final_out
+        except RuntimeError as e:
+            raise HTTPException(500, f"Caption rendering failed: {e}")
+
+    return {
+        "edit_id": edit_id,
+        "output_url": _file_url(current),
+        "n_clips": len(ordered_paths),
+        "matching": matching_summary,
+        "trim": trim_summary,
+        "voice_swap": swap_summary,
+        "captions": cap_info,
+        "rerender_available": bool(enable_captions),
+    }
+
+
+@app.post("/api/editor/rerender")
+async def editor_rerender(
+    edit_id: str = Form(...),
+    template: str = Form("popout-yellow"),
+    overrides: str | None = Form(None),
+    trim_start_secs: float = Form(0.0),
+    trim_end_secs: float = Form(0.0),   # 0 = until end
+) -> dict:
+    """Re-render captions (and optionally manually-trim) the pre-caption
+    video produced by a previous /api/editor/auto_edit run. Reuses the cached
+    transcript so no Whisper call is needed."""
+    from character_swap import video_edit
+    edit_dir = settings.output_dir / "editor" / edit_id
+    words_path = edit_dir / "words.json"
+    pre_caption_path_file = edit_dir / "pre_caption.txt"
+    if not words_path.exists() or not pre_caption_path_file.exists():
+        raise HTTPException(404, "Cached transcript missing — original auto-edit no longer re-renderable")
+
+    pre_caption = Path(pre_caption_path_file.read_text(encoding="utf-8").strip())
+    if not pre_caption.exists():
+        raise HTTPException(404, "Cached pre-caption video missing on disk")
+
+    words = video_edit.words_from_json(words_path.read_text(encoding="utf-8"))
+    if not words:
+        raise HTTPException(422, "Cached transcript is empty")
+
+    overrides_dict: dict | None = None
+    if overrides:
+        try:
+            overrides_dict = json.loads(overrides)
+        except json.JSONDecodeError:
+            raise HTTPException(400, "overrides must be valid JSON")
+    style = video_edit.style_from_params(template, overrides_dict)
+
+    # Build a unique output filename so old re-renders don't get overwritten
+    # (lets the user A/B compare).
+    existing = sorted(edit_dir.glob("rerender-*.mp4"))
+    version = len(existing) + 1
+    rerender_out = edit_dir / f"rerender-{version:02d}.mp4"
+
+    try:
+        # If a trim range is given, cut the pre-caption video first AND shift
+        # the cached word timestamps so captions still line up.
+        if trim_start_secs > 0 or (trim_end_secs and trim_end_secs > 0):
+            trimmed = edit_dir / f"rerender-{version:02d}-trimmed.mp4"
+            await asyncio.to_thread(
+                video_edit.trim_range, pre_caption, trimmed,
+                start_secs=trim_start_secs, end_secs=trim_end_secs,
+            )
+            adj_words = video_edit.filter_and_shift_words(
+                words, start=trim_start_secs, end=trim_end_secs,
+            )
+            await asyncio.to_thread(
+                video_edit.render_captions, trimmed, rerender_out,
+                words=adj_words, style=style, job_id=edit_id,
+            )
+            trimmed.unlink(missing_ok=True)
+            used_words = adj_words
+        else:
+            await asyncio.to_thread(
+                video_edit.render_captions, pre_caption, rerender_out,
+                words=words, style=style, job_id=edit_id,
+            )
+            used_words = words
+    except RuntimeError as e:
+        raise HTTPException(500, f"Rerender failed: {e}")
+
+    return {
+        "edit_id": edit_id,
+        "version": version,
+        "output_url": _file_url(rerender_out),
+        "template": template,
+        "n_words": len(used_words),
+        "trim_start_secs": trim_start_secs,
+        "trim_end_secs": trim_end_secs,
+    }
+
+
+@app.post("/api/editor/timeline_render")
+async def editor_timeline_render(
+    edit_id: str = Form(...),
+    segments_json: str = Form(...),
+    source_filename: str | None = Form(None),
+) -> dict:
+    """CapCut-style timeline apply: take a list of `{start, end}` segments
+    (in seconds, relative to the source video) and emit a new clip with each
+    segment trimmed and concatenated in the supplied order.
+
+    `source_filename` lets the client pick which video to slice — typically
+    the most recent `rerender-NN.mp4` or `captioned.mp4` under the edit
+    directory. Defaults to the newest mp4 in the edit folder.
+    """
+    from character_swap import video_edit
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.exists():
+        raise HTTPException(404, "edit_id not found")
+
+    # Pick the source file. Either the explicit filename (basename-only,
+    # constrained to edit_dir to block path traversal) or the most recent
+    # mp4 in the directory.
+    src: Path | None = None
+    if source_filename:
+        safe = Path(source_filename).name  # basename only
+        candidate = edit_dir / safe
+        if candidate.exists() and candidate.is_file():
+            src = candidate
+        else:
+            raise HTTPException(404, f"source video not found: {safe}")
+    else:
+        mp4s = sorted(edit_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not mp4s:
+            raise HTTPException(404, "no rendered videos found for this edit_id")
+        src = mp4s[0]
+
+    try:
+        raw = json.loads(segments_json)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "segments_json must be valid JSON")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "segments_json must be a non-empty list")
+
+    segments: list[tuple[float, float]] = []
+    for i, seg in enumerate(raw):
+        if not isinstance(seg, dict) or "start" not in seg or "end" not in seg:
+            raise HTTPException(400, f"segment[{i}] must be {{start, end}}")
+        try:
+            s = float(seg["start"])
+            e = float(seg["end"])
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"segment[{i}] has non-numeric start/end")
+        if e - s <= 0.02:
+            continue  # skip degenerate ranges (UI sometimes ships ~0-length)
+        segments.append((s, e))
+    if not segments:
+        raise HTTPException(400, "no valid segments after filtering")
+
+    # Numbered output so old timeline renders are kept for A/B compare.
+    existing = sorted(edit_dir.glob("timeline-*.mp4"))
+    version = len(existing) + 1
+    out_path = edit_dir / f"timeline-{version:02d}.mp4"
+
+    try:
+        summary = await asyncio.to_thread(
+            video_edit.apply_timeline, src, out_path,
+            segments=segments, job_id=edit_id,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(500, f"Timeline render failed: {e}")
+
+    return {
+        "edit_id": edit_id,
+        "version": version,
+        "output_url": _file_url(out_path),
+        "source_filename": src.name,
+        **summary,
+    }
+
+
+# --- B-roll generation (audio → cinematic medical-realism clips → final mp4) -----
+
+@app.post("/api/broll/generate")
+async def broll_generate(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    video_model: str = Form("grok-imagine"),
+) -> dict:
+    """Kick off a full B-roll generation from a narration audio file.
+    Returns a `broll_id` immediately; the actual work happens in a
+    background task. Poll `GET /api/broll/{broll_id}` for progress."""
+    from character_swap import broll as broll_mod, runner_broll
+
+    if not settings.openai_api_key:
+        raise HTTPException(503, "OpenAI API key required for transcription + planning")
+
+    ext = Path(file.filename or "").suffix.lower()
+    allowed = ALLOWED_AUDIO_EXTS | {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+    if ext not in allowed:
+        raise HTTPException(400,
+            f"Unsupported source type '{ext}'. Allowed: {sorted(allowed)}")
+
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    broll_id = "br_" + secrets.token_hex(5)
+    work = broll_mod.broll_dir(broll_id)
+    source_path = work / f"source{ext}"
+    tmp = source_path.with_suffix(source_path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(source_path)
+
+    # If source is a video, extract the audio so Whisper has something
+    # straightforward to chew on. We still keep the original file for the
+    # caller to reference.
+    audio_for_pipeline = source_path
+    if ext in {".mp4", ".mov", ".webm", ".mkv", ".m4v"}:
+        from character_swap import video_edit
+        extracted = work / "source.audio.wav"
+        await asyncio.to_thread(
+            video_edit._run,
+            [video_edit._ffmpeg(), "-y", "-i", str(source_path),
+             "-vn", "-ac", "1", "-ar", "16000", str(extracted)],
+        )
+        audio_for_pipeline = extracted
+
+    initial_state = {
+        "broll_id": broll_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "queued",
+        "error": None,
+        "source_path": str(source_path),
+        "audio_path": str(audio_for_pipeline),
+        "source_url": _file_url(source_path),
+        "video_model": video_model,
+        "transcript": "",
+        "clips": [],
+        "final_video_path": None,
+        "final_video_url": None,
+    }
+    broll_mod.save_state(initial_state)
+
+    background_tasks.add_task(runner_broll.run_broll, broll_id)
+    return initial_state
+
+
+@app.get("/api/broll")
+async def broll_list() -> list[dict]:
+    from character_swap import broll as broll_mod
+    return broll_mod.list_states()
+
+
+@app.get("/api/broll/{broll_id}")
+async def broll_get(broll_id: str) -> dict:
+    from character_swap import broll as broll_mod
+    state = broll_mod.load_state(broll_id)
+    if not state:
+        raise HTTPException(404, "broll_id not found")
+    return state
+
+
+@app.delete("/api/broll/{broll_id}")
+async def broll_delete(broll_id: str) -> dict:
+    from character_swap import broll as broll_mod
+    work = broll_mod.broll_dir(broll_id)
+    if not work.exists():
+        raise HTTPException(404, "broll_id not found")
+    shutil.rmtree(work, ignore_errors=True)
+    return {"ok": True, "broll_id": broll_id}
+
+
+@app.post("/api/broll/{broll_id}/regenerate_clip")
+async def broll_regenerate_clip(
+    broll_id: str,
+    background_tasks: BackgroundTasks,
+    idx: int = Form(...),
+) -> dict:
+    """Reject a single clip and regenerate it. Reuses the same line + prompt
+    + target_duration. Allowed only when the job is in awaiting_approval
+    (so it doesn't fight an in-flight pipeline)."""
+    from character_swap import broll as broll_mod, runner_broll
+    state = broll_mod.load_state(broll_id)
+    if not state:
+        raise HTTPException(404, "broll_id not found")
+    if state.get("status") not in {"awaiting_approval", "partial_success", "done"}:
+        raise HTTPException(409,
+            f"Can't regenerate while job status is '{state.get('status')}'")
+    clips = state.get("clips") or []
+    if idx < 0 or idx >= len(clips):
+        raise HTTPException(400, f"idx {idx} out of range (0..{len(clips) - 1})")
+    # Mark immediately so the UI sees it transition out of 'done'.
+    clip = clips[idx]
+    clip.update({"status": "image_running", "video_url": None,
+                 "video_path": None, "error": None})
+    state["clips"] = clips
+    # If we're regenerating after finalize, drop the old final video so we
+    # don't show stale output that doesn't match the new clip set.
+    if state.get("status") in {"done", "partial_success"}:
+        state["final_video_path"] = None
+        state["final_video_url"] = None
+    state["status"] = "awaiting_approval"
+    broll_mod.save_state(state)
+
+    background_tasks.add_task(runner_broll.regenerate_clip, broll_id, idx)
+    return {"ok": True, "broll_id": broll_id, "idx": idx}
+
+
+@app.post("/api/broll/{broll_id}/finalize")
+async def broll_finalize(
+    broll_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """Trim + concat + mux. Triggered by the user after reviewing each
+    clip in awaiting_approval. Refuses if any clip is mid-generation."""
+    from character_swap import broll as broll_mod, runner_broll
+    state = broll_mod.load_state(broll_id)
+    if not state:
+        raise HTTPException(404, "broll_id not found")
+    if state.get("status") not in {"awaiting_approval", "partial_success", "done"}:
+        raise HTTPException(409,
+            f"Can't finalize while job status is '{state.get('status')}'")
+    clips = state.get("clips") or []
+    in_flight = [c for c in clips
+                 if c.get("status") in {"pending", "image_running",
+                                        "image_done", "video_running"}]
+    if in_flight:
+        raise HTTPException(409,
+            f"{len(in_flight)} clip(s) still generating — wait or refresh")
+    successful = [c for c in clips if c.get("status") == "done"]
+    if not successful:
+        raise HTTPException(400, "No successful clips to finalize")
+
+    state["status"] = "concatenating"
+    broll_mod.save_state(state)
+    background_tasks.add_task(runner_broll.finalize_broll, broll_id)
+    return {"ok": True, "broll_id": broll_id, "n_clips": len(successful)}
+
+
 # Mount the editor outputs subtree so frontend can download the rendered files.
 _editor_dir = settings.output_dir / "editor"
 _editor_dir.mkdir(parents=True, exist_ok=True)
+
+# Same for b-roll outputs — exposes source.mp3, clips/clip-NN.mp4, final.mp4.
+_broll_dir = settings.output_dir / "broll"
+_broll_dir.mkdir(parents=True, exist_ok=True)
 
 
 @app.exception_handler(ProviderNotConfigured)

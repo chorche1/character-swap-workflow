@@ -37,6 +37,60 @@ def _ffmpeg() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 
+# Bundled fonts — downloaded lazily from Google Fonts (SIL Open Font License,
+# free for commercial use) and cached so libass/fontconfig can find them.
+_FONT_URLS = {
+    "Anton": "https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf",
+    "Bebas Neue": "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+    "Montserrat Black": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf",
+    # "Montserrat" alone is the Bold variant — Submagic's default caption font.
+    "Montserrat": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Bold.ttf",
+    "Montserrat ExtraBold": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-ExtraBold.ttf",
+    "Montserrat SemiBold": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-SemiBold.ttf",
+    # The Bold Font-style — heavy, rounded, modern sans. Free Google Font matches.
+    "Poppins ExtraBold": "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-ExtraBold.ttf",
+    "Poppins Black":     "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Black.ttf",
+    "Inter ExtraBold":   "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-ExtraBold.ttf",
+    "Inter Black":       "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-Black.ttf",
+}
+
+
+def _fonts_dir() -> Path:
+    """Where bundled fonts live. Created on first use; safe to inspect."""
+    p = settings.state_dir / "fonts"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _ensure_font(name: str) -> Path | None:
+    """Resolve a font name to a .ttf path under `state/fonts/`. Returns
+    None if the font isn't bundled and isn't pre-installed locally — in
+    that case libass falls back to fontconfig + system fonts.
+
+    Order: (1) check for an existing file in `state/fonts/`, so manually
+    dropped-in fonts work; (2) try to download from `_FONT_URLS` for the
+    fonts we ship by default; (3) give up."""
+    safe = name.replace(" ", "_") + ".ttf"
+    dest = _fonts_dir() / safe
+    if dest.exists():
+        return dest
+    url = _FONT_URLS.get(name)
+    if url is None:
+        return None
+    try:
+        import httpx
+        with httpx.Client(timeout=30, follow_redirects=True) as c:
+            r = c.get(url)
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+        return dest
+    except Exception:
+        # Network down or rate-limited — fall through to system fallback.
+        if dest.exists():
+            dest.unlink(missing_ok=True)
+        return None
+
+
 def _run(args: list[str]) -> str:
     """Run ffmpeg with the given args. Returns combined stdout+stderr.
     Raises CalledProcessError with output on failure."""
@@ -232,7 +286,8 @@ class CaptionStyle:
     bold: bool = True
     outline: int = 4
     shadow: int = 0
-    margin_v: int = 80                  # vertical margin from bottom
+    margin_v: int = 80                  # vertical margin from bottom (in 1920-tall video coords)
+    margin_h: int = 0                   # horizontal offset from center (in 1080-wide coords). Triggers \pos() override.
     alignment: int = 2                  # 2 = bottom-center (ASS conventions)
     box: bool = False                   # background box behind text
     words_per_card: int = 3             # word-by-word grouping size
@@ -259,15 +314,117 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               outline_color="&H00000000", outline=2, shadow=1,
                               words_per_card=10, margin_v=40),
     # Submagic/TikTok-style word-by-word yellow popout. Matches the "NEVER BUY
-    # HONEY" honey-store screenshot Hugo referenced: bold condensed all-caps,
-    # white default, yellow active word, thick black outline, no background.
-    "popout-yellow": CaptionStyle(font="Impact", size=110,
+    # HONEY" + "IT'S STRIPS OF" CapCut-style screenshots: bold display font,
+    # all-caps, white default, yellow active word, thick black outline +
+    # drop-shadow for the "pops off the screen" look.
+    "popout-yellow": CaptionStyle(font="Anton", size=120,
                               primary_color="&H00FFFFFF",      # white
                               outline_color="&H00000000",      # black
-                              outline=8, bold=True, shadow=0, box=False,
+                              back_color="&HC0000000",         # half-transparent black (for shadow tint)
+                              outline=6, shadow=3,             # thinner outline + visible drop shadow
+                              bold=True, box=False,
                               words_per_card=3,
                               highlight_color="&H0000FFFF",    # yellow (ASS BGR = RGB 255,255,0)
-                              margin_v=200, all_caps=True),
+                              margin_v=400, all_caps=True),
+
+    # --- 8 new modern templates with strong shadow ---
+
+    # Same look as popout-yellow but no colored highlight — pure punch.
+    "popout-white":  CaptionStyle(font="Anton", size=120,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=5, shadow=5, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=True),
+
+    # Submagic-pink highlight.
+    "popout-pink":   CaptionStyle(font="Anton", size=120,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=6, shadow=3, bold=True, box=False,
+                              words_per_card=3,
+                              highlight_color="&H00B56BFF",    # RGB 255,107,181 → BGR B5 6B FF
+                              margin_v=400, all_caps=True),
+
+    # Captions-hype lime green highlight.
+    "popout-green":  CaptionStyle(font="Anton", size=120,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=6, shadow=3, bold=True, box=False,
+                              words_per_card=3,
+                              highlight_color="&H0000FFC6",    # RGB 198,255,0 → BGR 00 FF C6
+                              margin_v=400, all_caps=True),
+
+    # Modern + clean: white text, NO outline, just a big soft drop shadow.
+    "clean-shadow":  CaptionStyle(font="Helvetica", size=72,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H40000000",      # very faint outline (mostly transparent)
+                              outline=1, shadow=8, bold=True, box=False,
+                              words_per_card=5, margin_v=300, all_caps=False),
+
+    # Bold typography focus — Montserrat Black, mixed case, soft shadow.
+    "bold-shadow":   CaptionStyle(font="Montserrat Black", size=90,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=2, shadow=6, bold=True, box=False,
+                              words_per_card=4, margin_v=350, all_caps=False),
+
+    # Retro monospace look in a soft black box.
+    "typewriter":    CaptionStyle(font="Courier", size=64,
+                              primary_color="&H00FFFFFF",
+                              back_color="&HC0000000",         # semi-transparent black
+                              outline=0, shadow=2, bold=True, box=True,
+                              words_per_card=6, margin_v=200, all_caps=False),
+
+    # Kinetic / single-word-at-a-time, huge text. Bebas Neue tall caps.
+    "kinetic":       CaptionStyle(font="Bebas Neue", size=160,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=5, shadow=4, bold=True, box=False,
+                              words_per_card=1,                # one word per card → fast cuts
+                              margin_v=500, all_caps=True),
+
+    # Classic broadcast lower-third — small, clean, light shadow, sits near edge.
+    "bottom-third":  CaptionStyle(font="Helvetica", size=48,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H80000000",
+                              outline=1, shadow=4, bold=True, box=False,
+                              words_per_card=8, margin_v=80, all_caps=False),
+
+    # Submagic-style: white Montserrat Bold, mixed case, very subtle outline,
+    # noticeable but soft drop shadow — matches the app.submagic.co default look.
+    "submagic":      CaptionStyle(font="Montserrat", size=80,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H60000000",       # mostly transparent black, barely-there edge
+                              outline=1, shadow=4, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=False),
+
+    # The Bold Font / "but jewelry" CapCut look — heavy rounded sans, mixed
+    # case, no outline, just a clean drop shadow. Uses Poppins ExtraBold as
+    # the free stand-in for the (paid) The Bold Font.
+    "modern-bold":   CaptionStyle(font="Poppins ExtraBold", size=95,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=0, shadow=4, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=False),
+
+    # Soft & friendly: Arial Rounded MT Bold (locally installed). Mixed case,
+    # gentle drop shadow, barely-there outline. Reads as warm/lifestyle/podcast
+    # rather than punchy/TikTok. Hugo dropped the .ttf into state/fonts/.
+    "rounded-soft":  CaptionStyle(font="Arial Rounded MT Bold", size=88,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H80000000",       # mostly-transparent edge
+                              outline=2, shadow=5, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=False),
+
+    # Same rounded font, but pop the active word in soft yellow — keeps the
+    # friendly read while adding a TikTok-style emphasis beat.
+    "rounded-pop":   CaptionStyle(font="Arial Rounded MT Bold", size=92,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=3, shadow=4, bold=True, box=False,
+                              words_per_card=3,
+                              highlight_color="&H0000F4FF",       # warm yellow
+                              margin_v=400, all_caps=False),
 }
 
 
@@ -319,9 +476,20 @@ def _group_words(words: list[Word], per_card: int) -> list[tuple[float, float, l
 
 def _ass_events(words: list[Word], style: CaptionStyle) -> str:
     """Emit one ASS Dialogue line per card. If `highlight_color` is set, also
-    emit per-word overrides so the spoken word pops in the highlight color."""
+    emit per-word overrides so the spoken word pops in the highlight color.
+
+    When `margin_h` is non-zero, prepends a `\\pos(x, y)` override per event so
+    the caption lands at a custom point on the 1080×1920 canvas (overrides the
+    Style's MarginV + alignment-based placement)."""
     def _case(w: str) -> str:
         return w.upper() if style.all_caps else w
+
+    # Free-position override — used when user has dragged the text off-center.
+    pos_prefix = ""
+    if style.margin_h != 0:
+        x = 540 + int(style.margin_h)
+        y = 1920 - int(style.margin_v)
+        pos_prefix = f"{{\\pos({x},{y})}}"
 
     out_lines: list[str] = []
     cards = _group_words(words, style.words_per_card)
@@ -338,13 +506,13 @@ def _ass_events(words: list[Word], style: CaptionStyle) -> str:
                         parts.append(f"{{\\c{style.highlight_color}}}{word}{{\\c{style.primary_color}}}")
                     else:
                         parts.append(word)
-                text = " ".join(parts)
+                text = pos_prefix + " ".join(parts)
                 out_lines.append(
                     f"Dialogue: 0,{_format_ts(active.start)},{_format_ts(active.end)},"
                     f"Default,,0,0,0,,{text}"
                 )
         else:
-            text = " ".join(_case(w.text.strip()) for w in chunk)
+            text = pos_prefix + " ".join(_case(w.text.strip()) for w in chunk)
             out_lines.append(
                 f"Dialogue: 0,{_format_ts(card_start)},{_format_ts(card_end)},"
                 f"Default,,0,0,0,,{text}"
@@ -364,21 +532,248 @@ def render_captions(input_video: Path, output_video: Path, *,
     generated ASS file. Returns a summary."""
     with record(phase="editor_captions", model="ffmpeg-subtitles",
                 character="editor", job_id=job_id):
+        # Ensure the chosen font is available (downloads on first use).
+        _ensure_font(style.font)
         ass_path = input_video.with_suffix(".captions.ass")
         _write_ass(words, style, ass_path)
         output_video.parent.mkdir(parents=True, exist_ok=True)
         # `subtitles` filter doesn't escape special chars in the path
         # gracefully — escape colons + commas + brackets.
         ass_arg = str(ass_path).replace("\\", "/").replace(":", "\\:").replace("'", r"\'")
+        fonts_arg = str(_fonts_dir()).replace("\\", "/").replace(":", "\\:")
         _run([
             _ffmpeg(), "-y", "-i", str(input_video),
-            "-vf", f"subtitles='{ass_arg}'",
+            "-vf", f"subtitles='{ass_arg}':fontsdir='{fonts_arg}'",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
             "-c:a", "copy",
             str(output_video),
         ])
         ass_path.unlink(missing_ok=True)
         return {"n_words": len(words), "template": style.font + f"/{style.size}"}
+
+
+def trim_range(input_path: Path, output_path: Path, *,
+               start_secs: float, end_secs: float) -> Path:
+    """Cut a video to [start, end] seconds (re-encode for clean frames).
+    `end_secs` <= 0 means 'until end of file'."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    args = [_ffmpeg(), "-y", "-ss", f"{max(0.0, start_secs):.3f}"]
+    if end_secs and end_secs > start_secs:
+        args += ["-to", f"{end_secs:.3f}"]
+    args += [
+        "-i", str(input_path),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        str(output_path),
+    ]
+    _run(args)
+    return output_path
+
+
+def words_to_json(words: list[Word]) -> str:
+    return json.dumps([{"text": w.text, "start": w.start, "end": w.end} for w in words])
+
+
+def words_from_json(raw: str) -> list[Word]:
+    return [Word(text=w["text"], start=float(w["start"]), end=float(w["end"]))
+            for w in json.loads(raw)]
+
+
+def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> list[Word]:
+    """Keep words inside [start, end] and shift timestamps so the trimmed clip
+    starts at 0. Used when re-rendering after a manual trim."""
+    out: list[Word] = []
+    eff_end = end if end and end > 0 else float("inf")
+    for w in words:
+        if w.end <= start or w.start >= eff_end:
+            continue
+        out.append(Word(
+            text=w.text,
+            start=max(0.0, w.start - start),
+            end=max(0.0, min(w.end, eff_end) - start),
+        ))
+    return out
+
+
+def concat_videos(video_paths: list[Path], output_path: Path) -> Path:
+    """Concatenate N videos into one. Re-encodes (rather than concat demuxer)
+    so clips with different codecs/resolutions still play back cleanly."""
+    if not video_paths:
+        raise ValueError("concat_videos: no inputs")
+    if len(video_paths) == 1:
+        # Just copy through.
+        _run([_ffmpeg(), "-y", "-i", str(video_paths[0]),
+              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+              "-c:a", "aac", "-b:a", "192k", str(output_path)])
+        return output_path
+
+    # Use the concat filter (handles different fps / size) with auto-scaling
+    # to the FIRST clip's resolution. Normalize everything to 1080x1920 (9:16);
+    # landscape sources get letterboxed. Audio normalized to 44.1kHz stereo.
+    inputs: list[str] = []
+    for p in video_paths:
+        inputs += ["-i", str(p)]
+    target_w, target_h = 1080, 1920
+    parts: list[str] = []
+    for i in range(len(video_paths)):
+        parts.append(
+            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v{i}]"
+        )
+        parts.append(
+            f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]"
+        )
+    labels = "".join(f"[v{i}][a{i}]" for i in range(len(video_paths)))
+    parts.append(f"{labels}concat=n={len(video_paths)}:v=1:a=1[outv][outa]")
+    filter_complex = ";".join(parts)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run([
+        _ffmpeg(), "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k",
+        str(output_path),
+    ])
+    return output_path
+
+
+def apply_timeline(input_path: Path, output_path: Path, *,
+                   segments: list[tuple[float, float]],
+                   job_id: str | None = None) -> dict:
+    """Cut `input_path` into the given `segments` (each `(start, end)` in
+    seconds, all relative to the source) and concatenate them, in order, to
+    `output_path`.
+
+    Powers the CapCut-style timeline editor: the user drags trim handles and
+    drops split markers in the UI; the resulting segment list is sent here.
+    Segments may be reordered relative to the source — they're concatenated
+    in the supplied list order, so segments[0] is the new clip's opening.
+
+    Implemented as a single `filter_complex` with N trims + concat so we
+    don't write intermediate files. Re-encodes (libx264/aac) to guarantee
+    clean cuts on non-keyframe boundaries.
+    """
+    if not segments:
+        raise ValueError("apply_timeline: no segments provided")
+    # Drop degenerate ranges (end <= start, or near-zero length) — they'd
+    # produce empty streams that crash the concat filter.
+    clean = [(float(s), float(e)) for s, e in segments if float(e) - float(s) > 0.02]
+    if not clean:
+        raise ValueError("apply_timeline: all segments are degenerate (length <= 0)")
+
+    with record(phase="editor_timeline", model="ffmpeg-trim-concat",
+                character="editor", job_id=job_id) as entry:
+        entry["n_segments"] = len(clean)
+        entry["total_in_secs"] = round(sum(e - s for s, e in clean), 2)
+
+        # Single-segment shortcut: just trim and re-encode.
+        if len(clean) == 1:
+            start, end = clean[0]
+            trim_range(input_path, output_path, start_secs=start, end_secs=end)
+            return {
+                "n_segments": 1,
+                "duration": round(end - start, 2),
+                "segments": [{"start": round(start, 3), "end": round(end, 3)}],
+            }
+
+        parts: list[str] = []
+        for i, (start, end) in enumerate(clean):
+            parts.append(
+                f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
+                f"fps=30,format=yuv420p[v{i}]"
+            )
+            parts.append(
+                f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
+                f"aresample=44100,aformat=channel_layouts=stereo[a{i}]"
+            )
+        labels = "".join(f"[v{i}][a{i}]" for i in range(len(clean)))
+        parts.append(f"{labels}concat=n={len(clean)}:v=1:a=1[outv][outa]")
+        filter_complex = ";".join(parts)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _run([
+            _ffmpeg(), "-y", "-i", str(input_path),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ])
+        return {
+            "n_segments": len(clean),
+            "duration": round(_probe_duration(output_path), 2),
+            "segments": [{"start": round(s, 3), "end": round(e, 3)} for s, e in clean],
+        }
+
+
+def _normalize_text(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — used for matching."""
+    import re
+    s = (s or "").lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def match_clips_by_transcript(clip_transcripts: list[str], script: str) -> list[dict]:
+    """Order clips so their transcripts line up with the script.
+
+    For each clip, finds where its content appears in the script using a
+    longest-common-substring search (difflib). Clips with very weak matches
+    are appended at the end and flagged `unmatched`.
+
+    Returns a list of dicts in script order, each with `{idx, position,
+    score, unmatched}`.
+    """
+    from difflib import SequenceMatcher
+    norm_script = _normalize_text(script)
+    if not norm_script:
+        return [{"idx": i, "position": i, "score": 0, "unmatched": True}
+                for i in range(len(clip_transcripts))]
+
+    placements: list[dict] = []
+    for i, transcript in enumerate(clip_transcripts):
+        norm_t = _normalize_text(transcript)
+        if not norm_t:
+            placements.append({"idx": i, "position": len(norm_script) + 1,
+                               "score": 0, "unmatched": True})
+            continue
+        matcher = SequenceMatcher(None, norm_script, norm_t, autojunk=False)
+        # find_longest_match returns (a, b, size) where `a` is the start in
+        # `norm_script`. Position the clip at that point.
+        match = matcher.find_longest_match(0, len(norm_script), 0, len(norm_t))
+        # Score = how much of the clip transcript was found, capped at 1.
+        score = match.size / max(1, len(norm_t))
+        unmatched = match.size < 12 or score < 0.15
+        placements.append({
+            "idx": i,
+            "position": match.a if not unmatched else len(norm_script) + 1 + i,
+            "score": round(score, 3),
+            "unmatched": unmatched,
+        })
+    placements.sort(key=lambda x: (x["unmatched"], x["position"]))
+    return placements
+
+
+def replace_audio(video_path: Path, audio_path: Path, output_path: Path) -> Path:
+    """Replace the audio track of a video with a new audio file. The video
+    stream is copied (no re-encode) and the new audio is encoded as AAC.
+    Output duration is clipped to the shorter of (video, audio)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run([
+        _ffmpeg(), "-y",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        str(output_path),
+    ])
+    return output_path
 
 
 def style_from_params(template: str | None,

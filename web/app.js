@@ -39,23 +39,76 @@ function studio() {
     videoGen: { model: 'grok-imagine', prompt: '', ref: null, aspect: '9:16', duration: 10, generating: false },
     avatarGen: { model: 'heygen-avatar-5', script: '', avatarId: '', voiceId: '', voiceProvider: 'heygen', aspect: '9:16', generating: false },
     audioGen: { model: 'elevenlabs-vc', voiceId: '', sourceAudio: null, script: '', generating: false },
+    // B-roll: audio → transcript → planned visual prompts → clips → final mp4
+    brollGen: {
+      videoModel: 'grok-imagine',
+      source: null,                  // {file, url, name, isVideo}
+      submitting: false,
+    },
+    brollHistory: [],                 // [{broll_id, status, clips, ...}]
+    _brollPollTimer: null,
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -30,
       minSilenceSecs: 0.4,
       padSecs: 0.05,
       trimming: false,
-      template: 'tiktok',
+      template: 'popout-yellow',
       captioning: false,
+      autoEditing: false,
+      voiceId: '',
+      enableTrim: true,
+      enableCaptions: true,
+      rerendering: false,
+      rerenderOpen: false,                    // shows the edit-result panel
+      rerenderTemplate: 'popout-yellow',      // independent of editor.template so you can A/B
+      rerenderTrimStart: 0,
+      rerenderTrimEnd: 0,
+      rerenderOverrides: {
+        font: null, size: null, primary_color: null, outline_color: null,
+        words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, box: null,
+        all_caps: null, shadow: null, alignment: null, outline: null,
+      },
       overrides: {                 // CaptionStyle field overrides; null until user touches them
         font: null, size: null, primary_color: null, outline_color: null,
-        words_per_card: null, margin_v: null, highlight_color: null, box: null,
-        all_caps: null,
+        words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, box: null,
+        all_caps: null, shadow: null, alignment: null, outline: null,
       },
       lastResult: null,            // {output_url, kind: 'trim'|'captions', ...}
     },
+    // --- Studio-specific state, top-level so HTML can bind directly ---
+    propTab: 'template',
+    promptDropActive: false,         // highlights prompt area on file drag-over
+    duration: 0,
+    trimStartSecs: 0,
+    trimEndSecs: 0,
+    draggingText: false,
+    _dragStartY: 0,
+    _dragStartMargin: 400,
+    _dragPreviewH: 1,
     editorTemplates: [],
     editorHistory: [],
+    // --- CapCut-style timeline editor (operates on the LATEST rendered video) ---
+    timeline: {
+      open: false,                 // is the timeline panel visible?
+      sourceUrl: '',               // URL of the video we're slicing
+      sourceFilename: '',          // basename (sent to backend so it knows which file)
+      sourceDuration: 0,           // full duration of the source video (s)
+      segments: [],                // [{start, end}] in source seconds, played in array order
+      selectedIdx: -1,             // which segment is selected (for handle visibility)
+      playhead: 0,                 // current playback position in OUTPUT time (s)
+      rendering: false,
+      lastTimelineResult: null,    // last timeline_render response
+    },
+    _tlDrag: null,                 // {kind: 'left'|'right', segIdx, startX, origStart, origEnd, scale}
+    _tlOnMove: null,               // bound mousemove handler (so we can remove it)
+    _tlOnUp: null,                 // bound mouseup handler
+    // --- Multi-clip mode (auto-order clips against a script) ---
+    multiClipMode: false,
+    multiClips: [],                // [{file, url, name, size}]
+    multiScript: '',
+    multiAutoEditing: false,
+    multiResult: null,             // last response from /multi_auto_edit
     swapPrompt: '',
     swapModel: 'gpt-image',
     swapDefaultPrompt: '',
@@ -92,7 +145,6 @@ function studio() {
     draftTitle: '',
     editingCharacterId: null,
     draftCharacterName: '',
-    isDark: document.documentElement.classList.contains('dark'),
     ws: null,
     wsConnected: false,
     _wsBackoff: 1000,
@@ -111,6 +163,10 @@ function studio() {
       await this.loadDailyCost();
       this.loadDisk();
       await this.loadGenModels();
+      // Eagerly load ElevenLabs voices + editor templates once at boot so
+      // the pickers are ready without waiting for a tab-switch.
+      if (this.elevenlabsAvailable()) this.loadElevenlabsVoices();
+      this.loadEditorTemplates();
       await this.loadGenerations();
       await this.loadSwapDefaults();
       // Refresh daily cost every minute while the tab is open.
@@ -348,8 +404,14 @@ function studio() {
 
     setAudioSource(file) {
       if (!file) return;
+      // Voice Changer also accepts video — the server extracts the audio,
+      // swaps the voice, then re-muxes it back into the original video.
+      const isVideo = (file.type || '').startsWith('video/')
+        || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name || '');
       if (this.audioGen.sourceAudio?.url) URL.revokeObjectURL(this.audioGen.sourceAudio.url);
-      this.audioGen.sourceAudio = { file, url: URL.createObjectURL(file), name: file.name };
+      this.audioGen.sourceAudio = {
+        file, url: URL.createObjectURL(file), name: file.name, isVideo,
+      };
     },
 
     async submitAudioGen() {
@@ -386,6 +448,164 @@ function studio() {
       } finally {
         this.audioGen.generating = false;
       }
+    },
+
+    // --- B-roll generator (audio → planned cinematic clips → final mp4) ----
+
+    setBrollSource(file) {
+      if (!file) return;
+      const isVideo = (file.type || '').startsWith('video/')
+        || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name || '');
+      if (this.brollGen.source?.url) URL.revokeObjectURL(this.brollGen.source.url);
+      this.brollGen.source = {
+        file, url: URL.createObjectURL(file), name: file.name, isVideo,
+      };
+    },
+
+    async submitBroll() {
+      if (!this.brollGen.source) { this.notifyError('Drop a narration file first'); return; }
+      this.brollGen.submitting = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', this.brollGen.source.file);
+        fd.append('video_model', this.brollGen.videoModel || 'grok-imagine');
+        const r = await fetch('/api/broll/generate', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('B-roll submit failed: ' + await r.text()); return; }
+        const job = await r.json();
+        this.brollHistory = [job, ...this.brollHistory.filter(b => b.broll_id !== job.broll_id)];
+        if (this.brollGen.source?.url) URL.revokeObjectURL(this.brollGen.source.url);
+        this.brollGen.source = null;
+        this.notifyInfo(`B-roll queued (${job.broll_id}) — polling for progress`);
+        this._startBrollPolling();
+      } finally {
+        this.brollGen.submitting = false;
+      }
+    },
+
+    async loadBrollHistory() {
+      try {
+        const r = await fetch('/api/broll');
+        if (!r.ok) return;
+        this.brollHistory = await r.json();
+        if (this.brollHistory.some(b => this._brollIsActive(b))) {
+          this._startBrollPolling();
+        }
+      } catch (_) {}
+    },
+
+    // A broll is "active" (i.e. we should keep polling it) if the job
+    // status itself is mid-pipeline OR any of its clips are transient
+    // (single-clip regeneration after awaiting_approval).
+    _brollIsActive(b) {
+      const restingStatuses = ['done', 'failed', 'partial_success', 'awaiting_approval'];
+      if (!restingStatuses.includes(b.status)) return true;   // mid-pipeline
+      return this._hasInFlightClips(b);                       // mid-regen
+    },
+
+    async refreshBroll(brollId) {
+      try {
+        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}`);
+        if (!r.ok) return;
+        const fresh = await r.json();
+        const i = this.brollHistory.findIndex(b => b.broll_id === brollId);
+        if (i >= 0) {
+          // Preserve client-side transient flags across server refreshes so
+          // the UI doesn't flicker spinner state during a poll.
+          const prev = this.brollHistory[i];
+          fresh._regenerating_idx = prev._regenerating_idx;
+          fresh._finalizing = prev._finalizing;
+          // Once the regenerated clip is back in flight, drop the marker.
+          if (prev._regenerating_idx != null) {
+            const c = (fresh.clips || [])[prev._regenerating_idx];
+            if (c && !['done', 'failed'].includes(c.status)) {
+              fresh._regenerating_idx = null;
+            }
+          }
+          // Once finalize lands (status becomes done/partial_success), drop flag.
+          if (prev._finalizing && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
+            fresh._finalizing = false;
+          }
+          this.brollHistory.splice(i, 1, fresh);
+        } else {
+          this.brollHistory = [fresh, ...this.brollHistory];
+        }
+      } catch (_) {}
+    },
+
+    async deleteBroll(brollId) {
+      if (!confirm(`Delete B-roll ${brollId}? This removes the source, clips, and final video.`)) return;
+      try {
+        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}`, { method: 'DELETE' });
+        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
+        this.brollHistory = this.brollHistory.filter(b => b.broll_id !== brollId);
+      } catch (_) {}
+    },
+
+    async rejectClip(brollId, idx) {
+      const b = this.brollHistory.find(x => x.broll_id === brollId);
+      if (b) b._regenerating_idx = idx;
+      try {
+        const fd = new FormData();
+        fd.append('idx', String(idx));
+        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}/regenerate_clip`,
+          { method: 'POST', body: fd });
+        if (!r.ok) {
+          this.notifyError('Regenerate failed: ' + await r.text());
+          if (b) b._regenerating_idx = null;
+          return;
+        }
+        this.notifyInfo(`Regenerating clip #${idx + 1}…`);
+        // Polling will pick up the status change.
+        this._startBrollPolling();
+        // Clear the regenerating marker on the next refresh (when the
+        // clip's status flips away from done/failed).
+        setTimeout(() => { if (b) b._regenerating_idx = null; }, 8000);
+      } catch (e) {
+        this.notifyError('Regenerate failed: ' + e.message);
+        if (b) b._regenerating_idx = null;
+      }
+    },
+
+    async finalizeBroll(brollId) {
+      const b = this.brollHistory.find(x => x.broll_id === brollId);
+      if (b) b._finalizing = true;
+      try {
+        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}/finalize`,
+          { method: 'POST' });
+        if (!r.ok) {
+          this.notifyError('Finalize failed: ' + await r.text());
+          if (b) b._finalizing = false;
+          return;
+        }
+        this.notifyInfo('Finalizing video — concatenating + muxing audio');
+        this._startBrollPolling();
+        setTimeout(() => { if (b) b._finalizing = false; }, 8000);
+      } catch (e) {
+        this.notifyError('Finalize failed: ' + e.message);
+        if (b) b._finalizing = false;
+      }
+    },
+
+    // Are any of this broll's clips still mid-generation? Used to gate the
+    // Finalize button — can't concat while clips are in flight.
+    _hasInFlightClips(b) {
+      const transient = ['pending', 'image_running', 'image_done', 'video_running'];
+      return (b.clips || []).some(c => transient.includes(c.status));
+    },
+
+    _startBrollPolling() {
+      if (this._brollPollTimer) return;
+      const tick = async () => {
+        const active = this.brollHistory.filter(b => this._brollIsActive(b));
+        if (active.length === 0) {
+          clearInterval(this._brollPollTimer);
+          this._brollPollTimer = null;
+          return;
+        }
+        await Promise.all(active.map(b => this.refreshBroll(b.broll_id)));
+      };
+      this._brollPollTimer = setInterval(tick, 5000);
+      tick();
     },
 
     // --- Video Editor (silence-trim + captions) -----------------------------
@@ -451,6 +671,583 @@ function studio() {
       } finally {
         this.editor.captioning = false;
       }
+    },
+
+    _activeRerenderOverrides() {
+      const o = this.editor.rerenderOverrides;
+      const out = {};
+      for (const k of Object.keys(o)) {
+        if (o[k] !== null && o[k] !== '') out[k] = o[k];
+      }
+      return out;
+    },
+
+    openRerenderPanel() {
+      // Seed the panel with whatever was used last time so the user starts
+      // from where they were, not from scratch.
+      this.editor.rerenderTemplate = this.editor.template;
+      this.editor.rerenderOverrides = { ...this.editor.overrides };
+      this.editor.rerenderTrimStart = 0;
+      this.editor.rerenderTrimEnd = 0;
+      this.editor.rerenderOpen = true;
+    },
+
+    async submitRerender() {
+      const r0 = this.editor.lastResult;
+      if (!r0?.edit_id) { this.notifyError('No auto-edit result to re-render'); return; }
+      this.editor.rerendering = true;
+      try {
+        const fd = new FormData();
+        fd.append('edit_id', r0.edit_id);
+        fd.append('template', this.editor.rerenderTemplate);
+        const overrides = this._activeRerenderOverrides();
+        if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
+        if (this.editor.rerenderTrimStart > 0) fd.append('trim_start_secs', this.editor.rerenderTrimStart);
+        if (this.editor.rerenderTrimEnd > 0) fd.append('trim_end_secs', this.editor.rerenderTrimEnd);
+        const r = await fetch('/api/editor/rerender', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Rerender failed: ' + await r.text()); return; }
+        const data = await r.json();
+        // Replace the result view with the new render (keep the same edit_id
+        // so further re-renders also work).
+        this.editor.lastResult = {
+          ...this.editor.lastResult,
+          output_url: data.output_url,
+          template: data.template,
+          n_words: data.n_words,
+          version: data.version,
+        };
+        this.editorHistory = [{
+          edit_id: data.edit_id, kind: 'rerender', version: data.version,
+          template: data.template, n_words: data.n_words,
+          output_url: data.output_url, ts: Date.now(),
+        }, ...this.editorHistory];
+        this.notifyInfo(`Rerendered v${data.version} with ${data.template}`);
+      } finally {
+        this.editor.rerendering = false;
+      }
+    },
+
+    // --- CapCut-style timeline: trim + split + delete + reorder ----------
+
+    openTimeline() {
+      // Open the timeline panel against the current lastResult video.
+      const r = this.editor.lastResult;
+      if (!r?.output_url) { this.notifyError('No rendered video to edit'); return; }
+      const url = r.output_url;
+      const filename = url.split('/').pop();
+      // Reset segments only if we're switching files.
+      const isNewFile = this.timeline.sourceFilename !== filename;
+      this.timeline.sourceUrl = url;
+      this.timeline.sourceFilename = filename;
+      this.timeline.open = true;
+      this.timeline.selectedIdx = -1;
+      this.timeline.playhead = 0;
+      if (isNewFile) this.timeline.segments = [];  // wait for @loadedmetadata
+    },
+
+    onTimelineMeta(event) {
+      const v = event.target;
+      const dur = v.duration || 0;
+      this.timeline.sourceDuration = dur;
+      if (!this.timeline.segments.length && dur > 0) {
+        this.timeline.segments = [{ start: 0, end: dur }];
+      }
+    },
+
+    onTimelineTime(event) {
+      if (!this.timeline.open) return;
+      this.timeline.playhead = this._sourceToOutputTime(event.target.currentTime);
+    },
+
+    closeTimeline() {
+      this.timeline.open = false;
+      const v = this.$refs.timelineVideo;
+      if (v) { v.pause(); v.src = ''; }
+    },
+
+    timelineOutputDuration() {
+      return this.timeline.segments.reduce((s, seg) => s + Math.max(0, seg.end - seg.start), 0);
+    },
+
+    // Map a source-time `t` to the corresponding position on the output
+    // timeline (segments concatenated in order). Returns 0 if `t` isn't
+    // within any segment.
+    _sourceToOutputTime(t) {
+      let acc = 0;
+      for (const seg of this.timeline.segments) {
+        if (t >= seg.start && t <= seg.end) return acc + (t - seg.start);
+        acc += Math.max(0, seg.end - seg.start);
+      }
+      return acc; // past end
+    },
+
+    // Inverse: output-time → {segIdx, srcTime}. Used for split-at-playhead.
+    _outputToSource(t) {
+      let acc = 0;
+      for (let i = 0; i < this.timeline.segments.length; i++) {
+        const seg = this.timeline.segments[i];
+        const len = Math.max(0, seg.end - seg.start);
+        if (t <= acc + len) return { segIdx: i, srcTime: seg.start + (t - acc) };
+        acc += len;
+      }
+      const last = this.timeline.segments.length - 1;
+      return { segIdx: last, srcTime: this.timeline.segments[last]?.end || 0 };
+    },
+
+    splitAtPlayhead() {
+      const t = this.timeline.playhead;
+      const total = this.timelineOutputDuration();
+      if (t <= 0.05 || t >= total - 0.05) {
+        this.notifyError('Move the playhead inside a segment first');
+        return;
+      }
+      const { segIdx, srcTime } = this._outputToSource(t);
+      const seg = this.timeline.segments[segIdx];
+      if (!seg) return;
+      if (srcTime - seg.start < 0.1 || seg.end - srcTime < 0.1) {
+        this.notifyError('Too close to an existing edge — move the playhead');
+        return;
+      }
+      const left = { start: seg.start, end: srcTime };
+      const right = { start: srcTime, end: seg.end };
+      this.timeline.segments.splice(segIdx, 1, left, right);
+      this.timeline.selectedIdx = segIdx;
+    },
+
+    deleteSegment(idx) {
+      if (this.timeline.segments.length <= 1) {
+        this.notifyError("Can't delete the only segment — split first");
+        return;
+      }
+      this.timeline.segments.splice(idx, 1);
+      if (this.timeline.selectedIdx === idx) this.timeline.selectedIdx = -1;
+    },
+
+    moveSegment(idx, delta) {
+      const next = idx + delta;
+      if (next < 0 || next >= this.timeline.segments.length) return;
+      const arr = this.timeline.segments;
+      [arr[idx], arr[next]] = [arr[next], arr[idx]];
+      this.timeline.selectedIdx = next;
+    },
+
+    resetTimeline() {
+      this.timeline.segments = [{ start: 0, end: this.timeline.sourceDuration }];
+      this.timeline.selectedIdx = -1;
+    },
+
+    timelineSegmentWidthPct(seg) {
+      const total = this.timelineOutputDuration();
+      if (total <= 0) return 0;
+      return ((seg.end - seg.start) / total) * 100;
+    },
+
+    timelinePlayheadPct() {
+      const total = this.timelineOutputDuration();
+      if (total <= 0) return 0;
+      return Math.min(100, Math.max(0, (this.timeline.playhead / total) * 100));
+    },
+
+    // Start dragging a left/right trim handle on segment[idx].
+    startHandleDrag(event, idx, side) {
+      event.preventDefault();
+      event.stopPropagation();
+      const seg = this.timeline.segments[idx];
+      if (!seg) return;
+      const trackEl = this.$refs.timelineTrack;
+      if (!trackEl) return;
+      const trackWidthPx = trackEl.getBoundingClientRect().width;
+      const total = this.timelineOutputDuration();
+      const scale = trackWidthPx / Math.max(0.001, total);  // px per output-second; frozen during drag
+      this._tlDrag = {
+        kind: side,                 // 'left' or 'right'
+        segIdx: idx,
+        startX: event.clientX,
+        origStart: seg.start,
+        origEnd: seg.end,
+        scale,
+      };
+      // Bind handlers so we can remove them later. Plain method refs lose
+      // `this` when called by the window's event loop.
+      this._tlOnMove = (ev) => {
+        const d = this._tlDrag;
+        if (!d) return;
+        const dxPx = ev.clientX - d.startX;
+        const dt = dxPx / d.scale;
+        const s = this.timeline.segments[d.segIdx];
+        if (!s) return;
+        const srcDur = this.timeline.sourceDuration;
+        if (d.kind === 'left') {
+          s.start = Math.max(0, Math.min(d.origEnd - 0.1, d.origStart + dt));
+        } else {
+          s.end = Math.max(d.origStart + 0.1, Math.min(srcDur, d.origEnd + dt));
+        }
+      };
+      this._tlOnUp = () => {
+        this._tlDrag = null;
+        window.removeEventListener('mousemove', this._tlOnMove);
+        window.removeEventListener('mouseup', this._tlOnUp);
+        this._tlOnMove = null;
+        this._tlOnUp = null;
+      };
+      window.addEventListener('mousemove', this._tlOnMove);
+      window.addEventListener('mouseup', this._tlOnUp);
+    },
+
+    // Click anywhere on the track to move the playhead (in output time).
+    seekTimeline(event) {
+      const trackEl = this.$refs.timelineTrack;
+      if (!trackEl) return;
+      const r = trackEl.getBoundingClientRect();
+      const xPx = event.clientX - r.left;
+      const ratio = Math.min(1, Math.max(0, xPx / r.width));
+      const total = this.timelineOutputDuration();
+      const outT = ratio * total;
+      this.timeline.playhead = outT;
+      // Convert back to source-time of the segment under outT so the video
+      // element jumps to the right frame.
+      const { srcTime } = this._outputToSource(outT);
+      const v = this.$refs.timelineVideo;
+      if (v) v.currentTime = srcTime;
+    },
+
+    formatTC(secs) {
+      if (!isFinite(secs) || secs < 0) return '0:00';
+      const m = Math.floor(secs / 60);
+      const s = secs - m * 60;
+      return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+    },
+
+    async submitTimeline() {
+      const r0 = this.editor.lastResult;
+      if (!r0?.edit_id) { this.notifyError('No edit_id on current result'); return; }
+      const segs = this.timeline.segments.filter(s => s.end - s.start > 0.05);
+      if (!segs.length) { this.notifyError('No valid segments to render'); return; }
+      this.timeline.rendering = true;
+      try {
+        const fd = new FormData();
+        fd.append('edit_id', r0.edit_id);
+        fd.append('segments_json', JSON.stringify(
+          segs.map(s => ({ start: s.start, end: s.end }))
+        ));
+        fd.append('source_filename', this.timeline.sourceFilename);
+        const r = await fetch('/api/editor/timeline_render', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Timeline render failed: ' + await r.text()); return; }
+        const data = await r.json();
+        this.timeline.lastTimelineResult = data;
+        // Swap lastResult so the user sees the new clip in the player. Keep
+        // edit_id so they can keep iterating.
+        this.editor.lastResult = {
+          ...this.editor.lastResult,
+          output_url: data.output_url,
+          version: data.version,
+          n_words: this.editor.lastResult?.n_words,
+        };
+        this.editorHistory = [{
+          edit_id: data.edit_id, kind: 'timeline', version: data.version,
+          n_segments: data.n_segments, duration: data.duration,
+          output_url: data.output_url, ts: Date.now(),
+        }, ...this.editorHistory];
+        this.notifyInfo(`Timeline v${data.version}: ${data.n_segments} segments, ${data.duration}s`);
+        // Re-anchor the timeline to the new render so the user can iterate
+        // again on the result of this round.
+        this.openTimeline();
+      } finally {
+        this.timeline.rendering = false;
+      }
+    },
+
+    // --- Multi-clip flow: many clips + script → auto-order by transcript ---
+
+    addMultiClips(fileList) {
+      const files = Array.from(fileList || []).filter(f => f.type.startsWith('video/'));
+      for (const f of files) {
+        this.multiClips.push({
+          file: f, url: URL.createObjectURL(f),
+          name: f.name, size: f.size,
+        });
+      }
+    },
+
+    removeMultiClip(idx) {
+      const c = this.multiClips[idx];
+      if (c?.url) URL.revokeObjectURL(c.url);
+      this.multiClips.splice(idx, 1);
+    },
+
+    formatMB(b) {
+      return (b / 1024 / 1024).toFixed(1) + ' MB';
+    },
+
+    async submitMultiAutoEdit() {
+      if (this.multiClips.length < 1) { this.notifyError('Add at least one clip'); return; }
+      if (!this.multiScript.trim()) { this.notifyError('Paste or write a script first'); return; }
+      if (!this.health.openai_key) { this.notifyError('Whisper needs OPENAI_API_KEY'); return; }
+      this.multiAutoEditing = true;
+      try {
+        const fd = new FormData();
+        for (const c of this.multiClips) fd.append('files', c.file);
+        fd.append('script', this.multiScript);
+        fd.append('threshold_db', this.editor.thresholdDb);
+        fd.append('min_silence_secs', this.editor.minSilenceSecs);
+        fd.append('pad_secs', this.editor.padSecs);
+        fd.append('template', this.editor.template);
+        if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
+        fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');
+        fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
+        const overrides = this._activeOverrides();
+        if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
+        const r = await fetch('/api/editor/multi_auto_edit', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Multi auto-edit failed: ' + await r.text()); return; }
+        const data = await r.json();
+        this.multiResult = data;
+        // Slot the final result into the same lastResult slot so the existing
+        // rerender flow works on it.
+        this.editor.lastResult = {
+          ...data, kind: 'auto',
+          template: data.captions?.template, n_words: data.captions?.n_words,
+        };
+        const unmatched = (data.matching || []).filter(m => m.unmatched).length;
+        this.notifyInfo(`Stitched ${data.n_clips} clips${unmatched ? ` (${unmatched} unmatched)` : ''} · ${data.captions?.n_words} words captioned`);
+      } finally {
+        this.multiAutoEditing = false;
+      }
+    },
+
+    async editorAutoEdit() {
+      if (!this.editor.sourceVideo) { this.notifyError('Upload a video first'); return; }
+      if (!this.health.openai_key) { this.notifyError('Whisper needs OPENAI_API_KEY'); return; }
+      this.editor.autoEditing = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', this.editor.sourceVideo.file);
+        fd.append('threshold_db', this.editor.thresholdDb);
+        fd.append('min_silence_secs', this.editor.minSilenceSecs);
+        fd.append('pad_secs', this.editor.padSecs);
+        fd.append('template', this.editor.template);
+        if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
+        fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');
+        fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
+        const overrides = this._activeOverrides();
+        if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
+        const r = await fetch('/api/editor/auto_edit', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Auto-edit failed: ' + await r.text()); return; }
+        const data = await r.json();
+        this.editor.lastResult = { ...data, kind: 'auto' };
+        this.editorHistory = [{ ...data, kind: 'auto', ts: Date.now() }, ...this.editorHistory];
+        const parts = [];
+        if (data.trim) parts.push(`trimmed ${data.trim.saved_secs}s`);
+        if (data.voice_swap) parts.push(`voice swapped`);
+        if (data.captions) parts.push(`${data.captions.n_words} words captioned`);
+        this.notifyInfo('Auto-edit done: ' + parts.join(' · '));
+      } finally {
+        this.editor.autoEditing = false;
+      }
+    },
+
+    // --- Live CSS preview of caption templates ------------------------------
+    // Converts ASS &HAABBGGRR color → CSS rgba. ASS alpha 00 = opaque,
+    // FF = fully transparent.
+    _assToCss(assColor, fallback = 'rgba(255,255,255,1)') {
+      if (!assColor || typeof assColor !== 'string') return fallback;
+      const hex = assColor.replace(/^&H/i, '').padStart(8, '0').toUpperCase();
+      const aa = parseInt(hex.slice(0, 2), 16);
+      const bb = parseInt(hex.slice(2, 4), 16);
+      const gg = parseInt(hex.slice(4, 6), 16);
+      const rr = parseInt(hex.slice(6, 8), 16);
+      if ([aa, bb, gg, rr].some(n => isNaN(n))) return fallback;
+      const a = (255 - aa) / 255;
+      return `rgba(${rr},${gg},${bb},${a.toFixed(2)})`;
+    },
+
+    // 8-direction text-shadow stack to approximate ASS outline.
+    _outlineCss(color, px) {
+      if (!px || px <= 0) return '';
+      const dirs = [
+        [px, 0], [-px, 0], [0, px], [0, -px],
+        [px, px], [px, -px], [-px, px], [-px, -px],
+      ];
+      return dirs.map(([x, y]) => `${x}px ${y}px 0 ${color}`).join(', ');
+    },
+
+    _shadowCss(px) {
+      if (!px || px <= 0) return '';
+      return `${px}px ${px}px ${Math.max(2, px * 2)}px rgba(0,0,0,0.55)`;
+    },
+
+    // Returns the inline-style object for a single preview word.
+    previewWordStyle(t, isActive) {
+      const color = isActive && t.highlight_color
+        ? this._assToCss(t.highlight_color)
+        : this._assToCss(t.primary_color);
+      const outline = this._outlineCss(this._assToCss(t.outline_color, 'rgba(0,0,0,1)'), Math.min(t.outline || 0, 3));
+      const shadow = this._shadowCss(Math.min(t.shadow || 0, 6));
+      const textShadow = [outline, shadow].filter(Boolean).join(', ');
+      const fontSizePx = Math.max(10, Math.min(28, Math.round((t.size || 60) * 0.18)));
+      const style = {
+        color,
+        fontFamily: `'${t.font}', Impact, Helvetica, sans-serif`,
+        fontWeight: t.bold ? '900' : '700',
+        fontSize: fontSizePx + 'px',
+        lineHeight: '1.05',
+        textShadow: textShadow || 'none',
+        textTransform: t.all_caps ? 'uppercase' : 'none',
+        display: 'inline-block',
+        padding: '0 2px',
+        whiteSpace: 'nowrap',
+      };
+      if (t.box && !isActive) {
+        style.background = this._assToCss(t.back_color, 'rgba(0,0,0,0.7)');
+        style.padding = '2px 4px';
+        style.borderRadius = '2px';
+      }
+      return style;
+    },
+
+    // Wrapper style: positions the preview text on the 9:16 mock canvas,
+    // approximating both vertical (margin_v + alignment) and horizontal
+    // (margin_h) ASS positioning. Used both for tiny template thumbnails
+    // and the big Studio preview.
+    previewWrapStyle(t) {
+      const a = t.alignment || 2;
+      const vertical = a <= 3 ? 'flex-end'
+                    : a >= 5 && a <= 7 ? 'flex-start'
+                    : 'center';
+      const tileH = 160;
+      const norm = Math.min(1, (t.margin_v || 100) / 1080);
+      const offsetY = Math.round(norm * tileH * 0.85);
+      // Horizontal: percentage offset from center. margin_h is in 1080-wide coords.
+      const marginH = t.margin_h || 0;
+      const xPercent = 50 + (marginH / 1080) * 100;
+
+      const transforms = ['translateX(-50%)'];
+      if (vertical === 'center') transforms.push('translateY(-50%)');
+
+      return {
+        position: 'absolute',
+        left: `${xPercent}%`,
+        maxWidth: '92%',
+        transform: transforms.join(' '),
+        display: 'flex',
+        flexWrap: 'wrap',
+        gap: '4px 6px',
+        justifyContent: 'center',
+        alignItems: 'center',
+        textAlign: 'center',
+        bottom: vertical === 'flex-end' ? offsetY + 'px' : 'auto',
+        top:    vertical === 'flex-start' ? offsetY + 'px'
+             : vertical === 'center' ? '50%' : 'auto',
+      };
+    },
+
+    // --- Studio: current template object + merged-with-overrides ---
+    currentTemplate() {
+      return (this.editorTemplates || []).find(t => t.slug === this.editor.template)
+             || this.editorTemplates[0] || { font: 'Anton', size: 100, primary_color: '&H00FFFFFF',
+                                              outline_color: '&H00000000', outline: 4, shadow: 3,
+                                              words_per_card: 3, margin_v: 400, all_caps: true };
+    },
+
+    // Template with active overrides folded in — used to drive the live preview overlay.
+    activeStyle() {
+      const base = this.currentTemplate();
+      const o = this._activeOverrides();
+      const merged = { ...base, ...o };
+      return merged;
+    },
+
+    // Free 2D drag: mousedown on caption text → updates both margin_v (Y from
+    // bottom) and margin_h (X offset from center). Listens on window so the
+    // pointer can leave the caption bounds without dropping the drag.
+    startTextDrag(ev) {
+      ev.preventDefault();
+      const isTouch = ev.type === 'touchstart';
+      const stage = ev.currentTarget.closest('.studio-preview') || ev.currentTarget.parentElement;
+      const rect = stage ? stage.getBoundingClientRect() : { width: 360, height: 640 };
+      this._dragPreviewW = rect.width;
+      this._dragPreviewH = rect.height;
+      this._dragStartX = isTouch ? ev.touches[0].clientX : ev.clientX;
+      this._dragStartY = isTouch ? ev.touches[0].clientY : ev.clientY;
+      this._dragStartMarginV = this.editor.overrides.margin_v ?? this.currentTemplate().margin_v ?? 400;
+      this._dragStartMarginH = this.editor.overrides.margin_h ?? this.currentTemplate().margin_h ?? 0;
+      this.draggingText = true;
+
+      const onMove = (m) => {
+        if (!this.draggingText) return;
+        const x = m.type === 'touchmove' ? m.touches[0].clientX : m.clientX;
+        const y = m.type === 'touchmove' ? m.touches[0].clientY : m.clientY;
+        const ratioY = 1920 / Math.max(1, this._dragPreviewH);
+        const ratioX = 1080 / Math.max(1, this._dragPreviewW);
+        // margin_v counts UP from the bottom, so subtract Y delta.
+        this.editor.overrides.margin_v = Math.max(0, Math.min(1700,
+          Math.round(this._dragStartMarginV - (y - this._dragStartY) * ratioY)));
+        // margin_h counts right-positive from center.
+        this.editor.overrides.margin_h = Math.max(-540, Math.min(540,
+          Math.round(this._dragStartMarginH + (x - this._dragStartX) * ratioX)));
+      };
+      const onUp = () => {
+        this.draggingText = false;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove);
+      window.addEventListener('touchend', onUp);
+    },
+
+    // Drag the visible resize handle at bottom-right of the caption — scales
+    // font size based on the diagonal pointer movement.
+    startTextResize(ev) {
+      ev.preventDefault();
+      ev.stopPropagation();  // don't also kick off the text-drag
+      const isTouch = ev.type === 'touchstart';
+      const startX = isTouch ? ev.touches[0].clientX : ev.clientX;
+      const startY = isTouch ? ev.touches[0].clientY : ev.clientY;
+      const baseSize = this.editor.overrides.size ?? this.currentTemplate().size ?? 100;
+
+      const onMove = (m) => {
+        const x = m.type === 'touchmove' ? m.touches[0].clientX : m.clientX;
+        const y = m.type === 'touchmove' ? m.touches[0].clientY : m.clientY;
+        // Combine horizontal and vertical drag — pulling away grows, pulling in shrinks.
+        const delta = ((x - startX) + (y - startY)) / 2;
+        const next = Math.max(20, Math.min(220, Math.round(baseSize + delta * 0.7)));
+        this.editor.overrides.size = next;
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove);
+      window.addEventListener('touchend', onUp);
+    },
+
+    // Mouse-wheel-resize: tweak font size live.
+    onTextWheel(ev) {
+      ev.preventDefault();
+      const base = this.editor.overrides.size ?? this.currentTemplate().size ?? 100;
+      const step = 4;
+      const next = Math.max(20, Math.min(220, base + (ev.deltaY < 0 ? step : -step)));
+      this.editor.overrides.size = next;
+    },
+
+    onVideoLoaded(ev) {
+      this.duration = ev.target.duration || 0;
+      this.trimStartSecs = 0;
+      this.trimEndSecs = 0;
+    },
+
+    formatSecs(s) {
+      if (s == null || isNaN(s)) return '0:00';
+      const m = Math.floor(s / 60);
+      const sec = Math.floor(s % 60);
+      return `${m}:${sec.toString().padStart(2, '0')}`;
     },
 
     selectEditorTemplate(slug) {
@@ -567,6 +1364,102 @@ function studio() {
     },
 
     // --- generations: image -------------------------------------------------
+
+    // --- Paste + drop image refs into prompts (Image / Video tabs) ---
+
+    _filesFromClipboard(ev) {
+      const items = ev.clipboardData?.items || [];
+      const out = [];
+      for (const it of items) {
+        if (it.kind === 'file' && (it.type || '').startsWith('image/')) {
+          const f = it.getAsFile();
+          if (f) out.push(f);
+        }
+      }
+      return out;
+    },
+
+    onPromptPaste(ev, target) {
+      const files = this._filesFromClipboard(ev);
+      if (files.length === 0) return;            // text paste — let it through
+      ev.preventDefault();
+      if (target === 'image') {
+        this.addImageRefs(files);
+        this.notifyInfo(`Added ${files.length} reference image${files.length > 1 ? 's' : ''} from clipboard`);
+      } else if (target === 'video') {
+        this.setVideoRef(files[0]);
+        if (files.length > 1) this.notifyInfo('Video uses one ref — kept the first');
+        else this.notifyInfo('Reference image set from clipboard');
+      }
+    },
+
+    onPromptDrop(ev, target) {
+      const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+      if (files.length === 0) return;
+      ev.preventDefault();
+      if (target === 'image') this.addImageRefs(files);
+      else if (target === 'video') this.setVideoRef(files[0]);
+      this.promptDropActive = false;
+    },
+
+    onPromptDragOver(ev) {
+      // Only highlight when actual files are being dragged (avoid plain text drags).
+      const types = Array.from(ev.dataTransfer?.types || []);
+      if (types.includes('Files')) {
+        ev.preventDefault();
+        this.promptDropActive = true;
+      }
+    },
+
+    onPromptDragLeave(ev) {
+      if (!ev.currentTarget.contains(ev.relatedTarget)) {
+        this.promptDropActive = false;
+      }
+    },
+
+    // Reuse a past generation's prompt + settings in the active form.
+    reuseImageGen(g) {
+      if (!g) return;
+      this.imageGen.prompt = g.prompt || '';
+      if (g.model) this.imageGen.model = g.model;
+      if (g.aspect_ratio) this.imageGen.aspect = g.aspect_ratio;
+      this.activeTab = 'image';
+      this.notifyInfo('Prompt loaded — drop new refs if needed');
+    },
+
+    reuseVideoGen(g) {
+      if (!g) return;
+      this.videoGen.prompt = g.prompt || '';
+      if (g.model) this.videoGen.model = g.model;
+      if (g.aspect_ratio) this.videoGen.aspect = g.aspect_ratio;
+      if (g.duration_secs) this.videoGen.duration = g.duration_secs;
+      this.activeTab = 'video';
+      this.notifyInfo('Prompt loaded — drop a reference image');
+    },
+
+    reuseAvatarGen(g) {
+      if (!g) return;
+      this.avatarGen.script = g.prompt || '';
+      if (g.model) this.avatarGen.model = g.model;
+      if (g.avatar_id) this.avatarGen.avatarId = g.avatar_id;
+      if (g.voice_id) this.avatarGen.voiceId = g.voice_id;
+      if (g.voice_provider) this.avatarGen.voiceProvider = g.voice_provider;
+      this.activeTab = 'avatar';
+      this.notifyInfo('Script + avatar + voice loaded');
+    },
+
+    reuseAudioGen(g) {
+      if (!g) return;
+      if (g.model) this.audioGen.model = g.model;
+      // Voice changer's "prompt" was a placeholder, not user-meaningful text;
+      // only restore script text for TTS.
+      if (g.model === 'elevenlabs-tts') this.audioGen.script = g.prompt || '';
+      if (g.voice_id) this.audioGen.voiceId = g.voice_id;
+      this.activeTab = 'audio';
+      this.notifyInfo(g.model === 'elevenlabs-vc'
+        ? 'Voice loaded — drop a new source clip'
+        : 'Script + voice loaded');
+    },
 
     addImageRefs(fileList) {
       const files = Array.from(fileList || []);
@@ -740,21 +1633,6 @@ function studio() {
       this.dismissToast(toast.id);
       try { await toast.retry(); }
       catch (e) { this.notifyError('Retry failed: ' + (e?.message || e)); }
-    },
-
-    // --- theme ---------------------------------------------------------------
-
-    toggleTheme() {
-      const root = document.documentElement;
-      if (root.classList.contains('dark')) {
-        root.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-        this.isDark = false;
-      } else {
-        root.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-        this.isDark = true;
-      }
     },
 
     // --- health & library ----------------------------------------------------
