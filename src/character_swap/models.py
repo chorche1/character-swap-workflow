@@ -64,6 +64,11 @@ class ProjectAsset(BaseModel):
     # Preset character library for this project. New jobs created inside the
     # project pre-select these characters; users can still adjust per job.
     character_ids: list[str] = Field(default_factory=list)
+    # Optional per-project default Swap generation prompt. When set, new jobs
+    # in this project use this instead of `pipeline.GENERATION_PROMPT`. The
+    # "↺ reset to default" link in Step 2 also reverts to this. Empty/None
+    # means "use the global default".
+    default_prompt: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

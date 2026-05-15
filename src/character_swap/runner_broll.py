@@ -48,6 +48,24 @@ _CLIP_MAX_ATTEMPTS = 2
 # *a* clip we can trim down at concat time.
 _MIN_PROVIDER_DURATION_SECS = 5
 
+# Hard guard appended to every image-gen prompt. Grok's text-to-image model
+# tends to interpret "BEFORE → TRIGGER → AFTER" language as a literal
+# split-screen / vertical-strip layout (real fail we observed: 3-panel
+# storyboard of a swollen ankle). This suffix slaps the constraint directly
+# onto the image-gen call so even if the LLM's planned prompt is
+# ambiguous, the image model still produces a single continuous frame.
+_IMAGE_GUARD_SUFFIX = (
+    "\n\nIMAGE COMPOSITION RULES (these override anything above): "
+    "Produce ONE single photographic frame from a single camera position. "
+    "Never a split-screen, never a before/after side-by-side, never a "
+    "vertical strip, never a horizontal strip, never a 2x2 or 3x3 grid, "
+    "never stacked panels, never a comic-strip storyboard, never multiple "
+    "stages of a transformation shown together in one image. The frame "
+    "captures a SINGLE MOMENT in time — the opening of the clip — and any "
+    "transformation described will happen across the video's time, not "
+    "across the frame's space. Single seamless image only."
+)
+
 
 def _now() -> str:
     return datetime.utcnow().isoformat() + "Z"
@@ -65,6 +83,14 @@ def _update_clip(broll_id: str, idx: int, **changes) -> dict:
     state = broll.load_state(broll_id) or {}
     clips = state.get("clips", [])
     if 0 <= idx < len(clips):
+        # Stamp updated_at on the clip itself so the UI can show
+        # "running 42s" per clip without a separate endpoint.
+        changes.setdefault("updated_at", _now())
+        # If the status is flipping to a new transient state, also stamp a
+        # "transition_at" so the elapsed-time counter only measures TIME
+        # IN CURRENT STATE, not total time since the clip was queued.
+        if "status" in changes and changes["status"] != clips[idx].get("status"):
+            changes["transition_at"] = changes.get("updated_at")
         clips[idx].update(changes)
     state["clips"] = clips
     state["updated_at"] = _now()
@@ -108,10 +134,38 @@ async def finalize_broll(broll_id: str) -> None:
                       completed_at=_now())
 
 
+def _prev_chained_video_path(broll_id: str, idx: int) -> Path | None:
+    """If clip `idx` is part of a scene group, return the most recent
+    DONE upstream clip's video_path so the regen can chain from it.
+    Returns None if the clip is solo, has no upstream, or upstream isn't
+    available yet.
+    """
+    state = broll.load_state(broll_id) or {}
+    clips = state.get("clips") or []
+    if idx <= 0 or idx >= len(clips):
+        return None
+    this_group = (clips[idx].get("scene_group") or "").strip()
+    if not this_group:
+        return None
+    # Walk backward from idx-1 to find the nearest done clip in the same group.
+    for j in range(idx - 1, -1, -1):
+        c = clips[j]
+        if (c.get("scene_group") or "").strip() != this_group:
+            # Different (or empty) group — stop; group boundary reached.
+            break
+        if c.get("status") == "done" and c.get("video_path"):
+            p = Path(c["video_path"])
+            if p.exists():
+                return p
+    return None
+
+
 async def regenerate_clip(broll_id: str, idx: int) -> None:
     """Re-run generation for a single clip — used when the user rejects
     a clip in the awaiting_approval review. Re-uses the existing line +
-    prompt + target_duration_secs; just bumps the attempt counter."""
+    prompt + target_duration_secs; just bumps the attempt counter. If
+    the clip is in a scene group, the regen chains from the previous
+    DONE clip in that same group, preserving visual continuity."""
     state = broll.load_state(broll_id)
     if not state:
         return
@@ -122,12 +176,16 @@ async def regenerate_clip(broll_id: str, idx: int) -> None:
     work = broll.broll_dir(broll_id)
     clip_dir = work / "clips"
     video_model = state.get("video_model") or "grok-imagine"
+    aspect_ratio = state.get("aspect_ratio") or "9:16"
     target = int(clip.get("target_duration_secs") or _MIN_PROVIDER_DURATION_SECS)
     prompt = clip.get("prompt") or ""
+    prev_path = _prev_chained_video_path(broll_id, idx)
     try:
         await _generate_one_clip(
             broll_id, idx, prompt, video_model, clip_dir,
             target_duration_secs=target,
+            aspect_ratio=aspect_ratio,
+            prev_video_path=prev_path,
         )
     except Exception as e:
         _update_clip(broll_id, idx, status="failed",
@@ -139,6 +197,7 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
     Stops at `awaiting_approval` so the user can review."""
     audio_path = Path(state["audio_path"])
     video_model = state.get("video_model") or "grok-imagine"
+    aspect_ratio = state.get("aspect_ratio") or "9:16"
     work = broll.broll_dir(broll_id)
 
     # --- 1. transcribe -------------------------------------------------------
@@ -163,6 +222,7 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
     _update_state(broll_id, status="planning")
     planned = await asyncio.to_thread(
         broll.plan_visuals, transcript_text, broll_id=broll_id,
+        aspect_ratio=aspect_ratio,
     )
     if not planned:
         _update_state(broll_id, status="failed",
@@ -192,6 +252,7 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
             "idx": i,
             "line": p.line,
             "mode": p.mode,
+            "scene_group": p.scene_group,  # empty = standalone; non-empty = chained
             "prompt": p.prompt,
             "status": "pending",
             "attempts": 0,
@@ -215,23 +276,56 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
     _update_state(broll_id, status="generating_clips", clips=clips,
                   n_clips=len(clips), audio_duration_secs=round(audio_total, 2))
 
-    # --- 3. generate clips in parallel (capped), then retry any failures ---
+    # --- 3. generate clips: groups in parallel, clips within a group strictly
+    # sequential so each later clip in a scene group can chain its seed
+    # image from the previous clip's last frame. Solo clips (no scene_group)
+    # become singleton groups — same code path, just one iteration each.
     sem = asyncio.Semaphore(_CLIP_CONCURRENCY)
 
-    async def gen_one(i: int) -> None:
+    # Bucket clips by scene_group. Empty/missing group = unique singleton key
+    # per clip so each lives in its own group (same as the old all-parallel
+    # behaviour for those).
+    groups: dict[str, list[int]] = {}
+    for c in clips:
+        key = (c.get("scene_group") or "").strip() or f"__solo__{c['idx']}"
+        groups.setdefault(key, []).append(c["idx"])
+
+    async def gen_one(i: int, prev_video_path: Path | None = None) -> None:
         cur = broll.load_state(broll_id) or {}
         cur_clip = (cur.get("clips") or [{}] * (i + 1))[i]
         target = cur_clip.get("target_duration_secs") or _MIN_PROVIDER_DURATION_SECS
         prompt = cur_clip.get("prompt") or ""
-        async with sem:
-            await _generate_one_clip(
-                broll_id, i, prompt, video_model, clip_dir,
-                target_duration_secs=int(target),
-            )
+        await _generate_one_clip(
+            broll_id, i, prompt, video_model, clip_dir,
+            target_duration_secs=int(target),
+            aspect_ratio=aspect_ratio,
+            prev_video_path=prev_video_path,
+        )
 
-    # First pass: every clip
+    async def gen_group(group_idxs: list[int]) -> None:
+        """Generate one scene group strictly in order. The semaphore is
+        held for the whole group, so cross-group parallelism is capped at
+        _CLIP_CONCURRENCY but within-group ordering is preserved."""
+        async with sem:
+            prev_video_path: Path | None = None
+            for idx in sorted(group_idxs):
+                await gen_one(idx, prev_video_path=prev_video_path)
+                # Re-load to find the just-finished clip's video path.
+                cur = broll.load_state(broll_id) or {}
+                cclip = ((cur.get("clips") or []) + [{}])[idx]
+                if (cclip.get("status") == "done"
+                        and cclip.get("video_path")
+                        and Path(cclip["video_path"]).exists()):
+                    prev_video_path = Path(cclip["video_path"])
+                else:
+                    # Failure breaks the chain: the next clip in the group
+                    # falls back to fresh-seed generation so we don't
+                    # cascade one failure into N.
+                    prev_video_path = None
+
+    # First pass: kick every group concurrently.
     await asyncio.gather(
-        *(gen_one(i) for i in range(len(clips))),
+        *(gen_group(idxs) for idxs in groups.values()),
         return_exceptions=True,
     )
 
@@ -246,7 +340,11 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
             break
         _update_state(broll_id, status=f"retrying_clips (attempt {attempt})")
         for i in to_retry:
-            await gen_one(i)
+            # If this clip belongs to a scene group, re-chain from the
+            # previous DONE clip in the same group (if any) so retries
+            # preserve continuity.
+            prev_path = _prev_chained_video_path(broll_id, i)
+            await gen_one(i, prev_video_path=prev_path)
         _update_state(broll_id, status="generating_clips")
 
     # Re-load post-retries.
@@ -273,6 +371,7 @@ async def _do_run_finalize(broll_id: str, state: dict) -> None:
     """Phase 2: trim each clip to its allotted duration, concat, mux audio.
     Triggered by the user clicking Finalize after reviewing clips."""
     audio_path = Path(state["audio_path"])
+    aspect_ratio = state.get("aspect_ratio") or "9:16"
     work = broll.broll_dir(broll_id)
     clip_dir = work / "clips"
     all_clips = state.get("clips", [])
@@ -311,6 +410,7 @@ async def _do_run_finalize(broll_id: str, state: dict) -> None:
     concat_path = work / "concat.mp4"
     await asyncio.to_thread(
         video_edit.concat_videos, trimmed_paths, concat_path,
+        aspect_ratio=aspect_ratio,
     )
 
     # --- 5. mux audio over the concatenated track --------------------------
@@ -337,7 +437,9 @@ async def _do_run_finalize(broll_id: str, state: dict) -> None:
 
 async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
                              video_model: str, clip_dir: Path,
-                             *, target_duration_secs: int) -> None:
+                             *, target_duration_secs: int,
+                             aspect_ratio: str = "9:16",
+                             prev_video_path: Path | None = None) -> None:
     """Text → image → video for one clip. Updates the per-clip state inline.
 
     For models that support direct text-to-video (Veo, some Sora tiers),
@@ -348,6 +450,13 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
     Whisper timestamps (spoken_duration + 1s margin), so the model gets
     a clip roughly the right length for its phrase. The final concat trims
     it down to exactly the allotted slot.
+
+    `prev_video_path` is set when this clip is a continuation step in a
+    scene group (recipe step 2/3, skincare step 2/3, etc.). When set, we
+    extract the LAST FRAME of that previous clip and use it as the seed
+    image for THIS clip's video gen — so the new clip starts where the
+    prior ended (same glass, same lighting, cumulative state). If the
+    frame extraction fails, we silently fall back to a fresh seed.
     """
     image_path = clip_dir / f"clip-{idx:02d}.png"
     video_path = clip_dir / f"clip-{idx:02d}.mp4"
@@ -385,34 +494,71 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
             "transformation arc the same, but change the cinematography."
         )
 
-    # Append the duration hint + variation hint. Both are technical /
-    # workflow notes that go to the image+video models but NOT into the
-    # stored LINE/PROMPT plan.
+    # Append the duration hint + variation hint + (when chained) the
+    # scene-continuity hint. All three are technical / workflow notes
+    # that go to the image+video models but NOT into the stored
+    # LINE/PROMPT plan.
+    continuity_hint = ""
+    if prev_video_path is not None:
+        continuity_hint = (
+            "\n\nSCENE CONTINUITY: This shot continues directly from the "
+            "previous shot in the same scene group. The starting frame is "
+            "literally the LAST FRAME of the previous clip — same camera "
+            "position, same lighting, same objects, same cumulative state. "
+            "Do NOT reset the scene, do NOT change the camera angle, do "
+            "NOT introduce a new environment. The only thing that should "
+            "change is the new action described in the prompt being added "
+            "on top of what's already in frame."
+        )
+
     prompt_with_duration = (
         f"{prompt}\n\nClip duration target: ~{target_duration_secs} seconds."
-        f"{variation_hint}"
+        f"{variation_hint}{continuity_hint}"
     )
     # The image-gen prompt gets the variation hint too — without it the
     # text-to-image step would happily re-roll something nearly identical.
-    image_prompt = f"{prompt}{variation_hint}"
+    # Plus the hard image-composition guard suffix — defends against Grok
+    # text-to-image's tendency to produce 3-panel storyboards when prompts
+    # describe a transformation. See `_IMAGE_GUARD_SUFFIX` docstring.
+    image_prompt = f"{prompt}{variation_hint}{_IMAGE_GUARD_SUFFIX}"
 
     try:
         _update_clip(broll_id, idx, status="image_running")
 
+        seed_image: Path | None = None  # set below by one of three branches
+
         if video_model in {"veo", "veo-3-fast"}:
             # Veo accepts pure text input — skip the image-gen detour.
             seed_image = None
-        else:
-            # Seed image via Grok's text-to-image — keeps the whole pipeline
-            # inside xAI's stylistic space, so the seed and the Grok Imagine
-            # video that consumes it share the same visual training. On
-            # retries the prompt has a variation hint appended so we don't
-            # re-roll the same composition.
+        elif prev_video_path is not None:
+            # CONTINUATION CLIP in a scene group: use the previous clip's
+            # last frame as the seed image so the new clip starts where
+            # the prior one ended. No text-to-image call needed — Grok
+            # video accepts any local image path.
+            extracted = await asyncio.to_thread(
+                video_edit.extract_last_frame, prev_video_path, image_path,
+            )
+            if extracted is not None and extracted.exists():
+                seed_image = image_path
+                _update_clip(broll_id, idx, status="image_done",
+                             image_url=f"/files/output/broll/{broll_id}/clips/{image_path.name}?v={this_attempt}&from=prev")
+            else:
+                # Last-frame extraction failed (corrupt / too-short
+                # upstream clip). Silently fall back to fresh-seed gen
+                # below so a downstream failure doesn't cascade.
+                seed_image = None
+
+        if seed_image is None and video_model not in {"veo", "veo-3-fast"}:
+            # Standard path: Grok text-to-image seed. Keeps the whole
+            # pipeline inside xAI's stylistic space, so the seed and the
+            # Grok Imagine video that consumes it share the same visual
+            # training. On retries the prompt has a variation hint
+            # appended so we don't re-roll the same composition.
             img_bytes = await asyncio.to_thread(
                 grok.generate_image,
                 prompt=image_prompt,
                 character="broll",
-                aspect_ratio="9:16",
+                aspect_ratio=aspect_ratio,
                 app_job_id=broll_id,
             )
             image_path.write_bytes(img_bytes)
@@ -442,7 +588,7 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
                 google_genai.submit_veo,
                 image=seed_image,           # may be None — Veo handles text-only
                 prompt=prompt_with_duration,
-                aspect_ratio="9:16",
+                aspect_ratio=aspect_ratio,
                 duration_secs=target_duration_secs,
                 app_job_id=broll_id,
             )
@@ -453,7 +599,7 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
             task_id = await asyncio.to_thread(
                 kling.submit_kling,
                 image=seed_image, prompt=prompt_with_duration,
-                aspect_ratio="9:16",
+                aspect_ratio=aspect_ratio,
                 duration_secs=target_duration_secs,
                 app_job_id=broll_id,
             )
@@ -482,7 +628,7 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
             assert seed_image is not None
             task_id = await asyncio.to_thread(
                 submit_fn, image=seed_image, prompt=prompt_with_duration,
-                aspect_ratio="9:16",
+                aspect_ratio=aspect_ratio,
                 duration_secs=target_duration_secs,
                 app_job_id=broll_id,
             )

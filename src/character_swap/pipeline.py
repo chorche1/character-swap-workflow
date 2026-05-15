@@ -24,7 +24,7 @@ GENERATION_PROMPT = (
     "The man from the second picture is in the exact same pose in the exact "
     "same position and holding the exact same stuff in the exact same place "
     "as the man in the first picture. Remove any text overlays. 9:16 ratio. "
-    "The background looks like it is the same environment as the second picture."
+    "Change the background but same vibe. No blurry background."
 )
 
 

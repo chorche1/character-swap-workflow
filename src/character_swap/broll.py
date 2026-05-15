@@ -55,9 +55,10 @@ THE CORE RULE — VISUAL CONGRUENCE WITH THE SCRIPT
 Every prompt must make the viewer instantly understand what the line is about. The visual is a literal translation of the words — not a metaphor, not abstract art.
 The 0.5-second test: If a viewer muted the audio and saw only the clip, they should immediately grasp what concept, body part, system, or process the line is describing.
 Each prompt now belongs to ONE of these four visual modes — pick the mode that most clearly communicates the script line:
-MODE 1 — BODY PART TRANSFORMATION (Before → Trigger → After)
-A recognizable human body part shown in a damaged state, transformed by a biological trigger into a healthy state.
+MODE 1 — BODY PART TRANSFORMATION
+A single continuous close-up shot of one recognizable human body part where the transformation from unhealthy to healthy happens OVER THE COURSE OF THE CLIP — across time, not across the frame. The camera holds on the same body part the whole clip; what changes is the tissue/skin/colour itself, animated in place. The OPENING moment of the clip shows the unhealthy state; as the clip plays, a real biological trigger drives the change; the FINAL moment shows the healthy state. All within one continuous take from one camera.
 Use when: the line is about a specific organ, body part, or symptom (eyes, joints, gut, skin, teeth, heart, lungs, etc.)
+CRITICAL: when writing the prompt for a Mode 1 clip, describe the OPENING shot first (what the body part looks like in its problem state at frame 1), then describe the on-screen change that happens "over the course of the clip" or "during the shot". NEVER structure the prompt as labelled stages ("BEFORE: ... TRIGGER: ... AFTER: ..."), because image-gen models read those labels as instructions to produce a multi-panel collage.
 MODE 2 — BIOLOGICAL PROCESS SHOT
 A close visualization of a real internal process — blood circulating, nutrients absorbing, inflammation receding, fat cells shrinking, neurons firing, hormones binding to receptors, fluid clearing through tissue.
 Use when: the line describes a mechanism, action, or how something works inside the body.
@@ -90,6 +91,35 @@ Concrete examples:
 When a line introduces a NEW body part or condition, that becomes the new anchor going forward — until the script pivots again. Don't ping-pong between random body parts when the script is sustaining one theme.
 
 Mode variation lives ON TOP of anchor continuity, not in conflict with it: the same anchor (e.g. ankles) can yield a Mode 1 transformation, then a Mode 4 human moment, then a Mode 3 flythrough, then a Mode 2 process shot — all centred on the same body part, varied in style. That's exactly the right shape.
+
+SCENE GROUPING — CONSECUTIVE LINES IN THE SAME PHYSICAL SCENE MUST CARRY OBJECTS FORWARD
+When two or more consecutive script lines describe steps that happen in the SAME PHYSICAL ENVIRONMENT with PERSISTENT OBJECTS (a single glass, a single cutting board, a single yoga mat, a single bathroom sink), they must visually share that scene — the same glass, the same counter, the same lighting — and each later step must show the CUMULATIVE state from the previous step.
+
+The classic case is a recipe:
+- "Take one tablespoon of raw apple cider vinegar"
+- "Add the juice of half a lemon"
+- "One teaspoon of raw honey"
+- "One cup of warm water"
+- "Drink it every morning"
+All five lines happen at the SAME glass on the SAME counter. After step 1, the glass has cider vinegar in it. After step 2, it has cider AND lemon juice. After step 4 it has the full mixture. The glass never changes between steps; only the cumulative liquid state and the next ingredient being added changes.
+
+How to tag scene groups in your output: add a `SCENE_GROUP:` line between `MODE:` and `PROMPT:` containing a short descriptive name (snake_case). Examples:
+- `SCENE_GROUP: morning_drink_glass` (the recipe above)
+- `SCENE_GROUP: bathroom_skincare_mirror` (apply moisturizer → then sunscreen, same mirror, same hand)
+- `SCENE_GROUP: yoga_mat_living_room` (stretch sequence on one mat)
+- `SCENE_GROUP: cutting_board_dinner` (chop onions → then garlic → then add to pan, same cutting board)
+
+Rules:
+1. Use the SAME `SCENE_GROUP` name for every line that shares the scene. The pipeline groups by name and chains the visuals.
+2. Distinct scenes get distinct names. If the recipe ends and the next line is "Your kidneys start draining" (different scene entirely), do NOT continue the same group — drop the SCENE_GROUP tag or open a new one.
+3. Standalone lines (most Mode 1, Mode 2, Mode 3 clips) get NO SCENE_GROUP tag. Only use it when continuity is genuinely needed.
+4. Within a group, write each prompt to describe the NEW action being added on top of the persistent scene — NOT to re-describe the whole scene. The pipeline literally hands the previous clip's final frame to the video model as the starting frame, so the new prompt should focus on what changes:
+   - First clip in a group: full scene description ("a clear glass on a wooden counter in soft morning light, a hand pours a tablespoon of amber apple cider vinegar in")
+   - Later clips in the same group: action only ("the same glass from the previous shot now receives half a lemon being squeezed over it, juice streaming in to mix with the cider vinegar already there")
+5. Camera position stays anchored within a group — same angle, same distance. Only the action inside the frame changes step to step.
+6. Lighting stays the same within a group. Don't switch from "cool flat unhealthy" lighting to "warm directional healthy" lighting mid-group unless the script literally describes that transition.
+
+A scene group is for visual CONTINUITY — same glass with cumulative state. It is NOT the same as anchor-continuity (CONTEXT CONTINUITY rule above), which is about which BODY PART successive lines are about. The two rules compose: a recipe sequence can all share `SCENE_GROUP: morning_drink_glass` while still hitting BODY-PART VARIETY because no body part appears at all (the glass is the focus).
 
 BODY-PART VARIETY — DON'T KEEP RETURNING TO THE SAME BODY PART
 Across the script as a whole, spread the visuals across DIFFERENT body parts wherever the script reasonably allows it. A 10-line script should visit many different anchors, not focus on just one or two.
@@ -182,6 +212,26 @@ What "9:16 framing" means in our prompts:
 - BEFORE → TRIGGER → AFTER unfolds OVER TIME in the single shot — the camera and subject occupy the same frame the whole clip, the transformation is what changes
 
 When you write the prompt, describe the shot as if a real cinematographer holding a real camera is capturing a single take. Never describe "panels", "strips", "split", "grid", "collage", "comparison", "side-by-side", "multi-view", or anything that implies more than one image within the frame.
+
+PROMPT STRUCTURE — HOW TO WRITE A TRANSFORMATION PROMPT WITHOUT TRIGGERING A STORYBOARD
+Image-generation models read prompt STRUCTURE as a hint for image STRUCTURE. A prompt structured like "BEFORE: ... TRIGGER: ... AFTER: ..." gets visualised as three panels stacked on top of each other. We have seen this fail in real generations — a swollen ankle prompt produced a vertical 3-panel strip showing progressive states, which then tripped video moderation.
+
+The fix is structural — write the prompt as ONE continuous sentence describing the OPENING frame plus the time-based change that follows:
+
+Forbidden prompt structures:
+- "BEFORE: [description]. TRIGGER: [description]. AFTER: [description]."
+- "Frame 1 shows X. Frame 2 shows Y. Frame 3 shows Z."
+- "The clip transitions from [state A] to [state B] to [state C]."
+- "Three stages: 1) ... 2) ... 3) ..."
+- Any label, header, or enumeration that implies discrete frames or panels.
+- Any phrase like "side by side", "before and after", "comparison view".
+
+Required prompt structure — pick a single OPENING frame and describe the change as happening over the clip's duration:
+- "OPENING: a tight close-up of [body part] in [unhealthy state, visual details], soft uneasy camera drift, cool flat lighting. OVER THE COURSE OF THE CLIP, [biological trigger] visibly drives the tissue to transform on-camera — [described change] — until the final hold shows [body part] in [healthy state, visual details] under warm directional lighting. Single continuous take, no cuts."
+
+The word "OVER THE COURSE OF THE CLIP" (or equivalent: "during the shot", "as the take progresses", "across the clip's runtime") is the magic phrase that signals temporal change rather than spatial panels. Use it.
+
+Real-world fail to learn from: a Mode 1 ankle clip's prompt was written with explicit BEFORE/TRIGGER/AFTER staging. The image model produced a vertical 3-strip layout of three progressive ankle states stacked, the video model then animated through them, and Grok's video moderation rejected the output as a "deformed body" because the stacked images looked like a medical anomaly. The same anatomical content described as a single opening frame plus a temporal change would have produced one continuous ankle shot with the swelling visibly draining in place.
 
 NO STILL CLIPS — THE SUBJECT MUST ALWAYS BE DOING SOMETHING
 A B-roll clip is never just a posed shot of a body part. Within every clip the SUBJECT itself must be in motion, transforming, or visibly reacting. Camera movement alone is not enough — if the subject is frozen, the clip is a still image and fails.
@@ -316,8 +366,10 @@ LINE:
 "[script line here]"
 MODE:
 [Mode 1 — Body Part Transformation / Mode 2 — Biological Process / Mode 3 — Anatomical Flythrough / Mode 4 — Contextual Human Moment]
+SCENE_GROUP:
+[snake_case_name OR leave blank for standalone clips. Two consecutive clips with the SAME SCENE_GROUP value will share the same physical scene with cumulative state — see the SCENE GROUPING rule above for when to use this.]
 PROMPT:
-"[Detailed cinematic AI video prompt. Must specify: what the viewer sees in the first 0.5 seconds and how it directly translates the script line, the entry state, the trigger or transition, the exit state, at least two active camera movements, lighting for both states, and color palette for both states. No fantasy effects. No neon. No lightning. Biologically real.]"
+"[Detailed cinematic AI video prompt. Must specify: what the viewer sees in the first 0.5 seconds and how it directly translates the script line, the entry state, the trigger or transition, the exit state, at least two active camera movements, lighting for both states, and color palette for both states. No fantasy effects. No neon. No lightning. Biologically real. For continuation clips inside a SCENE_GROUP: describe only the new action being added on top of the persistent scene, not the whole scene.]"
 
 NON-NEGOTIABLES
 
@@ -342,12 +394,21 @@ class PlannedClip:
     line: str
     prompt: str
     mode: str = ""        # e.g. "Mode 1 — Body Part Transformation"; empty if LLM dropped it
+    scene_group: str = "" # e.g. "morning_drink_glass"; empty = standalone clip. Consecutive
+                          # clips with the same value share visuals (recipe steps etc.)
 
 
 def plan_visuals(transcript_text: str, *, broll_id: str | None = None,
-                 model: str = "gpt-4o") -> list[PlannedClip]:
+                 model: str = "gpt-4o",
+                 aspect_ratio: str = "9:16") -> list[PlannedClip]:
     """Send the transcript to OpenAI with the creative-director system prompt
     and parse the LINE/PROMPT pairs back out.
+
+    `aspect_ratio` ("9:16" / "1:1" / "16:9") is injected into the user
+    message so the LLM plans compositions appropriate for the chosen
+    canvas — square for 1:1, landscape for 16:9, etc. The system prompt
+    still mentions 9:16 by default but the user-message override
+    instructs GPT-4o to adapt.
 
     `model` defaults to gpt-4o for quality — the prompts are long and the
     formatting fidelity matters. gpt-4o-mini works but occasionally drops
@@ -355,6 +416,15 @@ def plan_visuals(transcript_text: str, *, broll_id: str | None = None,
     """
     if not transcript_text.strip():
         return []
+    aspect_brief = {
+        "9:16": "VERTICAL 9:16 (TikTok / Reels / Shorts).",
+        "1:1":  "SQUARE 1:1 (Instagram feed). Compose for a square canvas — frame "
+                "subjects with less vertical headroom, center the action, the body part "
+                "or process should fill most of the frame horizontally and vertically.",
+        "16:9": "LANDSCAPE 16:9 (YouTube / web video). Compose for a wide canvas — "
+                "use horizontal camera moves, give space on either side of the subject, "
+                "lateral tracking shots feel right at this aspect.",
+    }.get(aspect_ratio, "VERTICAL 9:16.")
     client = openai_image._client()
     with record(phase="broll_plan", model=model, character="broll",
                 job_id=broll_id) as entry:
@@ -363,6 +433,11 @@ def plan_visuals(transcript_text: str, *, broll_id: str | None = None,
             messages=[
                 {"role": "system", "content": BROLL_SYSTEM_PROMPT},
                 {"role": "user", "content": (
+                    f"ASPECT RATIO OVERRIDE: every prompt must be composed "
+                    f"for {aspect_brief} The system prompt's references to "
+                    f"'9:16' are a default — replace them with the aspect "
+                    f"above when planning each shot's framing and camera "
+                    f"movement.\n\n"
                     "Here is the FULL script for this ad. Before you plan "
                     "any line, READ THE WHOLE SCRIPT and identify its "
                     "anchors — the body parts, conditions, or processes "
@@ -387,25 +462,30 @@ def plan_visuals(transcript_text: str, *, broll_id: str | None = None,
 
 _PAIR_RE = re.compile(
     r"LINE:\s*\"?([^\"\n]+?)\"?\s*\n+"
-    r"(?:\s*MODE:\s*\"?([^\"\n]+?)\"?\s*\n+)?"   # MODE: is the new line; optional so we
-                                                  # don't break if the LLM forgets it
+    r"(?:\s*MODE:\s*\"?([^\"\n]+?)\"?\s*\n+)?"          # MODE — optional
+    r"(?:\s*SCENE_GROUP:\s*\"?([^\"\n]*?)\"?\s*\n+)?"   # SCENE_GROUP — optional; may
+                                                         # even be an empty string if the
+                                                         # LLM emits the tag with no value
     r"\s*PROMPT:\s*\"?(.+?)\"?\s*(?=(?:\n+LINE:|\Z))",
     re.DOTALL | re.IGNORECASE,
 )
 
 
 def _parse_line_prompt_pairs(raw: str) -> list[PlannedClip]:
-    """Pull out every LINE:/(MODE:)/PROMPT: triple from the LLM output,
-    tolerant of quoting variations and stray blank lines. MODE is optional
-    — the LLM occasionally drops it; we just leave it empty rather than
-    losing the whole clip."""
+    """Pull out every LINE:/(MODE:)/(SCENE_GROUP:)/PROMPT: tuple from the
+    LLM output, tolerant of quoting variations and stray blank lines.
+    MODE and SCENE_GROUP are optional — the LLM may drop one or both for
+    a given clip; we just leave them empty rather than losing the clip."""
     pairs: list[PlannedClip] = []
     for m in _PAIR_RE.finditer(raw):
         line = m.group(1).strip().strip('"').strip()
         mode = (m.group(2) or "").strip().strip('"').strip()
-        prompt = m.group(3).strip().strip('"').strip()
+        scene_group = (m.group(3) or "").strip().strip('"').strip()
+        prompt = m.group(4).strip().strip('"').strip()
         if line and prompt:
-            pairs.append(PlannedClip(line=line, prompt=prompt, mode=mode))
+            pairs.append(PlannedClip(
+                line=line, prompt=prompt, mode=mode, scene_group=scene_group,
+            ))
     return pairs
 
 

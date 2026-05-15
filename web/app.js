@@ -42,6 +42,7 @@ function studio() {
     // B-roll: audio → transcript → planned visual prompts → clips → final mp4
     brollGen: {
       videoModel: 'grok-imagine',
+      aspectRatio: '9:16',           // 9:16 | 1:1 | 16:9
       source: null,                  // {file, url, name, isVideo}
       submitting: false,
     },
@@ -59,6 +60,8 @@ function studio() {
       voiceId: '',
       enableTrim: true,
       enableCaptions: true,
+      enableNormalizeWpm: true,       // default-on; time-stretch each clip to target_wpm
+      targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
       rerendering: false,
       rerenderOpen: false,                    // shows the edit-result panel
       rerenderTemplate: 'popout-yellow',      // independent of editor.template so you can A/B
@@ -111,7 +114,9 @@ function studio() {
     multiResult: null,             // last response from /multi_auto_edit
     swapPrompt: '',
     swapModel: 'gpt-image',
-    swapDefaultPrompt: '',
+    swapDefaultPrompt: '',          // effective default (project's if set, else global)
+    swapGlobalDefaultPrompt: '',    // always the global pipeline.GENERATION_PROMPT
+    swapProjectDefaultPrompt: '',   // current project's override, if any
     showCharLib: false,
     expandedCharId: null,
     charGalleries: {},
@@ -123,6 +128,19 @@ function studio() {
     videoHistory: [],
     avatarHistory: [],
     audioHistory: [],
+    // Persistent sidebar "Recent media" expand/collapse state.
+    recentMediaOpen: true,
+
+    // Per-tab history filters: free-text prompt search + optional model
+    // filter. Frontend-only — operates on the already-loaded history
+    // arrays via computed getters (filteredImageHistory etc.).
+    historyFilters: {
+      image: { q: '', model: '' },
+      video: { q: '', model: '' },
+      audio: { q: '', model: '' },
+      avatar: { q: '', model: '' },
+      broll: { q: '', status: '' },
+    },
     heygenAvatars: [],
     heygenVoices: [],
     heygenCatalogueError: '',
@@ -145,6 +163,9 @@ function studio() {
     draftTitle: '',
     editingCharacterId: null,
     draftCharacterName: '',
+    // Which character's "pick which gallery image to use as source" popover
+    // is open in Step 2. null = closed. Only one open at a time.
+    sourceImagePickerCharId: null,
     ws: null,
     wsConnected: false,
     _wsBackoff: 1000,
@@ -169,8 +190,32 @@ function studio() {
       this.loadEditorTemplates();
       await this.loadGenerations();
       await this.loadSwapDefaults();
+      // Restore last-used picks per-tab so the model/voice/aspect we used
+      // before is still selected next session. Falls back to existing
+      // defaults if no saved value exists.
+      this._restorePerTabPrefs();
+      // Then wire watches that save the picks back as the user changes them.
+      this.$watch('imageGen.model', v => v && localStorage.setItem('imageGen.model', v));
+      this.$watch('imageGen.aspect', v => v && localStorage.setItem('imageGen.aspect', v));
+      this.$watch('videoGen.model', v => v && localStorage.setItem('videoGen.model', v));
+      this.$watch('videoGen.aspect', v => v && localStorage.setItem('videoGen.aspect', v));
+      this.$watch('videoGen.duration', v => v && localStorage.setItem('videoGen.duration', String(v)));
+      this.$watch('audioGen.model', v => v && localStorage.setItem('audioGen.model', v));
+      this.$watch('audioGen.voiceId', v => v && localStorage.setItem('audioGen.voiceId', v));
+      this.$watch('avatarGen.model', v => v && localStorage.setItem('avatarGen.model', v));
+      this.$watch('avatarGen.voiceId', v => v && localStorage.setItem('avatarGen.voiceId', v));
+      this.$watch('avatarGen.voiceProvider', v => v && localStorage.setItem('avatarGen.voiceProvider', v));
+      this.$watch('avatarGen.avatarId', v => v && localStorage.setItem('avatarGen.avatarId', v));
+      this.$watch('brollGen.videoModel', v => v && localStorage.setItem('brollGen.videoModel', v));
+      this.$watch('brollGen.aspectRatio', v => v && localStorage.setItem('brollGen.aspectRatio', v));
       // Refresh daily cost every minute while the tab is open.
       this._dailyCostTimer = setInterval(() => this.loadDailyCost(), 60000);
+      // 1-second tick so the elapsed-time labels in the status toast +
+      // B-roll progress card update without an extra backend round-trip.
+      this._tickTimer = setInterval(() => { this._tickNow = Date.now(); }, 1000);
+      // Reload swap defaults whenever the active project changes — picks up
+      // the project's `default_prompt` (or falls back to global).
+      this.$watch('currentProjectId', () => this.loadSwapDefaults());
       // Poll in-flight generations every 4s
       this._genPollTimer = setInterval(() => this.pollActiveGens(), 4000);
       // URL routing: if we landed on /j/<id>, open that job.
@@ -291,17 +336,53 @@ function studio() {
     },
 
     async loadSwapDefaults() {
+      // Pass the active project_id so the backend can return that
+      // project's `default_prompt` instead of the global one.
       try {
-        const r = await fetch('/api/swap/defaults');
+        const url = '/api/swap/defaults' + (this.currentProjectId
+          ? '?project_id=' + encodeURIComponent(this.currentProjectId) : '');
+        const r = await fetch(url);
         if (!r.ok) return;
         const data = await r.json();
         this.swapDefaultPrompt = data.prompt || '';
+        this.swapGlobalDefaultPrompt = data.global_prompt || data.prompt || '';
+        this.swapProjectDefaultPrompt = data.project_prompt || '';
         if (!this.swapPrompt) this.swapPrompt = this.swapDefaultPrompt;
       } catch (_) {}
     },
 
     resetSwapPrompt() {
       this.swapPrompt = this.swapDefaultPrompt;
+    },
+
+    resetSwapPromptToGlobal() {
+      this.swapPrompt = this.swapGlobalDefaultPrompt;
+    },
+
+    // Save the current textarea contents as the active project's default
+    // prompt. Future jobs in this project will inherit it.
+    async saveProjectDefaultPrompt() {
+      if (!this.currentProjectId) return;
+      const newPrompt = (this.swapPrompt || '').trim();
+      try {
+        const r = await fetch('/api/projects/' + encodeURIComponent(this.currentProjectId), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ default_prompt: newPrompt || null }),
+        });
+        if (!r.ok) { this.notifyError('Save failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        // Refresh in-memory project list so currentProject() reflects it.
+        const i = this.projects.findIndex(p => p.project_id === updated.project_id);
+        if (i >= 0) this.projects.splice(i, 1, updated);
+        this.swapProjectDefaultPrompt = updated.default_prompt || '';
+        this.swapDefaultPrompt = this.swapProjectDefaultPrompt || this.swapGlobalDefaultPrompt;
+        this.notifyInfo(newPrompt
+          ? 'Saved as project default — new jobs in this project inherit it'
+          : 'Cleared project default — new jobs fall back to the global default');
+      } catch (e) {
+        this.notifyError('Save failed: ' + e.message);
+      }
     },
 
     swapPromptIsDefault() {
@@ -347,11 +428,219 @@ function studio() {
       } catch (_) {}
     },
 
+    // Build a human-readable download filename from a generation object.
+    // E.g. "swollen-ankles-2026-05-14.mp4" instead of "g_a1b2c3d4e5.mp4".
+    friendlyName(g, extOverride) {
+      const ext = extOverride
+        || (g.output_url && /\.mp4($|\?)/i.test(g.output_url) ? 'mp4'
+            : g.kind === 'image' ? 'png'
+            : g.kind === 'audio' ? 'mp3'
+            : 'mp4');
+      const date = new Date((g.completed_at || g.created_at || Date.now()))
+        .toISOString().slice(0, 10);
+      const slug = ((g.prompt || g.model || 'gen') + '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60);
+      return `${slug || g.gen_id}-${date}.${ext}`;
+    },
+
     _historyForKind(kind) {
       return kind === 'image' ? this.imageHistory
            : kind === 'video' ? this.videoHistory
            : kind === 'avatar' ? this.avatarHistory
            : this.audioHistory;
+    },
+
+    _filterHistory(kind, arr) {
+      const f = this.historyFilters[kind];
+      if (!f) return arr;
+      const q = (f.q || '').trim().toLowerCase();
+      const model = f.model || '';
+      if (!q && !model) return arr;
+      return arr.filter(g => {
+        if (model && g.model !== model) return false;
+        if (q) {
+          const hay = ((g.prompt || '') + ' ' + (g.model || '')).toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+    },
+
+    // Convenience getters used by the templates.
+    get filteredImageHistory() { return this._filterHistory('image', this.imageHistory); },
+    get filteredVideoHistory() { return this._filterHistory('video', this.videoHistory); },
+    get filteredAudioHistory() { return this._filterHistory('audio', this.audioHistory); },
+    get filteredAvatarHistory() { return this._filterHistory('avatar', this.avatarHistory); },
+    get filteredBrollHistory() {
+      const f = this.historyFilters.broll;
+      const q = (f.q || '').trim().toLowerCase();
+      const st = f.status || '';
+      if (!q && !st) return this.brollHistory;
+      return this.brollHistory.filter(b => {
+        if (st && b.status !== st) return false;
+        if (q) {
+          const hay = ((b.transcript || '') + ' ' + (b.broll_id || '')).toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      });
+    },
+
+    // Models that have actually been used in this history kind, for the
+    // dropdown filter so we don't show locked/unused models.
+    _modelsInHistory(arr) {
+      const seen = new Set();
+      for (const g of arr) if (g.model) seen.add(g.model);
+      return [...seen].sort();
+    },
+
+    // Internal tick so any elapsed-time UI re-renders without polling
+    // the backend on every second. Bumped once per second by a
+    // setInterval kicked off in init.
+    _tickNow: Date.now(),
+
+    // ISO timestamp diff to "Xm Ys" or "Xs" string.
+    formatElapsed(iso) {
+      if (!iso) return '';
+      const start = Date.parse(iso);
+      if (isNaN(start)) return '';
+      const sec = Math.max(0, Math.floor((this._tickNow - start) / 1000));
+      if (sec < 60) return `${sec}s`;
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      return `${m}m ${s}s`;
+    },
+
+    // B-roll: aggregate progress for the current run — n_done, n_failed,
+    // n_total, percent_done, and an ETA estimate based on per-clip
+    // average runtime so far.
+    brollProgress(b) {
+      const clips = b.clips || [];
+      const n = clips.length;
+      if (!n) return null;
+      const done = clips.filter(c => c.status === 'done').length;
+      const failed = clips.filter(c => c.status === 'failed').length;
+      const inFlight = clips.filter(c => ['image_running','image_done','video_running'].includes(c.status)).length;
+      const percent = Math.round((done / n) * 100);
+      // ETA: assume remaining clips take same wall-time as completed ones.
+      let eta = '';
+      if (b.created_at && done > 0 && done < n) {
+        const elapsedMs = this._tickNow - Date.parse(b.created_at);
+        const perClipMs = elapsedMs / done;
+        const remainingClips = n - done - failed;
+        const etaMs = perClipMs * remainingClips;
+        if (etaMs > 0 && etaMs < 1000 * 60 * 60) {
+          const etaMin = Math.floor(etaMs / 60000);
+          const etaSec = Math.round((etaMs % 60000) / 1000);
+          eta = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
+        }
+      }
+      return { n, done, failed, inFlight, percent, eta };
+    },
+
+    // Aggregate every in-flight job across tabs into one list for the
+    // persistent status toast at the bottom-right. Each entry has:
+    //   {kind, label, status, tab, navigate(): switch to its tab}
+    get activeJobs() {
+      const out = [];
+      const transient = ['pending', 'running'];
+      for (const kind of ['image', 'video', 'audio', 'avatar']) {
+        const arr = this._historyForKind(kind);
+        for (const g of arr) {
+          if (!transient.includes(g.status)) continue;
+          out.push({
+            id: g.gen_id, kind, tab: kind,
+            label: (g.prompt || g.model || g.gen_id).slice(0, 50),
+            status: g.status, model: g.model,
+            created_at: g.created_at,
+          });
+        }
+      }
+      // B-roll has a richer state machine. Anything not in the resting
+      // states is "in flight" for toast purposes.
+      const brollResting = ['done', 'failed', 'partial_success'];
+      for (const b of this.brollHistory) {
+        const stillRolling = !brollResting.includes(b.status)
+          || (b.clips || []).some(c => ['pending', 'image_running', 'image_done', 'video_running'].includes(c.status));
+        if (!stillRolling) continue;
+        const nDone = (b.clips || []).filter(c => c.status === 'done').length;
+        const nTotal = (b.clips || []).length;
+        out.push({
+          id: b.broll_id, kind: 'broll', tab: 'broll',
+          label: (b.transcript || b.broll_id).slice(0, 50),
+          status: b.status,
+          progress: nTotal ? `${nDone}/${nTotal} clips` : '',
+          created_at: b.created_at,
+        });
+      }
+      // Swap-flow video animations are not currently aggregated here
+      // (they live in the project sidebar and have their own progress).
+      // Easy to add later if needed.
+      return out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    },
+
+    // Cross-kind list of recent finished media for the sidebar thumbnail
+    // strip. Each entry has {kind, id, tab, thumb, label, created_at}.
+    // Includes Image, Video, Audio, Avatar, and B-roll final outputs.
+    // Sorted newest-first, capped to 50 for performance.
+    get recentMedia() {
+      const out = [];
+      for (const g of this.imageHistory) {
+        if (g.output_url) out.push({
+          kind: 'image', id: g.gen_id, tab: 'image',
+          thumb: g.output_url, label: g.prompt || g.model,
+          created_at: g.completed_at || g.created_at,
+        });
+      }
+      for (const g of this.videoHistory) {
+        if (g.output_url) out.push({
+          kind: 'video', id: g.gen_id, tab: 'video',
+          thumb: g.output_url, label: g.prompt || g.model,
+          created_at: g.completed_at || g.created_at,
+        });
+      }
+      for (const g of this.audioHistory) {
+        if (g.output_url) out.push({
+          kind: 'audio', id: g.gen_id, tab: 'audio',
+          // Audio outputs that came from video VC are mp4; use them as thumb.
+          // Pure-audio (mp3) has no thumb — fall back to null.
+          thumb: /\.mp4($|\?)/i.test(g.output_url) ? g.output_url : null,
+          label: g.prompt || g.model,
+          created_at: g.completed_at || g.created_at,
+        });
+      }
+      for (const g of this.avatarHistory) {
+        if (g.output_url) out.push({
+          kind: 'avatar', id: g.gen_id, tab: 'avatar',
+          thumb: g.output_url, label: g.prompt || g.model,
+          created_at: g.completed_at || g.created_at,
+        });
+      }
+      for (const b of this.brollHistory) {
+        if (b.final_video_url) out.push({
+          kind: 'broll', id: b.broll_id, tab: 'broll',
+          thumb: b.final_video_url,
+          label: (b.transcript || b.broll_id).slice(0, 40),
+          created_at: b.completed_at || b.created_at,
+        });
+      }
+      out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      return out.slice(0, 50);
+    },
+
+    jumpToActiveJob(job) {
+      if (job.tab) this.switchTab(job.tab);
+      // Tiny delay so the tab renders before we scroll
+      this.$nextTick(() => {
+        // Try to scroll to the specific card. Each card uses gen_id or broll_id
+        // as part of its key.
+        const sel = `[x-key="${job.id}"], [x-key="br-${job.id}"]`;
+        const el = document.querySelector(sel);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      });
     },
 
     async pollActiveGens() {
@@ -389,6 +678,18 @@ function studio() {
       } catch (e) {
         this.elevenlabsCatalogueError = String(e);
       }
+      // Restore last-used voice now that the list is loaded.
+      try {
+        const saved = localStorage.getItem('audioGen.voiceId');
+        if (saved && this.elevenlabsVoices.some(v => v.voice_id === saved)) {
+          this.audioGen.voiceId = saved;
+        }
+        const savedAv = localStorage.getItem('avatarGen.voiceId');
+        if (savedAv && this.avatarGen.voiceProvider === 'elevenlabs'
+            && this.elevenlabsVoices.some(v => v.voice_id === savedAv)) {
+          this.avatarGen.voiceId = savedAv;
+        }
+      } catch (_) {}
     },
 
     elevenlabsAvailable() {
@@ -442,12 +743,18 @@ function studio() {
         if (!r.ok) { this.notifyError('Generate failed: ' + await r.text()); return; }
         const gen = await r.json();
         this.audioHistory = [gen, ...this.audioHistory];
-        if (this.audioGen.sourceAudio?.url) URL.revokeObjectURL(this.audioGen.sourceAudio.url);
-        this.audioGen.sourceAudio = null;
-        this.audioGen.script = '';
+        // Preserve sourceAudio + script so users can iterate (tweak script
+        // for TTS, or A/B different voices for VC). Use clearAudioForm()
+        // to start fresh.
       } finally {
         this.audioGen.generating = false;
       }
+    },
+
+    clearAudioForm() {
+      if (this.audioGen.sourceAudio?.url) URL.revokeObjectURL(this.audioGen.sourceAudio.url);
+      this.audioGen.sourceAudio = null;
+      this.audioGen.script = '';
     },
 
     // --- B-roll generator (audio → planned cinematic clips → final mp4) ----
@@ -469,6 +776,7 @@ function studio() {
         const fd = new FormData();
         fd.append('file', this.brollGen.source.file);
         fd.append('video_model', this.brollGen.videoModel || 'grok-imagine');
+        fd.append('aspect_ratio', this.brollGen.aspectRatio || '9:16');
         const r = await fetch('/api/broll/generate', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('B-roll submit failed: ' + await r.text()); return; }
         const job = await r.json();
@@ -610,10 +918,56 @@ function studio() {
 
     // --- Video Editor (silence-trim + captions) -----------------------------
 
+    _restorePerTabPrefs() {
+      // Restore last-used picks from localStorage for every tab where it
+      // matters. Only restore if the saved value still references something
+      // that exists in the currently-loaded models/voices lists, so we
+      // don't pick a locked or removed item.
+      const get = k => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+      const inList = (val, list, key='slug') => val && (list || []).some(x => x[key] === val);
+
+      const imageModels = (this.models?.image) || [];
+      const videoModels = (this.models?.video) || [];
+      const audioModels = (this.models?.audio) || [];
+
+      const im = get('imageGen.model');
+      if (inList(im, imageModels) && imageModels.find(m => m.slug === im)?.available) this.imageGen.model = im;
+      const ia = get('imageGen.aspect'); if (ia) this.imageGen.aspect = ia;
+
+      const vm = get('videoGen.model');
+      if (inList(vm, videoModels) && videoModels.find(m => m.slug === vm)?.available) this.videoGen.model = vm;
+      const va = get('videoGen.aspect'); if (va) this.videoGen.aspect = va;
+      const vd = get('videoGen.duration'); if (vd) this.videoGen.duration = Number(vd) || 10;
+
+      const am = get('audioGen.model');
+      if (inList(am, audioModels) && audioModels.find(m => m.slug === am)?.available) this.audioGen.model = am;
+
+      const avm = get('avatarGen.model');
+      if (avm) this.avatarGen.model = avm;
+      const avp = get('avatarGen.voiceProvider'); if (avp) this.avatarGen.voiceProvider = avp;
+
+      const bm = get('brollGen.videoModel');
+      if (inList(bm, videoModels) && videoModels.find(m => m.slug === bm)?.available) this.brollGen.videoModel = bm;
+      const ba = get('brollGen.aspectRatio');
+      if (ba && ['9:16','1:1','16:9'].includes(ba)) this.brollGen.aspectRatio = ba;
+
+      // Voice IDs are restored once the voices are loaded — handled lazily
+      // by `loadElevenlabsVoices` / `loadHeygenCatalogue` since those run
+      // asynchronously and aren't necessarily ready at init time.
+    },
+
     async loadEditorTemplates() {
       try {
         const r = await fetch('/api/editor/templates');
         if (r.ok) this.editorTemplates = await r.json();
+        // Restore last-used template, or fall back to the first available
+        // (or the existing `editor.template` default which is popout-yellow).
+        const saved = localStorage.getItem('editor.template');
+        if (saved && this.editorTemplates.some(t => t.slug === saved)) {
+          this.editor.template = saved;
+        } else if (this.editorTemplates.length && !this.editorTemplates.some(t => t.slug === this.editor.template)) {
+          this.editor.template = this.editorTemplates[0].slug;
+        }
       } catch (_) {}
     },
 
@@ -995,6 +1349,8 @@ function studio() {
         if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
         fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');
         fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
+        fd.append('enable_wpm_normalize', this.editor.enableNormalizeWpm ? 'true' : 'false');
+        fd.append('target_wpm', String(this.editor.targetWpm || 190));
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/multi_auto_edit', { method: 'POST', body: fd });
@@ -1028,6 +1384,8 @@ function studio() {
         if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
         fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');
         fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
+        fd.append('enable_wpm_normalize', this.editor.enableNormalizeWpm ? 'true' : 'false');
+        fd.append('target_wpm', String(this.editor.targetWpm || 190));
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/auto_edit', { method: 'POST', body: fd });
@@ -1252,6 +1610,7 @@ function studio() {
 
     selectEditorTemplate(slug) {
       this.editor.template = slug;
+      try { localStorage.setItem('editor.template', slug); } catch (_) {}
       // Reset custom overrides whenever the user picks a new template so the
       // custom card shows the new defaults next time it's opened.
       this.editor.overrides = {
@@ -1275,6 +1634,19 @@ function studio() {
       } catch (e) {
         this.heygenCatalogueError = String(e);
       }
+      // Restore last-used HeyGen avatar + voice now that catalogue loaded.
+      try {
+        const savedAvatar = localStorage.getItem('avatarGen.avatarId');
+        if (savedAvatar && this.heygenAvatars.some(a => a.avatar_id === savedAvatar)) {
+          this.avatarGen.avatarId = savedAvatar;
+        }
+        if (this.avatarGen.voiceProvider === 'heygen' || !this.avatarGen.voiceProvider) {
+          const savedVoice = localStorage.getItem('avatarGen.voiceId');
+          if (savedVoice && this.heygenVoices.some(v => v.voice_id === savedVoice)) {
+            this.avatarGen.voiceId = savedVoice;
+          }
+        }
+      } catch (_) {}
     },
 
     // --- Photo-avatar from a swap variant ----------------------------------
@@ -1357,10 +1729,16 @@ function studio() {
         if (!r.ok) { this.notifyError('Generate failed: ' + await r.text()); return; }
         const gen = await r.json();
         this.avatarHistory = [gen, ...this.avatarHistory];
-        this.avatarGen.script = '';
+        // Avatar + voice are kept selected (batch-generation friendly).
+        // Script preserved so users can iterate. Use clearAvatarForm()
+        // to start fresh.
       } finally {
         this.avatarGen.generating = false;
       }
+    },
+
+    clearAvatarForm() {
+      this.avatarGen.script = '';
     },
 
     // --- generations: image -------------------------------------------------
@@ -1491,13 +1869,18 @@ function studio() {
         if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
         const gen = await resp.json();
         this.imageHistory = [gen, ...this.imageHistory];
-        // Free object URLs and reset form
-        for (const r of this.imageGen.refs) if (r.url) URL.revokeObjectURL(r.url);
-        this.imageGen.refs = [];
-        this.imageGen.prompt = '';
+        // Form state is intentionally preserved so users can tweak prompt
+        // and re-submit without re-uploading refs. Use the "Clear" button
+        // or `clearImageForm()` to start fresh.
       } finally {
         this.imageGen.generating = false;
       }
+    },
+
+    clearImageForm() {
+      for (const r of this.imageGen.refs) if (r.url) URL.revokeObjectURL(r.url);
+      this.imageGen.refs = [];
+      this.imageGen.prompt = '';
     },
 
     // --- generations: video -------------------------------------------------
@@ -1525,12 +1908,17 @@ function studio() {
         if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
         const gen = await resp.json();
         this.videoHistory = [gen, ...this.videoHistory];
-        if (this.videoGen.ref?.url) URL.revokeObjectURL(this.videoGen.ref.url);
-        this.videoGen.ref = null;
-        this.videoGen.prompt = '';
+        // Preserve form so user can tweak the prompt and re-animate the
+        // same reference image. Use clearVideoForm() to start fresh.
       } finally {
         this.videoGen.generating = false;
       }
+    },
+
+    clearVideoForm() {
+      if (this.videoGen.ref?.url) URL.revokeObjectURL(this.videoGen.ref.url);
+      this.videoGen.ref = null;
+      this.videoGen.prompt = '';
     },
 
     // --- generations: retry + delete ----------------------------------------
@@ -2186,6 +2574,80 @@ function studio() {
       });
       if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
       this.job = await r.json();
+    },
+
+    async retryVariant(charId, variantId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/characters/${charId}/variants/${variantId}/retry`, {
+        method: 'POST',
+      });
+      if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
+      this.job = await r.json();
+      this.notifyInfo('Retrying just this variant — others are untouched');
+    },
+
+    // --- Step 2: per-character source-image picker ------------------------
+
+    // What URL should the character card show in Step 2? When a job is
+    // loaded, use the actual source image set on that JobCharacter (which
+    // can differ from the library's primary). Otherwise fall back to the
+    // library primary.
+    cardThumbUrl(ch) {
+      if (this.job) {
+        const jc = this.job.characters?.[ch.char_id];
+        if (jc?.source_image_url) return jc.source_image_url;
+      }
+      return ch.url;
+    },
+
+    // Match the JobCharacter's source_image_path's filename to a specific
+    // CharacterImage in the library so we can highlight "currently selected"
+    // in the picker. Returns image_id or null.
+    currentSourceImageId(ch) {
+      if (!this.job) return ch.primary_image_id;
+      const jc = this.job.characters?.[ch.char_id];
+      if (!jc?.source_image_url) return ch.primary_image_id;
+      // URL ends with /characters/<filename> — strip query strings + path.
+      const filename = jc.source_image_url.split('?')[0].split('/').pop();
+      const match = (ch.images || []).find(img => img.filename === filename);
+      return match?.image_id || ch.primary_image_id;
+    },
+
+    openImagePicker(charId, event) {
+      // Don't let the parent card's @click="toggleCharacter" fire too.
+      if (event) event.stopPropagation();
+      this.sourceImagePickerCharId =
+        this.sourceImagePickerCharId === charId ? null : charId;
+    },
+
+    closeImagePicker() {
+      this.sourceImagePickerCharId = null;
+    },
+
+    async setCharSourceImage(charId, imageId) {
+      this.sourceImagePickerCharId = null;
+      if (!this.job) {
+        // Creating a new job — no JobCharacter exists yet. For now we tell
+        // the user to start the job first, then swap. (Could be enhanced
+        // later to stage the override client-side.)
+        this.notifyError('Start the job first, then swap the reference image');
+        return;
+      }
+      try {
+        const r = await fetch(
+          `/api/jobs/${this.job.job_id}/characters/${charId}/source_image`,
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_id: imageId }),
+          },
+        );
+        if (!r.ok) { this.notifyError('Swap failed: ' + await r.text()); return; }
+        this.job = await r.json();
+        this.notifyInfo('Source image swapped — click ↻ regenerate to rebuild variants with the new reference');
+      } catch (e) {
+        this.notifyError('Swap failed: ' + e.message);
+      }
     },
 
     async saveTitle() {

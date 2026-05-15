@@ -143,6 +143,36 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     )
 
 
+async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> None:
+    """Re-run image gen for ONE specific (already-failed) variant slot.
+
+    Unlike `run_image_generation` which wipes all variants for the
+    character, this keeps the other (possibly successful) variants intact
+    and only re-attempts the failed slot. The variant_id is preserved so
+    the UI swaps it in place without losing scroll position.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None or job.movement_prompt:
+        return
+    jc = job.characters.get(char_id)
+    if jc is None:
+        return
+    target = next((v for v in jc.images if v.variant_id == variant_id), None)
+    if target is None:
+        return
+    # Reset the slot to GENERATING + clear any prior error
+    target.status = VariantStatus.GENERATING
+    target.error = None
+    _replace_variant(job, jc, target)
+    if jc.status in {CharStatus.FAILED, CharStatus.AWAITING_APPROVAL}:
+        _persist(job, jc, status=CharStatus.GENERATING, error=None)
+    await _emit(job_id, "variant.started",
+                char_id=char_id, variant_id=variant_id)
+    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    await _generate_one_variant(job, jc, target, sem)
+
+
 async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -> None:
     """Kick off N variants for the listed characters (or every non-progressing char)."""
     s = store()

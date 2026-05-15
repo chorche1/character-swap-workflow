@@ -188,6 +188,40 @@
         </div>
       </template>
     </div>
+
+    <!-- Recent media: cross-kind thumbnail strip at the bottom. Click a
+         thumbnail to jump to its tab and scroll to the card.  -->
+    <div x-show="recentMedia.length > 0"
+         class="border-t border-neutral-200 dark:border-neutral-800">
+      <details class="text-xs" :open="recentMediaOpen">
+        <summary class="px-3 py-2 cursor-pointer text-neutral-600 dark:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/50 select-none flex items-center justify-between"
+                 @click.prevent="recentMediaOpen = !recentMediaOpen">
+          <span>Recent media</span>
+          <span class="text-[10px] text-neutral-400 dark:text-neutral-500"
+                x-text="recentMedia.length"></span>
+        </summary>
+        <div class="grid grid-cols-4 gap-1 p-2 max-h-72 overflow-y-auto">
+          <template x-for="m in recentMedia.slice(0, 32)" :key="m.kind+'-'+m.id">
+            <button class="relative aspect-square rounded overflow-hidden border border-neutral-200 dark:border-neutral-700 hover:ring-2 hover:ring-indigo-400 transition-shadow"
+                    @click="jumpToActiveJob({tab: m.tab, id: m.id, kind: m.kind})"
+                    :title="`${m.kind} · ${m.label || m.id}`">
+              <template x-if="m.thumb && m.kind === 'image'">
+                <img :src="m.thumb" class="w-full h-full object-cover" />
+              </template>
+              <template x-if="m.thumb && m.kind !== 'image'">
+                <video :src="m.thumb" class="w-full h-full object-cover" muted playsinline></video>
+              </template>
+              <template x-if="!m.thumb">
+                <div class="w-full h-full bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-[8px] text-neutral-400"
+                     x-text="m.kind"></div>
+              </template>
+              <span class="absolute bottom-0 left-0 right-0 px-1 py-0.5 text-[8px] text-white bg-black/60 truncate"
+                    x-text="m.kind"></span>
+            </button>
+          </template>
+        </div>
+      </details>
+    </div>
   </aside>
 
   <!-- MAIN -->
@@ -346,11 +380,46 @@
                :class="selectedCharacters.includes(ch.char_id)
                          ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900'
                          : 'border-neutral-200 dark:border-neutral-800'"
-               @click="toggleCharacter(ch.char_id)">
-            <img :src="ch.url" class="w-full h-32 object-cover" />
-            <div x-show="(ch.images || []).length > 1"
-                 class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded">
-              <span x-text="(ch.images || []).length"></span> imgs
+               @click="toggleCharacter(ch.char_id)"
+               @click.away="sourceImagePickerCharId === ch.char_id && closeImagePicker()">
+            <img :src="cardThumbUrl(ch)" class="w-full h-32 object-cover" />
+            <!-- "N imgs" badge: clickable to open the source-image picker
+                 for THIS job. Only relevant when char has >1 image. -->
+            <button x-show="(ch.images || []).length > 1"
+                    class="absolute top-1.5 left-1.5 bg-neutral-900/70 hover:bg-neutral-900 text-white text-[10px] px-1.5 py-0.5 rounded inline-flex items-center gap-1 cursor-pointer"
+                    :class="sourceImagePickerCharId === ch.char_id ? 'ring-2 ring-indigo-400' : ''"
+                    @click.stop="openImagePicker(ch.char_id, $event)"
+                    :title="job ? 'Pick which reference image to use for this job' : 'Click to see images (start a job first to pick which one is used)'">
+              <span x-text="(ch.images || []).length"></span> imgs <span class="opacity-70">↕</span>
+            </button>
+
+            <!-- Source-image picker popover -->
+            <div x-show="sourceImagePickerCharId === ch.char_id"
+                 x-transition.opacity
+                 @click.stop=""
+                 class="absolute top-9 left-1.5 right-1.5 z-30 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg shadow-xl p-2">
+              <div class="text-[10px] font-semibold text-neutral-500 dark:text-neutral-400 px-1 pb-1 flex items-center justify-between">
+                <span>Reference image for this job</span>
+                <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                        @click.stop="closeImagePicker()">✕</button>
+              </div>
+              <div class="grid grid-cols-3 gap-1">
+                <template x-for="img in (ch.images || [])" :key="'pick-'+ch.char_id+'-'+img.image_id">
+                  <button class="relative aspect-square rounded overflow-hidden border-2 transition-all"
+                          :class="currentSourceImageId(ch) === img.image_id
+                                   ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900'
+                                   : 'border-neutral-200 dark:border-neutral-700 hover:border-indigo-400'"
+                          @click.stop="setCharSourceImage(ch.char_id, img.image_id)"
+                          :title="img.filename">
+                    <img :src="img.url" class="w-full h-full object-cover" />
+                    <span x-show="currentSourceImageId(ch) === img.image_id"
+                          class="absolute top-0 right-0 bg-indigo-500 text-white text-[9px] px-1 rounded-bl">✓</span>
+                  </button>
+                </template>
+              </div>
+              <p class="text-[9px] text-neutral-500 dark:text-neutral-400 mt-1.5 px-1 leading-snug">
+                After swapping, click ↻ on the character below (in Step 3) to regenerate variants with the new reference.
+              </p>
             </div>
             <div class="px-2 py-1 text-xs flex justify-between items-center gap-1 bg-white dark:bg-neutral-900 group/name">
               <template x-if="editingCharacterId !== ch.char_id">
@@ -392,9 +461,26 @@
           <label class="text-sm font-medium text-neutral-700 dark:text-neutral-300">
             Generation prompt
           </label>
-          <button x-show="!swapPromptIsDefault()"
-                  class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
-                  @click="resetSwapPrompt()">↺ reset to default</button>
+          <div class="flex items-center gap-3 text-xs">
+            <span x-show="swapProjectDefaultPrompt && currentProjectId"
+                  class="text-emerald-600 dark:text-emerald-400"
+                  title="This project has a custom default prompt">● using project default</span>
+            <button x-show="currentProjectId && (swapPrompt || '').trim() !== (swapProjectDefaultPrompt || '').trim()"
+                    class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                    @click="saveProjectDefaultPrompt()"
+                    title="Save the current prompt as this project's default. New jobs in this project will inherit it.">★ save as project default</button>
+            <button x-show="currentProjectId && swapProjectDefaultPrompt"
+                    class="text-neutral-500 dark:text-neutral-400 hover:underline"
+                    @click="swapPrompt = swapGlobalDefaultPrompt; saveProjectDefaultPrompt()"
+                    title="Remove this project's custom default; revert to the global default">✕ clear project default</button>
+            <button x-show="!swapPromptIsDefault()"
+                    class="text-indigo-600 dark:text-indigo-400 hover:underline"
+                    @click="resetSwapPrompt()">↺ reset</button>
+            <button x-show="swapProjectDefaultPrompt && (swapPrompt || '').trim() === (swapDefaultPrompt || '').trim()"
+                    class="text-neutral-500 dark:text-neutral-400 hover:underline"
+                    @click="resetSwapPromptToGlobal()"
+                    title="Replace with the GLOBAL default prompt (ignores project override)">↺ global default</button>
+          </div>
         </div>
         <textarea x-model="swapPrompt"
                   rows="4"
@@ -545,6 +631,9 @@
                               @click="deleteVariant(cid, v.variant_id)">✕</button>
                     </div>
                     <div class="flex gap-1" x-show="v.status === 'failed' && !job.movement_prompt">
+                      <button class="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950 rounded px-2 py-1 text-sm"
+                              title="Retry just this variant (keeps the other variants intact)"
+                              @click="retryVariant(cid, v.variant_id)">↻</button>
                       <button class="text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-2 py-1 text-sm"
                               title="Remove this failed entry"
                               @click="deleteVariant(cid, v.variant_id)">✕</button>
@@ -741,18 +830,38 @@
           <div class="text-xs text-neutral-400 dark:text-neutral-500"
                x-show="currentImageModel() && !currentImageModel().available"
                x-text="`(locked) ${currentImageModel()?.label} needs its API key configured.`"></div>
-          <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
-                  :disabled="!imageGen.prompt.trim() || !currentImageModel()?.available || imageGen.generating"
-                  @click="submitImageGen()">
-            <span x-show="!imageGen.generating">▶ Generate</span>
-            <span x-show="imageGen.generating">Submitting…</span>
-          </button>
+          <div class="ml-auto flex items-center gap-2">
+            <button class="px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-30"
+                    :disabled="!imageGen.prompt && imageGen.refs.length === 0"
+                    @click="clearImageForm()"
+                    title="Clear prompt and reference images">✕ Clear</button>
+            <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                    :disabled="!imageGen.prompt.trim() || !currentImageModel()?.available || imageGen.generating"
+                    @click="submitImageGen()">
+              <span x-show="!imageGen.generating">▶ Generate</span>
+              <span x-show="imageGen.generating">Submitting…</span>
+            </button>
+          </div>
         </div>
       </section>
 
       <!-- history grid -->
+      <div class="flex items-center gap-2 mb-3" x-show="imageHistory.length > 0">
+        <input type="search" placeholder="Search image history..."
+               x-model="historyFilters.image.q"
+               class="flex-1 px-3 py-1.5 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500" />
+        <select x-model="historyFilters.image.model"
+                class="px-2 py-1.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+          <option value="">All models</option>
+          <template x-for="m in _modelsInHistory(imageHistory)" :key="'imf-'+m">
+            <option :value="m" x-text="m"></option>
+          </template>
+        </select>
+        <span class="text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap"
+              x-text="`${filteredImageHistory.length} / ${imageHistory.length}`"></span>
+      </div>
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-        <template x-for="g in imageHistory" :key="g.gen_id">
+        <template x-for="g in filteredImageHistory" :key="g.gen_id">
           <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden bg-white dark:bg-neutral-900">
             <div class="aspect-square bg-neutral-100 dark:bg-neutral-800 relative">
               <template x-if="g.output_url">
@@ -774,11 +883,11 @@
               <div class="flex items-center justify-between mt-1 text-[10px] text-neutral-500 dark:text-neutral-400">
                 <span x-text="g.cost_usd != null ? formatUsd(g.cost_usd) : ''"></span>
                 <div class="flex gap-2">
-                  <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.png`"
+                  <a x-show="g.output_url" :href="g.output_url" :download="friendlyName(g, 'png')"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                   <button x-show="g.prompt" @click="reuseImageGen(g)"
-                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
-                          title="Load this prompt + settings into the form">reuse</button>
+                          class="px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-200 dark:hover:bg-indigo-900/70 font-medium"
+                          title="Load this prompt + settings into the form">↺ Reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -882,7 +991,11 @@
           <div class="text-xs text-neutral-400 dark:text-neutral-500"
                x-show="currentVideoModel() && !currentVideoModel().available"
                x-text="`(locked) ${currentVideoModel()?.label} needs its API key configured.`"></div>
-          <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
+          <button class="ml-auto px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-30"
+                  :disabled="!videoGen.prompt && !videoGen.ref"
+                  @click="clearVideoForm()"
+                  title="Clear prompt and reference image">✕ Clear</button>
+          <button class="ml-2 px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   :disabled="!videoGen.prompt.trim() || !videoGen.ref || !currentVideoModel()?.available || videoGen.generating"
                   @click="submitVideoGen()">
             <span x-show="!videoGen.generating">▶ Animate</span>
@@ -891,8 +1004,22 @@
         </div>
       </section>
 
+      <div class="flex items-center gap-2 mb-3" x-show="videoHistory.length > 0">
+        <input type="search" placeholder="Search video history..."
+               x-model="historyFilters.video.q"
+               class="flex-1 px-3 py-1.5 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500" />
+        <select x-model="historyFilters.video.model"
+                class="px-2 py-1.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+          <option value="">All models</option>
+          <template x-for="m in _modelsInHistory(videoHistory)" :key="'vmf-'+m">
+            <option :value="m" x-text="m"></option>
+          </template>
+        </select>
+        <span class="text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap"
+              x-text="`${filteredVideoHistory.length} / ${videoHistory.length}`"></span>
+      </div>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        <template x-for="g in videoHistory" :key="g.gen_id">
+        <template x-for="g in filteredVideoHistory" :key="g.gen_id">
           <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden bg-white dark:bg-neutral-900">
             <div class="aspect-[9/16] bg-black relative">
               <template x-if="g.output_url">
@@ -914,11 +1041,11 @@
               <div class="flex items-center justify-between mt-1 text-[10px] text-neutral-500 dark:text-neutral-400">
                 <span x-text="g.cost_usd != null ? formatUsd(g.cost_usd) : ''"></span>
                 <div class="flex gap-2">
-                  <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.mp4`"
+                  <a x-show="g.output_url" :href="g.output_url" :download="friendlyName(g, 'mp4')"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                   <button x-show="g.prompt" @click="reuseVideoGen(g)"
-                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
-                          title="Load this prompt + settings into the form">reuse</button>
+                          class="px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-200 dark:hover:bg-indigo-900/70 font-medium"
+                          title="Load this prompt + settings into the form">↺ Reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -1086,7 +1213,11 @@
           </div>
         </div>
 
-        <div class="mt-4 flex items-center justify-end">
+        <div class="mt-4 flex items-center justify-end gap-2">
+          <button class="px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-30"
+                  :disabled="!avatarGen.script"
+                  @click="clearAvatarForm()"
+                  title="Clear script (keeps avatar + voice selection)">✕ Clear script</button>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   :disabled="!avatarGen.script.trim() || !avatarGen.avatarId || !avatarGen.voiceId || !currentAvatarModel()?.available || avatarGen.generating"
                   @click="submitAvatarGen()">
@@ -1097,8 +1228,22 @@
       </section>
 
       <!-- history -->
+      <div class="flex items-center gap-2 mb-3" x-show="avatarHistory.length > 0">
+        <input type="search" placeholder="Search avatar history..."
+               x-model="historyFilters.avatar.q"
+               class="flex-1 px-3 py-1.5 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500" />
+        <select x-model="historyFilters.avatar.model"
+                class="px-2 py-1.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+          <option value="">All models</option>
+          <template x-for="m in _modelsInHistory(avatarHistory)" :key="'avf-'+m">
+            <option :value="m" x-text="m"></option>
+          </template>
+        </select>
+        <span class="text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap"
+              x-text="`${filteredAvatarHistory.length} / ${avatarHistory.length}`"></span>
+      </div>
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-        <template x-for="g in avatarHistory" :key="g.gen_id">
+        <template x-for="g in filteredAvatarHistory" :key="g.gen_id">
           <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden bg-white dark:bg-neutral-900">
             <div class="aspect-[9/16] bg-black relative">
               <template x-if="g.output_url">
@@ -1120,11 +1265,11 @@
               <div class="flex items-center justify-between mt-1 text-[10px] text-neutral-500 dark:text-neutral-400">
                 <span x-text="g.cost_usd != null ? formatUsd(g.cost_usd) : ''"></span>
                 <div class="flex gap-2">
-                  <a x-show="g.output_url" :href="g.output_url" :download="`${g.gen_id}.mp4`"
+                  <a x-show="g.output_url" :href="g.output_url" :download="friendlyName(g, 'mp4')"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                   <button x-show="g.prompt" @click="reuseAvatarGen(g)"
-                          class="text-indigo-600 dark:text-indigo-400 hover:underline"
-                          title="Load this script + avatar + voice">reuse</button>
+                          class="px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-200 dark:hover:bg-indigo-900/70 font-medium"
+                          title="Load this script + avatar + voice">↺ Reuse</button>
                   <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                           class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                   <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -1232,7 +1377,11 @@
                     placeholder="What should the voice say?"></textarea>
         </div>
 
-        <div class="flex items-center justify-end">
+        <div class="flex items-center justify-end gap-2">
+          <button class="px-3 py-2 rounded-lg border border-neutral-300 dark:border-neutral-700 text-neutral-600 dark:text-neutral-300 text-xs hover:bg-neutral-50 dark:hover:bg-neutral-800 disabled:opacity-30"
+                  :disabled="!audioGen.script && !audioGen.sourceAudio"
+                  @click="clearAudioForm()"
+                  title="Clear source / script (keeps voice + mode selection)">✕ Clear</button>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   :disabled="!audioGen.voiceId || !currentAudioModel()?.available || audioGen.generating
                              || (audioGen.model === 'elevenlabs-vc' && !audioGen.sourceAudio)
@@ -1245,8 +1394,22 @@
       </section>
 
       <!-- history -->
+      <div class="flex items-center gap-2 mb-3" x-show="audioHistory.length > 0">
+        <input type="search" placeholder="Search audio history..."
+               x-model="historyFilters.audio.q"
+               class="flex-1 px-3 py-1.5 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500" />
+        <select x-model="historyFilters.audio.model"
+                class="px-2 py-1.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+          <option value="">All models</option>
+          <template x-for="m in _modelsInHistory(audioHistory)" :key="'aumf-'+m">
+            <option :value="m" x-text="m"></option>
+          </template>
+        </select>
+        <span class="text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap"
+              x-text="`${filteredAudioHistory.length} / ${audioHistory.length}`"></span>
+      </div>
       <div class="space-y-2">
-        <template x-for="g in audioHistory" :key="g.gen_id">
+        <template x-for="g in filteredAudioHistory" :key="g.gen_id">
           <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl bg-white dark:bg-neutral-900 p-3">
             <div class="flex items-start gap-3">
               <div class="flex-1 min-w-0">
@@ -1271,11 +1434,11 @@
               <div class="flex items-center gap-2 text-xs shrink-0">
                 <span class="text-neutral-500 dark:text-neutral-400" x-text="g.cost_usd != null ? formatUsd(g.cost_usd) : ''"></span>
                 <a x-show="g.output_url" :href="g.output_url"
-                   :download="`${g.gen_id}.${/\.mp4($|\?)/i.test(g.output_url || '') ? 'mp4' : 'mp3'}`"
+                   :download="friendlyName(g)"
                    class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                 <button @click="reuseAudioGen(g)"
-                        class="text-indigo-600 dark:text-indigo-400 hover:underline"
-                        title="Load this voice + (TTS) script">reuse</button>
+                        class="px-2 py-0.5 rounded bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-200 hover:bg-indigo-200 dark:hover:bg-indigo-900/70 font-medium"
+                        title="Load this voice + (TTS) script">↺ Reuse</button>
                 <button x-show="g.status === 'failed'" @click="retryGen(g.gen_id)"
                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↻</button>
                 <button x-show="['done','failed'].includes(g.status)" @click="deleteGen(g.gen_id)"
@@ -1298,28 +1461,65 @@
          class="space-y-6">
       <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6 max-w-2xl mx-auto">
         <h2 class="text-lg font-semibold mb-1">B-roll generator</h2>
-        <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
+        <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-2">
           Drop a narration audio file (or video — we'll extract the audio).
-          Whisper transcribes it, GPT-4o plans cinematic medical-realism B-roll prompts
-          (BEFORE&nbsp;→&nbsp;TRIGGER&nbsp;→&nbsp;AFTER body-part transformations), each becomes a clip via your
-          chosen video model, and we stitch + mux your narration over the result.
+          Whisper transcribes it, GPT-4o plans cinematic medical-realism B-roll prompts,
+          each becomes a clip via your chosen video model, and we stitch + mux your narration over the result.
         </p>
+        <details class="text-xs text-neutral-500 dark:text-neutral-400 mb-4">
+          <summary class="cursor-pointer hover:text-neutral-700 dark:hover:text-neutral-200">
+            What are the 4 modes? (visual styles GPT-4o picks per line)
+          </summary>
+          <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+            <div class="flex items-start gap-2 p-2 rounded bg-violet-50 dark:bg-violet-900/20">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200 shrink-0">Mode 1</span>
+              <div><strong>Body Part Transformation</strong> — a single close-up where unhealthy tissue visibly changes to healthy across the clip's time. For lines about specific organs / symptoms.</div>
+            </div>
+            <div class="flex items-start gap-2 p-2 rounded bg-sky-50 dark:bg-sky-900/20">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-200 shrink-0">Mode 2</span>
+              <div><strong>Biological Process</strong> — close visualization of an internal process (blood flowing, fat shrinking, inflammation receding). For lines that describe a mechanism.</div>
+            </div>
+            <div class="flex items-start gap-2 p-2 rounded bg-amber-50 dark:bg-amber-900/20">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200 shrink-0">Mode 3</span>
+              <div><strong>Anatomical Flythrough</strong> — drone-style camera moving through a real anatomical space (blood vessel, spine, alveoli). For lines about journey / scale.</div>
+            </div>
+            <div class="flex items-start gap-2 p-2 rounded bg-emerald-50 dark:bg-emerald-900/20">
+              <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200 shrink-0">Mode 4</span>
+              <div><strong>Contextual Human Moment</strong> — tight close-up on one body part of a person experiencing the problem or result. For emotional / lifestyle lines.</div>
+            </div>
+          </div>
+        </details>
 
-        <!-- Model picker -->
-        <div class="mb-4">
-          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Video model</span>
-          <select x-model="brollGen.videoModel"
-                  class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-2 text-sm">
-            <template x-for="m in (models.video || [])" :key="'brm-'+m.slug">
-              <option :value="m.slug"
-                      :disabled="!m.available"
-                      x-text="`${m.label}${m.available ? '' : ' (locked)'}`"></option>
-            </template>
-          </select>
-          <p class="text-[11px] text-neutral-500 dark:text-neutral-400 mt-1">
-            Default is Grok Imagine. Veo gets a direct text-to-video path; everything else seeds with a gpt-image-2 frame first.
-          </p>
+        <!-- Model + aspect picker -->
+        <div class="mb-4 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-end">
+          <div>
+            <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Video model</span>
+            <select x-model="brollGen.videoModel"
+                    class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-2 text-sm">
+              <template x-for="m in (models.video || [])" :key="'brm-'+m.slug">
+                <option :value="m.slug"
+                        :disabled="!m.available"
+                        x-text="`${m.label}${m.available ? '' : ' (locked)'}`"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Aspect</span>
+            <div class="mt-1 inline-flex rounded-lg border border-neutral-300 dark:border-neutral-700 overflow-hidden">
+              <template x-for="a in ['9:16', '1:1', '16:9']" :key="'baspect-'+a">
+                <button class="px-3 py-2 text-sm transition-colors"
+                        :class="brollGen.aspectRatio === a
+                          ? 'bg-violet-600 text-white'
+                          : 'bg-transparent hover:bg-neutral-50 dark:hover:bg-neutral-800'"
+                        @click="brollGen.aspectRatio = a"
+                        x-text="a"></button>
+              </template>
+            </div>
+          </div>
         </div>
+        <p class="text-[11px] text-neutral-500 dark:text-neutral-400 -mt-2 mb-4">
+          Default is Grok Imagine at 9:16 (TikTok/Reels). 1:1 = Instagram feed, 16:9 = YouTube. The whole pipeline — seed image, video gen, concat canvas — adapts to the aspect.
+        </p>
 
         <!-- Source upload -->
         <div class="mb-4">
@@ -1368,8 +1568,24 @@
       </section>
 
       <!-- Active / recent B-roll jobs -->
+      <div class="flex items-center gap-2 mb-3" x-show="brollHistory.length > 0">
+        <input type="search" placeholder="Search transcripts or broll_id..."
+               x-model="historyFilters.broll.q"
+               class="flex-1 px-3 py-1.5 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500" />
+        <select x-model="historyFilters.broll.status"
+                class="px-2 py-1.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+          <option value="">All statuses</option>
+          <option value="done">Done</option>
+          <option value="partial_success">Partial</option>
+          <option value="awaiting_approval">Awaiting approval</option>
+          <option value="generating_clips">Generating</option>
+          <option value="failed">Failed</option>
+        </select>
+        <span class="text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap"
+              x-text="`${filteredBrollHistory.length} / ${brollHistory.length}`"></span>
+      </div>
       <div class="space-y-4">
-        <template x-for="b in brollHistory" :key="'br-'+b.broll_id">
+        <template x-for="b in filteredBrollHistory" :key="'br-'+b.broll_id">
           <div class="bg-white dark:bg-neutral-900 rounded-xl border border-neutral-200 dark:border-neutral-800 p-4">
             <div class="flex items-center justify-between gap-3 mb-3">
               <div class="flex items-center gap-2 text-xs">
@@ -1386,6 +1602,9 @@
                       x-text="`${b.n_failed_clips} failed`"></span>
                 <span x-show="b.audio_duration_secs" class="text-neutral-500 dark:text-neutral-400"
                       x-text="`audio: ${(b.audio_duration_secs || 0).toFixed(1)}s`"></span>
+                <span x-show="b.created_at && b.status !== 'done' && b.status !== 'failed'"
+                      class="text-neutral-500 dark:text-neutral-400"
+                      x-text="`elapsed ${formatElapsed(b.created_at)}`"></span>
               </div>
               <div class="flex items-center gap-2 text-xs">
                 <button @click="refreshBroll(b.broll_id)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↻ refresh</button>
@@ -1393,12 +1612,27 @@
               </div>
             </div>
 
+            <!-- Aggregate progress bar while generating clips -->
+            <template x-if="b.clips && b.clips.length && ['generating_clips','awaiting_approval','concatenating'].includes(b.status) && brollProgress(b)">
+              <div class="mb-3">
+                <div class="flex items-center justify-between text-[11px] text-neutral-500 dark:text-neutral-400 mb-1">
+                  <span x-text="`${brollProgress(b).done} of ${brollProgress(b).n} clips done${brollProgress(b).failed ? ' · ' + brollProgress(b).failed + ' failed' : ''}${brollProgress(b).inFlight ? ' · ' + brollProgress(b).inFlight + ' in flight' : ''}`"></span>
+                  <span x-show="brollProgress(b).eta" x-text="`ETA ${brollProgress(b).eta}`"></span>
+                </div>
+                <div class="h-1.5 w-full rounded-full bg-neutral-200 dark:bg-neutral-800 overflow-hidden">
+                  <div class="h-full bg-indigo-500 transition-all duration-500"
+                       :style="`width: ${brollProgress(b).percent}%`"></div>
+                </div>
+              </div>
+            </template>
+
             <!-- final video if done -->
             <template x-if="b.final_video_url">
               <div class="mb-3">
                 <video :src="b.final_video_url" controls class="w-full max-w-md rounded bg-black"></video>
                 <div class="mt-1 text-xs">
-                  <a :href="b.final_video_url" :download="`broll-${b.broll_id}.mp4`"
+                  <a :href="b.final_video_url"
+                     :download="`broll-${(b.transcript || '').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40) || b.broll_id}-${new Date(b.created_at || Date.now()).toISOString().slice(0,10)}.mp4`"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download final</a>
                 </div>
               </div>
@@ -1445,6 +1679,9 @@
                                       'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200'"
                               x-text="c.status"></span>
                       </div>
+                      <div x-show="['pending','image_running','image_done','video_running'].includes(c.status) && c.transition_at"
+                           class="text-[9px] text-amber-600 dark:text-amber-400 mt-0.5"
+                           x-text="`running ${formatElapsed(c.transition_at)}`"></div>
                       <div class="mt-1 flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
                         <span x-show="c.target_duration_secs"
                               x-text="`target: ${c.target_duration_secs}s`"></span>
@@ -1458,7 +1695,7 @@
                               title="LLM line didn't fuzzy-match the transcript — timing estimated">unmatched</span>
                       </div>
                       <template x-if="c.mode">
-                        <div class="mt-1 inline-block px-1 py-0.5 rounded text-[9px] font-semibold"
+                        <div class="mt-1 inline-block px-1 py-0.5 rounded text-[9px] font-semibold cursor-help"
                              :class="
                                 /Mode 1/i.test(c.mode) ? 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200' :
                                 /Mode 2/i.test(c.mode) ? 'bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-200' :
@@ -1466,7 +1703,13 @@
                                 /Mode 4/i.test(c.mode) ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200' :
                                 'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'
                              "
-                             x-text="c.mode"></div>
+                             :title="c.mode"
+                             x-text="(c.mode.match(/Mode \d/) || [c.mode])[0]"></div>
+                      </template>
+                      <template x-if="c.scene_group">
+                        <div class="mt-1 ml-1 inline-block px-1 py-0.5 rounded text-[9px] font-semibold bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-200 cursor-help"
+                             :title="'Scene group: ' + c.scene_group + ' — visually continues from the previous clip in the same group (same environment, same objects, cumulative state)'"
+                             x-text="'🔗 ' + c.scene_group"></div>
                       </template>
                       <div class="mt-1 text-neutral-700 dark:text-neutral-300 line-clamp-2"
                            :title="c.line" x-text="c.line"></div>
@@ -1624,7 +1867,7 @@
             </div>
 
             <!-- Step toggles -->
-            <div class="flex items-center gap-4 text-xs">
+            <div class="flex items-center gap-4 text-xs flex-wrap">
               <label class="flex items-center gap-1.5 cursor-pointer">
                 <input type="checkbox" x-model="editor.enableTrim" />
                 <span class="text-neutral-300">Trim silences</span>
@@ -1632,6 +1875,17 @@
               <label class="flex items-center gap-1.5 cursor-pointer">
                 <input type="checkbox" x-model="editor.enableCaptions" />
                 <span class="text-neutral-300">Captions</span>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer"
+                     title="Time-stretch each clip independently so the speaker hits the target WPM. Audio pitch preserved.">
+                <input type="checkbox" x-model="editor.enableNormalizeWpm" />
+                <span class="text-neutral-300">Normalize pace to</span>
+                <input type="number" min="100" max="280" step="5"
+                       x-model.number="editor.targetWpm"
+                       :disabled="!editor.enableNormalizeWpm"
+                       @click.stop
+                       class="w-14 px-1 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded disabled:opacity-40" />
+                <span class="text-neutral-300">WPM</span>
               </label>
               <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
             </div>
@@ -1662,6 +1916,31 @@
                         :class="m.unmatched ? 'text-red-400' : ''"
                         x-text="`clip ${m.clip_index+1} · ${(m.score*100).toFixed(0)}%`"></span>
                   <span class="flex-1 text-neutral-500 truncate" x-text="m.transcript_preview"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- WPM normalization result (per-clip) -->
+          <div x-show="multiResult?.wpm_normalize?.clips" class="pt-3 border-t border-neutral-200 dark:border-neutral-800">
+            <div class="text-xs font-semibold text-neutral-300 mb-2 flex items-center gap-2">
+              <span>Pace normalization</span>
+              <span class="text-neutral-500 font-normal"
+                    x-text="`target ${multiResult?.wpm_normalize?.target_wpm} WPM`"></span>
+            </div>
+            <div class="space-y-1.5">
+              <template x-for="(c, i) in (multiResult?.wpm_normalize?.clips || [])" :key="'wpm-'+i">
+                <div class="flex items-center gap-2 text-xs">
+                  <span class="text-neutral-500 w-5 text-right" x-text="`${i+1}.`"></span>
+                  <span class="text-neutral-300 font-mono w-24"
+                        x-text="`clip ${c.source_clip_idx+1} · ${c.original_wpm} WPM`"></span>
+                  <span class="font-mono"
+                        :class="c.stretched
+                                  ? (c.speed_factor > 1 ? 'text-amber-400' : 'text-sky-400')
+                                  : 'text-neutral-500'"
+                        x-text="c.stretched
+                                  ? `${c.speed_factor > 1 ? '↑' : '↓'} ${c.speed_factor}× ${(c.original_wpm * c.speed_factor).toFixed(0)} WPM`
+                                  : 'unchanged (within dead zone)'"></span>
                 </div>
               </template>
             </div>
@@ -1967,7 +2246,7 @@
               <!-- Render bar -->
               <div class="border-t border-neutral-200 dark:border-neutral-800 p-4 bg-neutral-50 dark:bg-neutral-900/40 space-y-2">
                 <!-- Step toggles -->
-                <div class="flex items-center justify-center gap-4 text-xs">
+                <div class="flex items-center justify-center gap-4 text-xs flex-wrap">
                   <label class="flex items-center gap-1.5 cursor-pointer">
                     <input type="checkbox" x-model="editor.enableTrim" />
                     <span class="text-neutral-300">Trim silences</span>
@@ -1975,6 +2254,17 @@
                   <label class="flex items-center gap-1.5 cursor-pointer">
                     <input type="checkbox" x-model="editor.enableCaptions" />
                     <span class="text-neutral-300">Captions</span>
+                  </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer"
+                         title="Time-stretch the clip so the speaker hits the target WPM. Audio pitch preserved.">
+                    <input type="checkbox" x-model="editor.enableNormalizeWpm" />
+                    <span class="text-neutral-300">Normalize pace to</span>
+                    <input type="number" min="100" max="280" step="5"
+                           x-model.number="editor.targetWpm"
+                           :disabled="!editor.enableNormalizeWpm"
+                           @click.stop
+                           class="w-14 px-1 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded disabled:opacity-40" />
+                    <span class="text-neutral-300">WPM</span>
                   </label>
                   <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
                 </div>
@@ -2492,7 +2782,8 @@
               <div class="p-2 text-xs">
                 <div class="flex items-center justify-between">
                   <span class="bg-neutral-900/70 text-white px-1.5 py-0.5 rounded text-[10px]" x-text="e.kind"></span>
-                  <a :href="e.output_url" :download="`${e.kind}-${e.edit_id}.mp4`"
+                  <a :href="e.output_url"
+                     :download="`${e.kind || 'edit'}-${e.template || ''}-${new Date(e.ts || Date.now()).toISOString().slice(0,10)}.mp4`"
                      class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                 </div>
                 <div class="mt-1 text-[10px] text-neutral-500 dark:text-neutral-400"
@@ -2504,6 +2795,42 @@
       </div>
     </div>
   </main>
+
+  <!-- BOTTOM-RIGHT: persistent status toast for in-flight generations -->
+  <div x-show="activeJobs.length > 0"
+       x-transition.opacity
+       class="fixed bottom-4 right-4 z-50 w-80 max-h-[60vh] overflow-y-auto bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl shadow-xl">
+    <div class="px-3 py-2 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-2">
+      <span class="relative flex h-2 w-2">
+        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+        <span class="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
+      </span>
+      <span class="text-xs font-semibold text-neutral-700 dark:text-neutral-300">In flight</span>
+      <span class="text-[10px] text-neutral-500 dark:text-neutral-400 ml-auto"
+            x-text="`${activeJobs.length}`"></span>
+    </div>
+    <div class="divide-y divide-neutral-200 dark:divide-neutral-800">
+      <template x-for="job in activeJobs" :key="job.kind+'-'+job.id">
+        <button class="w-full text-left px-3 py-2 hover:bg-neutral-50 dark:hover:bg-neutral-800/60 transition-colors"
+                @click="jumpToActiveJob(job)">
+          <div class="flex items-center gap-2 text-[10px] font-semibold uppercase">
+            <span class="px-1.5 py-0.5 rounded"
+                  :class="job.kind === 'broll' ? 'bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-200'
+                       : job.kind === 'image' ? 'bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-200'
+                       : job.kind === 'video' ? 'bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200'
+                       : job.kind === 'audio' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200'
+                       : 'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-200'"
+                  x-text="job.kind"></span>
+            <span class="text-neutral-500 dark:text-neutral-400" x-text="job.status"></span>
+            <span x-show="job.progress" class="ml-auto text-neutral-500 dark:text-neutral-400"
+                  x-text="job.progress"></span>
+          </div>
+          <div class="mt-1 text-xs text-neutral-700 dark:text-neutral-300 line-clamp-2"
+               x-text="job.label || job.id"></div>
+        </button>
+      </template>
+    </div>
+  </div>
 
   <!-- RIGHT-SIDE CHARACTER LIBRARY -->
   <aside x-show="showCharLib"

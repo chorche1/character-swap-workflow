@@ -425,6 +425,46 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               words_per_card=3,
                               highlight_color="&H0000F4FF",       # warm yellow
                               margin_v=400, all_caps=False),
+
+    # Instagram Sans Bold — the official IG caption font. Slightly wider /
+    # warmer than Helvetica, mid-weight bold, designed for legibility on
+    # photo backgrounds. Mixed case + soft shadow gives the polished
+    # editorial look you see on most Reels captions.
+    "instagram":     CaptionStyle(font="Instagram Sans Bold", size=82,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H60000000",       # very subtle edge
+                              outline=2, shadow=5, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=False),
+
+    # Same Instagram Sans but with a magenta-pink active word highlight —
+    # IG-feed flavor for emphasis-driven cuts.
+    "instagram-pop": CaptionStyle(font="Instagram Sans Bold", size=88,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=2, shadow=4, bold=True, box=False,
+                              words_per_card=3,
+                              highlight_color="&H00B56BFF",       # RGB 255,107,181
+                              margin_v=400, all_caps=False),
+
+    # TikTok Sans ExtraBold — the official TikTok-platform font. Very heavy,
+    # condensed, designed for vertical mobile. Pairs with all-caps + cyan
+    # active-word highlight to match the TikTok caption-popout aesthetic.
+    "tiktok-pop":    CaptionStyle(font="TikTok Sans ExtraBold", size=110,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=5, shadow=3, bold=True, box=False,
+                              words_per_card=3,
+                              highlight_color="&H0000FFFF",       # yellow (BGR FFFF00 = RGB 255,255,0)
+                              margin_v=400, all_caps=True),
+
+    # TikTok Sans Black — heaviest weight, mixed case, no highlight. Clean
+    # but commands attention. The "premium product launch" feel rather
+    # than the popout-yellow viral look.
+    "tiktok-black":  CaptionStyle(font="TikTok Sans Black", size=100,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=4, shadow=5, bold=True, box=False,
+                              words_per_card=3, margin_v=400, all_caps=False),
 }
 
 
@@ -552,6 +592,182 @@ def render_captions(input_video: Path, output_video: Path, *,
         return {"n_words": len(words), "template": style.font + f"/{style.size}"}
 
 
+def compute_wpm(words: list[Word], *,
+                ignore_silence_above_secs: float = 0.4) -> float:
+    """Words per minute, robust to Whisper's quirks.
+
+    OpenAI's whisper-1 API returns word-level timestamps that are
+    typically interpolated INSIDE each segment: word[i].end is set to
+    word[i+1].start (no gap). So summing per-word durations is
+    equivalent to using the span from first-word.start to
+    last-word.end — both fold inter-word silences into "speaking time".
+
+    The real talking-pace measure is:
+
+        active_speaking_secs = span − sum(inter-word gaps > threshold)
+
+    i.e. the time minus REAL pauses (between phrases, mid-sentence
+    breaths, etc.). This gives a number that answers "if you silence-
+    trimmed this clip first, what would its WPM be?" — which is what
+    "talking speed" actually means perceptually.
+
+    A clip where the speaker delivers 5 words then pauses 2 seconds
+    then delivers 5 more words ends up with the SAME WPM as a clip
+    where they deliver 10 words back-to-back at the same mouth-speed.
+    Stretching both to the same target gives them the same perceived
+    talking pace while preserving their original pause structures.
+
+    Returns 0.0 for empty / too-short / zero-duration lists.
+    """
+    if len(words) < 2:
+        return 0.0
+    total_span = words[-1].end - words[0].start
+    if total_span <= 0.1:
+        return 0.0
+    # Subtract LONG inter-word gaps (real pauses). Short gaps are
+    # Whisper segmentation noise / breathing / micro-pauses and should
+    # stay counted as part of speaking time.
+    long_pause_secs = 0.0
+    for i in range(1, len(words)):
+        gap = words[i].start - words[i - 1].end
+        if gap > ignore_silence_above_secs:
+            long_pause_secs += gap
+    active_secs = total_span - long_pause_secs
+    if active_secs <= 0.1:
+        return 0.0
+    return (len(words) / active_secs) * 60.0
+
+
+def compute_speed_factor(words: list[Word], *,
+                         target_wpm: float = 190.0,
+                         min_factor: float = 0.5,
+                         max_factor: float = 2.0,
+                         dead_zone: float = 0.03) -> float:
+    """The ffmpeg `atempo` factor that brings the clip's spoken pace to
+    target_wpm.
+
+    Key insight: ffmpeg's `atempo=X` makes audio play X times AS FAST.
+    So if the source is 252 WPM (too fast) and target is 190, we want
+    to SLOW DOWN — atempo should be < 1 (specifically 190/252 = 0.754).
+    Conversely if the source is 130 WPM (too slow), atempo > 1 to speed
+    up.
+
+    Formula: `target_wpm / current_wpm`.
+
+    After playback at this factor, new spoken pace = current × factor =
+    current × (target / current) = target. ✓
+
+    Returns 1.0 (no change) when:
+      - the transcript is empty / too short to measure (`compute_wpm` == 0)
+      - the current pace is within `dead_zone` of target (±3% by default)
+        — no point burning an ffmpeg pass for a negligible adjustment
+
+    Clamped to `[min_factor, max_factor]` so we stay inside ffmpeg
+    `atempo`'s pitch-preserving single-pass range. Pace outside this
+    range still gets *some* normalization at the boundary.
+    """
+    current = compute_wpm(words)
+    if current <= 0:
+        return 1.0
+    factor = target_wpm / current
+    if abs(factor - 1.0) < dead_zone:
+        return 1.0
+    return max(min_factor, min(max_factor, factor))
+
+
+def time_stretch(input_path: Path, output_path: Path, *,
+                 speed_factor: float, job_id: str | None = None) -> Path:
+    """Time-stretch a video by `speed_factor` (>1 speeds up, <1 slows
+    down). Audio pitch is preserved via ffmpeg's `atempo` filter; video
+    PTS is scaled in lockstep via `setpts` so A/V stay in sync.
+
+    speed_factor very close to 1.0 takes a fast path — we still re-encode
+    so the output has a consistent codec for downstream `concat_videos`,
+    but skip the atempo/setpts filters.
+
+    speed_factor outside [0.5, 2.0] raises ValueError — callers should
+    clamp via `compute_speed_factor` first.
+    """
+    if speed_factor < 0.5 or speed_factor > 2.0:
+        raise ValueError(
+            f"speed_factor {speed_factor} outside safe atempo range [0.5, 2.0]"
+        )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with record(phase="editor_time_stretch", model="ffmpeg-atempo",
+                character="editor", job_id=job_id) as entry:
+        entry["speed_factor"] = round(speed_factor, 4)
+        if abs(speed_factor - 1.0) < 1e-3:
+            # Passthrough: still re-encode to clean h264/aac so downstream
+            # concat sees the same codec as a stretched clip would have.
+            _run([
+                _ffmpeg(), "-y", "-i", str(input_path),
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k",
+                str(output_path),
+            ])
+            return output_path
+        # `atempo` is pitch-preserving for audio; `setpts=PTS/factor`
+        # scales the video time-base by the same factor so the two
+        # streams stay locked.
+        _run([
+            _ffmpeg(), "-y", "-i", str(input_path),
+            "-filter_complex",
+            f"[0:v]setpts=PTS/{speed_factor:.4f}[v];"
+            f"[0:a]atempo={speed_factor:.4f}[a]",
+            "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ])
+    return output_path
+
+
+def scale_word_timestamps(words: list[Word], speed_factor: float) -> list[Word]:
+    """After a clip has been time-stretched by `speed_factor`, every
+    Word's start/end timestamps must be divided by `speed_factor` to
+    align with the new (shorter or longer) clip. Higher speed → shorter
+    output → smaller timestamps.
+
+    Returns a new list — `words` is not mutated.
+    """
+    if abs(speed_factor - 1.0) < 1e-3:
+        return list(words)
+    return [
+        Word(text=w.text,
+             start=w.start / speed_factor,
+             end=w.end / speed_factor)
+        for w in words
+    ]
+
+
+def extract_last_frame(video_path: Path, dest_png: Path) -> Path | None:
+    """Pull the last frame of a video out as a PNG. Returns the dest path
+    on success, or None if ffmpeg fails (corrupt clip, zero-duration,
+    codec mismatch, etc.) so callers can fall back gracefully.
+
+    Used by the B-roll runner to chain scene-group clips: clip N+1's
+    video gen starts from clip N's last frame, so the same physical
+    scene with cumulative state carries forward.
+
+    `-sseof -1.0` seeks 1.0s before EOF and decodes one frame from
+    there. For clips shorter than 1s, ffmpeg gracefully clamps to the
+    available range and still emits the last available frame.
+    `-q:v 2` keeps the JPEG-equivalent quality high (libavformat uses
+    this for PNG-via-mjpeg edge cases on some platforms).
+    """
+    dest_png.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _run([
+            _ffmpeg(), "-y", "-sseof", "-1.0",
+            "-i", str(video_path),
+            "-vframes", "1", "-q:v", "2",
+            str(dest_png),
+        ])
+    except RuntimeError:
+        return None
+    return dest_png if dest_png.exists() and dest_png.stat().st_size > 0 else None
+
+
 def trim_range(input_path: Path, output_path: Path, *,
                start_secs: float, end_secs: float) -> Path:
     """Cut a video to [start, end] seconds (re-encode for clean frames).
@@ -595,9 +811,26 @@ def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> li
     return out
 
 
-def concat_videos(video_paths: list[Path], output_path: Path) -> Path:
+def _target_resolution(aspect_ratio: str) -> tuple[int, int]:
+    """Map an aspect ratio string ("9:16", "1:1", "16:9") to a target
+    pixel resolution. All output sizes target a 1080-pixel short edge
+    to match Grok/Veo/Kling defaults."""
+    a = (aspect_ratio or "9:16").strip()
+    return {
+        "9:16": (1080, 1920),   # vertical (TikTok / Reels / Shorts)
+        "1:1":  (1080, 1080),   # square (Instagram feed)
+        "16:9": (1920, 1080),   # landscape (YouTube / web)
+    }.get(a, (1080, 1920))
+
+
+def concat_videos(video_paths: list[Path], output_path: Path,
+                  *, aspect_ratio: str = "9:16") -> Path:
     """Concatenate N videos into one. Re-encodes (rather than concat demuxer)
-    so clips with different codecs/resolutions still play back cleanly."""
+    so clips with different codecs/resolutions still play back cleanly.
+
+    `aspect_ratio` determines the target canvas — clips with different
+    aspect ratios get letterboxed/pillarboxed onto the chosen canvas.
+    """
     if not video_paths:
         raise ValueError("concat_videos: no inputs")
     if len(video_paths) == 1:
@@ -608,12 +841,13 @@ def concat_videos(video_paths: list[Path], output_path: Path) -> Path:
         return output_path
 
     # Use the concat filter (handles different fps / size) with auto-scaling
-    # to the FIRST clip's resolution. Normalize everything to 1080x1920 (9:16);
-    # landscape sources get letterboxed. Audio normalized to 44.1kHz stereo.
+    # to the chosen target resolution. Landscape sources get letterboxed if
+    # we're outputting vertical, vertical sources get pillarboxed if we're
+    # outputting landscape. Audio normalized to 44.1kHz stereo.
     inputs: list[str] = []
     for p in video_paths:
         inputs += ["-i", str(p)]
-    target_w, target_h = 1080, 1920
+    target_w, target_h = _target_resolution(aspect_ratio)
     parts: list[str] = []
     for i in range(len(video_paths)):
         parts.append(

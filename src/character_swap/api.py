@@ -559,6 +559,7 @@ def _project_to_dict(project: ProjectAsset, n_jobs: int) -> dict:
         "project_id": project.project_id,
         "name": project.name,
         "character_ids": project.character_ids,
+        "default_prompt": project.default_prompt,
         "n_jobs": n_jobs,
         "created_at": project.created_at.isoformat() + "Z",
         "updated_at": project.updated_at.isoformat() + "Z",
@@ -630,6 +631,15 @@ async def patch_project(project_id: str, body: dict) -> dict:
         if not isinstance(raw, list):
             raise HTTPException(400, "character_ids must be a list of strings")
         project.character_ids = _validate_character_ids(s, raw)
+        changed = True
+    if "default_prompt" in body:
+        raw = body.get("default_prompt")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            project.default_prompt = None    # clear → fall back to global default
+        elif isinstance(raw, str):
+            project.default_prompt = raw.strip()
+        else:
+            raise HTTPException(400, "default_prompt must be a string or null")
         changed = True
 
     if not changed:
@@ -715,6 +725,13 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
             f"Add the right API key to .env.",
         )
     custom_prompt = (body.prompt or "").strip() or None
+    # If no explicit prompt was supplied and the job's project has a
+    # custom default_prompt, inherit it. This lets the user say "every
+    # job in project X uses this prompt" without having to retype it.
+    if not custom_prompt and body.project_id:
+        proj = s.get_project(body.project_id)
+        if proj and proj.default_prompt:
+            custom_prompt = proj.default_prompt
 
     job = Job(
         job_id=job_id,
@@ -866,6 +883,81 @@ async def approve(job_id: str, body: ApproveBody, background: BackgroundTasks) -
         background.add_task(_run_async, runner.run_image_generation, job_id, [body.char_id])
     else:
         raise HTTPException(400, f"Unknown action '{body.action}'")
+    return _job_to_dict(job)
+
+
+class SetSourceImageBody(BaseModel):
+    image_id: str
+
+
+@app.patch("/api/jobs/{job_id}/characters/{char_id}/source_image")
+async def set_character_source_image(job_id: str, char_id: str,
+                                      body: SetSourceImageBody) -> dict:
+    """Swap which image (from the character's library gallery) is used as
+    the reference for THIS character on THIS job. Useful when a character
+    has multiple reference photos and the user wants different photos for
+    different scenes.
+
+    Refused when:
+    - the job's movement_prompt is set (the whole approval/gen flow is locked)
+    - the character is currently mid-generation or mid-animation (race condition)
+    Existing already-generated variants on the character are NOT regenerated
+    automatically — the user can hit ↻ regenerate after swapping if they want.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.movement_prompt:
+        raise HTTPException(409,
+            "Movement prompt already submitted; source image is locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    if jc.status in {CharStatus.GENERATING, CharStatus.ANIMATING}:
+        raise HTTPException(409,
+            f"Character is '{jc.status}', wait until it settles before swapping the source")
+
+    asset = s.get_character(char_id)
+    if asset is None:
+        raise HTTPException(404, "Character not in library")
+    image = next((i for i in (asset.images or []) if i.image_id == body.image_id), None)
+    if image is None:
+        raise HTTPException(404, "image_id not found on this character")
+
+    jc.source_image_path = str(settings.characters_dir / image.filename)
+    jc.updated_at = datetime.utcnow()
+    job.characters[char_id] = jc
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "char.source_image_changed",
+                                   "job_id": job_id, "char_id": char_id,
+                                   "image_id": body.image_id})
+    return _job_to_dict(job)
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/retry")
+async def retry_variant(job_id: str, char_id: str, variant_id: str,
+                        background: BackgroundTasks) -> dict:
+    """Re-run image gen for one specific failed variant — keeps the other
+    variants on this character intact and only re-attempts the failed slot.
+    Refuses if movement_prompt is set (gen flow is locked) or if the variant
+    isn't currently in FAILED state."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.movement_prompt:
+        raise HTTPException(409, "Movement prompt already submitted; variants are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    target = next((v for v in jc.images if v.variant_id == variant_id), None)
+    if target is None:
+        raise HTTPException(404, "Variant not found on this character")
+    if target.status != VariantStatus.FAILED:
+        raise HTTPException(409,
+            f"Variant status is '{target.status}', not 'failed' — nothing to retry")
+    background.add_task(_run_async, runner.retry_single_variant, job_id, char_id, variant_id)
     return _job_to_dict(job)
 
 
@@ -1277,11 +1369,27 @@ async def get_gen_models() -> dict:
 
 
 @app.get("/api/swap/defaults")
-async def get_swap_defaults() -> dict:
-    """Defaults for the Swap-tab Step-2 form (prompt + model)."""
+async def get_swap_defaults(project_id: str | None = None) -> dict:
+    """Defaults for the Swap-tab Step-2 form (prompt + model).
+
+    If `project_id` is given AND that project has a custom `default_prompt`,
+    we return that instead of the global default. The frontend uses this
+    to drive both the textarea's initial value and the "↺ reset to default"
+    button. `global_prompt` is always returned alongside so the frontend
+    can offer a "reset to global default" too.
+    """
     from character_swap import pipeline
+    global_prompt = pipeline.GENERATION_PROMPT
+    project_prompt: str | None = None
+    if project_id:
+        s = store()
+        project = s.get_project(project_id)
+        if project and project.default_prompt:
+            project_prompt = project.default_prompt
     return {
-        "prompt": pipeline.GENERATION_PROMPT,
+        "prompt": project_prompt or global_prompt,
+        "global_prompt": global_prompt,
+        "project_prompt": project_prompt,
         "image_model": "gpt-image",
         "image_models": _models_payload()["image"],
     }
@@ -1619,6 +1727,8 @@ async def editor_auto_edit(
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),        # opt-out of auto silence-trim
     enable_captions: bool = Form(True),    # opt-out of caption burn-in
+    enable_wpm_normalize: bool = Form(True),  # time-stretch to hit target_wpm
+    target_wpm: float = Form(190.0),
 ) -> dict:
     """One-shot pipeline. Each step is opt-out:
       - trim silences (enable_trim)
@@ -1689,7 +1799,38 @@ async def editor_auto_edit(
         except Exception as e:
             raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
 
-    # Step 3: captions (optional)
+    # Step 3a: transcribe (required if captions OR wpm-normalize is on)
+    words: list = []
+    if enable_captions or enable_wpm_normalize:
+        settings.require_keys("openai")
+        words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
+        if enable_captions and not words:
+            raise HTTPException(422, "No speech detected — nothing to caption")
+
+    # Step 3b: WPM normalization (time-stretch so spoken pace ≈ target_wpm)
+    wpm_info: dict | None = None
+    if enable_wpm_normalize and words:
+        original_wpm = video_edit.compute_wpm(words)
+        speed = video_edit.compute_speed_factor(words, target_wpm=target_wpm)
+        if abs(speed - 1.0) > 1e-3:
+            stretched = edit_dir / "03-stretched.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.time_stretch, current, stretched,
+                    speed_factor=speed, job_id=edit_id,
+                )
+            except (RuntimeError, ValueError) as e:
+                raise HTTPException(500, f"Time-stretch failed: {e}")
+            words = video_edit.scale_word_timestamps(words, speed)
+            current = stretched
+        wpm_info = {
+            "original_wpm": round(original_wpm, 1),
+            "target_wpm": target_wpm,
+            "speed_factor": round(speed, 3),
+            "stretched": abs(speed - 1.0) > 1e-3,
+        }
+
+    # Step 3c: captions (optional)
     cap_info: dict | None = None
     if enable_captions:
         overrides_dict: dict | None = None
@@ -1701,12 +1842,10 @@ async def editor_auto_edit(
         style = video_edit.style_from_params(template, overrides_dict)
 
         try:
-            words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
-            if not words:
-                raise HTTPException(422, "No speech detected — nothing to caption")
+            # `words` already populated (and possibly time-scaled) above.
             (edit_dir / "words.json").write_text(video_edit.words_to_json(words), encoding="utf-8")
             (edit_dir / "pre_caption.txt").write_text(str(current), encoding="utf-8")
-            final_out = edit_dir / "03-final.mp4"
+            final_out = edit_dir / "04-final.mp4"
             cap_summary = await asyncio.to_thread(
                 video_edit.render_captions, current, final_out,
                 words=words, style=style, job_id=edit_id,
@@ -1722,6 +1861,7 @@ async def editor_auto_edit(
         "source_url": _file_url(src),
         "trim": trim_summary,
         "voice_swap": swap_summary,
+        "wpm_normalize": wpm_info,
         "captions": cap_info,
         "rerender_available": bool(enable_captions),
     }
@@ -1739,14 +1879,18 @@ async def editor_multi_auto_edit(
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),
     enable_captions: bool = Form(True),
+    enable_wpm_normalize: bool = Form(True),
+    target_wpm: float = Form(190.0),
 ) -> dict:
     """Multi-clip auto-edit:
       1. Save each uploaded clip.
       2. Transcribe each with Whisper.
       3. Match each transcript to a position in the supplied script and
          reorder accordingly.
-      4. Concat the clips in script order.
-      5. Continue with the standard auto-edit pipeline:
+      4. (Optional) Time-stretch each ordered clip so its spoken pace
+         hits target_wpm independently — uniform pacing across takes.
+      5. Concat the clips in script order.
+      6. Continue with the standard auto-edit pipeline:
          trim silences → (optional) voice swap → captions.
     """
     from character_swap import video_edit
@@ -1791,6 +1935,7 @@ async def editor_multi_auto_edit(
     # 3. Match each clip to a position in the script + sort.
     placements = video_edit.match_clips_by_transcript(plain_transcripts, script)
     ordered_paths = [clip_paths[p["idx"]] for p in placements]
+    ordered_transcripts = [transcripts_per_clip[p["idx"]] for p in placements]
     matching_summary = [{
         "clip_index": p["idx"],
         "score": p["score"],
@@ -1798,7 +1943,54 @@ async def editor_multi_auto_edit(
         "transcript_preview": plain_transcripts[p["idx"]][:120],
     } for p in placements]
 
-    # 4. Concat in script order.
+    # 4. (Optional) Per-clip WPM normalization. Each clip is time-stretched
+    # independently so every take in the final concat plays at the same
+    # spoken pace. Audio pitch is preserved (ffmpeg atempo).
+    wpm_decisions: list[dict] | None = None
+    if enable_wpm_normalize:
+        stretched_paths: list[Path] = []
+        wpm_decisions = []
+        for i, (p, words) in enumerate(zip(ordered_paths, ordered_transcripts)):
+            original_wpm = video_edit.compute_wpm(words)
+            speed = video_edit.compute_speed_factor(words, target_wpm=target_wpm)
+            stretched = edit_dir / f"clip-{i:02d}-stretched.mp4"
+            if abs(speed - 1.0) < 1e-3:
+                # Within dead zone — passthrough, but still re-encode so the
+                # concat sees consistent codecs across all inputs.
+                try:
+                    await asyncio.to_thread(
+                        video_edit.time_stretch, p, stretched,
+                        speed_factor=1.0, job_id=edit_id,
+                    )
+                except (RuntimeError, ValueError):
+                    # If passthrough re-encode fails for any reason, fall
+                    # back to the original input — concat will handle it.
+                    stretched = p
+            else:
+                try:
+                    await asyncio.to_thread(
+                        video_edit.time_stretch, p, stretched,
+                        speed_factor=speed, job_id=edit_id,
+                    )
+                except (RuntimeError, ValueError):
+                    # Stretch failed (unusual) — fall back to original.
+                    stretched = p
+                    speed = 1.0
+            stretched_paths.append(stretched)
+            wpm_decisions.append({
+                "ordered_idx": i,
+                "source_clip_idx": placements[i]["idx"],
+                "original_wpm": round(original_wpm, 1),
+                "speed_factor": round(speed, 3),
+                "stretched": abs(speed - 1.0) > 1e-3,
+            })
+        ordered_paths = stretched_paths
+        (edit_dir / "wpm_decisions.json").write_text(
+            json.dumps({"target_wpm": target_wpm, "clips": wpm_decisions}, indent=2),
+            encoding="utf-8",
+        )
+
+    # 5. Concat in script order.
     concat_out = edit_dir / "01-concat.mp4"
     try:
         await asyncio.to_thread(video_edit.concat_videos, ordered_paths, concat_out)
@@ -1883,6 +2075,8 @@ async def editor_multi_auto_edit(
         "output_url": _file_url(current),
         "n_clips": len(ordered_paths),
         "matching": matching_summary,
+        "wpm_normalize": ({"target_wpm": target_wpm, "clips": wpm_decisions}
+                          if wpm_decisions else None),
         "trim": trim_summary,
         "voice_swap": swap_summary,
         "captions": cap_info,
@@ -2057,6 +2251,7 @@ async def broll_generate(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     video_model: str = Form("grok-imagine"),
+    aspect_ratio: str = Form("9:16"),
 ) -> dict:
     """Kick off a full B-roll generation from a narration audio file.
     Returns a `broll_id` immediately; the actual work happens in a
@@ -2065,6 +2260,10 @@ async def broll_generate(
 
     if not settings.openai_api_key:
         raise HTTPException(503, "OpenAI API key required for transcription + planning")
+
+    if aspect_ratio not in {"9:16", "1:1", "16:9"}:
+        raise HTTPException(400,
+            f"aspect_ratio must be one of 9:16 / 1:1 / 16:9 (got {aspect_ratio!r})")
 
     ext = Path(file.filename or "").suffix.lower()
     allowed = ALLOWED_AUDIO_EXTS | {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
@@ -2107,6 +2306,7 @@ async def broll_generate(
         "audio_path": str(audio_for_pipeline),
         "source_url": _file_url(source_path),
         "video_model": video_model,
+        "aspect_ratio": aspect_ratio,
         "transcript": "",
         "clips": [],
         "final_video_path": None,
