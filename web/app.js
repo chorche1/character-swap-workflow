@@ -3,6 +3,14 @@
 function studio() {
   return {
     health: { openai_key: false, xai_key: false },
+    // Step 1: array of uploaded scene objects {scene_id, url, original_name, ...}.
+    // Empty until the user uploads at least one scene. The job is created from
+    // scenes[] — each scene generates `images_per_character` variants per char.
+    scenes: [],
+    // Highlights the Step-1 dropzone when an image file is being dragged in.
+    sceneDropActive: false,
+    // Legacy single-scene field — kept so any old code paths that still read
+    // `this.scene` don't break. Mirrors `scenes[0]` when present.
     scene: null,
     library: [],
     selectedCharacters: [],
@@ -403,6 +411,30 @@ function studio() {
           this.videoGen.model = firstVideo.slug;
         }
       } catch (_) {}
+    },
+
+    // Step 3 variant gallery: group a character's variants by scene so the
+    // UI can render "Scene 1: [v1, v2, v3]  Scene 2: [v4, v5, v6]" instead
+    // of a flat strip. Returns [{scene, variants}].
+    //   - Multi-scene jobs: one group per scene in this.job.scenes (in
+    //     order). Edits without scene_id (or matching the parent's
+    //     scene_id) join their parent's group.
+    //   - Single-scene jobs: one group containing all variants.
+    //   - Loose variants without scene_id (legacy data) → trailing group
+    //     so they're still visible.
+    variantGroupsFor(jc) {
+      const scenes = (this.job?.scenes || []);
+      const images = jc?.images || [];
+      if (scenes.length <= 1) {
+        return [{ scene: scenes[0] || null, variants: images }];
+      }
+      const groups = scenes.map(s => ({
+        scene: s,
+        variants: images.filter(v => v.scene_id === s.scene_id),
+      }));
+      const orphans = images.filter(v => !v.scene_id || !scenes.find(s => s.scene_id === v.scene_id));
+      if (orphans.length) groups.push({ scene: null, variants: orphans });
+      return groups;
     },
 
     currentImageModel() {
@@ -2271,7 +2303,69 @@ function studio() {
       const fd = new FormData(); fd.append('file', file);
       const r = await fetch('/api/scenes', { method: 'POST', body: fd });
       if (!r.ok) { this.notifyError('Scene upload failed: ' + await r.text()); return; }
-      this.scene = await r.json();
+      const scene = await r.json();
+      // Append to the scenes list; dedupe by scene_id (content-addressed)
+      // so a paste of the same image twice doesn't create duplicates.
+      if (!this.scenes.find(s => s.scene_id === scene.scene_id)) {
+        this.scenes.push(scene);
+      }
+      this.scene = this.scenes[0] || null;   // legacy mirror
+    },
+
+    async uploadScenes(files) {
+      for (const f of files) {
+        if (f && f.type && f.type.startsWith('image/')) {
+          await this.uploadScene(f);
+        }
+      }
+    },
+
+    removeScene(scene_id) {
+      this.scenes = this.scenes.filter(s => s.scene_id !== scene_id);
+      this.scene = this.scenes[0] || null;
+    },
+
+    // --- Step 1 paste + drop handlers (clipboard image → scene upload) ---
+    _scenesFromClipboard(ev) {
+      const items = ev.clipboardData?.items || [];
+      const out = [];
+      for (const it of items) {
+        if (it.kind === 'file' && (it.type || '').startsWith('image/')) {
+          const f = it.getAsFile();
+          if (f) out.push(f);
+        }
+      }
+      return out;
+    },
+
+    async onScenePaste(ev) {
+      const files = this._scenesFromClipboard(ev);
+      if (files.length === 0) return;        // plain text — let it through
+      ev.preventDefault();
+      await this.uploadScenes(files);
+      this.notifyInfo(`Added ${files.length} scene${files.length > 1 ? 's' : ''} from clipboard`);
+    },
+
+    async onSceneDrop(ev) {
+      const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
+      this.sceneDropActive = false;
+      if (files.length === 0) return;
+      ev.preventDefault();
+      await this.uploadScenes(files);
+    },
+
+    onSceneDragOver(ev) {
+      const types = Array.from(ev.dataTransfer?.types || []);
+      if (types.includes('Files')) {
+        ev.preventDefault();
+        this.sceneDropActive = true;
+      }
+    },
+
+    onSceneDragLeave(ev) {
+      if (!ev.currentTarget.contains(ev.relatedTarget)) {
+        this.sceneDropActive = false;
+      }
     },
 
     // Legacy direct upload (kept for tests / future programmatic use). New code
@@ -2422,14 +2516,18 @@ function studio() {
     // --- job lifecycle -------------------------------------------------------
 
     async startJob() {
-      if (!this.scene || this.selectedCharacters.length === 0) return;
+      if (this.scenes.length === 0 || this.selectedCharacters.length === 0) return;
       this.generating = true;
       try {
         const r = await fetch('/api/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            scene_id: this.scene.scene_id,
+            // Send the full list — backend treats this as the canonical source.
+            // For new jobs we also send scene_id=scenes[0] just in case any
+            // older code path needs it; backend dedupes.
+            scene_ids: this.scenes.map(s => s.scene_id),
+            scene_id: this.scenes[0].scene_id,
             character_ids: this.selectedCharacters,
             images_per_character: this.imagesPerChar,
             project_id: this.currentProjectId,
@@ -2458,14 +2556,24 @@ function studio() {
       if (opts.pushState !== false) {
         history.pushState({ jobId }, '', '/j/' + jobId);
       }
-      // Reload scene preview from the job's scene
-      if (this.job.scene_image_url) {
-        this.scene = {
+      // Reload scenes from the job. Multi-scene jobs serialize their scenes
+      // in `job.scenes`. Legacy single-scene jobs only have scene_image_url —
+      // fall back to a 1-item list.
+      if (Array.isArray(this.job.scenes) && this.job.scenes.length > 0) {
+        this.scenes = this.job.scenes.map(s => ({
+          scene_id: s.scene_id, url: s.url,
+          original_name: s.scene_id,
+        }));
+      } else if (this.job.scene_image_url) {
+        this.scenes = [{
           scene_id: this.job.scene_id,
           url: this.job.scene_image_url,
           original_name: this.job.title || this.job.job_id,
-        };
+        }];
+      } else {
+        this.scenes = [];
       }
+      this.scene = this.scenes[0] || null;
       this.selectedCharacters = Object.keys(this.job.characters);
       this.imagesPerChar = this.job.images_per_character || 1;
       this.videosPerChar = this.job.videos_per_character || 1;
@@ -2811,6 +2919,7 @@ function studio() {
       this.ws = null;
       this.wsConnected = false;
       this.job = null;
+      this.scenes = [];
       this.scene = null;
       // Default: all library characters checked. startNewJobInProject() will
       // override this with the project's preset if there is one.

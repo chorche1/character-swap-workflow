@@ -163,13 +163,37 @@ def _auto_title(char_names: list[str]) -> str:
     return out[:80]
 
 
+def _effective_scene_ids(job: Job) -> list[str]:
+    """Resolve the canonical scene list for a job. Old jobs from before
+    multi-scene support only have `scene_id` set; treat them as a 1-item
+    list."""
+    if job.scene_ids:
+        return list(job.scene_ids)
+    return [job.scene_id]
+
+
+def _effective_scene_paths(job: Job) -> list[str]:
+    if job.scene_image_paths:
+        return list(job.scene_image_paths)
+    return [job.scene_image_path]
+
+
 def _job_to_dict(job: Job) -> dict:
+    eff_ids = _effective_scene_ids(job)
+    eff_paths = _effective_scene_paths(job)
     return {
         "job_id": job.job_id,
         "title": job.title or job.job_id,
         "project_id": job.project_id,
+        # Legacy single-scene fields preserved.
         "scene_id": job.scene_id,
         "scene_image_url": _file_url(job.scene_image_path),
+        # New multi-scene fields: parallel lists [{scene_id, url}] for the
+        # frontend.
+        "scenes": [
+            {"scene_id": sid, "url": _file_url(p)}
+            for sid, p in zip(eff_ids, eff_paths)
+        ],
         "prompt": job.prompt,
         "image_model": job.image_model,
         "movement_prompt": job.movement_prompt,
@@ -192,6 +216,7 @@ def _job_to_dict(job: Job) -> dict:
                         "url": _file_url(v.path),
                         "prompt": v.prompt,
                         "parent_variant_id": v.parent_variant_id,
+                        "scene_id": v.scene_id,
                         "status": v.status,
                         "error": v.error,
                         "download_name": _variant_download_name(jc, v),
@@ -666,7 +691,11 @@ async def delete_project(project_id: str) -> dict:
 # --- jobs ----------------------------------------------------------------------------
 
 class CreateJobBody(BaseModel):
-    scene_id: str
+    # scene_id stays for back-compat with the existing single-scene UX;
+    # scene_ids is the new canonical list. If both supplied, scene_ids wins.
+    # If only scene_id, we treat the job as having a single scene = [scene_id].
+    scene_id: str | None = None
+    scene_ids: list[str] | None = None
     character_ids: list[str]
     images_per_character: int = Field(default=1, ge=1, le=4)
     title: str | None = None
@@ -683,14 +712,28 @@ async def _run_async(coro_fn, *args, **kwargs) -> None:
 async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
     settings.require_keys("openai")
     s = store()
-    scene = s.get_scene(body.scene_id)
-    if scene is None:
-        raise HTTPException(404, "Scene not found")
+    # Resolve the scene list: prefer `scene_ids` (multi-scene), fall back
+    # to `scene_id` (legacy single). At least one must be supplied.
+    raw_scene_ids: list[str] = []
+    if body.scene_ids:
+        raw_scene_ids = [sid for sid in body.scene_ids if sid]
+    if body.scene_id and body.scene_id not in raw_scene_ids:
+        raw_scene_ids.insert(0, body.scene_id)
+    if not raw_scene_ids:
+        raise HTTPException(400, "Provide scene_id or scene_ids")
+
+    scene_paths: list[Path] = []
+    for sid in raw_scene_ids:
+        scene = s.get_scene(sid)
+        if scene is None:
+            raise HTTPException(404, f"Scene not found: {sid}")
+        path = settings.scenes_dir / scene.filename
+        if not path.exists():
+            raise HTTPException(500, f"Scene file missing on disk: {path}")
+        scene_paths.append(path)
+
     if not body.character_ids:
         raise HTTPException(400, "At least one character_id required")
-    scene_path = settings.scenes_dir / scene.filename
-    if not scene_path.exists():
-        raise HTTPException(500, f"Scene file missing on disk: {scene_path}")
 
     if body.project_id is not None and s.get_project(body.project_id) is None:
         raise HTTPException(404, f"Project not found: {body.project_id}")
@@ -737,8 +780,13 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         job_id=job_id,
         title=title,
         project_id=body.project_id,
-        scene_id=body.scene_id,
-        scene_image_path=str(scene_path),
+        # Legacy single-scene fields point at the FIRST scene so older
+        # code paths (download names, summaries) keep working.
+        scene_id=raw_scene_ids[0],
+        scene_image_path=str(scene_paths[0]),
+        # New canonical fields — runner reads these.
+        scene_ids=raw_scene_ids,
+        scene_image_paths=[str(p) for p in scene_paths],
         characters=chars,
         images_per_character=body.images_per_character,
         prompt=custom_prompt,
@@ -1127,12 +1175,18 @@ async def duplicate_job(job_id: str, background: BackgroundTasks) -> dict:
     src = s.get_job(job_id)
     if src is None:
         raise HTTPException(404, "Job not found")
-    scene = s.get_scene(src.scene_id)
-    if scene is None:
-        raise HTTPException(409, "Source scene no longer exists; cannot duplicate")
-    scene_path = settings.scenes_dir / scene.filename
-    if not scene_path.exists():
-        raise HTTPException(500, f"Scene file missing on disk: {scene_path}")
+    # Copy ALL scenes (multi-scene aware). Falls back to single scene_id
+    # for legacy jobs.
+    src_scene_ids = _effective_scene_ids(src)
+    scene_paths: list[Path] = []
+    for sid in src_scene_ids:
+        scene = s.get_scene(sid)
+        if scene is None:
+            raise HTTPException(409, f"Source scene {sid} no longer exists; cannot duplicate")
+        path = settings.scenes_dir / scene.filename
+        if not path.exists():
+            raise HTTPException(500, f"Scene file missing on disk: {path}")
+        scene_paths.append(path)
 
     # Snapshot characters from the source job. Reject if any have been deleted
     # from the library since (we need their file on disk to seed the new job).
@@ -1162,8 +1216,10 @@ async def duplicate_job(job_id: str, background: BackgroundTasks) -> dict:
         job_id=new_id,
         title=new_title,
         project_id=src.project_id,
-        scene_id=src.scene_id,
-        scene_image_path=str(scene_path),
+        scene_id=src_scene_ids[0],
+        scene_image_path=str(scene_paths[0]),
+        scene_ids=src_scene_ids,
+        scene_image_paths=[str(p) for p in scene_paths],
         characters=new_chars,
         images_per_character=src.images_per_character,
     )

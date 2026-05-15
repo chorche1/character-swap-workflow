@@ -325,31 +325,47 @@
       <span x-show="job?.compacted" class="text-xs text-neutral-400 dark:text-neutral-500">· compacted</span>
     </div>
 
-    <!-- STEP 1 — Scene -->
-    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
-      <h2 class="text-lg font-semibold mb-4"><span class="step-num">1</span> <span class="ml-2">Scene</span></h2>
-      <template x-if="!scene">
-        <label class="dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-10 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
-               @dragover.prevent="$event.currentTarget.classList.add('dragover')"
-               @dragleave.prevent="$event.currentTarget.classList.remove('dragover')"
-               @drop.prevent="$event.currentTarget.classList.remove('dragover'); uploadScene($event.dataTransfer.files[0])">
-          <div class="text-base">Drop a scene image here</div>
-          <div class="text-xs mt-1">or click to browse — .jpg, .png, .webp</div>
-          <input type="file" class="hidden" accept="image/*" @change="uploadScene($event.target.files[0])" />
-        </label>
-      </template>
-      <template x-if="scene">
-        <div class="flex items-start gap-4">
-          <img :src="scene.url" class="w-40 h-auto rounded-lg border border-neutral-200 dark:border-neutral-800 object-cover" />
-          <div class="flex-1">
-            <div class="text-sm text-neutral-600 dark:text-neutral-300" x-text="scene.original_name"></div>
-            <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1" x-text="scene.scene_id"></div>
-            <button class="mt-3 text-sm text-red-600 dark:text-red-400 hover:underline"
-                    x-show="!job"
-                    @click="scene = null">Replace scene</button>
+    <!-- STEP 1 — Scenes (one or more reference images) -->
+    <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6"
+             tabindex="0"
+             @paste.window="if (activeTab === 'swap') onScenePaste($event)">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-semibold"><span class="step-num">1</span> <span class="ml-2">Scene</span>
+          <span class="text-xs font-normal text-neutral-500 dark:text-neutral-400 ml-2"
+                x-show="scenes.length > 1"
+                x-text="`(${scenes.length} scenes — each character gets variants for every scene)`"></span>
+        </h2>
+      </div>
+      <!-- Scene grid: one tile per uploaded scene + an "add more" dropzone tile -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+        <template x-for="s in scenes" :key="'scene-'+s.scene_id">
+          <div class="relative card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden group">
+            <img :src="s.url" class="w-full h-32 object-cover" />
+            <div class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded font-mono"
+                 x-text="s.scene_id.slice(0, 10) + '…'"></div>
+            <button x-show="!job"
+                    class="absolute top-1.5 right-1.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center"
+                    title="Remove this scene"
+                    @click="removeScene(s.scene_id)">✕</button>
           </div>
-        </div>
-      </template>
+        </template>
+        <!-- Add-more dropzone — disappears once a job is loaded -->
+        <label x-show="!job"
+               class="dropzone card border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl flex flex-col items-center justify-center cursor-pointer text-neutral-400 dark:text-neutral-500 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors h-[10.25rem]"
+               :class="sceneDropActive ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30' : ''"
+               @dragover="onSceneDragOver($event)"
+               @dragleave="onSceneDragLeave($event)"
+               @drop.prevent="onSceneDrop($event)">
+          <span class="text-3xl leading-none">+</span>
+          <span class="text-xs mt-1" x-text="scenes.length === 0 ? 'Drop / paste / click — first scene' : 'Add another scene'"></span>
+          <input type="file" class="hidden" accept="image/*" multiple
+                 @change="uploadScenes(Array.from($event.target.files || []))" />
+        </label>
+      </div>
+      <p class="text-[11px] text-neutral-500 dark:text-neutral-400 mt-3"
+         x-show="!job">
+        Drop, click, or paste (Cmd+V) — supports multiple. Each scene becomes a separate reference background; the character gets variants for every scene.
+      </p>
     </section>
 
     <!-- STEP 2 — Character images -->
@@ -544,7 +560,7 @@
                x-show="selectedCharacters.length > 0 && imagesPerChar > 1"
                x-text="`will request ${selectedCharacters.length * imagesPerChar} image generations`"></div>
           <button class="px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                  :disabled="!scene || selectedCharacters.length === 0 || generating || !health.openai_key"
+                  :disabled="scenes.length === 0 || selectedCharacters.length === 0 || generating || !health.openai_key"
                   :title="!health.openai_key ? 'OPENAI_API_KEY is not set' : ''"
                   @click="startJob()">
             <span x-show="!generating">▶ Generate images</span>
@@ -578,12 +594,29 @@
                       @click="approve(cid, 'regenerate')">↻ regenerate all</button>
             </div>
 
-            <div class="variant-strip">
-              <template x-for="v in jc.images" :key="v.variant_id">
-                <div class="card border rounded-xl overflow-hidden flex flex-col"
-                     :class="v.variant_id === jc.approved_variant_id
-                              ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900'
-                              : 'border-neutral-200 dark:border-neutral-800'">
+            <!-- Variants grouped by scene. Single-scene jobs collapse the
+                 group header (it's redundant); multi-scene jobs show each
+                 scene's variants as a labelled subgroup. The `variantGroupsFor`
+                 getter returns [{scene, variants}, ...] driven by job.scenes. -->
+            <div class="space-y-4">
+              <template x-for="(g, sIdx) in variantGroupsFor(jc)" :key="'sgrp-'+cid+'-'+(g.scene?.scene_id || sIdx)">
+                <div>
+                  <div class="flex items-center gap-2 mb-1.5"
+                       x-show="(job?.scenes?.length || 0) > 1">
+                    <img :src="g.scene?.url" class="w-8 h-8 rounded object-cover border border-neutral-200 dark:border-neutral-800" />
+                    <span class="text-xs text-neutral-500 dark:text-neutral-400">
+                      Scene <span x-text="sIdx + 1"></span>
+                      <span class="text-neutral-400 dark:text-neutral-500 font-mono ml-1"
+                            x-text="(g.scene?.scene_id || '').slice(0, 8)"></span>
+                      <span class="ml-1" x-text="`· ${g.variants.length} variant${g.variants.length === 1 ? '' : 's'}`"></span>
+                    </span>
+                  </div>
+                  <div class="variant-strip">
+                    <template x-for="v in g.variants" :key="v.variant_id">
+                      <div class="card border rounded-xl overflow-hidden flex flex-col"
+                           :class="v.variant_id === jc.approved_variant_id
+                                    ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900'
+                                    : 'border-neutral-200 dark:border-neutral-800'">
                   <div class="aspect-[9/16] bg-neutral-100 dark:bg-neutral-800 relative flex items-center justify-center">
                     <template x-if="v.status === 'ready' && v.url">
                       <img :src="v.url" class="w-full h-full object-cover" />
@@ -652,6 +685,9 @@
                               @click="submitEdit()">Submit edit</button>
                     </div>
                   </div>
+                </div>
+              </template>
+            </div>
                 </div>
               </template>
             </div>

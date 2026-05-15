@@ -79,6 +79,7 @@ class GeneratedImage(BaseModel):
     path: str
     prompt: str                              # GENERATION_PROMPT for fresh gens, custom for edits
     parent_variant_id: str | None = None     # set when this is an edit
+    scene_id: str | None = None              # which Job.scene_ids[i] this variant was generated against
     status: VariantStatus = VariantStatus.READY
     error: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -113,8 +114,16 @@ class Job(BaseModel):
     job_id: str
     title: str | None = None                 # user-editable; falls back to job_id in UI
     project_id: str | None = None            # None = Unfiled
+    # Legacy single-scene fields (still set for back-compat with old jobs).
+    # Canonical source of truth is `scene_ids` + `scene_image_paths` below.
     scene_id: str
     scene_image_path: str
+    # Multi-scene support: a job can have N scene reference images. Each
+    # character gets `images_per_character` variants generated PER SCENE.
+    # `scene_ids` mirrors `scene_id` (first element) for old jobs loaded
+    # from disk that don't have this field yet — see `effective_scene_ids`.
+    scene_ids: list[str] = Field(default_factory=list)
+    scene_image_paths: list[str] = Field(default_factory=list)
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants

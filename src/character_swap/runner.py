@@ -55,6 +55,20 @@ async def _emit(job_id: str, kind: str, char_id: str | None = None, **data) -> N
 
 # --- image generation -----------------------------------------------------------------
 
+def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:
+    """Look up the scene image path for this variant. Variants carry
+    their own `scene_id` (when generated under multi-scene support);
+    fall back to the job's single scene_image_path for legacy variants
+    without scene_id."""
+    if variant.scene_id and job.scene_ids and job.scene_image_paths:
+        try:
+            i = list(job.scene_ids).index(variant.scene_id)
+            return Path(job.scene_image_paths[i])
+        except ValueError:
+            pass
+    return Path(job.scene_image_path)
+
+
 async def _generate_one_variant(
     job: Job, jc: JobCharacter, variant: GeneratedImage,
     sem: asyncio.Semaphore,
@@ -71,7 +85,7 @@ async def _generate_one_variant(
             await asyncio.to_thread(
                 pipeline.generate_variant,
                 model=job.image_model,
-                scene_image=Path(job.scene_image_path),
+                scene_image=_scene_path_for_variant(job, variant),
                 character_image=Path(jc.source_image_path),
                 character_name=jc.name,
                 prompt=variant.prompt,
@@ -113,30 +127,44 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
 
 
 async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore) -> None:
-    """Reset a character and start N fresh variants."""
+    """Reset a character and start N fresh variants per scene.
+
+    When the job has multiple scene_ids, we generate `n` variants for
+    each scene — so the total per-character variant count is `n × len(scene_ids)`.
+    Each placeholder records which scene it belongs to via `scene_id`, so
+    the runner picks the right reference image and the UI can group
+    results per scene.
+    """
     jc.images = []
     jc.videos = []
     jc.approved_variant_id = None
     jc.error = None
     _persist(job, jc, status=CharStatus.QUEUED)
 
-    # Create N placeholder variants in `generating` state up front so the UI
-    # can show N skeleton cards immediately.
+    # Effective scene list — multi-scene jobs use `scene_ids`; legacy
+    # single-scene jobs fall back to a 1-item list.
+    scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+
+    # Create N×scenes placeholder variants in `generating` state up front
+    # so the UI can show all skeleton cards immediately.
     placeholders: list[GeneratedImage] = []
-    for _ in range(n):
-        variant_id = _short("v_")
-        path = _output_dir(job.job_id, jc.char_id) / f"variant_{variant_id}.png"
-        v = GeneratedImage(
-            variant_id=variant_id,
-            path=str(path),
-            prompt=job.prompt or pipeline.GENERATION_PROMPT,
-            status=VariantStatus.GENERATING,
-        )
-        placeholders.append(v)
-        jc.images.append(v)
+    for sid in scene_ids:
+        for _ in range(n):
+            variant_id = _short("v_")
+            path = _output_dir(job.job_id, jc.char_id) / f"variant_{variant_id}.png"
+            v = GeneratedImage(
+                variant_id=variant_id,
+                path=str(path),
+                prompt=job.prompt or pipeline.GENERATION_PROMPT,
+                scene_id=sid,
+                status=VariantStatus.GENERATING,
+            )
+            placeholders.append(v)
+            jc.images.append(v)
     _persist(job, jc)
     await _emit(job.job_id, "char.queued", char_id=jc.char_id,
-                images_per_character=n)
+                images_per_character=n,
+                n_scenes=len(scene_ids))
 
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
@@ -221,6 +249,9 @@ async def run_edit_variant(
         path=str(dest),
         prompt=custom_prompt,
         parent_variant_id=parent_variant_id,
+        # Inherit the parent's scene anchor so the edit groups under the
+        # same scene in the UI gallery.
+        scene_id=parent.scene_id,
         status=VariantStatus.GENERATING,
     )
     jc.images.append(variant)
