@@ -6,46 +6,59 @@
 
 ## What this project does
 
-Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. Four top-level tabs:
+Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. **Seven top-level tabs:**
 
 - **Swap** (the original 5-step character-swap flow described below — default tab).
 - **Image** — free-form text-to-image. Pick model (GPT Image, DALL·E 3, Grok Imagine, Nano Banana, FLUX variants, Ideogram, Recraft, SD3.5, Seedream, Higgsfield Soul). Optional reference images, aspect ratio, prompt → output appears in a grid below.
 - **Video** — free-form image-to-video. Pick model (Grok Imagine, Veo 3, Kling, Runway, Luma, Pika, Hailuo, Sora 2, Wan, Seedance, Higgsfield variants). Required reference image + motion prompt + aspect/duration → polled output appears in a grid.
-- **Avatar** — talking-head avatar video via HeyGen. Pick avatar + voice, paste a script, hit Generate. Output appears in its own history grid. `MediaGeneration.kind="avatar"` distinguishes them. Two avatar models:
+- **Avatar** — talking-head avatar video via HeyGen. Pick avatar + voice, paste a script, hit Generate. Two avatar models:
   - `heygen-avatar-5` — uses a HeyGen catalogue avatar (`avatar_id` + `voice_id` + script)
   - `heygen-photo-avatar` — uses an uploaded photo as the talking subject (`reference_paths[0]` + `voice_id` + script). Triggered via the 🎙 button on any ready variant in the Swap flow's Step 3.
-  - **Voice source** can be either HeyGen's voice library OR the user's ElevenLabs voices. The picker has a HeyGen/ElevenLabs toggle. When ElevenLabs is selected, `voice_provider="elevenlabs"` and the runner renders the script via ElevenLabs TTS first, then feeds the audio file into HeyGen (`heygen.submit_avatar_video_with_audio`). Catalogue auto-loaded from `/api/heygen/voices` + `/api/elevenlabs/voices`.
-
-- **Editor** — upload a video and (a) auto-trim silent gaps via ffmpeg silencedetect + concat, (b) burn in word-level captions transcribed by OpenAI Whisper (`whisper-1`, `verbose_json` with `timestamp_granularities=['word']`). Five built-in caption templates (`mrbeast`, `tiktok`, `karaoke`, `minimal`, `subtitle`) with optional per-render overrides (font, size, color, words-per-card, vertical margin, highlight color, boxed background). Rendering uses ffmpeg's `subtitles` filter against a generated ASS file. ffmpeg binary comes bundled via `imageio-ffmpeg` so users don't need a system install. Endpoints: `GET /api/editor/templates`, `POST /api/editor/trim_silences`, `POST /api/editor/captions`. Outputs live under `output/editor/<edit_id>/`.
+  - **Voice source** can be either HeyGen's voice library OR the user's ElevenLabs voices, picked via a toggle. When ElevenLabs is selected, `voice_provider="elevenlabs"` and the runner renders via ElevenLabs TTS first, then feeds the audio into HeyGen.
 
 - **Audio** — ElevenLabs voice library. Two modes via the `Mode` dropdown:
-  - `elevenlabs-vc` — Voice Changer (Speech-to-Speech). Upload a source audio file, pick a target voice from your ElevenLabs library, get back an mp3 in the target voice with the source's timing/emotion preserved.
+  - `elevenlabs-vc` — Voice Changer (Speech-to-Speech). **Accepts audio OR video uploads.** Video inputs: ffmpeg extracts the audio, ElevenLabs swaps the voice, ffmpeg re-muxes the new audio back into the original video stream → `result.mp4`. Pure-audio inputs return `result.mp3`.
   - `elevenlabs-tts` — Text-to-Speech. Paste a script, pick a voice, get an mp3.
-  History grid shows inline `<audio controls>` players.
 
-The Image/Video tabs share the same sidebar (project/job history is swap-specific). Each tab has its own generation history grid loaded from `/api/generations?kind=...`. Locked models show a 🔒 chip with a tooltip naming the missing API key — they're rendered in the picker so users can see what's available but disabled.
+- **B-roll** — drop a narration audio/video → Whisper transcribes → GPT-4o plans cinematic medical-realism B-roll prompts (the 4-mode "elite creative director" system prompt) → for each line, Grok generates a seed image + a short clip → trim each clip to match its phrase's spoken duration → concat in order → mux the original narration on top. Endpoints under `/api/broll/*`. The pipeline pauses at `awaiting_approval` so the user can reject + regenerate specific clips before finalizing. State lives per-job at `output/broll/<broll_id>/state.json`. See "B-roll details" section below.
 
-**Characters are 1-to-many with images.** Each `CharacterAsset` has a list of `CharacterImage`s plus a `primary_image_id` pointing at the "main" thumbnail (and `filename` is mirrored to that primary so legacy code paths still work). Uploading via the modal asks whether the new image(s) belong to an existing character or create a new one — the same hash-named file is reused if you upload the same image twice. Existing single-image characters are migrated lazily on app start (a `CharacterImage` row is synthesized that matches their original `filename`).
+- **Editor** — upload a video and run any combination of: (a) auto-trim silent gaps via ffmpeg silencedetect + concat, (b) **per-clip WPM normalization** (time-stretch each clip independently so the speaker hits target_wpm, pitch-preserving via ffmpeg `atempo`), (c) voice swap via ElevenLabs STS, (d) burn in word-level captions transcribed by OpenAI Whisper. **16+ caption templates** (popout-yellow family, submagic, modern-bold, rounded-soft/pop, instagram/-pop, tiktok-pop/-black, mrbeast, tiktok, karaoke, minimal, subtitle, kinetic, clean-shadow, bold-shadow, typewriter, bottom-third). **Multi-clip mode**: upload N clips + a script, the system transcribes each, fuzzy-matches them to script positions, orders them, normalizes WPM per clip, concats. Plus a **CapCut-style timeline editor** for trim/split/segment-reorder on any finished result. Endpoints under `/api/editor/*`. Outputs live under `output/editor/<edit_id>/`.
 
-**Right-side character library** (toggle via the 📚 button in the header; open/closed persisted in `localStorage.char_lib_open`): lists every character with an image count. Click a row to expand it — top section shows all uploaded reference images (with ★ on the primary, ✕ to remove a specific image, "+ image" link to upload another via the modal pre-selected to this character); bottom section shows all `ready` variants of that character across every job ("Generated in jobs"). Drag any image — headshot, alternative ref, or any gallery variant — onto Step 2's character grid in the Swap tab to add the character to `selectedCharacters`. Drag uses a custom mime `text/x-charswap-char-id` so the page isn't hijacked by unrelated OS-level file drags. Per-character gallery is lazy-loaded on first expand and invalidated when a `variant.ready` WS event arrives for that char_id.
+The Image/Video/Audio/Avatar tabs share the same sidebar (project/job history is swap-specific). Each tab has its own generation history grid loaded from `/api/generations?kind=...`. Locked models show a 🔒 chip with a tooltip naming the missing API key — they're rendered in the picker so users can see what's available but disabled.
 
-**Step 2 is renamed "Character images"** and defaults to all library characters checked. Uncheck the ones you don't want in this job. Each tile shows the count of reference images (`N imgs` badge) when a character has more than one.
+**Characters are 1-to-many with images.** Each `CharacterAsset` has a list of `CharacterImage`s plus a `primary_image_id` pointing at the "main" thumbnail. Uploading via the modal asks whether the new image(s) belong to an existing character or create a new one. Same hash-named file is reused for duplicate uploads.
+
+**Right-side character library** (toggle via the 📚 button in the header; open/closed persisted in `localStorage.char_lib_open`): per-character image gallery, drag-to-add into Step 2.
+
+**Per-job source-image swap** (Step 2): if a character has 2+ reference images, the "N imgs ↕" badge on its card is clickable → opens a popover with all the character's gallery images → click any to swap it as the source for THIS job. Library primary stays unchanged. Existing variants keep their reference to the old source; only new variants from a regenerate use the new one. Endpoint: `PATCH /api/jobs/{job_id}/characters/{char_id}/source_image`.
 
 The Swap flow (5 steps): persistent left sidebar of past jobs + main panel:
 
-1. **Scene** — upload one scene image.
-2. **Characters** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. Choose **N images per character** (1–4, default 1).
-3. **Generate** — GPT Image 2 generates N variant images per character (scene as ref #1, character as ref #2). For each character, user picks ONE variant to approve. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. Per-variant download with friendly filename.
+1. **Scene** — upload **one or more** scene images. Supports drop, click, and **Cmd+V paste** (multiple at once). Each scene becomes a separate reference background; the character gets variants for every scene. Per-tile ✕ to remove. Counter shows "(N scenes — each character gets variants for every scene)".
+2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default".
+3. **Generate** — GPT Image 2 generates `images_per_character × N_scenes` variant images per character (scene as ref #1, character as ref #2). When multiple scenes exist, variants render under per-scene subgroup headers inside each character section. For each (character × scene), user picks ONE variant to approve. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. **Per-variant retry** (↻) re-runs just one failed slot, leaving the other variants intact. Per-variant download with friendly filename.
 4. **Movement prompt** — type one movement prompt + choose **M videos per approved image** (1–4, default 1).
 5. **Videos** — Grok Imagine animates each approved image M times. Live progress + per-video download with friendly filename.
 
-**Sidebar:** jobs are grouped by **project** (collapsible). "+ New project" creates a project; "+" on a project header pre-selects it for the next job. The "⇄" icon on each job opens a move menu to send it to another project (or Unfiled). Unfiled jobs cluster at the bottom. Hover-✕ to hard-delete a job; ✕ on a project header CASCADES (deletes the project AND every job in it AND those jobs' `output/<job_id>/` directories — with a strong confirm that names the project and counts the jobs).
+**Sidebar:** jobs grouped by **project** (collapsible). "+ New project" → modal. "+" on a project header pre-selects it for the next job. "⇄" icon moves a job between projects. **Cross-kind "Recent media" thumbnail strip at the bottom** shows the 32 newest items across all tabs (image / video / audio / avatar / broll) — click a thumbnail to jump to its tab and scroll to the card.
 
-**Project character presets:** each project stores `character_ids: list[str]`. When you start a new job inside a project via the "+" on its header, those characters are auto-selected in Step 2 (filtered against the current library so deleted chars don't show). A "Save selection as project default" button appears in Step 2 when the current selection diverges from the preset — click to update the project. Deleting a character from the library automatically prunes it from every project's preset.
+**Per-project default_prompt** (new). Each project can have its own default Swap generation prompt. Set via "★ save as project default" in Step 2, or via `PATCH /api/projects/{id}` with `{default_prompt: "..."}`. New jobs in that project inherit it; jobs without a project fall back to `pipeline.GENERATION_PROMPT`. UI in Step 2 shows a green "● using project default" indicator when active.
 
-**Renames are everywhere:** characters in library (retroactive — propagates to all past jobs' snapshot names), job titles (inline above step 1), and download filenames are automatically friendly (`<char_name>-variant-N.png`, `<char_name>-edit-N.png`, `<char_name>-video-N.mp4`).
+**Persistent cross-tab status toast** (bottom-right): aggregates all in-flight generations across tabs into one always-visible card. Each entry shows kind/status/progress. Click to jump to the tab. Auto-hides when no jobs are in flight. Powered by the `activeJobs` computed getter in `app.js`.
 
-Dark mode toggle in the header, persisted across sessions, with `prefers-color-scheme` fallback for first visit.
+**History grids: search + filter on every kind.** Each grid (Image, Video, Audio, Avatar, B-roll) has a free-text search box (matches against prompt + model) and a model/status dropdown filter. Shows `filtered/total` count.
+
+**Form-state persistence.** Image/Video/Audio/Avatar forms NO LONGER clear after submit — prompt + refs survive so the user can iterate. Each form has an explicit ✕ Clear button. Model/voice/aspect/duration picks per tab persist to `localStorage` and restore on next session.
+
+**Reuse buttons** (`↺ Reuse` indigo pill) on every history card load the prompt + settings back into the active form.
+
+**Friendly download names.** Every download (history cards, B-roll final, Editor result) uses a slug derived from the prompt + ISO date: `swollen-ankles-2026-05-15.mp4`. Helper: `friendlyName(g, ext?)` in `app.js`.
+
+**B-roll "Mode" legend** at top of the tab (collapsible) explains the 4 visual modes the LLM picks from. Each clip card shows a small mode chip (violet/sky/amber/emerald per mode 1/2/3/4) with the full label on hover. Plus an orange `🔗 <scene_group>` chip on clips that visually continue from the previous clip in the same scene group.
+
+**Renames are everywhere:** characters in library (retroactive — propagates to all past jobs' snapshot names), job titles (inline above step 1), and download filenames.
+
+**Dark mode is forced** (no toggle). Light mode classes still in DOM but never applied.
 
 No Claude calls. No automatic QC. Quality is gated by human approval before any Grok video is kicked off (Grok is the expensive step).
 
@@ -74,14 +87,14 @@ character-swap serve --reload --no-open
 
 Both `.env` and `.env.example` are loaded; `.env` wins. `env_ignore_empty=True` — empty shell var does NOT override the file value.
 
-Required for Swap + Image (GPT Image) + Video (Grok):
+Required for Swap + Image (GPT Image) + Video (Grok) + B-roll planning + Editor (Whisper):
 ```
 OPENAI_API_KEY=...
 XAI_API_KEY=...
 ```
 
 Optional — each unlocks one or more models in the Image/Video model picker
-(the picker mirrors Higgsfield's full catalogue — 14 image + 17 video models):
+(14 image + 17 video models registered):
 ```
 GEMINI_API_KEY=...                # Nano Banana + Nano Banana Pro + Veo 3 + Veo 3 Fast
 KLING_ACCESS_KEY=...              # Both required for Kling 2.0 / 2.1 Pro / 1.6
@@ -97,21 +110,20 @@ MINIMAX_API_KEY=...               # MiniMax Hailuo 02 + Hailuo 01
 BYTEDANCE_API_KEY=...             # Seedream 3.0 + SeedEdit + Seedance (Volcano ARK)
 ALIBABA_API_KEY=...               # Wan 2.1 + 2.2 (DashScope)
 HIGGSFIELD_API_KEY=...            # Higgsfield Soul (image+video) / DoP / Lipsync / Speak
-                                  # — these models are exclusive to Higgsfield's pipeline
 HEYGEN_API_KEY=...                # HeyGen Avatar 5 — talking-head videos (Avatar tab)
-ELEVENLABS_API_KEY=...            # ElevenLabs voice library (Audio tab) +
-                                  # optional voice source for HeyGen avatars
+ELEVENLABS_API_KEY=...            # ElevenLabs voice library (Audio tab + Editor voice swap +
+                                  # optional voice source for HeyGen avatars)
 ```
 Sora 2 (video) also uses `OPENAI_API_KEY` but requires separate API-tier access.
-The model picker is a `<select>` dropdown that shows ALL registered models; locked ones are tagged with 🔒 and disabled (can't be selected) until their key is present. Once a key lands in `.env` and the server restarts, the corresponding models become selectable; if the client implementation is still a stub, the gen fails with `NotImplementedError` and a clear message — that's the cue to wire up the real adapter for that provider.
 
 Optional overrides (defaults shown):
 ```
 OPENAI_IMAGE_MODEL=gpt-image-2
 GROK_VIDEO_MODEL=grok-imagine-video
+GROK_IMAGE_MODEL=grok-imagine-image      # bumped from grok-2-image-1212 (deprecated 2026-02-24)
 XAI_BASE_URL=https://api.x.ai/v1
-IMAGE_SIZE=1024x1792               # 9:16 portrait
-IMAGE_CONCURRENCY=2                # parallel OpenAI image calls (caps gen + edit together)
+IMAGE_SIZE=1024x1792
+IMAGE_CONCURRENCY=2
 VIDEO_DURATION_SECS=10
 VIDEO_ASPECT_RATIO=9:16
 VIDEO_RESOLUTION=720p
@@ -119,31 +131,41 @@ VIDEO_POLL_INTERVAL_SECS=12
 VIDEO_TIMEOUT_SECS=600
 HOST=127.0.0.1
 PORT=8000
-MAX_UPLOAD_BYTES=26214400          # 25 MB — rejects oversize uploads with 413
+MAX_UPLOAD_BYTES=26214400
+USE_SQLITE_STATE=1                # opt-in SQLite backend (vs full-file JSON)
 ```
-
-Claude / Anthropic key is not required (no QC in this version).
 
 ---
 
 ## Architecture
 
 ```
-Browser (Alpine.js + Tailwind + dark mode)  ←─ WebSocket ─→  FastAPI
-                                                                  │
-                                                ┌─────────────────┴────────────┐
-                                          runner.py                     state.json
-                                                │                       (atomic)
-                          ┌─────────────────────┼─────────────────────┐
-                          │                     │                     │
-              pipeline.generate_image   pipeline.edit_image     pipeline.submit_video
-              + wait_for_video          (1 ref + custom prompt) + wait_for_video
+Browser (Alpine.js + Tailwind, dark mode forced)  ←─ WebSocket ─→  FastAPI
+                                                                       │
+            ┌──────────────────────────────────────────────────────────┘
+            │
+   ┌────────┼─────────────────┬───────────────┬──────────────┐
+   │        │                 │               │              │
+runner.py   runner_media.py   runner_broll.py    state.json (atomic)
+(Swap)      (Image/Video/     (B-roll: transcribe        + per-broll/per-edit
+            Audio/Avatar       → plan → seed → vid       state.json files
+            free-form)         → trim → concat → mux)    on disk
+            │                  │
+   ┌────────┴────────┐    video_edit.py
+   │                 │    (ffmpeg primitives:
+pipeline.            broll.py        trim, concat,
+(generate/edit       (creative-      time_stretch,
++wait_for_video)     director         caption render,
+                     prompt +        extract_last_frame,
+                     plan_visuals    silence-detect,
+                     + matcher)      Whisper transcribe)
 ```
 
 - FastAPI process. `BackgroundTasks` runs async work; OpenAI/Grok client calls are sync so they go through `asyncio.to_thread`.
 - `events.py` — in-process pub/sub keyed by `job_id`. WebSocket clients subscribe; runner publishes.
-- `state.py` — atomic JSON persistence (scenes, character library, jobs with variants + videos).
-- On server restart, `api.py`'s lifespan handler calls `runner.resume_pending(job_id)` for every job: in-flight Grok video polls resume; stuck image gens are marked failed.
+- `state.py` — atomic JSON persistence with opt-in SQLite backend (`USE_SQLITE_STATE=1`).
+- `runner_broll.py` — full B-roll pipeline with bucket-by-scene-group scheduler (clips in a group chain off the previous clip's last frame via `extract_last_frame`).
+- `video_edit.py` — every ffmpeg invocation we make: trim, concat, time-stretch with `atempo`, caption render via `subtitles` filter against generated ASS, Whisper transcribe, silence detect, extract last frame for B-roll continuity.
 
 ---
 
@@ -151,159 +173,243 @@ Browser (Alpine.js + Tailwind + dark mode)  ←─ WebSocket ─→  FastAPI
 
 ```
 src/character_swap/
-├── api.py          — FastAPI app: scenes/characters/jobs/edit_variant CRUD + WebSocket
-├── runner.py       — Multi-variant image gen, edit, multi-video animation, resume
-├── pipeline.py     — Pure primitives: generate_image, edit_image, submit_video, wait_for_video
-├── events.py       — Asyncio pub/sub for live updates
-├── state.py        — Atomic JSON state (scenes, characters, jobs)
-├── models.py       — Pydantic: SceneAsset, CharacterAsset, ProjectAsset, GeneratedImage, VideoVariant, JobCharacter, Job, AppState + StrEnums (CharStatus, VariantStatus, VideoStatus)
-├── config.py       — Settings via pydantic-settings
-├── images.py       — sha256, base64, atomic write/copy
-├── call_log.py     — JSONL call logger
-├── cli.py          — Typer: serve, status, reset, migrate
-├── runner_media.py — Background runner for free-form Image / Video generations
+├── api.py             — FastAPI app: every CRUD endpoint + WebSocket
+├── runner.py          — Swap-flow runner: per-(scene, char) variants, edit, multi-video
+├── runner_media.py    — Background runner for free-form Image/Video/Audio/Avatar
+├── runner_broll.py    — B-roll pipeline: transcribe → plan → seed image → video →
+                         scene-group chaining → trim → concat → mux audio
+├── broll.py           — System prompt + plan_visuals (GPT-4o) + parser +
+                         match_lines_to_timestamps + state I/O helpers
+├── pipeline.py        — Pure primitives: generate_image, edit_image,
+                         submit_video, wait_for_video, GENERATION_PROMPT
+├── video_edit.py      — ffmpeg primitives + Whisper + caption templates + WPM helpers +
+                         time_stretch + extract_last_frame + apply_timeline (CapCut)
+├── events.py          — Asyncio pub/sub for live updates
+├── state.py           — Atomic JSON state OR SQLite (depending on USE_SQLITE_STATE)
+├── models.py          — Pydantic: SceneAsset, CharacterAsset, ProjectAsset (+default_prompt),
+                         GeneratedImage (+scene_id), VideoVariant, JobCharacter,
+                         Job (+scene_ids list), AppState + StrEnums
+├── config.py          — Settings via pydantic-settings
+├── images.py          — sha256, base64, atomic write/copy
+├── call_log.py        — JSONL call logger
+├── cli.py             — Typer: serve, status, reset, migrate
 └── clients/
-    ├── __init__.py     — `ProviderNotConfigured` exception (→ HTTP 503)
-    ├── openai_image.py — GPT Image 2 wrapper; text-only or with refs
-    ├── grok.py         — xAI Grok REST: video submit/poll/download + image generate
-    ├── google_genai.py — stubs for Nano Banana + Veo (locked until GEMINI_API_KEY)
-    ├── kling.py        — stub for Kling (locked until KLING_ACCESS_KEY + SECRET)
-    ├── heygen.py       — stub for HeyGen Avatar (locked until HEYGEN_API_KEY).
-                          Has list_avatars / list_voices / submit_avatar_video /
-                          submit_photo_avatar / submit_avatar_video_with_audio /
-                          wait_for_avatar_video matching HeyGen's v2 REST.
-    ├── elevenlabs.py   — stub for ElevenLabs (locked until ELEVENLABS_API_KEY).
-                          list_voices + text_to_speech + voice_changer matching
-                          ElevenLabs's v1 REST.
-    └── _stubs.py       — collected stubs for FLUX/Ideogram/Recraft/Stability (image)
-                          + Runway/Luma/Pika/MiniMax/Sora/Wan/Seedance/Higgsfield
-                          (video). Each raises ProviderNotConfigured until its key
-                          is present, then NotImplementedError until a real adapter
-                          is wired.
+    ├── __init__.py       — `ProviderNotConfigured` exception (→ HTTP 503)
+    ├── openai_image.py   — GPT Image 2 wrapper; text-only or with refs
+    ├── grok.py           — xAI Grok REST: video submit/poll/download +
+                            image generate. submit() accepts duration_secs kwarg
+                            (clamped to [5, 15]) for B-roll per-clip duration matching.
+    ├── elevenlabs.py     — list_voices + text_to_speech + voice_changer (live)
+    ├── heygen.py         — list_avatars / voices / submit_avatar_video /
+                            submit_photo_avatar / submit_avatar_video_with_audio (live)
+    ├── google_genai.py   — stubs for Nano Banana + Veo (locked until GEMINI_API_KEY)
+    ├── kling.py          — stub (locked until KLING_*_KEY)
+    └── _stubs.py         — collected stubs for FLUX/Ideogram/Recraft/Stability
+                            + Runway/Luma/Pika/MiniMax/Sora/Wan/Seedance/Higgsfield.
 
 web/
-├── index.html      — Single page; Tailwind + dark mode + Alpine components
-└── app.js          — Studio component (theme, counts, edit flow, WebSocket client)
+├── index.html      — Single page; Tailwind via CDN + Alpine
+└── app.js          — Studio component (all tabs, WebSocket client, history grids,
+                     drag/drop/paste, status toast, sidebar thumbnails, WPM controls,
+                     CapCut timeline, B-roll review gate, per-variant retry, etc.)
 
-input/scenes/       — Uploaded scenes: <scene_id><ext>
+state/
+├── fonts/           — Cached Google Fonts + locally-installed TTFs
+│                      (Anton, Bebas Neue, Montserrat *, Poppins ExtraBold/Black,
+│                      Inter ExtraBold/Black, Arial Rounded MT Bold,
+│                      Instagram Sans Bold/Medium, TikTok Sans Bold/ExtraBold/Black)
+├── state.json       — Atomic AppState (or SQLite at state/state.db)
+└── calls.jsonl      — Append-only API call log
+
+input/scenes/       — Uploaded scenes: sc_<hash><ext>
 characters/         — Uploaded library: <char_id><ext>
 output/<job_id>/<char_id>/
                     — variant_<vid>.png, edit_<vid>.png, video_<vid>.mp4
-state/
-├── state.json      — Atomic AppState
-├── state.json.corrupt — Previous schema (kept on upgrade)
-└── calls.jsonl     — Append-only API call log
+output/editor/<edit_id>/
+                    — uploads, trimmed, swapped, captioned mp4s,
+                      stretched clips, words.json, wpm_decisions.json,
+                      pre_caption.txt, rerender-NN.mp4, timeline-NN.mp4
+output/broll/<broll_id>/
+                    — source audio, words.json, plan.json, state.json,
+                      clips/clip-NN.png + clip-NN.mp4 (+ clip-NN-stretched.mp4
+                      for trim-and-concat), concat.mp4, final.mp4
+output/generations/<gen_id>/
+                    — ref images + result for free-form tabs
 ```
 
 ---
 
-## The generation prompt (verbatim — do not paraphrase)
+## The Swap generation prompt
 
-Hardcoded in `pipeline.py::GENERATION_PROMPT`. Used for every initial variant. Edits use the user's custom prompt instead.
+Hardcoded in `pipeline.py::GENERATION_PROMPT`. Used for every initial variant unless the job has a custom prompt OR its project has a `default_prompt`. Edits use the user's custom prompt instead.
 
-> "The man from the second picture is in the exact same pose in the exact same position and holding the exact same stuff in the exact same place as the man in the first picture. Remove any text overlays. 9:16 ratio. The background looks like it is the same environment as the second picture."
+> "The man from the second picture is in the exact same pose in the exact same position and holding the exact same stuff in the exact same place as the man in the first picture. Remove any text overlays. 9:16 ratio. Change the background but same vibe. No blurry background."
 
-Order matters: scene is reference #1, character is reference #2. The user confirmed that "second picture" for background is intentional (the character keeps the scene's pose/items but in their own environment).
+Order matters: scene is reference #1, character is reference #2.
+
+**Per-project override**: `ProjectAsset.default_prompt: str | None`. When set, jobs created in that project inherit it instead of the global default. `GET /api/swap/defaults?project_id=...` returns `{prompt, global_prompt, project_prompt}` so the frontend can show both the active and the global default.
 
 ---
 
-## API surface
+## B-roll details
+
+### Pipeline
+
+1. **Transcribe** the source audio via Whisper (`verbose_json` + word timestamps). Word-level timestamps are noisy — most adjacent words come back back-to-back (no inter-word gap). True silences only show up as `next_word.start - prev_word.end > 0.4s`.
+2. **Plan visuals** via GPT-4o with the system prompt in `broll.BROLL_SYSTEM_PROMPT` (~30KB). The prompt teaches:
+   - The 4 visual MODES (Body-Part Transformation / Biological Process / Anatomical Flythrough / Contextual Human Moment)
+   - CONTEXT CONTINUITY (ambiguous later lines anchor to earlier body parts)
+   - BODY-PART VARIETY (don't keep returning to the same anchor)
+   - SCENE GROUPING (consecutive recipe steps share a `SCENE_GROUP` tag → chained visuals)
+   - ANATOMICAL CONNECTEDNESS (no floating feet/hands)
+   - TIGHT FRAMING (never whole-body, always one body part)
+   - NO STILL CLIPS (subject must be moving)
+   - ONE SHOT ONE FRAME (no tile/grid/strip/split-screen)
+   - The desired output format is `LINE:/MODE:/SCENE_GROUP:/PROMPT:` per segment; `SCENE_GROUP` is optional.
+3. **Match each line to Whisper timestamps** via `broll.match_lines_to_timestamps` (difflib at the word level). Each clip gets `timing: {start, end, duration, spoken_duration, unmatched}`. Silences between phrases fold into the preceding clip so total clip-track length == total audio length.
+4. **Per-clip duration target**: `max(5, ceil(spoken_duration + 1))` (5s minimum for Grok, +1s safety margin). Appended to the prompt as "Clip duration target: ~Ns seconds."
+5. **Generate clips**: scene groups run concurrently (cap 3); clips WITHIN a group run strictly sequentially. The first clip in a group gets a fresh Grok seed image; later clips in the same group get the previous clip's last frame extracted via ffmpeg `-sseof -1.0` as their seed → cumulative state preserved (recipe step 2 shows water + lemon over water from step 1).
+6. **Image guard suffix** is appended to EVERY Grok text-to-image call to defend against the 3-panel-storyboard fail mode that Grok's image model tends to produce for "BEFORE → AFTER" prompts.
+7. **Variation hint** on retries: "previous version was rejected, pick a different camera angle / framing / lighting" — appended to both image and video prompts.
+8. **Auto-retry**: failed clips get 1 automatic retry (constant `_CLIP_MAX_ATTEMPTS = 2` at top of `runner_broll.py`).
+9. **Pause at `awaiting_approval`**: pipeline does NOT auto-finalize. User reviews each clip in the UI, can ✕ Reject & regenerate any (with variation hint + cache-buster query string on URLs), then clicks ✓ Finalize.
+10. **Finalize**: trim each clip to its allotted duration, concat in script order, mux original narration on top via `replace_audio` (with `-shortest`).
+
+### Endpoints
 
 ```
-GET    /                              → web/index.html
-GET    /app.js                        → web/app.js
-GET    /files/output/<rel>            → generated outputs (per job)
-GET    /files/input/scenes/<rel>      → uploaded scene images
-GET    /files/characters/<rel>        → uploaded character images
-                                        (state/, .env, source are NOT exposed)
+POST   /api/broll/generate              multipart {file, video_model, aspect_ratio}
+GET    /api/broll                       list all
+GET    /api/broll/{broll_id}            single (poll)
+DELETE /api/broll/{broll_id}            full cleanup
+POST   /api/broll/{broll_id}/regenerate_clip   body {idx} — chains from prior in scene group
+POST   /api/broll/{broll_id}/finalize          trim+concat+mux
+```
 
-POST   /api/scenes                    multipart upload → {scene_id, url}
-                                      max upload size: MAX_UPLOAD_BYTES (default 25 MB)
-GET    /api/scenes/{scene_id}         metadata
+### State machine
 
-POST   /api/characters                multipart upload (file + optional
-                                      character_id + optional name) →
-                                      {char_id, name, filename, url,
-                                       primary_image_id, images: [...]}
-                                      • character_id matches an existing char →
-                                        append the image to that character.
-                                      • otherwise → create a new character;
-                                        `name` defaults to the file's stem.
-                                      Same hash-named file is reused for
-                                      duplicate uploads (no disk waste).
-GET    /api/characters                list with images array + primary
-PATCH  /api/characters/{char_id}      body {name} — retroactive rename
-DELETE /api/characters/{char_id}      remove from library + disk
+```
+queued → transcribing → planning → generating_clips → awaiting_approval ⇄ regen
+                                          ↓ ✓ Finalize
+                                    concatenating → done | partial_success | failed
+```
+
+---
+
+## Editor details
+
+### Single-clip auto-edit
+`POST /api/editor/auto_edit` runs (in order, each step is opt-out via Form):
+1. Trim silences (`enable_trim`)
+2. Voice swap via ElevenLabs STS (only if `voice_id` set)
+3. Transcribe (Whisper, needed if captions OR WPM normalize is on)
+4. **WPM normalize** (`enable_wpm_normalize`, default true; `target_wpm` default 190): compute `active-WPM` (= words / (span − sum_of_long_pauses>0.4s)), compute `speed_factor = target / current` clamped to [0.5, 2.0] with 3% dead zone, time-stretch via `atempo`, scale word timestamps in lockstep.
+5. Render captions (`enable_captions`)
+
+### Multi-clip auto-edit
+`POST /api/editor/multi_auto_edit` accepts N video files + a script:
+1. Save each clip
+2. Transcribe each (parallel)
+3. Fuzzy-match each clip's transcript to a position in the script (difflib via `match_clips_by_transcript`); reorder to script order
+4. Per-clip WPM normalize (same logic as above, on each clip independently)
+5. Concat in script order
+6. Trim silences, voice swap, captions (same as single-clip from step 5 onward)
+
+UI surfaces per-clip pacing decisions in a "Pace normalization" panel after rendering: `clip 3 · 245 WPM    ↑ 1.29× → 190 WPM` per clip.
+
+### CapCut-style timeline
+After any successful render, a "Trim & split" button opens a horizontal timeline below the result video. Segments are colored bars proportional to their played length. Drag handles trim each segment. Click "Split at playhead" to cut a segment in two. Per-segment ←/→ to reorder, ✕ to delete. "Apply timeline" POSTs to `/api/editor/timeline_render` which uses ffmpeg trim+concat in a single filter_complex.
+
+### Endpoints
+
+```
+GET  /api/editor/templates       list of caption templates with metadata
+POST /api/editor/trim_silences   silence-detect + cut
+POST /api/editor/captions        transcribe + burn captions
+POST /api/editor/auto_edit       full single-clip pipeline
+POST /api/editor/multi_auto_edit full multi-clip pipeline
+POST /api/editor/rerender        re-render captions on a cached result (no re-Whisper)
+POST /api/editor/timeline_render apply a CapCut-style timeline
+```
+
+---
+
+## Caption templates
+
+In `video_edit.TEMPLATES`. Each is a `CaptionStyle` dataclass with font, size, colors, outline, shadow, margin, words-per-card, optional highlight color, optional all-caps. Available templates:
+
+- **Submagic-style**: `popout-yellow`, `popout-white`, `popout-pink`, `popout-green` (Anton, all-caps, big outline)
+- **Modern bold**: `modern-bold` (Poppins ExtraBold), `bold-shadow` (Montserrat Black)
+- **Clean / soft**: `clean-shadow` (Helvetica, no outline + drop shadow), `rounded-soft` + `rounded-pop` (Arial Rounded MT Bold)
+- **Platform-branded**: `instagram` + `instagram-pop` (Instagram Sans Bold), `tiktok-pop` + `tiktok-black` (TikTok Sans ExtraBold / Black)
+- **Specialty**: `kinetic` (one word per card, Bebas Neue 160px), `typewriter` (Courier monospace boxed), `bottom-third` (broadcast lower-third), `submagic` (Montserrat Bold mixed-case)
+- **Legacy**: `mrbeast`, `tiktok`, `karaoke`, `minimal`, `subtitle`
+
+Fonts are auto-downloaded from Google Fonts on first use into `state/fonts/`. Locally-installed TTFs (Arial Rounded MT, Instagram Sans, TikTok Sans) are dropped directly into `state/fonts/` and resolved by `_ensure_font` which checks for local files BEFORE consulting the download URL dict.
+
+---
+
+## API surface (summary)
+
+```
+GET    /                                       → web/index.html
+GET    /app.js                                 → web/app.js
+GET    /files/output/<rel>                     → generated outputs
+GET    /files/input/scenes/<rel>               → uploaded scene images
+GET    /files/characters/<rel>                 → uploaded character images
+
+POST   /api/scenes                             multipart upload
+GET    /api/scenes/{scene_id}                  metadata
+
+POST   /api/characters                         multipart upload
+GET    /api/characters                         list
+PATCH  /api/characters/{char_id}               rename
+DELETE /api/characters/{char_id}               delete
 DELETE /api/characters/{char_id}/images/{image_id}
-                                      remove ONE image. If it was the primary,
-                                      another becomes primary. If it was the
-                                      last image, the character is deleted
-                                      entirely. → {ok, character_deleted}
-GET    /api/characters/{char_id}/gallery
-                                      → {char_id, name, source_url,
-                                         appearances: [{variant_id, url, job_id,
-                                                        job_title, is_approved,
-                                                        is_edit, created_at}]}
+GET    /api/characters/{char_id}/gallery       all appearances across jobs
 
-POST   /api/projects                  body {name, character_ids?: [...]}
-                                      → {project_id, name, character_ids, n_jobs, ...}
-GET    /api/projects                  list projects (with n_jobs, character_ids)
-PATCH  /api/projects/{project_id}     body {name?, character_ids?} — at least one field
-DELETE /api/projects/{project_id}     CASCADE: deletes project + every job inside
-                                      + each job's output/<job_id>/ directory.
-                                      Returns {ok, deleted_jobs: [...]}.
+POST   /api/projects                           create
+GET    /api/projects                           list
+PATCH  /api/projects/{project_id}              body: name? / character_ids? / default_prompt?
+DELETE /api/projects/{project_id}              CASCADE
 
-POST   /api/jobs                      body {scene_id, character_ids,
-                                              images_per_character: 1..4, title?,
-                                              project_id?}
-                                      project_id null/absent = Unfiled
-GET    /api/jobs                      list all jobs (full); ?summary=1 for compact list
-GET    /api/jobs/{job_id}             job state (variants + videos, with download_name fields)
-PATCH  /api/jobs/{job_id}             body {title?, project_id?}
-                                      — project_id explicitly null moves job to Unfiled
-                                      — at least one field required
-DELETE /api/jobs/{job_id}             hard delete: state entry + output/<job_id>/ directory
-POST   /api/jobs/{job_id}/approve     body {char_id, action: "approve"|"reject"|"regenerate", variant_id?}
-                                      — approve requires variant_id
-                                      — locked once movement_prompt is set (409)
-POST   /api/jobs/{job_id}/edit_variant  body {char_id, variant_id, prompt}
-                                      — produces a new variant (parent_variant_id set)
-                                      — locked once movement_prompt is set (409)
-POST   /api/jobs/{job_id}/movement    body {prompt, videos_per_character: 1..4}
-                                      — locked once already set (409)
+POST   /api/jobs                               body: scene_id OR scene_ids, character_ids, ...
+GET    /api/jobs                               list (?summary=1 for compact)
+GET    /api/jobs/{job_id}                      full state
+PATCH  /api/jobs/{job_id}                      title / project_id
+DELETE /api/jobs/{job_id}                      hard delete
+POST   /api/jobs/{job_id}/approve              body: char_id, action, variant_id?
+POST   /api/jobs/{job_id}/edit_variant         body: char_id, variant_id, prompt
+POST   /api/jobs/{job_id}/movement             body: prompt, videos_per_character
+POST   /api/jobs/{job_id}/duplicate            new job with same scenes + chars
+POST   /api/jobs/{job_id}/compact              strip non-approved files
+POST   /api/jobs/{job_id}/retry_video          retry one failed video
+PATCH  /api/jobs/{job_id}/characters/{char_id}/source_image   body: image_id
+POST   /api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/retry   per-variant retry
 
-WS     /ws/jobs/{job_id}              live events; sends snapshot on connect
+WS     /ws/jobs/{job_id}                       live events
 
-GET    /api/generations/models        {image: [...], video: [...]} — each entry has
-                                      {slug, label, provider, available}. Locked
-                                      models have available=false.
-POST   /api/generations                multipart {kind: image|video, model, prompt,
-                                                  aspect_ratio?, duration_secs?,
-                                                  files?: list[UploadFile]}
-                                      → MediaGeneration dict. Background task kicks off.
-                                      Returns 503 if provider not configured.
-GET    /api/generations?kind=image    list (or kind=video). Sorted created_at desc.
-GET    /api/generations/{gen_id}      single (polling endpoint while in flight)
-DELETE /api/generations/{gen_id}      remove from state + delete output + refs.
-                                      409 if status is pending/running.
-POST   /api/generations/{gen_id}/retry only when status=failed
+GET    /api/generations/models                 model registry
+POST   /api/generations                        multipart kind + model + prompt + files
+GET    /api/generations?kind=image             list
+GET    /api/generations/{gen_id}               single
+DELETE /api/generations/{gen_id}
+POST   /api/generations/{gen_id}/retry
 
-GET    /api/health                    {ok, version, openai_key, xai_key,
-                                       gemini_key, kling_key}
+GET    /api/swap/defaults?project_id=...       {prompt, global_prompt, project_prompt, ...}
+GET    /api/heygen/avatars, /api/heygen/voices, /api/elevenlabs/voices
+
+POST   /api/broll/generate                     full pipeline
+GET    /api/broll, /api/broll/{id}, DELETE /api/broll/{id}
+POST   /api/broll/{id}/regenerate_clip
+POST   /api/broll/{id}/finalize
+
+POST   /api/editor/auto_edit, /multi_auto_edit, /trim_silences, /captions, /rerender,
+       /timeline_render
+GET    /api/editor/templates
+
+GET    /api/health                             {ok, version, openai_key, xai_key, ...}
 ```
-
-Per-character status (`models.CharStatus`):
-```
-queued → generating → awaiting_approval → approved → animating → done
-                                       ↘ rejected (terminal)
-                generating/animating → failed (retry with regenerate)
-```
-
-`awaiting_approval` flips on as soon as the **first** variant lands, so the user can start approving while the rest are still generating.
-
-Per-variant status (`models.VariantStatus`): `generating | ready | failed`.
-Per-video status (`models.VideoStatus`): `pending | processing | done | failed | error`.
-Unknown intermediate states from Grok (e.g. "queued", "running") are coerced to `processing`.
 
 ---
 
@@ -312,7 +418,7 @@ Unknown intermediate states from Grok (e.g. "queued", "running") are coerced to 
 ### OpenAI `images.edit`
 - Two-ref (generate): `client.images.edit(image=[scene, char], prompt=..., model="gpt-image-2", size="1024x1792", n=1)`
 - One-ref (edit): `client.images.edit(image=variant, prompt=custom, ...)`
-- Multi-image must be passed as a list of open file handles. `clients/openai_image.py` uses `ExitStack`.
+- Multi-image must be passed as a list of open file handles (`ExitStack`).
 - 403 = OpenAI org isn't verified for `gpt-image-2`.
 
 ### Grok Imagine
@@ -320,30 +426,45 @@ Unknown intermediate states from Grok (e.g. "queued", "running") are coerced to 
 POST https://api.x.ai/v1/videos/generations
 GET  https://api.x.ai/v1/videos/{job_id}
 
-Submit body: {"model": "grok-imagine-video", "prompt": ..., "duration": 10,
-              "aspect_ratio": "9:16", "resolution": "720p",
+Submit body: {"model": "grok-imagine-video", "prompt": ..., "duration": <int 5-15>,
+              "aspect_ratio": "9:16" | "1:1" | "16:9", "resolution": "720p",
               "image": {"url": "data:<mime>;base64,<b64>"}}
-Submit response: {"request_id": "<job_id>", ...}   ← job ID at "request_id"
-Status complete: {"status": "done", "video": {"url": "...", "duration": 10}, "progress": 100}
-Terminal: {done, failed, error, cancelled}; success: {done}.
-Download: plain GET on the video URL (httpx.stream 300s).
+Submit response: {"request_id": "<job_id>", ...}
+Status terminal: {done, failed, error, cancelled}; success: {done}.
+Grok image model: `grok-imagine-image` (xAI deprecated `grok-2-image-1212` on 2026-02-24).
 ```
+
+### Whisper word timestamps quirk
+`whisper-1` with `timestamp_granularities=["word"]` returns word durations that are mostly INTERPOLATED inside each segment — `word[i].end == word[i+1].start` for most adjacent words. Real silences only show up as gaps > ~0.4s. The WPM helpers in `video_edit.py` (`compute_wpm`) account for this by computing `active_secs = span − sum(long_gaps)` instead of summing per-word durations.
 
 ---
 
 ## Cost & safety notes
 
 - Server binds to `127.0.0.1` only.
-- Static-file serving uses **three narrow mounts**: `/files/output`, `/files/input/scenes`, `/files/characters`. `state/`, `.env`, source, and call logs are NOT reachable via HTTP — even if HOST is changed.
-- Uploads are streamed in chunks and capped by `MAX_UPLOAD_BYTES` (default 25 MB) to prevent OOM from huge files.
-- Image gen is gated by `IMAGE_CONCURRENCY` (default 2). With 5 chars × 4 variants = 20 calls; at concurrency 2 that's ~30–60s × 10 batches.
-- Video gen fires all in parallel (Grok handles queueing server-side). With 5 chars × 4 videos = 20 Grok jobs; ~5–10 min each. UI shows count hints next to Generate / Animate buttons.
-- Approvals + edits are locked after the movement prompt is submitted — protects the contract that videos came from a specific image.
+- Static-file serving uses **three narrow mounts**: `/files/output`, `/files/input/scenes`, `/files/characters`. `state/`, `.env`, source, and call logs are NOT reachable via HTTP.
+- Uploads streamed in chunks, capped by `MAX_UPLOAD_BYTES` (default 25 MB).
+- Image gen gated by `IMAGE_CONCURRENCY` (default 2). With multi-scene jobs: 5 chars × 3 scenes × 4 variants = 60 calls.
+- Video gen fires in parallel (Grok queues server-side).
+- Approvals + edits locked after movement prompt submitted.
 - All API calls logged to `state/calls.jsonl`.
+
+---
+
+## Known issues / pending
+
+- **Step 2 source-image swap shows "Start the job first, then swap the reference image" when no job is loaded yet.** Picker is open for "preview" but PATCH endpoint requires an existing JobCharacter. Fix path: either disable the picker when `!job`, or implement a client-side override map that gets sent to `POST /api/jobs` at creation time.
+- Head-of-chain B-roll regen: rejecting the FIRST clip in a scene group doesn't auto-rechain downstream clips (they still point at the old first-clip's last frame). UI hint to manually reject downstream too is a follow-up.
+- Edit-chain visualization beyond the small "↳ edit" badge.
+- SQLite-backed state is opt-in via `USE_SQLITE_STATE=1` but full migration tooling isn't shipped yet.
+- Mobile / iPad UI: not optimized. Sidebar layout assumes ≥md breakpoint.
 
 ---
 
 ## Pending / nice-to-haves
 
-- Edit-chain visualization beyond the small "↳ edit" badge (e.g. parent thumbnail on hover).
-- SQLite-backed state (planned in `~/.claude/plans/`) — kills the write-amplification of full-file JSON rewrites.
+- Cross-clip pause-length normalization in Editor multi-clip (currently each clip's pause structure is preserved; could optionally collapse all pauses to a target length).
+- Visual preview of WPM-stretch decisions BEFORE rendering (the data is computed instantly from the transcript).
+- Drag-to-reorder in CapCut timeline (current UI has ← → buttons per segment).
+- Node-based canvas (Higgsfield/Krea style) for chaining tab outputs into pipelines. Parked.
+- `.otio` export for finishing edits in DaVinci Resolve / CapCut Desktop.
