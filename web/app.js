@@ -14,7 +14,53 @@ function studio() {
     scene: null,
     library: [],
     selectedCharacters: [],
+    // Map of char_id -> image_id chosen as the reference BEFORE a job exists.
+    // Sent to POST /api/jobs as character_source_image_ids. Cleared when
+    // the job is created or the character is deselected.
+    charSourceOverrides: {},
     imagesPerChar: 1,
+    // --- Reel tab state (batch-consistent image edit) -------------------
+    reelPresets: [],
+    reelJobs: [],
+    // OS-level notification preferences. Persisted to localStorage in init().
+    // Both default to ON; user can disable via header toggles. The chime is
+    // synthesized via Web Audio API (no asset file). OS popup needs browser
+    // permission — _requestNotifPermission() prompts once.
+    notif: {
+      os: (typeof localStorage !== 'undefined') ? (localStorage.getItem('notif.os') !== '0') : true,
+      sound: (typeof localStorage !== 'undefined') ? (localStorage.getItem('notif.sound') !== '0') : true,
+    },
+    // Snapshot of last-seen swap job state per job_id — used to detect
+    // transitions like "char moved to awaiting_approval" so we only fire
+    // ONE milestone notification per gate, not on every WS refresh.
+    _lastSwapJobSnapshot: {},
+    // Same idea for freeform gens: stash previous status keyed by gen_id.
+    _lastGenStatus: {},
+    reel: {
+      presetId: null,
+      customPrompt: '',
+      model: 'gpt-image',
+      aspect: '9:16',
+      frames: [],           // {file, previewUrl}
+      dropActive: false,
+      submitting: false,
+      miniApproval: false,  // when true: render followers sequentially with per-frame review
+      showPresetEditor: false,
+      draftPresetName: '',
+      draftPresetBaseline: '',
+      draftPresetIsDefault: false,
+      savingPreset: false,
+      // Anchor-approval inline editor: which job is currently being edited,
+      // plus the draft prompt text being typed into the textarea.
+      anchorEditJobId: null,
+      anchorEditDraft: '',
+      // Per-frame refine inline editor (✎ button): which frame is being
+      // refined + the user's free-text correction text.
+      refineJobId: null,
+      refineFrameId: null,
+      refineCorrection: '',
+    },
+    _reelWs: null,
     videosPerChar: 1,
     job: null,
     jobsList: [],
@@ -196,6 +242,11 @@ function studio() {
       // the pickers are ready without waiting for a tab-switch.
       if (this.elevenlabsAvailable()) this.loadElevenlabsVoices();
       this.loadEditorTemplates();
+      // Reel: load presets + jobs eagerly so the picker has data even when
+      // the user lands directly on the Reel tab (the $watch below only fires
+      // on tab CHANGE, which doesn't happen on initial mount).
+      this.loadReelPresets();
+      this.loadReelJobs();
       await this.loadGenerations();
       await this.loadSwapDefaults();
       // Restore last-used picks per-tab so the model/voice/aspect we used
@@ -224,6 +275,22 @@ function studio() {
       // Reload swap defaults whenever the active project changes — picks up
       // the project's `default_prompt` (or falls back to global).
       this.$watch('currentProjectId', () => this.loadSwapDefaults());
+      // OS-level notifications: ask permission once (browser remembers the
+      // answer); persist the user's toggle picks across reloads.
+      this._requestNotifPermission();
+      this.$watch('notif.os',    v => localStorage.setItem('notif.os',    v ? '1' : '0'));
+      this.$watch('notif.sound', v => localStorage.setItem('notif.sound', v ? '1' : '0'));
+      // Drive the Remotion preview: react to template / overrides / source-video
+      // changes so the in-browser player mirrors what the server will render.
+      this.$watch('editor.template', () => this._refreshRemotionPreview());
+      this.$watch('editor.sourceVideo', () => this._refreshRemotionPreview());
+      // overrides is a flat object; watch each field individually since Alpine's
+      // string-path $watch only fires on direct property identity changes.
+      ['font','size','primary_color','outline_color','words_per_card',
+       'margin_v','margin_h','highlight_color','box','all_caps',
+       'outline','shadow','alignment'].forEach(k => {
+        this.$watch(`editor.overrides.${k}`, () => this._refreshRemotionPreview());
+      });
       // Poll in-flight generations every 4s
       this._genPollTimer = setInterval(() => this.pollActiveGens(), 4000);
       // URL routing: if we landed on /j/<id>, open that job.
@@ -680,6 +747,11 @@ function studio() {
         .filter(g => ['pending', 'running'].includes(g.status));
       if (active.length === 0) return;
       try {
+        // Snapshot statuses BEFORE the refetch so we can detect the
+        // running→done|failed transition once and only once per gen.
+        const prevStatusById = {};
+        for (const g of active) prevStatusById[g.gen_id] = g.status;
+
         const results = await Promise.all(active.map(g =>
           fetch('/api/generations/' + g.gen_id).then(r => r.ok ? r.json() : null)
         ));
@@ -688,6 +760,25 @@ function studio() {
           const target = this._historyForKind(updated.kind);
           const idx = target.findIndex(g => g.gen_id === updated.gen_id);
           if (idx !== -1) target[idx] = updated;
+
+          // Fire a milestone notification on the first transition from
+          // pending/running → done|failed. _lastGenStatus is the durable
+          // dedup key so a long poll loop doesn't re-fire on re-entry.
+          const prev = prevStatusById[updated.gen_id];
+          const seen = this._lastGenStatus[updated.gen_id];
+          if ((prev === 'running' || prev === 'pending')
+              && ['done', 'failed'].includes(updated.status)
+              && seen !== updated.status) {
+            this._lastGenStatus[updated.gen_id] = updated.status;
+            const verb = updated.status === 'done' ? 'done' : 'failed';
+            const label = (updated.prompt || updated.model || updated.gen_id || '')
+                            .toString().slice(0, 80);
+            this.notifyMilestone(
+              `${updated.kind || 'gen'} ${verb}`,
+              label || `${updated.gen_id}`,
+              { kind: 'done', tag: `gen-${updated.gen_id}` },
+            );
+          }
         }
         if (results.some(r => r && ['done', 'failed'].includes(r.status))) {
           this.loadDailyCost();
@@ -848,6 +939,7 @@ function studio() {
         if (!r.ok) return;
         const fresh = await r.json();
         const i = this.brollHistory.findIndex(b => b.broll_id === brollId);
+        const prevStatus = (i >= 0) ? this.brollHistory[i].status : null;
         if (i >= 0) {
           // Preserve client-side transient flags across server refreshes so
           // the UI doesn't flicker spinner state during a poll.
@@ -868,6 +960,22 @@ function studio() {
           this.brollHistory.splice(i, 1, fresh);
         } else {
           this.brollHistory = [fresh, ...this.brollHistory];
+        }
+        // Milestone: clips are done & b-roll is waiting for Hugo's approval
+        // before the optional finalize step. Or the whole b-roll is done.
+        const APPROVAL = 'awaiting_approval';
+        const TERMINAL = ['done', 'partial_success', 'failed'];
+        if (prevStatus !== APPROVAL && fresh.status === APPROVAL) {
+          this.notifyMilestone('B-roll ready — review clips',
+            `${fresh.broll_id}: pick which clips to keep before finalize`,
+            { kind: 'approval', tag: `broll-${fresh.broll_id}-approve` });
+        } else if (!TERMINAL.includes(prevStatus) && TERMINAL.includes(fresh.status)) {
+          const verb = fresh.status === 'done' ? 'done'
+                       : fresh.status === 'partial_success' ? 'done (partial)'
+                       : 'failed';
+          this.notifyMilestone(`B-roll ${verb}`,
+            `${fresh.broll_id}: final video ready`,
+            { kind: 'done', tag: `broll-${fresh.broll_id}-done` });
         }
       } catch (_) {}
     },
@@ -1024,7 +1132,9 @@ function studio() {
         const data = await r.json();
         this.editor.lastResult = { ...data, kind: 'trim' };
         this.editorHistory = [{ ...data, kind: 'trim', ts: Date.now() }, ...this.editorHistory];
-        this.notifyInfo(`Trimmed ${data.saved_secs}s (${data.n_cuts} segments kept)`);
+        this.notifyMilestone('Trim done',
+          `${data.saved_secs}s removed (${data.n_cuts} segments kept)`,
+          { kind: 'done', tag: 'editor-trim' });
       } finally {
         this.editor.trimming = false;
       }
@@ -1053,7 +1163,9 @@ function studio() {
         const data = await r.json();
         this.editor.lastResult = { ...data, kind: 'captions' };
         this.editorHistory = [{ ...data, kind: 'captions', ts: Date.now() }, ...this.editorHistory];
-        this.notifyInfo(`Captioned ${data.n_words} words with ${data.template}`);
+        this.notifyMilestone('Captions done',
+          `${data.n_words} words · ${data.template}`,
+          { kind: 'done', tag: 'editor-captions' });
       } finally {
         this.editor.captioning = false;
       }
@@ -1107,7 +1219,9 @@ function studio() {
           template: data.template, n_words: data.n_words,
           output_url: data.output_url, ts: Date.now(),
         }, ...this.editorHistory];
-        this.notifyInfo(`Rerendered v${data.version} with ${data.template}`);
+        this.notifyMilestone('Rerender done',
+          `v${data.version} · ${data.template}`,
+          { kind: 'done', tag: `editor-rerender-${data.version}` });
       } finally {
         this.editor.rerendering = false;
       }
@@ -1334,7 +1448,9 @@ function studio() {
           n_segments: data.n_segments, duration: data.duration,
           output_url: data.output_url, ts: Date.now(),
         }, ...this.editorHistory];
-        this.notifyInfo(`Timeline v${data.version}: ${data.n_segments} segments, ${data.duration}s`);
+        this.notifyMilestone('Timeline render done',
+          `v${data.version} · ${data.n_segments} segments · ${data.duration}s`,
+          { kind: 'done', tag: `editor-timeline-${data.version}` });
         // Re-anchor the timeline to the new render so the user can iterate
         // again on the result of this round.
         this.openTimeline();
@@ -1396,7 +1512,9 @@ function studio() {
           template: data.captions?.template, n_words: data.captions?.n_words,
         };
         const unmatched = (data.matching || []).filter(m => m.unmatched).length;
-        this.notifyInfo(`Stitched ${data.n_clips} clips${unmatched ? ` (${unmatched} unmatched)` : ''} · ${data.captions?.n_words} words captioned`);
+        this.notifyMilestone('Multi-clip auto-edit done',
+          `${data.n_clips} clips${unmatched ? ` (${unmatched} unmatched)` : ''} · ${data.captions?.n_words} words captioned`,
+          { kind: 'done', tag: 'editor-multi-auto-edit' });
       } finally {
         this.multiAutoEditing = false;
       }
@@ -1429,7 +1547,8 @@ function studio() {
         if (data.trim) parts.push(`trimmed ${data.trim.saved_secs}s`);
         if (data.voice_swap) parts.push(`voice swapped`);
         if (data.captions) parts.push(`${data.captions.n_words} words captioned`);
-        this.notifyInfo('Auto-edit done: ' + parts.join(' · '));
+        this.notifyMilestone('Auto-edit pipeline done', parts.join(' · '),
+          { kind: 'done', tag: 'editor-auto-edit' });
       } finally {
         this.editor.autoEditing = false;
       }
@@ -1631,6 +1750,14 @@ function studio() {
       this.duration = ev.target.duration || 0;
       this.trimStartSecs = 0;
       this.trimEndSecs = 0;
+      // Snapshot duration + intrinsic dimensions onto editor.sourceVideo so
+      // the Remotion Player can size its composition correctly.
+      if (this.editor?.sourceVideo) {
+        this.editor.sourceVideo.duration = ev.target.duration || 0;
+        this.editor.sourceVideo.width = ev.target.videoWidth || 1080;
+        this.editor.sourceVideo.height = ev.target.videoHeight || 1920;
+      }
+      this._refreshRemotionPreview();
     },
 
     formatSecs(s) {
@@ -1650,6 +1777,123 @@ function studio() {
         words_per_card: null, margin_v: null, highlight_color: null, box: null,
         all_caps: null,
       };
+      this._refreshRemotionPreview();
+    },
+
+    // --- Remotion preview integration -------------------------------------
+    // Remotion-rendered templates declare `engine: "remotion"` on the
+    // template row served from `/api/editor/templates`. When picked, we
+    // mount @remotion/player into the `#remotion-preview-host` div so the
+    // user sees an exact preview of what the server will render.
+
+    useRemotionPlayer() {
+      if (!this.editor?.sourceVideo?.url) return false;
+      const tpl = this.currentTemplate();
+      return !!(tpl && tpl.engine === 'remotion' && tpl.composition_id);
+    },
+
+    _remotionSampleWords() {
+      // Placeholder words used until Whisper has actually transcribed the
+      // source video. Mirrors the "NEVER BUY HONEY" sample used by the
+      // legacy CSS preview, padded out to 6 words so multi-word-per-card
+      // templates have something to group.
+      return [
+        { text: 'Never', start: 0.0, end: 0.45 },
+        { text: 'buy',   start: 0.5, end: 0.85 },
+        { text: 'honey', start: 0.9, end: 1.45 },
+        { text: 'from',  start: 1.5, end: 1.85 },
+        { text: 'the',   start: 1.9, end: 2.05 },
+        { text: 'store', start: 2.1, end: 2.7 },
+      ];
+    },
+
+    _assToHexCss(ass) {
+      if (!ass) return null;
+      let s = String(ass).replace(/^&h?/i, '');
+      if (s.length === 8) s = s.slice(2);
+      if (s.length !== 6) return null;
+      const bb = s.slice(0, 2), gg = s.slice(2, 4), rr = s.slice(4, 6);
+      if (!/^[0-9a-fA-F]{6}$/.test(bb + gg + rr)) return null;
+      return ('#' + rr + gg + bb).toUpperCase();
+    },
+
+    _remotionPlayerProps() {
+      const tpl = this.currentTemplate();
+      const overrides = this._activeOverrides();
+      const tplProps = tpl?.remotion_props || {
+        accent: '#FFD400', fontFamily: 'Inter', sizeScale: 1.0,
+        positionPct: { x: 0.5, y: 0.78 }, allCaps: true, wordsPerCard: 3,
+      };
+      const realWords = this.editor?.lastResult?.words;
+      const words = (Array.isArray(realWords) && realWords.length > 0)
+        ? realWords
+        : this._remotionSampleWords();
+
+      const remOverrides = {};
+      if (overrides.size != null) {
+        remOverrides.sizeScale = Math.max(0.4, Math.min(2.5, overrides.size / 115.2));
+      }
+      if (overrides.highlight_color) {
+        const hex = this._assToHexCss(overrides.highlight_color);
+        if (hex) remOverrides.accent = hex;
+      }
+      if (overrides.font) remOverrides.fontFamily = overrides.font;
+      if (overrides.all_caps != null) remOverrides.allCaps = !!overrides.all_caps;
+      if (overrides.words_per_card != null) remOverrides.wordsPerCard = overrides.words_per_card;
+      const basePos = tplProps.positionPct || { x: 0.5, y: 0.78 };
+      let pos = null;
+      if (overrides.margin_v != null) {
+        pos = pos || { ...basePos };
+        pos.y = Math.max(0.05, Math.min(0.95, 1 - overrides.margin_v / 1920));
+      }
+      if (overrides.margin_h != null) {
+        pos = pos || { ...basePos };
+        pos.x = Math.max(0.05, Math.min(0.95, 0.5 + overrides.margin_h / 1080));
+      }
+      if (pos) remOverrides.positionPct = pos;
+
+      const videoDur = this.editor.sourceVideo?.durationSecs
+                       || this.editor.sourceVideo?.duration
+                       || 10;
+      return {
+        videoSrc: this.editor.sourceVideo.url,
+        words,
+        videoDurationSecs: videoDur,
+        videoWidth: this.editor.sourceVideo?.width || 1080,
+        videoHeight: this.editor.sourceVideo?.height || 1920,
+        ...tplProps,
+        ...remOverrides,
+      };
+    },
+
+    _refreshRemotionPreview() {
+      if (!this.useRemotionPlayer()) {
+        if (typeof window !== 'undefined' && window.RemotionPreview && this._remotionMounted) {
+          window.RemotionPreview.unmount('remotion-preview-host');
+          this._remotionMounted = false;
+        }
+        return;
+      }
+      if (typeof window === 'undefined' || !window.RemotionPreview) {
+        // Bundle still loading (or never built). Retry a few times then give up.
+        if (!this._remotionLoadAttempts) this._remotionLoadAttempts = 0;
+        if (this._remotionLoadAttempts < 20) {
+          this._remotionLoadAttempts += 1;
+          setTimeout(() => this._refreshRemotionPreview(), 200);
+        } else if (!this._remotionLoadWarned) {
+          this._remotionLoadWarned = true;
+          console.warn('[remotion-preview] bundle missing — run `character-swap remotion-install`');
+        }
+        return;
+      }
+      this._remotionLoadAttempts = 0;
+      const tpl = this.currentTemplate();
+      window.RemotionPreview.mount(
+        'remotion-preview-host',
+        tpl.composition_id,
+        this._remotionPlayerProps(),
+      );
+      this._remotionMounted = true;
     },
 
     async loadHeygenCatalogue() {
@@ -2040,6 +2284,63 @@ function studio() {
     notifyError(msg, retry = null) { this.notify('error', msg, { retry }); },
     notifyInfo(msg)               { this.notify('info', msg); },
 
+    // Bigger-deal notification: in-app toast + audio chime + OS popup (if
+    // permitted). Use for approval gates and batch completions, NOT for
+    // routine status pings.
+    //
+    // opts: { kind: 'approval' | 'done', tag: string }
+    //   - kind picks the chime pitch (approval = higher/sharper)
+    //   - tag de-dupes OS popups when the same milestone fires twice quickly
+    notifyMilestone(title, body, opts = {}) {
+      this.notify('info', body, { ttl: 6000 });
+      if (this.notif.sound) this._playChime(opts.kind);
+      if (this.notif.os && typeof Notification !== 'undefined'
+          && Notification.permission === 'granted') {
+        try {
+          const n = new Notification(title, {
+            body, icon: '/favicon.ico', tag: opts.tag, silent: false,
+          });
+          n.onclick = () => { window.focus(); n.close(); };
+          setTimeout(() => { try { n.close(); } catch (_) {} }, 9000);
+        } catch (_) {}
+      }
+    },
+
+    _playChime(kind) {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        this._audioCtx = this._audioCtx || new Ctx();
+        const ctx = this._audioCtx;
+        const tones = kind === 'approval' ? [880, 1320] : [660, 990];
+        tones.forEach((freq, i) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          osc.connect(gain).connect(ctx.destination);
+          const t = ctx.currentTime + i * 0.12;
+          gain.gain.setValueAtTime(0.0001, t);
+          gain.gain.exponentialRampToValueAtTime(0.18, t + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+          osc.start(t); osc.stop(t + 0.2);
+        });
+      } catch (_) {}
+    },
+
+    async _requestNotifPermission() {
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission === 'default') {
+        try { await Notification.requestPermission(); } catch (_) {}
+      }
+    },
+
+    // True iff the browser permission for OS notifications was denied
+    // (user clicked "Block"). Used to grey out the 🔔 header toggle.
+    notifBlockedByBrowser() {
+      return typeof Notification !== 'undefined' && Notification.permission === 'denied';
+    },
+
     dismissToast(id) {
       this.toasts = this.toasts.filter(t => t.id !== id);
     },
@@ -2293,6 +2594,13 @@ function studio() {
     toggleCharacter(cid) {
       if (this.selectedCharacters.includes(cid)) {
         this.selectedCharacters = this.selectedCharacters.filter(x => x !== cid);
+        // Drop any staged source-image override too so it doesn't haunt a
+        // future re-selection of this char with a different intent.
+        if (this.charSourceOverrides[cid]) {
+          const next = { ...this.charSourceOverrides };
+          delete next[cid];
+          this.charSourceOverrides = next;
+        }
       } else {
         this.selectedCharacters.push(cid);
       }
@@ -2519,6 +2827,13 @@ function studio() {
       if (this.scenes.length === 0 || this.selectedCharacters.length === 0) return;
       this.generating = true;
       try {
+        // Only send overrides for chars actually selected — keep payload tight.
+        const overrides = {};
+        for (const cid of this.selectedCharacters) {
+          if (this.charSourceOverrides[cid]) {
+            overrides[cid] = this.charSourceOverrides[cid];
+          }
+        }
         const r = await fetch('/api/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2533,11 +2848,14 @@ function studio() {
             project_id: this.currentProjectId,
             prompt: (this.swapPrompt || '').trim() || null,
             image_model: this.swapModel,
+            character_source_image_ids: Object.keys(overrides).length ? overrides : null,
           }),
         });
         if (!r.ok) { this.notifyError('Job creation failed: ' + await r.text()); return; }
         const job = await r.json();
         this.job = job;
+        // Overrides have been baked into the job snapshot — clear the staging.
+        this.charSourceOverrides = {};
         this.connectWS(job.job_id);
         await this.loadJobsList();
         await this.loadProjects();
@@ -2712,7 +3030,10 @@ function studio() {
     // CharacterImage in the library so we can highlight "currently selected"
     // in the picker. Returns image_id or null.
     currentSourceImageId(ch) {
-      if (!this.job) return ch.primary_image_id;
+      if (!this.job) {
+        // Pre-job: prefer the user's staged override, fall back to primary.
+        return this.charSourceOverrides[ch.char_id] || ch.primary_image_id;
+      }
       const jc = this.job.characters?.[ch.char_id];
       if (!jc?.source_image_url) return ch.primary_image_id;
       // URL ends with /characters/<filename> — strip query strings + path.
@@ -2735,10 +3056,11 @@ function studio() {
     async setCharSourceImage(charId, imageId) {
       this.sourceImagePickerCharId = null;
       if (!this.job) {
-        // Creating a new job — no JobCharacter exists yet. For now we tell
-        // the user to start the job first, then swap. (Could be enhanced
-        // later to stage the override client-side.)
-        this.notifyError('Start the job first, then swap the reference image');
+        // Pre-job: stage the choice client-side. It'll be sent as
+        // `character_source_image_ids[charId]` when the user hits Generate.
+        // The picker's "currently selected" highlight already reads from
+        // currentSourceImageId() which checks charSourceOverrides first.
+        this.charSourceOverrides = { ...this.charSourceOverrides, [charId]: imageId };
         return;
       }
       try {
@@ -2956,6 +3278,7 @@ function studio() {
       if (!evt || !evt.kind) return;
       if (evt.kind === 'snapshot') {
         this.job = evt.job;
+        this._fireSwapMilestones(this.job);
         return;
       }
       if (!this.job || evt.job_id !== this.job.job_id) return;
@@ -2973,6 +3296,481 @@ function studio() {
       if (evt.kind === 'variant.ready' && evt.char_id) {
         this._invalidateGalleryFor(evt.char_id);
       }
+      // Notification milestones — fire AFTER the job state has been refetched
+      // above so we compare apples-to-apples against the snapshot.
+      this._fireSwapMilestones(this.job);
+    },
+
+    // Compare the freshly-refetched swap job against the last snapshot we
+    // saw and fire exactly one milestone per transition:
+    //   • per char: any-status → awaiting_approval  (approval gate)
+    //   • job-level: not all terminal → all terminal  (batch complete)
+    _fireSwapMilestones(job) {
+      if (!job || !job.job_id) return;
+      const TERMINAL = new Set(['done', 'rejected', 'failed']);
+      const prevSnap = this._lastSwapJobSnapshot[job.job_id] || { chars: {}, allTerminal: false };
+      const nextChars = {};
+      let allTerminal = true;
+      const charEntries = Object.entries(job.characters || {});
+      for (const [cid, jc] of charEntries) {
+        nextChars[cid] = jc.status;
+        if (!TERMINAL.has(jc.status)) allTerminal = false;
+        const prevStatus = prevSnap.chars[cid];
+        if (prevStatus !== 'awaiting_approval' && jc.status === 'awaiting_approval') {
+          this.notifyMilestone(
+            'Variant ready — approve',
+            `${jc.name || cid}: first variant landed, pick one to keep`,
+            { kind: 'approval', tag: `swap-${job.job_id}-${cid}-approve` },
+          );
+        }
+      }
+      if (charEntries.length > 0 && !prevSnap.allTerminal && allTerminal) {
+        this.notifyMilestone(
+          'Swap job complete',
+          `${job.title || job.job_id}: all characters finished`,
+          { kind: 'done', tag: `swap-${job.job_id}-done` },
+        );
+      }
+      this._lastSwapJobSnapshot[job.job_id] = { chars: nextChars, allTerminal };
+    },
+
+    // ----- Reel tab (batch-consistent image edit) ------------------------
+
+    async loadReelPresets() {
+      try {
+        const r = await fetch('/api/reel/presets');
+        if (!r.ok) { this.notifyError('Reel presets: ' + await r.text()); return; }
+        this.reelPresets = await r.json();
+        if (!this.reel.presetId && this.reelPresets.length > 0) {
+          const def = this.reelPresets.find(p => p.is_default) || this.reelPresets[0];
+          this.reel.presetId = def.preset_id;
+        }
+      } catch (e) {
+        this.notifyError('Reel presets: ' + e.message);
+      }
+    },
+
+    async loadReelJobs() {
+      try {
+        const r = await fetch('/api/reel/jobs');
+        if (!r.ok) { this.notifyError('Reel jobs: ' + await r.text()); return; }
+        this.reelJobs = await r.json();
+        // Reattach a WS to any job that's still in flight so the grid live-updates.
+        for (const rj of this.reelJobs) {
+          if (rj.status === 'queued' || rj.status === 'generating') {
+            this._attachReelWs(rj.job_id);
+          }
+        }
+      } catch (e) {
+        this.notifyError('Reel jobs: ' + e.message);
+      }
+    },
+
+    currentReelPreset() {
+      return this.reelPresets.find(p => p.preset_id === this.reel.presetId) || null;
+    },
+
+    isReelPresetDefault(presetId) {
+      const p = this.reelPresets.find(x => x.preset_id === presetId);
+      return !!(p && p.is_default);
+    },
+
+    onReelPresetChange() {
+      // Mirror the freshly-picked preset's content into the draft editor so
+      // "Save" updates THIS preset (and "Create" creates a clone) without
+      // the user having to manually copy-paste.
+      this.prefillPresetEditorFromCurrent();
+    },
+
+    prefillPresetEditorFromCurrent() {
+      const p = this.currentReelPreset();
+      if (!p) return;
+      this.reel.draftPresetName = p.name;
+      this.reel.draftPresetBaseline = p.baseline_prompt;
+      this.reel.draftPresetIsDefault = !!p.is_default;
+    },
+
+    async saveReelPreset() {
+      // If draftName === current preset name AND a preset is picked → PATCH it.
+      // Otherwise → POST a new preset.
+      const name = (this.reel.draftPresetName || '').trim();
+      const baseline = (this.reel.draftPresetBaseline || '').trim();
+      if (!name || !baseline) {
+        this.notifyError('Preset name and baseline prompt are both required');
+        return;
+      }
+      this.reel.savingPreset = true;
+      try {
+        const current = this.currentReelPreset();
+        const isUpdate = !!current && current.name === name;
+        const url = isUpdate ? `/api/reel/presets/${current.preset_id}` : '/api/reel/presets';
+        const method = isUpdate ? 'PATCH' : 'POST';
+        const r = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name, baseline_prompt: baseline, is_default: !!this.reel.draftPresetIsDefault,
+          }),
+        });
+        if (!r.ok) { this.notifyError('Preset save failed: ' + await r.text()); return; }
+        const saved = await r.json();
+        await this.loadReelPresets();
+        this.reel.presetId = saved.preset_id;
+        this.reel.showPresetEditor = false;
+        this.notifyInfo(isUpdate ? 'Preset updated' : 'Preset created');
+      } catch (e) {
+        this.notifyError('Preset save failed: ' + e.message);
+      } finally {
+        this.reel.savingPreset = false;
+      }
+    },
+
+    async deleteCurrentReelPreset() {
+      const p = this.currentReelPreset();
+      if (!p) return;
+      if (p.is_default) { this.notifyError("Can't delete the default preset"); return; }
+      if (!confirm(`Delete preset "${p.name}"?`)) return;
+      try {
+        const r = await fetch(`/api/reel/presets/${p.preset_id}`, { method: 'DELETE' });
+        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
+        this.reel.presetId = null;
+        await this.loadReelPresets();
+        this.notifyInfo('Preset deleted');
+      } catch (e) {
+        this.notifyError('Delete failed: ' + e.message);
+      }
+    },
+
+    reelSupportedModels() {
+      // Reel runner currently dispatches gpt-image + nano-banana[-pro]. Surface
+      // those (with availability based on configured provider keys).
+      const slugs = ['gpt-image', 'nano-banana', 'nano-banana-pro'];
+      const out = [];
+      for (const slug of slugs) {
+        const m = (this.models.image || []).find(x => x.slug === slug);
+        out.push(m
+          ? { slug, label: m.label, available: m.available }
+          : { slug, label: slug, available: false });
+      }
+      return out;
+    },
+
+    addReelFiles(fileList) {
+      if (!fileList) return;
+      const arr = Array.from(fileList).filter(f => f.type && f.type.startsWith('image/'));
+      const remaining = 12 - this.reel.frames.length;
+      const toAdd = arr.slice(0, Math.max(0, remaining));
+      for (const file of toAdd) {
+        this.reel.frames.push({ file, previewUrl: URL.createObjectURL(file) });
+      }
+      if (arr.length > toAdd.length) {
+        this.notifyInfo(`Reel capped at 12 frames — ignored ${arr.length - toAdd.length}.`);
+      }
+    },
+
+    removeReelFile(idx) {
+      const f = this.reel.frames[idx];
+      if (f?.previewUrl) URL.revokeObjectURL(f.previewUrl);
+      this.reel.frames.splice(idx, 1);
+    },
+
+    canSubmitReel() {
+      return this.reel.frames.length >= 2
+             && !!(this.reel.presetId || (this.reel.customPrompt || '').trim());
+    },
+
+    reelSummaryHint() {
+      const n = this.reel.frames.length;
+      if (n === 0) return 'Drop or pick at least 2 frames to start.';
+      if (n === 1) return 'Need at least 2 frames (anchor + 1 follower).';
+      return `Anchor: frame 1. Followers: ${n - 1}. They'll match the anchor's clothing/background.`;
+    },
+
+    async submitReel() {
+      if (!this.canSubmitReel()) return;
+      this.reel.submitting = true;
+      try {
+        const fd = new FormData();
+        for (const f of this.reel.frames) fd.append('files', f.file, f.file.name);
+        if (this.reel.presetId) fd.append('preset_id', this.reel.presetId);
+        if ((this.reel.customPrompt || '').trim()) {
+          fd.append('custom_prompt', this.reel.customPrompt.trim());
+        }
+        fd.append('image_model', this.reel.model);
+        fd.append('aspect_ratio', this.reel.aspect);
+        if (this.reel.miniApproval) fd.append('mini_approval', 'true');
+        const r = await fetch('/api/reel/jobs', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Reel submit failed: ' + await r.text()); return; }
+        const job = await r.json();
+        // Clear the staging form. Keep prompt + preset + model — they're
+        // intentional defaults for the next reel.
+        for (const f of this.reel.frames) {
+          if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
+        }
+        this.reel.frames = [];
+        this.reelJobs = [job, ...this.reelJobs];
+        this._attachReelWs(job.job_id);
+        this.notifyInfo(`Reel submitted — ${job.frames.length} frames (anchor first).`);
+      } catch (e) {
+        this.notifyError('Reel submit failed: ' + e.message);
+      } finally {
+        this.reel.submitting = false;
+      }
+    },
+
+    async deleteReelJob(jobId) {
+      if (!confirm('Delete this reel + its outputs?')) return;
+      try {
+        const r = await fetch(`/api/reel/jobs/${jobId}`, { method: 'DELETE' });
+        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
+        this.reelJobs = this.reelJobs.filter(rj => rj.job_id !== jobId);
+      } catch (e) {
+        this.notifyError('Delete failed: ' + e.message);
+      }
+    },
+
+    _attachReelWs(jobId) {
+      // One WS connection per page — multiplexed by switching to whichever
+      // job most recently changed. Cheap to recreate if it drops.
+      try {
+        if (this._reelWs) { try { this._reelWs.close(); } catch (_) {} this._reelWs = null; }
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${proto}//${window.location.host}/ws/reel/${jobId}`);
+        this._reelWs = ws;
+        ws.onmessage = (m) => this._onReelEvent(jobId, JSON.parse(m.data));
+        ws.onclose = () => { if (this._reelWs === ws) this._reelWs = null; };
+      } catch (e) {
+        console.warn('Reel WS failed:', e);
+      }
+    },
+
+    _onReelEvent(jobId, ev) {
+      if (!ev) return;
+      const rj = this.reelJobs.find(x => x.job_id === jobId);
+      if (!rj) return;
+      if (ev.type === 'snapshot' && ev.job) {
+        Object.assign(rj, ev.job);
+        return;
+      }
+      if (ev.type === 'job') {
+        const prevStatus = rj.status;
+        if (ev.status) rj.status = ev.status;
+        if (ev.error) rj.error = ev.error;
+        if (ev.anchor_description) rj.anchor_description = ev.anchor_description;
+        // Approval gate — anchor just landed and is awaiting Hugo's review.
+        if (prevStatus !== 'awaiting_anchor_approval'
+            && ev.status === 'awaiting_anchor_approval') {
+          this.notifyMilestone(
+            'Reel anchor ready — approve',
+            `${jobId}: anchor finished, review before followers run`,
+            { kind: 'approval', tag: `reel-${jobId}-anchor` },
+          );
+        }
+        // Batch complete (or terminal failure).
+        if (!['done', 'partial', 'failed'].includes(prevStatus)
+            && ['done', 'partial', 'failed'].includes(ev.status)) {
+          const verb = ev.status === 'done' ? 'complete'
+                       : ev.status === 'partial' ? 'partial (some failed)'
+                       : 'failed';
+          this.notifyMilestone(
+            `Reel ${verb}`,
+            `${jobId}: ${rj.frames.length} frames`,
+            { kind: 'done', tag: `reel-${jobId}-done` },
+          );
+        }
+        return;
+      }
+      if (ev.type === 'frame') {
+        const f = rj.frames.find(x => x.frame_id === ev.frame_id);
+        if (!f) return;
+        const prevStatus = f.status;
+        if (ev.status) f.status = ev.status;
+        if (ev.error) f.error = ev.error;
+        if (ev.drift_audit) f.last_drift_audit = ev.drift_audit;
+        if (ev.output_filename) {
+          // Append a cache-buster (Date.now()) so retries that overwrite the
+          // same file path still refresh the <img>. Matches the server's
+          // serialization pattern (?v=<completed_at_unix>).
+          f.output_filename = ev.output_filename;
+          f.output_url = `/files/output/reel/${jobId}/${ev.output_filename}?v=${Date.now()}`;
+        }
+        // Mini-approval milestone: a follower just landed in the per-frame
+        // approval gate. Reuses the same notification channel as the anchor
+        // approval gate.
+        if (prevStatus !== 'awaiting_approval'
+            && ev.status === 'awaiting_approval'
+            && !f.is_anchor) {
+          this.notifyMilestone(
+            `Frame #${f.sort_index + 1} ready — approve`,
+            `${jobId}: ${rj.frames.length - f.sort_index - 1} more after this one`,
+            { kind: 'approval', tag: `reel-${jobId}-frame-${f.frame_id}` },
+          );
+        }
+      }
+    },
+
+    // --- reel approval gate + retry --------------------------------------
+
+    reelStatusLabel(status) {
+      return ({
+        'queued': 'queued',
+        'generating_anchor': 'generating anchor…',
+        'awaiting_anchor_approval': 'awaiting your approval',
+        'generating': 'generating followers…',
+        'done': 'done',
+        'partial': 'partial (some failed)',
+        'failed': 'failed',
+      })[status] || status;
+    },
+
+    reelStatusColor(status) {
+      switch (status) {
+        case 'done': return 'text-emerald-400';
+        case 'awaiting_anchor_approval': return 'text-amber-300';
+        case 'generating_anchor':
+        case 'generating':
+        case 'queued': return 'text-amber-400';
+        case 'failed': return 'text-rose-400';
+        case 'partial': return 'text-orange-400';
+        default: return 'text-neutral-400';
+      }
+    },
+
+    reelAnchorEditOpen(jobId) {
+      return this.reel.anchorEditJobId === jobId;
+    },
+
+    openReelAnchorPromptEdit(jobId, currentPrompt) {
+      this.reel.anchorEditJobId = jobId;
+      this.reel.anchorEditDraft = currentPrompt || '';
+    },
+
+    closeReelAnchorPromptEdit() {
+      this.reel.anchorEditJobId = null;
+      this.reel.anchorEditDraft = '';
+    },
+
+    async approveReelAnchor(jobId) {
+      try {
+        const r = await fetch(`/api/reel/jobs/${jobId}/approve_anchor`, { method: 'POST' });
+        if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        const rj = this.reelJobs.find(x => x.job_id === jobId);
+        if (rj) Object.assign(rj, updated);
+        this._attachReelWs(jobId);
+      } catch (e) {
+        this.notifyError('Approve failed: ' + e.message);
+      }
+    },
+
+    async rerenderReelAnchor(jobId, newCustomPrompt) {
+      try {
+        const body = (typeof newCustomPrompt === 'string')
+                      ? { custom_prompt: newCustomPrompt }
+                      : {};
+        const r = await fetch(`/api/reel/jobs/${jobId}/rerender_anchor`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { this.notifyError('Rerender failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        const rj = this.reelJobs.find(x => x.job_id === jobId);
+        if (rj) Object.assign(rj, updated);
+        this.closeReelAnchorPromptEdit();
+        this._attachReelWs(jobId);
+      } catch (e) {
+        this.notifyError('Rerender failed: ' + e.message);
+      }
+    },
+
+    canRetryReelFrame(rj, frame) {
+      // Don't show retry while either the whole job or this frame is in
+      // flight (would either no-op or stomp the in-flight generation).
+      if (rj.status === 'generating' || rj.status === 'generating_anchor') return false;
+      if (frame.status === 'generating' || frame.status === 'queued') return false;
+      return true;
+    },
+
+    async retryReelFrame(jobId, frameId) {
+      try {
+        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/retry`, { method: 'POST' });
+        if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        const rj = this.reelJobs.find(x => x.job_id === jobId);
+        if (rj) Object.assign(rj, updated);
+        this._attachReelWs(jobId);
+      } catch (e) {
+        this.notifyError('Retry failed: ' + e.message);
+      }
+    },
+
+    openReelRefinePanel(jobId, frameId) {
+      this.reel.refineJobId = jobId;
+      this.reel.refineFrameId = frameId;
+      this.reel.refineCorrection = '';
+    },
+
+    closeReelRefinePanel() {
+      this.reel.refineJobId = null;
+      this.reel.refineFrameId = null;
+      this.reel.refineCorrection = '';
+    },
+
+    async submitReelRefine() {
+      const correction = (this.reel.refineCorrection || '').trim();
+      if (!correction) return;
+      const jobId = this.reel.refineJobId;
+      const frameId = this.reel.refineFrameId;
+      if (!jobId || !frameId) return;
+      try {
+        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/refine`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ correction }),
+        });
+        if (!r.ok) { this.notifyError('Refine failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        const rj = this.reelJobs.find(x => x.job_id === jobId);
+        if (rj) Object.assign(rj, updated);
+        this.closeReelRefinePanel();
+        this._attachReelWs(jobId);
+      } catch (e) {
+        this.notifyError('Refine failed: ' + e.message);
+      }
+    },
+
+    async approveReelFrame(jobId, frameId) {
+      try {
+        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/approve`, { method: 'POST' });
+        if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
+        const updated = await r.json();
+        const rj = this.reelJobs.find(x => x.job_id === jobId);
+        if (rj) Object.assign(rj, updated);
+        this._attachReelWs(jobId);
+      } catch (e) {
+        this.notifyError('Approve failed: ' + e.message);
+      }
+    },
+
+    // Drift audit helpers: server stores audit as JSON-string on
+    // `frame.last_drift_audit`. Parse + read severity / summary lazily.
+    _parseDriftAudit(frame) {
+      if (!frame?.last_drift_audit) return null;
+      try { return JSON.parse(frame.last_drift_audit); } catch (_) { return null; }
+    },
+
+    reelDriftSeverity(frame) {
+      const a = this._parseDriftAudit(frame);
+      return a?.severity || 'none';
+    },
+
+    reelDriftSummary(frame) {
+      const a = this._parseDriftAudit(frame);
+      if (!a?.drifts || !a.drifts.length) return '';
+      return a.drifts
+        .map(d => `${d.field || '?'} (anchor: ${d.anchor || '?'} → got: ${d.candidate || '?'})`)
+        .slice(0, 2).join('; ');
     },
   };
 }

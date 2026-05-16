@@ -258,6 +258,29 @@
               x-show="job">
           <span x-text="wsConnected ? '● live' : '○ offline'"></span>
         </span>
+        <!-- Notification toggles: 🔔 OS popup + 🔊 chime. Greyed when the
+             browser has blocked the permission. -->
+        <button @click="notif.os = !notif.os"
+                :disabled="notifBlockedByBrowser()"
+                :title="notifBlockedByBrowser()
+                          ? 'Blocked in browser settings — re-allow Notifications for 127.0.0.1 to enable'
+                          : (notif.os ? 'OS notifications: on (click to mute)' : 'OS notifications: off (click to enable)')"
+                class="px-2 py-1 rounded-lg border text-sm"
+                :class="notifBlockedByBrowser()
+                          ? 'opacity-40 cursor-not-allowed border-neutral-300 dark:border-neutral-700'
+                          : (notif.os
+                              ? 'bg-indigo-100 dark:bg-indigo-950 border-indigo-300 dark:border-indigo-800'
+                              : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800')">
+          <span x-text="notif.os ? '🔔' : '🔕'"></span>
+        </button>
+        <button @click="notif.sound = !notif.sound"
+                :title="notif.sound ? 'Chime: on (click to mute)' : 'Chime: off (click to enable)'"
+                class="px-2 py-1 rounded-lg border text-sm"
+                :class="notif.sound
+                          ? 'bg-indigo-100 dark:bg-indigo-950 border-indigo-300 dark:border-indigo-800'
+                          : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'">
+          <span x-text="notif.sound ? '🔊' : '🔈'"></span>
+        </button>
         <button @click="toggleCharLib()"
                 title="Toggle character library"
                 class="p-2 rounded-lg border text-base"
@@ -272,6 +295,7 @@
       <template x-for="t in [
           {slug: 'swap',   label: 'Swap'},
           {slug: 'image',  label: 'Image'},
+          {slug: 'reel',   label: 'Reel'},
           {slug: 'video',  label: 'Video'},
           {slug: 'avatar', label: 'Avatar'},
           {slug: 'audio',  label: 'Audio'},
@@ -939,6 +963,323 @@
           </div>
         </template>
       </div>
+    </div>
+
+    <!-- ================= REEL TAB ================= -->
+    <!-- Batch-consistent image edit for video reels. Upload N frames of one
+         video, pick a preset, type per-video tweaks, hit Generate. Anchor
+         renders first; rest follow with anchor as a style reference. -->
+    <div x-show="activeTab === 'reel'"
+         x-init="$watch('activeTab', t => { if (t === 'reel') { loadReelPresets(); loadReelJobs(); } })"
+         class="space-y-6">
+
+      <!-- Form -->
+      <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6 space-y-4">
+        <div class="flex items-baseline justify-between flex-wrap gap-2">
+          <h2 class="text-lg font-semibold">Reel — consistent batch edit</h2>
+          <p class="text-xs text-neutral-500 dark:text-neutral-400 max-w-md">
+            Upload the frames of one video. Frame 1 becomes the anchor — the rest copy its new clothing, background and lighting so the reel stays visually consistent.
+          </p>
+        </div>
+
+        <!-- Preset picker -->
+        <div class="flex items-center gap-2 flex-wrap">
+          <label class="text-sm text-neutral-500 dark:text-neutral-400">Preset:</label>
+          <select x-model="reel.presetId"
+                  @change="onReelPresetChange()"
+                  class="bg-neutral-100 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1 text-sm">
+            <template x-for="p in reelPresets" :key="p.preset_id">
+              <option :value="p.preset_id" x-text="p.name + (p.is_default ? ' (default)' : '')"></option>
+            </template>
+          </select>
+          <button class="text-xs text-indigo-400 hover:text-indigo-300"
+                  @click="reel.showPresetEditor = !reel.showPresetEditor"
+                  x-text="reel.showPresetEditor ? 'Hide preset editor' : 'Edit / create preset'"></button>
+        </div>
+
+        <!-- Preset editor (collapsible) -->
+        <div x-show="reel.showPresetEditor"
+             class="border border-neutral-200 dark:border-neutral-800 rounded-lg p-3 space-y-2 bg-neutral-50 dark:bg-neutral-950">
+          <div class="flex items-center gap-2">
+            <input type="text"
+                   x-model="reel.draftPresetName"
+                   placeholder="Preset name (e.g. 'Talking head reel')"
+                   class="flex-1 bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1 text-sm">
+            <label class="flex items-center gap-1 text-xs text-neutral-400">
+              <input type="checkbox" x-model="reel.draftPresetIsDefault">
+              default
+            </label>
+          </div>
+          <textarea x-model="reel.draftPresetBaseline"
+                    rows="4"
+                    placeholder="Baseline prompt — the rules that apply to EVERY reel. The user's per-video tweak gets appended to this."
+                    class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1 text-sm font-mono"></textarea>
+          <div class="flex items-center justify-end gap-2">
+            <button class="text-xs text-neutral-400 hover:text-neutral-200"
+                    @click="prefillPresetEditorFromCurrent()">↺ load current</button>
+            <button class="text-xs text-rose-400 hover:text-rose-300"
+                    x-show="reel.presetId && !isReelPresetDefault(reel.presetId)"
+                    @click="deleteCurrentReelPreset()">🗑 delete</button>
+            <button class="text-xs px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white"
+                    :disabled="reel.savingPreset"
+                    @click="saveReelPreset()"
+                    x-text="reel.presetId ? 'Save' : 'Create'"></button>
+          </div>
+        </div>
+
+        <!-- Current preset baseline (read-only summary) -->
+        <div x-show="currentReelPreset()" class="text-xs text-neutral-500 dark:text-neutral-400 italic border-l-2 border-neutral-200 dark:border-neutral-800 pl-3 whitespace-pre-wrap"
+             x-text="currentReelPreset()?.baseline_prompt"></div>
+
+        <!-- Per-reel custom prompt -->
+        <div>
+          <label class="text-sm text-neutral-500 dark:text-neutral-400">Per-video tweak (appended to preset):</label>
+          <textarea x-model="reel.customPrompt"
+                    rows="3"
+                    placeholder="Example: swap the black seed oil bottle to an olive oil bottle in every frame."
+                    class="w-full mt-1 bg-neutral-100 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1.5 text-sm"></textarea>
+        </div>
+
+        <!-- Model + aspect picker -->
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="text-sm text-neutral-500 dark:text-neutral-400">Model:</label>
+          <select x-model="reel.model"
+                  class="bg-neutral-100 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded px-2 py-1 text-sm">
+            <template x-for="m in reelSupportedModels()" :key="m.slug">
+              <option :value="m.slug" :disabled="!m.available"
+                      x-text="m.label + (m.available ? '' : ' 🔒')"></option>
+            </template>
+          </select>
+
+          <label class="text-sm text-neutral-500 dark:text-neutral-400 ml-2">Aspect:</label>
+          <div class="flex items-center gap-1">
+            <template x-for="a in ['9:16','1:1','4:5','16:9']" :key="'ra-'+a">
+              <button class="px-2 py-0.5 text-xs rounded border"
+                      :class="reel.aspect === a
+                                ? 'bg-indigo-600 border-indigo-500 text-white'
+                                : 'bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700 text-neutral-500 hover:text-neutral-200'"
+                      @click="reel.aspect = a"
+                      x-text="a"></button>
+            </template>
+          </div>
+        </div>
+
+        <!-- Mini-approval toggle: sequential rendering with per-frame review -->
+        <label class="flex items-center gap-2 text-sm text-neutral-400 cursor-pointer select-none">
+          <input type="checkbox" x-model="reel.miniApproval"
+                 class="rounded border-neutral-700 bg-neutral-800">
+          <span>🔍 Review each frame before next (sequential, slower, max control)</span>
+        </label>
+
+        <!-- Onboarding hint: nudge toward Nano Banana Pro when no Gemini key -->
+        <div x-show="!health.gemini_key"
+             class="text-xs px-3 py-2 rounded-lg border border-violet-900/50 bg-violet-950/20 text-violet-300">
+          🪄 <strong>Pro tip:</strong> add a <code>GEMINI_API_KEY</code> to <code>.env</code>
+          (free tier at <a href="https://aistudio.google.com/apikey" target="_blank" class="underline">aistudio.google.com/apikey</a>)
+          to unlock <strong>Nano Banana Pro</strong> — built for multi-image consistency.
+          Today's GPT-Image-2 path drifts on clothing colors across frames; Gemini sees the whole reel at once and is way better at this.
+        </div>
+
+        <!-- Dropzone for frames -->
+        <div class="border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-4 text-center bg-neutral-50 dark:bg-neutral-950"
+             :class="reel.dropActive ? 'border-indigo-500 bg-indigo-950/10' : ''"
+             @dragover.prevent="reel.dropActive = true"
+             @dragleave.prevent="reel.dropActive = false"
+             @drop.prevent="reel.dropActive = false; addReelFiles($event.dataTransfer.files)">
+          <label class="cursor-pointer block text-sm text-neutral-500 dark:text-neutral-400">
+            <input type="file" multiple accept="image/*" class="hidden"
+                   @change="addReelFiles($event.target.files); $event.target.value = ''">
+            Drop / click — first image becomes the anchor (defines the new style)
+          </label>
+
+          <div x-show="reel.frames.length > 0" class="mt-3 grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+            <template x-for="(f, i) in reel.frames" :key="'rf-'+i">
+              <div class="relative group rounded overflow-hidden border border-neutral-300 dark:border-neutral-700">
+                <img :src="f.previewUrl" class="w-full h-24 object-cover">
+                <div class="absolute top-0 left-0 right-0 bg-black/50 text-[10px] text-white px-1 py-0.5 flex items-center justify-between">
+                  <span x-text="i === 0 ? '⚓ anchor' : ('#' + (i+1))"></span>
+                  <button class="opacity-0 group-hover:opacity-100 transition-opacity"
+                          @click="removeReelFile(i)">✕</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Submit -->
+        <div class="flex items-center justify-between gap-2">
+          <p class="text-xs text-neutral-400" x-text="reelSummaryHint()"></p>
+          <button class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:bg-neutral-700 disabled:text-neutral-500 text-white text-sm font-medium"
+                  :disabled="!canSubmitReel() || reel.submitting"
+                  @click="submitReel()"
+                  x-text="reel.submitting ? 'Submitting…' : ('Generate ' + reel.frames.length + ' frame' + (reel.frames.length === 1 ? '' : 's'))"></button>
+        </div>
+      </section>
+
+      <!-- Active / past reel jobs -->
+      <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-base font-semibold">Reel jobs</h3>
+          <button class="text-xs text-neutral-400 hover:text-neutral-200" @click="loadReelJobs()">↻ refresh</button>
+        </div>
+        <template x-if="reelJobs.length === 0">
+          <p class="text-sm text-neutral-400">No reels yet — upload some frames and hit Generate.</p>
+        </template>
+        <div class="space-y-4">
+          <template x-for="rj in reelJobs" :key="rj.job_id">
+            <div class="border border-neutral-200 dark:border-neutral-800 rounded-lg p-3 space-y-2">
+              <div class="flex items-center justify-between text-xs text-neutral-400 flex-wrap gap-2">
+                <div>
+                  <span class="font-mono" x-text="rj.job_id"></span>
+                  <span class="mx-2">·</span>
+                  <span x-text="rj.image_model"></span>
+                  <span class="mx-2">·</span>
+                  <span x-text="rj.aspect_ratio"></span>
+                  <span class="mx-2">·</span>
+                  <span :class="reelStatusColor(rj.status)"
+                        x-text="reelStatusLabel(rj.status)"></span>
+                </div>
+                <button class="text-rose-400 hover:text-rose-300" @click="deleteReelJob(rj.job_id)">🗑</button>
+              </div>
+              <p class="text-xs text-neutral-500 italic whitespace-pre-wrap"
+                 x-text="rj.custom_prompt || '(no custom tweak)'"></p>
+
+              <!-- Anchor approval gate: shown once the anchor lands, blocks
+                   follower kickoff until the user reviews. Biggest single
+                   consistency boost — bad anchors no longer cascade. -->
+              <div x-show="rj.status === 'awaiting_anchor_approval'"
+                   class="border border-amber-700/40 bg-amber-950/20 rounded-lg p-3 space-y-2">
+                <div class="flex items-start gap-3 flex-wrap">
+                  <template x-for="f in rj.frames.filter(x => x.is_anchor)" :key="f.frame_id">
+                    <a :href="f.output_url" target="_blank"
+                       class="block w-32 h-56 rounded overflow-hidden border border-amber-700/50 flex-shrink-0">
+                      <img x-show="f.output_url" :src="f.output_url" class="w-full h-full object-cover">
+                    </a>
+                  </template>
+                  <div class="flex-1 min-w-[260px] space-y-2">
+                    <p class="text-xs text-amber-300/80">Anchor klar. Review the style — clothing, background, lighting — before paying for followers.</p>
+
+                    <!-- Vision-extracted hard spec. Injected into every follower
+                         prompt so colors don't drift. Shown collapsible so the
+                         user can see what's being enforced. -->
+                    <details x-show="rj.anchor_description" class="text-xs">
+                      <summary class="cursor-pointer text-amber-300/60 hover:text-amber-200">
+                        🔬 Style spec extracted from anchor (enforced on every follower)
+                      </summary>
+                      <p class="mt-1 p-2 bg-neutral-950 border border-amber-900/50 rounded whitespace-pre-wrap text-neutral-300"
+                         x-text="rj.anchor_description"></p>
+                    </details>
+
+                    <div x-show="!reelAnchorEditOpen(rj.job_id)" class="flex flex-wrap items-center gap-2">
+                      <button class="text-xs px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+                              @click="approveReelAnchor(rj.job_id)">
+                        ✅ Approve &amp; generate <span x-text="rj.frames.length - 1"></span> followers
+                      </button>
+                      <button class="text-xs px-3 py-1.5 rounded bg-neutral-700 hover:bg-neutral-600 text-white"
+                              @click="rerenderReelAnchor(rj.job_id)">
+                        ↻ Rerender anchor (same prompt)
+                      </button>
+                      <button class="text-xs px-3 py-1.5 rounded bg-neutral-700 hover:bg-neutral-600 text-white"
+                              @click="openReelAnchorPromptEdit(rj.job_id, rj.custom_prompt)">
+                        ✎ Edit prompt &amp; rerender
+                      </button>
+                    </div>
+
+                    <div x-show="reelAnchorEditOpen(rj.job_id)" class="space-y-2">
+                      <textarea x-model="reel.anchorEditDraft"
+                                rows="3"
+                                class="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm font-mono"></textarea>
+                      <div class="flex justify-end gap-2">
+                        <button class="text-xs text-neutral-400 hover:text-neutral-200"
+                                @click="closeReelAnchorPromptEdit()">cancel</button>
+                        <button class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white"
+                                @click="rerenderReelAnchor(rj.job_id, reel.anchorEditDraft)">
+                          ↻ Rerender with new prompt
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Frame grid (always shown; followers render in place as they land) -->
+              <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
+                <template x-for="f in rj.frames" :key="f.frame_id">
+                  <div class="relative rounded overflow-hidden border border-neutral-300 dark:border-neutral-700 group"
+                       :class="f.status === 'awaiting_approval' ? 'border-amber-500' : ''">
+                    <img :src="f.output_url || f.input_url"
+                         class="w-full h-28 object-cover"
+                         :class="f.output_url ? '' : 'opacity-40'">
+                    <div class="absolute top-0 left-0 right-0 bg-black/50 text-[10px] text-white px-1 py-0.5 flex items-center justify-between">
+                      <span x-text="(f.is_anchor ? '⚓ ' : '#' + (f.sort_index + 1)) + ' · ' + f.status"></span>
+                      <span class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button x-show="canRetryReelFrame(rj, f) && !f.is_anchor"
+                                class="hover:text-violet-300"
+                                @click="openReelRefinePanel(rj.job_id, f.frame_id)"
+                                title="Refine with a free-text correction">✎</button>
+                        <button x-show="canRetryReelFrame(rj, f)"
+                                class="hover:text-amber-300"
+                                @click="retryReelFrame(rj.job_id, f.frame_id)"
+                                title="Re-render this frame from scratch">↻</button>
+                        <a x-show="f.output_url" :href="f.output_url" :download="('reel-' + rj.job_id + '-' + (f.sort_index + 1) + '.png')"
+                           class="hover:text-indigo-300" title="Download">⬇</a>
+                      </span>
+                    </div>
+                    <!-- Mini-approval inline panel: shows when this frame is the
+                         currently-parked follower (sequential mode). -->
+                    <div x-show="f.status === 'awaiting_approval'"
+                         class="absolute bottom-0 left-0 right-0 bg-amber-950/90 px-1.5 py-1 flex items-center justify-between gap-1">
+                      <span class="text-[10px] text-amber-200">review →</span>
+                      <span class="flex items-center gap-1">
+                        <button class="text-xs px-1.5 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white"
+                                @click="approveReelFrame(rj.job_id, f.frame_id)"
+                                title="Accept and advance to next frame">✅</button>
+                        <button class="text-xs px-1.5 py-0.5 rounded bg-neutral-700 hover:bg-neutral-600 text-white"
+                                @click="retryReelFrame(rj.job_id, f.frame_id)"
+                                title="Re-render from scratch">↻</button>
+                        <button class="text-xs px-1.5 py-0.5 rounded bg-violet-600 hover:bg-violet-500 text-white"
+                                @click="openReelRefinePanel(rj.job_id, f.frame_id)"
+                                title="Free-text correction">✎</button>
+                      </span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- Refine panel: opens below the grid for the frame the user
+                   clicked ✎ on. One textarea + Submit. -->
+              <div x-show="reel.refineFrameId && reel.refineJobId === rj.job_id"
+                   class="mt-2 border border-violet-700/50 bg-violet-950/20 rounded-lg p-3 space-y-2">
+                <div class="text-xs text-violet-300">
+                  ✎ Refine frame
+                  <span class="font-mono ml-1" x-text="reel.refineFrameId"></span>
+                </div>
+                <textarea x-model="reel.refineCorrection"
+                          rows="2"
+                          placeholder="What to fix? e.g. 'shirt should be navy not green', 'bring back the woman', 'remove blue gloves'"
+                          class="w-full bg-neutral-900 border border-neutral-700 rounded px-2 py-1 text-sm"></textarea>
+                <div class="flex justify-end gap-2">
+                  <button class="text-xs text-neutral-400 hover:text-neutral-200"
+                          @click="closeReelRefinePanel()">cancel</button>
+                  <button class="text-xs px-3 py-1.5 rounded bg-violet-600 hover:bg-violet-500 text-white"
+                          :disabled="!(reel.refineCorrection || '').trim()"
+                          @click="submitReelRefine()">↻ Refine</button>
+                </div>
+              </div>
+
+              <!-- Drift audit hint: when a frame's last audit flagged minor drift,
+                   surface a soft warning (the auto-correction loop only fires on
+                   'major' so 'minor' shows as info). -->
+              <template x-for="f in rj.frames.filter(x => x.last_drift_audit)" :key="'drift-'+f.frame_id">
+                <p x-show="reelDriftSeverity(f) === 'minor'"
+                   class="text-[10px] text-amber-400/80">
+                  ⚠️ frame #<span x-text="f.sort_index + 1"></span> minor drift: <span x-text="reelDriftSummary(f)"></span>
+                </p>
+              </template>
+            </div>
+          </template>
+        </div>
+      </section>
     </div>
 
     <!-- ================= VIDEO TAB ================= -->
@@ -2008,13 +2349,15 @@
             <div class="bg-neutral-950 relative flex items-center justify-center p-4">
               <div class="studio-preview relative w-full max-w-[360px] mx-auto"
                    style="aspect-ratio: 9 / 16;">
-                <video :src="editor.sourceVideo.url"
+                <!-- ASS / legacy CSS-approximation preview -->
+                <video x-show="!useRemotionPlayer()"
+                       :src="editor.sourceVideo.url"
                        @loadedmetadata="onVideoLoaded($event)"
                        controls playsinline
                        class="absolute inset-0 w-full h-full object-contain bg-black rounded-lg"></video>
 
                 <!-- Live caption overlay — drag anywhere on screen, resize via corner handle -->
-                <div class="absolute inset-0 pointer-events-none">
+                <div x-show="!useRemotionPlayer()" class="absolute inset-0 pointer-events-none">
                   <div :style="previewWrapStyle(activeStyle())"
                        class="pointer-events-auto cursor-grab select-none"
                        :class="draggingText ? 'cursor-grabbing' : ''"
@@ -2036,8 +2379,16 @@
                   </div>
                 </div>
 
-                <div class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
+                <div x-show="!useRemotionPlayer()" class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
                   drag text · drag corner to resize · scroll also resizes
+                </div>
+
+                <!-- Remotion Player path — exact preview matching rendered output -->
+                <div x-show="useRemotionPlayer()"
+                     id="remotion-preview-host"
+                     class="absolute inset-0 bg-black rounded-lg overflow-hidden"></div>
+                <div x-show="useRemotionPlayer()" class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
+                  live Remotion preview · matches render
                 </div>
               </div>
 
@@ -3237,5 +3588,8 @@
 </div>
 
 <script src="/app.js"></script>
+<!-- Remotion preview bundle — built by `character-swap remotion-install` (esbuild).
+     Loads asynchronously; the Editor tab guards calls behind `window.RemotionPreview`. -->
+<script defer src="/files/web/static/remotion-preview.js"></script>
 </body>
 </html>

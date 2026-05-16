@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import shutil
+import subprocess
 import webbrowser
 
 import typer
@@ -90,6 +92,44 @@ def migrate() -> None:
         typer.echo(f"  {k}: {result[k]}")
     typer.echo("state.json renamed to state.json.migrated (kept as backup).")
     typer.echo("Set USE_SQLITE_STATE=1 in your .env and restart to use the SQLite backend.")
+
+
+@app.command("remotion-install")
+def remotion_install(
+    force: bool = typer.Option(False, "--force",
+                                help="Reinstall even if node_modules already exists."),
+) -> None:
+    """Install Remotion deps + build the in-browser preview bundle.
+
+    Run this once after cloning, and whenever `remotion/package.json` or any
+    file under `remotion/src/preview/` changes.
+
+    Requires Node.js ≥ 18 (`node --version`).
+    """
+    if shutil.which("node") is None:
+        typer.echo("error: `node` not found in PATH. Install Node.js >= 18 from https://nodejs.org/", err=True)
+        raise typer.Exit(1)
+    remotion_dir = settings.project_root / "remotion"
+    if not (remotion_dir / "package.json").is_file():
+        typer.echo(f"error: no package.json at {remotion_dir}", err=True)
+        raise typer.Exit(1)
+
+    node_modules = remotion_dir / "node_modules"
+    if force or not node_modules.is_dir():
+        typer.echo(f"==> installing Remotion deps in {remotion_dir} ...")
+        proc = subprocess.run(["npm", "install"], cwd=str(remotion_dir))
+        if proc.returncode != 0:
+            typer.echo(f"npm install failed (exit {proc.returncode})", err=True)
+            raise typer.Exit(proc.returncode)
+    else:
+        typer.echo(f"==> node_modules already present at {node_modules}; skipping install (use --force to reinstall)")
+
+    typer.echo("==> building preview bundle (web/static/remotion-preview.js) ...")
+    proc = subprocess.run(["npm", "run", "build-preview"], cwd=str(remotion_dir))
+    if proc.returncode != 0:
+        typer.echo(f"build-preview failed (exit {proc.returncode})", err=True)
+        raise typer.Exit(proc.returncode)
+    typer.echo("Remotion install + preview build complete.")
 
 
 if __name__ == "__main__":

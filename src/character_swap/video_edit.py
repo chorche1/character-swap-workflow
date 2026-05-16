@@ -293,6 +293,51 @@ class CaptionStyle:
     words_per_card: int = 3             # word-by-word grouping size
     highlight_color: str | None = None  # color used to highlight the active word
     all_caps: bool = False              # force-uppercase the rendered text (Submagic/TikTok aesthetic)
+    # Rendering engine. "ass" → existing ffmpeg+ASS path. "remotion" → React
+    # composition rendered via `npx remotion render`. Remotion supports
+    # animation/spring/glow that ASS can't.
+    engine: Literal["ass", "remotion"] = "ass"
+    # When engine="remotion", the id of the React composition to render.
+    # Must match an entry in `remotion/src/Root.tsx`.
+    composition_id: str | None = None
+
+    def to_remotion_props(self) -> dict:
+        """Map ASS-style fields onto the typed props the Remotion
+        compositions consume. Position fields assume a 1080×1920 canvas
+        (the same assumption ASS makes via PlayResX/Y)."""
+        accent = _ass_color_to_hex(self.highlight_color or self.primary_color, default="#FFD400")
+        sizeScale = max(0.4, min(2.5, self.size / 115.2))
+        margin_v_clamped = max(0, min(1900, self.margin_v))
+        margin_h_clamped = max(-540, min(540, self.margin_h))
+        y_pct = max(0.05, min(0.95, 1.0 - margin_v_clamped / 1920.0))
+        x_pct = max(0.05, min(0.95, 0.5 + margin_h_clamped / 1080.0))
+        return {
+            "accent": accent,
+            "fontFamily": self.font,
+            "sizeScale": sizeScale,
+            "positionPct": {"x": x_pct, "y": y_pct},
+            "allCaps": self.all_caps,
+            "wordsPerCard": self.words_per_card,
+        }
+
+
+def _ass_color_to_hex(ass: str | None, *, default: str = "#FFFFFF") -> str:
+    """Convert ASS &HAABBGGRR (or &HBBGGRR) to a #RRGGBB CSS hex color.
+    Returns `default` when the input is None or unparseable."""
+    if not ass:
+        return default
+    s = ass.strip().lstrip("&").lstrip("Hh")
+    # Strip a leading "00" alpha if present (ASS uses AABBGGRR where AA=00 is opaque)
+    if len(s) == 8:
+        s = s[2:]
+    if len(s) != 6:
+        return default
+    try:
+        bb, gg, rr = s[0:2], s[2:4], s[4:6]
+        int(bb, 16); int(gg, 16); int(rr, 16)
+        return f"#{rr}{gg}{bb}".upper()
+    except ValueError:
+        return default
 
 
 TEMPLATES: dict[str, CaptionStyle] = {
@@ -465,6 +510,30 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               outline_color="&H00000000",
                               outline=4, shadow=5, bold=True, box=False,
                               words_per_card=3, margin_v=400, all_caps=False),
+
+    # --- Remotion-rendered templates (engine="remotion") ---
+    # These cannot be reproduced in ASS — they rely on spring physics,
+    # multi-layer glow, per-word entrance animation. Rendered via the
+    # React project at `<repo>/remotion/`.
+
+    # Submagic-style word-by-word pop with spring entrance, yellow active.
+    "submagic-pop":  CaptionStyle(font="Inter", size=120,
+                              highlight_color="&H0000D4FF",   # #FFD400 yellow (BGR &H00D4FF)
+                              words_per_card=3, margin_v=420, all_caps=True,
+                              engine="remotion", composition_id="SubmagicPop"),
+
+    # MrBeast / Hormozi-style: ALLCAPS, no entry animation, single keyword
+    # in the card popped yellow.
+    "mrbeast-bold": CaptionStyle(font="Anton", size=140,
+                              highlight_color="&H0000FFFF",   # #FFFF00 yellow
+                              words_per_card=3, margin_v=480, all_caps=True,
+                              engine="remotion", composition_id="MrBeastBold"),
+
+    # CapCut-style cyan-glow lines with phrase entrance.
+    "capcut-glow":  CaptionStyle(font="Poppins", size=100,
+                              highlight_color="&H00FFE500",   # #00E5FF cyan (BGR &HFFE500)
+                              words_per_card=5, margin_v=380, all_caps=False,
+                              engine="remotion", composition_id="CapCutGlow"),
 }
 
 
@@ -568,8 +637,23 @@ def _write_ass(words: list[Word], style: CaptionStyle, dest: Path) -> Path:
 def render_captions(input_video: Path, output_video: Path, *,
                     words: list[Word], style: CaptionStyle,
                     job_id: str | None = None) -> dict:
-    """Burn captions into `input_video`. Uses ffmpeg's `subtitles` filter on a
-    generated ASS file. Returns a summary."""
+    """Burn captions into `input_video`. Routes to Remotion (React-based) or
+    the legacy ASS+ffmpeg path based on `style.engine`. Returns a summary."""
+    if style.engine == "remotion":
+        from character_swap import remotion_render
+        if not style.composition_id:
+            raise ValueError(
+                f"CaptionStyle.engine='remotion' but no composition_id set "
+                f"(font={style.font})"
+            )
+        word_dicts = [{"text": w.text, "start": w.start, "end": w.end} for w in words]
+        return remotion_render.render_remotion(
+            input_video, output_video,
+            composition_id=style.composition_id,
+            props=style.to_remotion_props(),
+            words=word_dicts,
+            job_id=job_id,
+        )
     with record(phase="editor_captions", model="ffmpeg-subtitles",
                 character="editor", job_id=job_id):
         # Ensure the chosen font is available (downloads on first use).

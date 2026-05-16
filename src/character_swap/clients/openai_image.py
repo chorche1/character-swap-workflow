@@ -56,6 +56,7 @@ def generate(
     size: str | None = None,
     job_id: str | None = None,
     model_override: str | None = None,
+    quality: str | None = None,
 ) -> bytes:
     """
     Generate an image.
@@ -64,12 +65,20 @@ def generate(
     (gpt-image-2 accepts a list — first image is the base, subsequent images are
     additional references). Otherwise call the create endpoint with text only.
 
+    `quality` maps to OpenAI's `quality` param: "low" | "medium" | "high" | "auto".
+    Default `None` lets OpenAI pick (currently "auto"). Pass "high" when you want
+    sharper/more-detailed output (~1.5× cost on gpt-image-2).
+
     Returns raw PNG bytes.
     """
     client = _client()
     size = size or settings.image_size
     model = model_override or settings.openai_image_model
     refs = reference_images or []
+
+    extra: dict = {}
+    if quality is not None:
+        extra["quality"] = quality
 
     try:
         with record(
@@ -80,6 +89,7 @@ def generate(
             mode="edit" if refs else "create",
             n_references=len(refs),
             size=size,
+            quality=quality,
         ) as entry:
             if refs:
                 with ExitStack() as stack:
@@ -90,6 +100,7 @@ def generate(
                         prompt=prompt,
                         size=size,
                         n=1,
+                        **extra,
                     )
             else:
                 response = client.images.generate(
@@ -97,6 +108,7 @@ def generate(
                     prompt=prompt,
                     size=size,
                     n=1,
+                    **extra,
                 )
             entry["request_id"] = getattr(response, "_request_id", None) or getattr(
                 response, "id", None

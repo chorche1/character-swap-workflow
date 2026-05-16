@@ -40,6 +40,7 @@ from character_swap.models import (
     JobCharacter,
     MediaGeneration,
     ProjectAsset,
+    ReelFrameStatus,
     SceneAsset,
     VariantStatus,
     VideoStatus,
@@ -269,6 +270,10 @@ def _job_summary(job: Job) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_dirs()
+    # Seed the built-in Reel preset on first boot (idempotent — bails if a
+    # default already exists).
+    from character_swap import reel_runner as _reel_runner
+    _reel_runner.seed_default_preset()
     for job in store().list_jobs():
         await runner.resume_pending(job.job_id)
     yield
@@ -702,6 +707,12 @@ class CreateJobBody(BaseModel):
     project_id: str | None = None
     prompt: str | None = None
     image_model: str | None = None
+    # Optional per-character source-image override at create time. Maps
+    # char_id → image_id (from CharacterAsset.images[].image_id). When set,
+    # the job snapshots that image instead of the character's primary.
+    # Lets users pick a non-primary reference in Step 2 BEFORE generation,
+    # without needing to start the job and then PATCH source_image.
+    character_source_image_ids: dict[str, str] | None = None
 
 
 async def _run_async(coro_fn, *args, **kwargs) -> None:
@@ -741,11 +752,23 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
     job_id = "j_" + secrets.token_hex(5)
     chars: dict[str, JobCharacter] = {}
     char_names: list[str] = []
+    overrides = body.character_source_image_ids or {}
     for cid in body.character_ids:
         ch = s.get_character(cid)
         if ch is None:
             raise HTTPException(404, f"Character not found: {cid}")
-        src = settings.characters_dir / ch.filename
+        # Resolve the reference image: per-character override (if supplied and
+        # valid) wins over the character's primary filename. Unknown image_ids
+        # fall back to the primary silently — the user picked from a list the
+        # server populated, so a mismatch likely means the character was edited
+        # between when the picker opened and submit.
+        filename = ch.filename
+        override_image_id = overrides.get(cid)
+        if override_image_id:
+            picked = next((img for img in ch.images if img.image_id == override_image_id), None)
+            if picked is not None:
+                filename = picked.filename
+        src = settings.characters_dir / filename
         if not src.exists():
             raise HTTPException(500, f"Character file missing on disk: {src}")
         chars[cid] = JobCharacter(
@@ -1654,12 +1677,33 @@ def _safe_video_ext(filename: str) -> str:
     return ext
 
 
+def _remotion_available() -> bool:
+    """Cheap cache check: does the Remotion project look installed?
+
+    True when (a) `node` is on PATH and (b) `remotion/node_modules/` exists.
+    Frontend skips Remotion templates from the picker when this is false.
+    The cache is module-level so we don't shell out on every templates call.
+    """
+    cached = getattr(_remotion_available, "_v", None)
+    if cached is not None:
+        return cached
+    import shutil as _shutil
+    have_node = _shutil.which("node") is not None
+    nm = settings.project_root / "remotion" / "node_modules"
+    have_nm = nm.is_dir()
+    _remotion_available._v = bool(have_node and have_nm)  # type: ignore[attr-defined]
+    return _remotion_available._v  # type: ignore[attr-defined]
+
+
 @app.get("/api/editor/templates")
 async def editor_templates() -> list[dict]:
     from character_swap import video_edit
+    remotion_ok = _remotion_available()
     out = []
     for slug, style in video_edit.TEMPLATES.items():
-        out.append({
+        if style.engine == "remotion" and not remotion_ok:
+            continue
+        row = {
             "slug": slug,
             "label": slug.title(),
             "font": style.font,
@@ -1677,7 +1721,14 @@ async def editor_templates() -> list[dict]:
             "all_caps": style.all_caps,
             "shadow": style.shadow,
             "alignment": style.alignment,
-        })
+            "engine": style.engine,
+            "composition_id": style.composition_id,
+        }
+        if style.engine == "remotion":
+            # Pack the exact props the Remotion Player will consume so the
+            # frontend can mirror the rendered output in its preview.
+            row["remotion_props"] = style.to_remotion_props()
+        out.append(row)
     return out
 
 
@@ -2475,6 +2526,378 @@ _broll_dir = settings.output_dir / "broll"
 _broll_dir.mkdir(parents=True, exist_ok=True)
 
 
+# --- Reel: batch-consistent image edits ---------------------------------------------
+# Preset CRUD + Job create/list/delete + WS for live frame updates.
+
+_reel_dir = settings.output_dir / "reel"
+_reel_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _reel_preset_to_dict(p) -> dict:
+    return {
+        "preset_id": p.preset_id,
+        "name": p.name,
+        "baseline_prompt": p.baseline_prompt,
+        "is_default": p.is_default,
+        "created_at": p.created_at.isoformat(),
+        "updated_at": p.updated_at.isoformat(),
+    }
+
+
+def _reel_job_to_dict(j) -> dict:
+    return {
+        "job_id": j.job_id,
+        "title": j.title,
+        "preset_id": j.preset_id,
+        "custom_prompt": j.custom_prompt,
+        "full_prompt": j.full_prompt,
+        "image_model": j.image_model,
+        "aspect_ratio": j.aspect_ratio,
+        "status": str(j.status),
+        "error": j.error,
+        "anchor_description": j.anchor_description,
+        "mini_approval": j.mini_approval,
+        "created_at": j.created_at.isoformat(),
+        "updated_at": j.updated_at.isoformat(),
+        "frames": [
+            {
+                "frame_id": f.frame_id,
+                "sort_index": f.sort_index,
+                "is_anchor": f.is_anchor,
+                "input_url": _file_url(_reel_dir / j.job_id / f.input_filename),
+                # Only expose output_url once the file actually exists on disk
+                # — otherwise the browser caches a 404 for the would-be path
+                # and won't refetch when the frame later finishes. The
+                # completed_at timestamp is appended as a cache-buster so a
+                # retry (which overwrites the file) refreshes the <img>.
+                "output_url": (
+                    f"{_file_url(_reel_dir / j.job_id / f.output_filename)}"
+                    f"?v={int(f.completed_at.timestamp())}"
+                    if (f.output_filename
+                        and f.status in (ReelFrameStatus.DONE,
+                                          ReelFrameStatus.AWAITING_APPROVAL)
+                        and f.completed_at is not None)
+                    else None
+                ),
+                "status": str(f.status),
+                "error": f.error,
+                "input_filename": f.input_filename,
+                "output_filename": f.output_filename,
+                "input_description": f.input_description,
+                "last_drift_audit": f.last_drift_audit,
+                "approved": f.approved,
+            }
+            for f in sorted(j.frames, key=lambda x: x.sort_index)
+        ],
+    }
+
+
+class ReelPresetBody(BaseModel):
+    name: str
+    baseline_prompt: str
+    is_default: bool = False
+
+
+@app.get("/api/reel/presets")
+async def list_reel_presets() -> list[dict]:
+    return [_reel_preset_to_dict(p) for p in store().list_reel_presets()]
+
+
+@app.post("/api/reel/presets")
+async def create_reel_preset(body: ReelPresetBody) -> dict:
+    from character_swap.models import ReelPreset
+    name = (body.name or "").strip()
+    baseline = (body.baseline_prompt or "").strip()
+    if not name:
+        raise HTTPException(400, "name required")
+    if not baseline:
+        raise HTTPException(400, "baseline_prompt required")
+    s = store()
+    if body.is_default:
+        # Demote any previous default — only one is_default at a time.
+        for existing in s.list_reel_presets():
+            if existing.is_default:
+                existing.is_default = False
+                existing.updated_at = datetime.utcnow()
+                s.update_reel_preset(existing)
+    preset = ReelPreset(
+        preset_id="rp_" + secrets.token_hex(5),
+        name=name, baseline_prompt=baseline,
+        is_default=body.is_default,
+    )
+    s.add_reel_preset(preset)
+    return _reel_preset_to_dict(preset)
+
+
+@app.patch("/api/reel/presets/{preset_id}")
+async def patch_reel_preset(preset_id: str, body: dict) -> dict:
+    s = store()
+    p = s.get_reel_preset(preset_id)
+    if p is None:
+        raise HTTPException(404, "Preset not found")
+    if "name" in body:
+        p.name = (body["name"] or "").strip() or p.name
+    if "baseline_prompt" in body:
+        bp = (body["baseline_prompt"] or "").strip()
+        if bp:
+            p.baseline_prompt = bp
+    if "is_default" in body and body["is_default"]:
+        for existing in s.list_reel_presets():
+            if existing.preset_id != p.preset_id and existing.is_default:
+                existing.is_default = False
+                existing.updated_at = datetime.utcnow()
+                s.update_reel_preset(existing)
+        p.is_default = True
+    p.updated_at = datetime.utcnow()
+    s.update_reel_preset(p)
+    return _reel_preset_to_dict(p)
+
+
+@app.delete("/api/reel/presets/{preset_id}")
+async def delete_reel_preset(preset_id: str) -> dict:
+    out = store().delete_reel_preset(preset_id)
+    if out is None:
+        raise HTTPException(404, "Preset not found")
+    return {"ok": True}
+
+
+def _safe_image_ext(name: str) -> str:
+    ext = Path(name).suffix.lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
+        return ".png"
+    return ext
+
+
+@app.post("/api/reel/jobs")
+async def create_reel_job(
+    background: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    preset_id: str | None = Form(None),
+    custom_prompt: str = Form(""),
+    image_model: str = Form("gpt-image"),
+    aspect_ratio: str = Form("9:16"),
+    title: str | None = Form(None),
+    mini_approval: bool = Form(False),
+) -> dict:
+    """Upload N reference frames + create a reel job. Anchor (frame 0) is
+    rendered first; followers run in parallel once anchor lands."""
+    from character_swap.models import ReelFrame, ReelJob, ReelFrameStatus
+
+    if not files:
+        raise HTTPException(400, "At least one file required")
+    if len(files) > 12:
+        raise HTTPException(400, "Up to 12 frames per reel")
+
+    if image_model not in runner_media.IMAGE_MODELS:
+        raise HTTPException(400, f"Unknown image_model '{image_model}'")
+    if image_model not in {"gpt-image", "nano-banana", "nano-banana-pro"}:
+        raise HTTPException(
+            400,
+            f"Reel runner currently supports gpt-image and nano-banana[-pro] only "
+            f"(picked: {image_model})",
+        )
+    if not settings.has_provider(runner_media.IMAGE_MODELS[image_model]["provider"]):
+        raise HTTPException(503, f"{image_model} is not configured — add the API key to .env")
+
+    s = store()
+    preset = s.get_reel_preset(preset_id) if preset_id else None
+    if preset_id and preset is None:
+        raise HTTPException(404, f"Preset not found: {preset_id}")
+    if preset is None:
+        # Fall back to whatever preset is flagged default.
+        preset = next((p for p in s.list_reel_presets() if p.is_default), None)
+    baseline = preset.baseline_prompt if preset else ""
+    custom = (custom_prompt or "").strip()
+    full_prompt = (baseline + "\n\n" + custom).strip() if custom else baseline.strip()
+    if not full_prompt:
+        raise HTTPException(400, "Either a preset or a custom_prompt is required")
+
+    job_id = "rj_" + secrets.token_hex(5)
+    job_dir = _reel_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    frames: list[ReelFrame] = []
+    for idx, upload in enumerate(files):
+        ext = _safe_image_ext(upload.filename or f"frame{idx}.png")
+        input_name = f"input_{idx:02d}{ext}"
+        data = await _read_capped(upload)
+        if not data:
+            raise HTTPException(400, f"Empty upload at index {idx}")
+        (job_dir / input_name).write_bytes(data)
+        frames.append(ReelFrame(
+            frame_id="rf_" + secrets.token_hex(4),
+            sort_index=idx,
+            is_anchor=(idx == 0),
+            input_filename=input_name,
+            output_filename=f"output_{idx:02d}.png",
+            status=ReelFrameStatus.QUEUED,
+        ))
+
+    job = ReelJob(
+        job_id=job_id,
+        title=(title or "").strip() or None,
+        preset_id=preset.preset_id if preset else None,
+        custom_prompt=custom,
+        full_prompt=full_prompt,
+        image_model=image_model,
+        aspect_ratio=aspect_ratio,
+        frames=frames,
+        mini_approval=mini_approval,
+    )
+    s.add_reel_job(job)
+
+    from character_swap import reel_runner as _reel_runner
+    # Run the anchor first; the followers don't kick off until the user
+    # approves via POST /api/reel/jobs/{job_id}/approve_anchor.
+    background.add_task(_run_async, _reel_runner.run_reel_anchor, job_id)
+    return _reel_job_to_dict(job)
+
+
+@app.post("/api/reel/jobs/{job_id}/approve_anchor")
+async def approve_reel_anchor(job_id: str, background: BackgroundTasks) -> dict:
+    """User has reviewed the anchor and wants to render the followers.
+    Only valid when status is AWAITING_ANCHOR_APPROVAL."""
+    from character_swap.models import ReelJobStatus as _RJS
+    from character_swap import reel_runner as _reel_runner
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    if j.status != _RJS.AWAITING_ANCHOR_APPROVAL:
+        raise HTTPException(409, f"Cannot approve anchor — job status is {j.status}")
+    background.add_task(_run_async, _reel_runner.run_reel_followers, job_id)
+    return _reel_job_to_dict(j)
+
+
+@app.post("/api/reel/jobs/{job_id}/rerender_anchor")
+async def rerender_reel_anchor(job_id: str, body: dict, background: BackgroundTasks) -> dict:
+    """Re-render the anchor. Optionally accept an updated custom_prompt so the
+    user can tweak the wording without re-uploading frames. Lands the job
+    back at AWAITING_ANCHOR_APPROVAL after the new anchor finishes."""
+    from character_swap.models import ReelJobStatus as _RJS
+    from character_swap import reel_runner as _reel_runner
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    if j.status == _RJS.GENERATING or j.status == _RJS.GENERATING_ANCHOR:
+        raise HTTPException(409, "Anchor is already generating")
+    if "custom_prompt" in body:
+        j.custom_prompt = (body["custom_prompt"] or "").strip()
+        preset = s.get_reel_preset(j.preset_id) if j.preset_id else None
+        baseline = preset.baseline_prompt if preset else ""
+        j.full_prompt = (baseline + "\n\n" + j.custom_prompt).strip() if j.custom_prompt else baseline.strip()
+        s.update_reel_job(j)
+    background.add_task(_run_async, _reel_runner.run_reel_anchor, job_id)
+    return _reel_job_to_dict(j)
+
+
+@app.post("/api/reel/jobs/{job_id}/frames/{frame_id}/retry")
+async def retry_reel_frame(job_id: str, frame_id: str, background: BackgroundTasks) -> dict:
+    """Re-render a single frame. Anchor re-render lands the job at
+    AWAITING_ANCHOR_APPROVAL again (so the user reviews before any further
+    follower work). Follower re-render just updates that frame."""
+    from character_swap import reel_runner as _reel_runner
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    if not any(f.frame_id == frame_id for f in j.frames):
+        raise HTTPException(404, "Frame not found in this reel")
+    background.add_task(_run_async, _reel_runner.retry_frame, job_id, frame_id)
+    return _reel_job_to_dict(j)
+
+
+@app.post("/api/reel/jobs/{job_id}/frames/{frame_id}/refine")
+async def refine_reel_frame(job_id: str, frame_id: str, body: dict,
+                              background: BackgroundTasks) -> dict:
+    """User-driven targeted correction. Body: {correction: 'free-text fix'}."""
+    from character_swap import reel_runner as _reel_runner
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    frame = next((f for f in j.frames if f.frame_id == frame_id), None)
+    if frame is None:
+        raise HTTPException(404, "Frame not found in this reel")
+    if frame.is_anchor:
+        raise HTTPException(400, "Use rerender_anchor to refine the anchor")
+    correction = (body.get("correction") or "").strip()
+    if not correction:
+        raise HTTPException(400, "correction text required")
+    background.add_task(_run_async, _reel_runner.refine_frame,
+                        job_id, frame_id, correction)
+    return _reel_job_to_dict(j)
+
+
+@app.post("/api/reel/jobs/{job_id}/frames/{frame_id}/approve")
+async def approve_reel_frame(job_id: str, frame_id: str,
+                               background: BackgroundTasks) -> dict:
+    """Mini-approval mode only: mark this follower as accepted and advance
+    to the next one (handled by the runner)."""
+    from character_swap import reel_runner as _reel_runner
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    if not j.mini_approval:
+        raise HTTPException(409, "This job is not in mini-approval mode")
+    frame = next((f for f in j.frames if f.frame_id == frame_id), None)
+    if frame is None:
+        raise HTTPException(404, "Frame not found")
+    if frame.is_anchor:
+        raise HTTPException(400, "Anchor approval uses approve_anchor")
+    background.add_task(_run_async, _reel_runner.approve_frame,
+                        job_id, frame_id)
+    return _reel_job_to_dict(j)
+
+
+@app.get("/api/reel/jobs")
+async def list_reel_jobs() -> list[dict]:
+    jobs = sorted(store().list_reel_jobs(), key=lambda j: j.created_at, reverse=True)
+    return [_reel_job_to_dict(j) for j in jobs]
+
+
+@app.get("/api/reel/jobs/{job_id}")
+async def get_reel_job(job_id: str) -> dict:
+    j = store().get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    return _reel_job_to_dict(j)
+
+
+@app.delete("/api/reel/jobs/{job_id}")
+async def delete_reel_job(job_id: str) -> dict:
+    s = store()
+    j = s.get_reel_job(job_id)
+    if j is None:
+        raise HTTPException(404, "Reel job not found")
+    s.delete_reel_job(job_id)
+    # Best-effort disk cleanup.
+    import shutil as _sh
+    _sh.rmtree(_reel_dir / job_id, ignore_errors=True)
+    return {"ok": True}
+
+
+@app.websocket("/ws/reel/{job_id}")
+async def ws_reel(websocket: WebSocket, job_id: str) -> None:
+    """Live frame-status updates. Same pattern as /ws/jobs/{job_id}: emit a
+    snapshot on connect, then forward subsequent publish() events."""
+    await websocket.accept()
+    snapshot = store().get_reel_job(job_id)
+    if snapshot is not None:
+        await websocket.send_json({"type": "snapshot", "job": _reel_job_to_dict(snapshot)})
+    queue = await events.subscribe(job_id)
+    try:
+        while True:
+            ev = await queue.get()
+            await websocket.send_json(ev)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+
+
 @app.exception_handler(ProviderNotConfigured)
 async def _provider_not_configured(request, exc: ProviderNotConfigured):
     return JSONResponse(status_code=503, content={"error": str(exc), "provider": exc.provider})
@@ -2491,6 +2914,7 @@ async def health() -> dict:
         "kling_key": bool(settings.kling_access_key and settings.kling_secret_key),
         "heygen_key": bool(settings.heygen_api_key),
         "elevenlabs_key": bool(settings.elevenlabs_api_key),
+        "remotion_available": _remotion_available(),
     }
 
 

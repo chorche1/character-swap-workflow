@@ -34,11 +34,14 @@ from character_swap.models import (
     JobCharacter,
     MediaGeneration,
     ProjectAsset,
+    ReelJob,
+    ReelPreset,
     SceneAsset,
     VariantStatus,
     VideoStatus,
     VideoVariant,
 )
+import json as _reel_json
 
 
 SCHEMA = """
@@ -173,6 +176,28 @@ CREATE TABLE IF NOT EXISTS gen_reference_paths (
     path TEXT NOT NULL,
     PRIMARY KEY (gen_id, position),
     FOREIGN KEY (gen_id) REFERENCES generations(gen_id) ON DELETE CASCADE
+);
+
+-- Reel: batch-consistent image-edit feature (Image-tab "Reel" subsystem).
+-- The full Pydantic models are JSON-encoded in `data` to avoid schema churn
+-- as the feature evolves. Indexed columns are duplicated for cheap listing.
+CREATE TABLE IF NOT EXISTS reel_presets (
+    preset_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    is_default INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    data TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS reel_jobs (
+    job_id TEXT PRIMARY KEY,
+    title TEXT,
+    status TEXT NOT NULL,
+    image_model TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    data TEXT NOT NULL
 );
 """
 
@@ -403,6 +428,19 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
         g = _gen_from_row(r, refs_by_gen.get(r["gen_id"], []))
         state.generations[g.gen_id] = g
 
+    # Reel — both tables store the full Pydantic model as JSON in `data`.
+    try:
+        for r in conn.execute("SELECT data FROM reel_presets ORDER BY created_at"):
+            p = ReelPreset.model_validate_json(r["data"])
+            state.reel_presets[p.preset_id] = p
+        for r in conn.execute("SELECT data FROM reel_jobs ORDER BY created_at"):
+            j = ReelJob.model_validate_json(r["data"])
+            state.reel_jobs[j.job_id] = j
+    except sqlite3.OperationalError:
+        # Tables not yet created on a partial-migration DB — skip silently;
+        # ensure_schema() on next boot creates them.
+        pass
+
     return state
 
 
@@ -622,5 +660,47 @@ def reset_all(conn: sqlite3.Connection) -> None:
     for table in ("gen_reference_paths", "generations",
                   "videos", "variants", "job_characters", "jobs",
                   "project_characters", "projects",
-                  "character_images", "characters", "scenes"):
+                  "character_images", "characters", "scenes",
+                  "reel_jobs", "reel_presets"):
         conn.execute(f"DELETE FROM {table}")
+
+
+# --- Reel CRUD ----------------------------------------------------------------------
+
+def upsert_reel_preset(conn: sqlite3.Connection, preset: ReelPreset) -> None:
+    conn.execute(
+        """INSERT INTO reel_presets (preset_id, name, is_default, created_at, updated_at, data)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(preset_id) DO UPDATE SET
+             name=excluded.name,
+             is_default=excluded.is_default,
+             updated_at=excluded.updated_at,
+             data=excluded.data""",
+        (preset.preset_id, preset.name, 1 if preset.is_default else 0,
+         _iso(preset.created_at), _iso(preset.updated_at),
+         _reel_json.dumps(preset.model_dump(mode="json"))),
+    )
+
+
+def delete_reel_preset(conn: sqlite3.Connection, preset_id: str) -> None:
+    conn.execute("DELETE FROM reel_presets WHERE preset_id = ?", (preset_id,))
+
+
+def upsert_reel_job(conn: sqlite3.Connection, job: ReelJob) -> None:
+    conn.execute(
+        """INSERT INTO reel_jobs (job_id, title, status, image_model, created_at, updated_at, data)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(job_id) DO UPDATE SET
+             title=excluded.title,
+             status=excluded.status,
+             image_model=excluded.image_model,
+             updated_at=excluded.updated_at,
+             data=excluded.data""",
+        (job.job_id, job.title, str(job.status), job.image_model,
+         _iso(job.created_at), _iso(job.updated_at),
+         _reel_json.dumps(job.model_dump(mode="json"))),
+    )
+
+
+def delete_reel_job(conn: sqlite3.Connection, job_id: str) -> None:
+    conn.execute("DELETE FROM reel_jobs WHERE job_id = ?", (job_id,))

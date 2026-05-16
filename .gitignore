@@ -19,3 +19,8 @@ state/*
 
 # uv
 uv.lock
+
+# Remotion: never commit Node modules or the built preview bundle
+remotion/node_modules/
+web/static/remotion-preview.js
+web/static/remotion-preview.js.map
