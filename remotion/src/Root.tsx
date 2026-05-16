@@ -4,6 +4,7 @@ import { DEFAULT_CAPTION_PROPS } from "./types";
 import { SubmagicPop } from "./compositions/SubmagicPop";
 import { MrBeastBold } from "./compositions/MrBeastBold";
 import { CapCutGlow } from "./compositions/CapCutGlow";
+import { SubmagicPro } from "./compositions/SubmagicPro";
 
 const FPS = 30;
 
@@ -50,6 +51,26 @@ export const Root: React.FC = () => {
         height={DEFAULT_CAPTION_PROPS.videoHeight}
         durationInFrames={durationInFrames(DEFAULT_CAPTION_PROPS)}
         defaultProps={{ ...DEFAULT_CAPTION_PROPS, accent: "#00E5FF", fontFamily: "Poppins", wordsPerCard: 5, allCaps: false }}
+        calculateMetadata={({ props }) => ({
+          durationInFrames: durationInFrames(props),
+          width: props.videoWidth,
+          height: props.videoHeight,
+        })}
+      />
+      <Composition
+        id="SubmagicPro"
+        component={SubmagicPro}
+        fps={FPS}
+        width={DEFAULT_CAPTION_PROPS.videoWidth}
+        height={DEFAULT_CAPTION_PROPS.videoHeight}
+        durationInFrames={durationInFrames(DEFAULT_CAPTION_PROPS)}
+        defaultProps={{
+          ...DEFAULT_CAPTION_PROPS,
+          accent: "#FFD400",
+          fontFamily: "Montserrat",
+          wordsPerCard: 3,
+          allCaps: true,
+        }}
         calculateMetadata={({ props }) => ({
           durationInFrames: durationInFrames(props),
           width: props.videoWidth,

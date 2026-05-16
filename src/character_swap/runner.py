@@ -126,6 +126,19 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
     _persist(job, jc)
 
 
+def _parse_director_plan(job: Job):
+    """Parse the cached SwapDirectorPlan JSON on the Job. Returns None if no
+    plan is cached or parsing fails. Cached on `job.director_prompts_json`
+    by `_maybe_run_director_swap`."""
+    if not job.director_prompts_json:
+        return None
+    try:
+        from character_swap.prompt_director import SwapDirectorPlan
+        return SwapDirectorPlan.model_validate_json(job.director_prompts_json)
+    except Exception:
+        return None
+
+
 async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore) -> None:
     """Reset a character and start N fresh variants per scene.
 
@@ -134,6 +147,9 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     Each placeholder records which scene it belongs to via `scene_id`, so
     the runner picks the right reference image and the UI can group
     results per scene.
+
+    Prompt precedence (highest to lowest): per-variant from Director plan
+    cache → `enriched_image_prompt` → `prompt` → `GENERATION_PROMPT`.
     """
     jc.images = []
     jc.videos = []
@@ -145,17 +161,29 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     # single-scene jobs fall back to a 1-item list.
     scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
 
-    # Create N×scenes placeholder variants in `generating` state up front
-    # so the UI can show all skeleton cards immediately.
+    # Fallback prompt when Director plan is missing OR doesn't cover a slot.
+    fallback_prompt = (job.enriched_image_prompt
+                       or job.prompt
+                       or pipeline.GENERATION_PROMPT)
+    director_plan = _parse_director_plan(job)
+
     placeholders: list[GeneratedImage] = []
     for sid in scene_ids:
-        for _ in range(n):
+        # Pull this (char, scene)'s ordered per-variant prompts from the
+        # Director cache, if present. Indexed by variant_index in plan; we
+        # consume them in order. Missing entries fall back.
+        director_variant_prompts: list[str] = (
+            director_plan.lookup(jc.char_id, sid) if director_plan else []
+        )
+        for i in range(n):
             variant_id = _short("v_")
             path = _output_dir(job.job_id, jc.char_id) / f"variant_{variant_id}.png"
+            tailored = (director_variant_prompts[i]
+                        if i < len(director_variant_prompts) else None)
             v = GeneratedImage(
                 variant_id=variant_id,
                 path=str(path),
-                prompt=job.prompt or pipeline.GENERATION_PROMPT,
+                prompt=tailored or fallback_prompt,
                 scene_id=sid,
                 status=VariantStatus.GENERATING,
             )
@@ -164,7 +192,8 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     _persist(job, jc)
     await _emit(job.job_id, "char.queued", char_id=jc.char_id,
                 images_per_character=n,
-                n_scenes=len(scene_ids))
+                n_scenes=len(scene_ids),
+                director_applied=bool(director_plan))
 
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
@@ -201,6 +230,50 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> No
     await _generate_one_variant(job, jc, target, sem)
 
 
+async def _maybe_run_director_swap(job: Job, s) -> None:
+    """If `use_director=True` and the plan isn't cached yet, run a ONE-shot
+    Claude Opus call to plan per-(char, scene, variant) prompts and cache
+    the result as JSON on `job.director_prompts_json`. Silent no-op on any
+    failure — `_kick_char` falls back to enrich/raw automatically."""
+    if not job.use_director or job.director_prompts_json:
+        return
+    from pathlib import Path
+
+    from character_swap import prompt_director
+    n = max(1, min(4, job.images_per_character))
+
+    # Build (char_id, name, path) tuples for every character in the job.
+    chars = [
+        (jc.char_id, jc.name, Path(jc.source_image_path))
+        for jc in job.characters.values()
+    ]
+    # Multi-scene → list of (scene_id, scene_path). Legacy single-scene
+    # collapses to a 1-tuple list.
+    scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+    scene_paths = (list(job.scene_image_paths) if job.scene_image_paths
+                   else [job.scene_image_path])
+    scenes = [(sid, Path(p)) for sid, p in zip(scene_ids, scene_paths)]
+    if not chars or not scenes:
+        return
+
+    plan = await asyncio.to_thread(
+        prompt_director.direct_swap,
+        user_prompt=job.prompt or "",
+        characters=chars,
+        scenes=scenes,
+        images_per_character=n,
+        job_id=job.job_id,
+    )
+    if plan is None:
+        return
+    # Cache + persist so retries / resumes don't re-bill the Anthropic API.
+    job.director_prompts_json = plan.model_dump_json()
+    s.update_job(job)
+    await _emit(job.job_id, "director.ready",
+                n_chars=len(plan.characters),
+                intent=plan.intent)
+
+
 async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -> None:
     """Kick off N variants for the listed characters (or every non-progressing char)."""
     s = store()
@@ -210,6 +283,26 @@ async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -
     if job.movement_prompt:
         # Approvals locked after movement submission; refuse to disrupt.
         return
+
+    # AI Director runs FIRST when enabled — its per-variant prompts override
+    # both enrich and raw. Runs once per job; cached on the Job thereafter.
+    await _maybe_run_director_swap(job, s)
+    # Re-load job in case Director persisted the plan above.
+    job = s.get_job(job_id) or job
+
+    # Optional prompt enrichment for the swap flow. Only triggers when the
+    # user provided a custom `job.prompt` (the GENERATION_PROMPT default is
+    # already highly detailed and benefits little from expansion). When
+    # Director succeeded, its per-variant prompts take precedence in
+    # `_kick_char`; enrichment still runs as a fallback safety net.
+    if job.enrich_prompt and job.prompt and not job.enriched_image_prompt:
+        from character_swap import prompt_enrich
+        enriched = await asyncio.to_thread(
+            prompt_enrich.enrich_prompt, job.prompt, "swap", job_id=job.job_id,
+        )
+        if enriched and enriched != job.prompt:
+            job.enriched_image_prompt = enriched
+            s.update_job(job)
 
     n = max(1, min(4, job.images_per_character))
     targets: list[JobCharacter] = []
@@ -291,21 +384,31 @@ async def _animate_one_video(
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
 
-    # Submit
+    # Submit. The `video_model` field on the Job (set in Step 4) chooses
+    # which provider — defaults to grok-imagine. All providers fail through
+    # the same VideoStatus.ERROR path so the UI doesn't need per-provider
+    # handling.
+    video_model = job.video_model or "grok-imagine"
     try:
+        # Each VideoVariant remembers WHICH approved variant it animates via
+        # `source_variant_id` — so multi-scene jobs (with multiple approved
+        # variants per char) animate every approval in parallel and keep
+        # their per-frame source mapping correct.
+        target_variant_id = video.source_variant_id or jc.approved_variant_id
         approved = next(
-            (v for v in jc.images if v.variant_id == jc.approved_variant_id), None
+            (v for v in jc.images if v.variant_id == target_variant_id), None
         )
         if approved is None:
             raise grok.GrokError("approved variant missing on disk")
-        grok_job_id = await asyncio.to_thread(
+        provider_job_id = await asyncio.to_thread(
             pipeline.submit_video,
             image=Path(approved.path),
             movement_prompt=movement_prompt,
             character_name=jc.name,
             job_id=job.job_id,
+            model=video_model,
         )
-    except grok.GrokError as e:
+    except Exception as e:
         video.status = VideoStatus.ERROR
         video.error = f"submit: {e}"
         _replace_video(job, jc, video)
@@ -314,10 +417,13 @@ async def _animate_one_video(
         _maybe_complete_char(job, jc)
         return
 
-    video.grok_job_id = grok_job_id
+    # `grok_job_id` is misnamed for non-grok providers but kept for DB
+    # back-compat (the column is the provider's external job/task id either
+    # way; the column name is historical).
+    video.grok_job_id = provider_job_id
     _replace_video(job, jc, video)
     await _emit(job.job_id, "video.submitted",
-                char_id=jc.char_id, video_id=video.video_id, grok_job_id=grok_job_id)
+                char_id=jc.char_id, video_id=video.video_id, grok_job_id=provider_job_id)
 
     loop = asyncio.get_running_loop()
     dest = _output_dir(job.job_id, jc.char_id) / f"video_{video.video_id}.mp4"
@@ -344,13 +450,14 @@ async def _animate_one_video(
     try:
         await asyncio.to_thread(
             pipeline.wait_for_video,
-            job_id=grok_job_id,
+            job_id=provider_job_id,
             character_name=jc.name,
             dest=dest,
             on_progress=_progress,
             app_job_id=job.job_id,
+            model=video_model,
         )
-    except grok.GrokError as e:
+    except Exception as e:
         video.status = VideoStatus.ERROR
         video.error = str(e)
         _replace_video(job, jc, video)
@@ -393,39 +500,62 @@ def _maybe_complete_char(job: Job, jc: JobCharacter) -> None:
 
 
 async def _animate_character(
-    job: Job, jc: JobCharacter, movement_prompt: str, m_videos: int,
+    job: Job, jc: JobCharacter, m_videos: int,
+    prompt_for_scene,
 ) -> None:
-    if jc.approved_variant_id is None:
+    """Fan out animation across every approved variant in parallel.
+
+    Per-scene prompts: `prompt_for_scene(scene_id) -> str` resolves the
+    movement prompt for a given scene. Multi-scene jobs use a different
+    prompt per scene so each scene's animation matches its intended action
+    (e.g. scene 1 "pours oil", scene 2 "walks away"). Single-scene legacy
+    jobs collapse to one prompt for all variants.
+    """
+    # Source-of-truth list; fall back to the legacy single field for jobs
+    # created before the multi-approve migration.
+    approved_ids = list(jc.approved_variant_ids or [])
+    if not approved_ids and jc.approved_variant_id:
+        approved_ids = [jc.approved_variant_id]
+    if not approved_ids:
         return
     _persist(job, jc, status=CharStatus.ANIMATING)
 
-    placeholders: list[VideoVariant] = []
-    for _ in range(m_videos):
-        vid = _short("vd_")
-        v = VideoVariant(
-            video_id=vid,
-            grok_job_id="",
-            status=VideoStatus.PENDING,
-            source_variant_id=jc.approved_variant_id,
-        )
-        jc.videos.append(v)
-        placeholders.append(v)
+    placeholders: list[tuple[VideoVariant, str]] = []
+    for src_variant_id in approved_ids:
+        variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
+        scene_id = variant.scene_id if variant else None
+        scene_prompt = prompt_for_scene(scene_id)
+        for _ in range(m_videos):
+            vid = _short("vd_")
+            v = VideoVariant(
+                video_id=vid,
+                grok_job_id="",
+                status=VideoStatus.PENDING,
+                source_variant_id=src_variant_id,
+            )
+            jc.videos.append(v)
+            placeholders.append((v, scene_prompt))
     _persist(job, jc)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, movement_prompt) for v in placeholders]
+        *[_animate_one_video(job, jc, v, mp) for v, mp in placeholders]
     )
 
 
 async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
     """Re-submit a single failed video. Replaces the entry in-place with a fresh
-    `VideoVariant` and re-runs `_animate_one_video`."""
+    `VideoVariant` (preserving its `source_variant_id`) and re-runs
+    `_animate_one_video`. Critical for multi-approve jobs: the new video must
+    re-target the SAME approved variant the failed one was animating, not
+    silently fall back to a different one."""
     s = store()
     job = s.get_job(job_id)
     if job is None or not job.movement_prompt:
         return
     jc = job.characters.get(char_id)
-    if jc is None or jc.approved_variant_id is None:
+    if jc is None:
+        return
+    if not (jc.approved_variant_ids or jc.approved_variant_id):
         return
     idx = next((i for i, v in enumerate(jc.videos) if v.video_id == video_id), None)
     if idx is None:
@@ -433,30 +563,169 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
     if jc.videos[idx].status not in {VideoStatus.FAILED, VideoStatus.ERROR}:
         return
 
+    # Preserve which approved variant this video was animating — falls back
+    # to the first approved one only if the original wasn't recorded.
+    source_variant_id = (jc.videos[idx].source_variant_id
+                         or (jc.approved_variant_ids[0] if jc.approved_variant_ids
+                             else jc.approved_variant_id))
     fresh = VideoVariant(
         video_id=_short("vd_"),
         grok_job_id="",
         status=VideoStatus.PENDING,
-        source_variant_id=jc.approved_variant_id,
+        source_variant_id=source_variant_id,
     )
     jc.videos[idx] = fresh
     _persist(job, jc, status=CharStatus.ANIMATING)
-    await _animate_one_video(job, jc, fresh, job.movement_prompt)
+    # Pick the prompt that matches THIS video's scene (multi-scene jobs).
+    source_variant = next(
+        (iv for iv in jc.images if iv.variant_id == source_variant_id), None,
+    )
+    scene_id = source_variant.scene_id if source_variant else None
+    sid = scene_id or _first_scene_id(job)
+    movement_prompt = (
+        (job.enriched_movement_prompts or {}).get(sid)
+        or (job.movement_prompts or {}).get(sid)
+        or job.enriched_movement_prompt
+        or job.movement_prompt
+        or ""
+    )
+    await _animate_one_video(job, jc, fresh, movement_prompt)
 
 
 async def run_video_synthesis(job_id: str) -> None:
     s = store()
     job = s.get_job(job_id)
-    if job is None or not job.movement_prompt:
+    if job is None:
         return
+    # Need at least one prompt — either the new dict or the legacy singular.
+    if not (job.movement_prompts or job.movement_prompt):
+        return
+
+    # AI Director runs FIRST when enabled. ONE Claude call with the scene
+    # references + approved variant frames; agent writes a cinematic shot
+    # description per scene. Result is merged into enriched_movement_prompts
+    # so the per-variant resolver below transparently picks it up.
+    if job.use_director and job.movement_prompts:
+        from pathlib import Path
+
+        from character_swap import prompt_director
+
+        # For each scene, collect the approved variant images (across all
+        # characters) so the director sees the actual start frames the video
+        # model will animate.
+        scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+        scene_paths = (list(job.scene_image_paths) if job.scene_image_paths
+                       else [job.scene_image_path])
+        scene_path_by_id = dict(zip(scene_ids, scene_paths))
+
+        director_inputs: list[tuple[str, "Path", list["Path"], str]] = []
+        for sid in scene_ids:
+            raw = (job.movement_prompts or {}).get(sid, "")
+            if not raw:
+                continue
+            scene_path = scene_path_by_id.get(sid)
+            if not scene_path:
+                continue
+            approved_imgs: list[Path] = []
+            for jc in job.characters.values():
+                approved_ids = set(jc.approved_variant_ids or [])
+                if jc.approved_variant_id:
+                    approved_ids.add(jc.approved_variant_id)
+                for v in jc.images:
+                    if v.variant_id in approved_ids and (v.scene_id or scene_ids[0]) == sid:
+                        approved_imgs.append(Path(v.path))
+            director_inputs.append((sid, Path(scene_path), approved_imgs, raw))
+
+        if director_inputs:
+            plan = await asyncio.to_thread(
+                prompt_director.direct_movement,
+                scenes=director_inputs,
+                job_id=job.job_id,
+            )
+            if plan is not None:
+                # Merge into enriched dict (per-scene cache). Director output
+                # takes precedence over any prior enriched values.
+                merged = dict(job.enriched_movement_prompts or {})
+                for s_plan in plan.scenes:
+                    if s_plan.prompt:
+                        merged[s_plan.scene_id] = s_plan.prompt
+                job.enriched_movement_prompts = merged
+                primary = (_first_scene_id(job)
+                           or next(iter(job.movement_prompts.keys()), None))
+                job.enriched_movement_prompt = (
+                    merged.get(primary)
+                    or next(iter(merged.values()), None)
+                )
+                s.update_job(job)
+
+    # Per-scene enrichment: each scene's "him pouring oil" / "she waves"
+    # direction is expanded into its own cinematic shot description.
+    # Cached on `job.enriched_movement_prompts` so a partial failure
+    # (e.g. one scene fails enrichment) doesn't re-pay the OpenAI cost
+    # on every subsequent run / resume. Skips scenes the Director already
+    # filled in (Director output is higher quality).
+    if job.enrich_prompt and job.movement_prompts:
+        from character_swap import prompt_enrich
+        enriched_dict = dict(job.enriched_movement_prompts or {})
+        dirty = False
+        for sid, raw in job.movement_prompts.items():
+            if enriched_dict.get(sid):
+                continue
+            out = await asyncio.to_thread(
+                prompt_enrich.enrich_prompt, raw, "video", job_id=job.job_id,
+            )
+            if out and out != raw:
+                enriched_dict[sid] = out
+                dirty = True
+        if dirty:
+            job.enriched_movement_prompts = enriched_dict
+            # Keep legacy singular field in sync for any code path that
+            # still reads it.
+            primary = (_first_scene_id(job)
+                       or next(iter(job.movement_prompts.keys()), None))
+            job.enriched_movement_prompt = (
+                enriched_dict.get(primary)
+                or next(iter(enriched_dict.values()), None)
+            )
+            s.update_job(job)
+
     m = max(1, min(4, job.videos_per_character))
-    targets = [jc for jc in job.characters.values()
-               if jc.status == CharStatus.APPROVED and jc.approved_variant_id]
+    targets = [
+        jc for jc in job.characters.values()
+        if jc.status == CharStatus.APPROVED
+        and (jc.approved_variant_ids or jc.approved_variant_id)
+    ]
     if not targets:
         return
+
+    # Build a closure that resolves the right prompt per variant's scene.
+    # Order of preference: enriched per-scene → raw per-scene → legacy
+    # enriched single → legacy single. Variants with scene_id=None (legacy)
+    # fall back to the job's primary scene.
+    primary_scene = _first_scene_id(job)
+    movement_prompts = dict(job.movement_prompts or {})
+    enriched_prompts = dict(job.enriched_movement_prompts or {})
+    fallback = (job.enriched_movement_prompt or job.movement_prompt or "")
+
+    def prompt_for_scene(scene_id: str | None) -> str:
+        sid = scene_id or primary_scene
+        if sid is None:
+            return fallback
+        return (enriched_prompts.get(sid)
+                or movement_prompts.get(sid)
+                or fallback)
+
     await asyncio.gather(
-        *[_animate_character(job, jc, job.movement_prompt, m) for jc in targets]
+        *[_animate_character(job, jc, m, prompt_for_scene) for jc in targets]
     )
+
+
+def _first_scene_id(job: Job) -> str | None:
+    """The job's primary (first) scene_id. Multi-scene jobs use
+    `scene_ids[0]`; legacy single-scene jobs use `scene_id`."""
+    if job.scene_ids:
+        return job.scene_ids[0]
+    return job.scene_id or None
 
 
 # --- resumption -----------------------------------------------------------------------
@@ -514,8 +783,9 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
             dest=dest,
             on_progress=_progress,
             app_job_id=job.job_id,
+            model=job.video_model or "grok-imagine",
         )
-    except grok.GrokError as e:
+    except Exception as e:
         video.status = VideoStatus.ERROR
         video.error = str(e)
         _replace_video(job, jc, video)

@@ -516,6 +516,15 @@ TEMPLATES: dict[str, CaptionStyle] = {
     # multi-layer glow, per-word entrance animation. Rendered via the
     # React project at `<repo>/remotion/`.
 
+    # PRO premium default — combines Submagic's random-keyword color
+    # emphasis + CapCut's accent glow + MrBeast's italic ALLCAPS punch.
+    # 22% active-word scale boost, 16% larger size than `submagic-pop`,
+    # Montserrat 900 italic. This is the recommended caption look.
+    "submagic-pro":  CaptionStyle(font="Montserrat", size=130,
+                              highlight_color="&H0000D4FF",   # #FFD400 yellow primary accent
+                              words_per_card=3, margin_v=460, all_caps=True,
+                              engine="remotion", composition_id="SubmagicPro"),
+
     # Submagic-style word-by-word pop with spring entrance, yellow active.
     "submagic-pop":  CaptionStyle(font="Inter", size=120,
                               highlight_color="&H0000D4FF",   # #FFD400 yellow (BGR &H00D4FF)

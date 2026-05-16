@@ -104,6 +104,13 @@ class JobCharacter(BaseModel):
     source_image_path: str
     status: CharStatus = CharStatus.QUEUED
     images: list[GeneratedImage] = Field(default_factory=list)
+    # Multi-variant approval (added when multi-scene support landed): the
+    # canonical list of variant_ids the user picked for this character. With
+    # N scenes, this can hold up to N entries — one per scene — so every
+    # scene's chosen image animates in parallel in Step 4.
+    # `approved_variant_id` (singular, below) is kept in sync with the
+    # FIRST entry so older code paths that read it directly keep working.
+    approved_variant_ids: list[str] = Field(default_factory=list)
     approved_variant_id: str | None = None
     videos: list[VideoVariant] = Field(default_factory=list)
     error: str | None = None
@@ -127,10 +134,43 @@ class Job(BaseModel):
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants
+    # Video provider used in Step 4 to animate every approved variant. Defaults
+    # to Grok Imagine for back-compat; the Step-4 UI lets the user switch to
+    # Kling / Veo / Runway / etc. before submitting the movement prompt.
+    video_model: str = "grok-imagine"
+    # Legacy single movement prompt. Kept in sync with the FIRST scene's
+    # entry in `movement_prompts` so all "is the job in movement state?"
+    # checks (`if job.movement_prompt:`) still work for callers that haven't
+    # been updated for per-scene prompts.
     movement_prompt: str | None = None
+    # Per-scene movement prompts (scene_id → prompt). One prompt drives every
+    # approved variant for that scene across ALL characters — so e.g. in a
+    # 3-scene reel each scene gets its own "guy pours oil" / "guy waves" /
+    # "guy walks away" direction, applied uniformly across characters.
+    movement_prompts: dict[str, str] = Field(default_factory=dict)
     images_per_character: int = 1
     videos_per_character: int = 1
     compacted: bool = False                  # set true after `compact` strips non-approved files
+    # Prompt enrichment for the swap flow: when True, the user's custom
+    # `prompt` AND the `movement_prompt` are expanded through GPT-4o before
+    # being sent to the image / video models. Enriched text stashed so the
+    # UI can show what was actually sent.
+    enrich_prompt: bool = False
+    enriched_image_prompt: str | None = None
+    # Legacy single enriched movement (mirror of `movement_prompt`).
+    enriched_movement_prompt: str | None = None
+    # Per-scene enriched movement (mirror of `movement_prompts`). Each scene's
+    # prompt is enriched independently so the cinematic expansion stays
+    # focused on what happens IN THAT SHOT.
+    enriched_movement_prompts: dict[str, str] = Field(default_factory=dict)
+    # AI Director (opt-in): when True, runner calls `prompt_director.direct_swap`
+    # before `_kick_char` and caches the full SwapDirectorPlan as JSON on
+    # `director_prompts_json`. Per-variant tailored prompts populate
+    # `GeneratedImage.prompt` directly. Movement step similarly populates
+    # `enriched_movement_prompts` from `direct_movement`. Falls back silently
+    # to the legacy enrich/raw path on any failure.
+    use_director: bool = False
+    director_prompts_json: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -161,6 +201,17 @@ class MediaGeneration(BaseModel):
     avatar_id: str | None = None                  # kind=avatar: which HeyGen avatar
     voice_id: str | None = None                   # kind=avatar/audio: voice id (HeyGen or ElevenLabs depending on provider)
     voice_provider: str | None = None             # "heygen" or "elevenlabs"; defaults to "heygen" for avatars
+    # Prompt enrichment — when True, the user's `prompt` is expanded through
+    # GPT-4o before being sent to the image/video model (mirrors what web UIs
+    # like Grok Imagine do internally). `enriched_prompt` stashes the actual
+    # text used so users can inspect what the downstream model saw.
+    enrich_prompt: bool = False
+    enriched_prompt: str | None = None
+    # AI Director (opt-in): when True, runner_media calls prompt_director
+    # before the actual gen call and stores the single tailored prompt here.
+    # Takes precedence over `enriched_prompt` when present.
+    use_director: bool = False
+    director_prompt: str | None = None
     status: GenStatus = GenStatus.PENDING
     output_path: str | None = None
     provider_job_id: str | None = None            # external async id (Grok / Veo / Kling / HeyGen)
@@ -246,10 +297,16 @@ class ReelJob(BaseModel):
     title: str | None = None
     preset_id: str | None = None
     custom_prompt: str = ""
-    full_prompt: str = ""           # baseline + custom, materialized at submit time
+    full_prompt: str = ""           # baseline + custom (post-enrichment), materialized at submit time
     image_model: str = "gpt-image"
     aspect_ratio: str | None = None
     frames: list[ReelFrame] = Field(default_factory=list)
+    # Prompt enrichment for the reel batch: when True the user's
+    # custom_prompt is GPT-4o-expanded into a numbered list of structured
+    # corrections before being concatenated with the preset baseline.
+    # enriched_custom_prompt stashes the actual text used.
+    enrich_prompt: bool = False
+    enriched_custom_prompt: str | None = None
     status: ReelJobStatus = ReelJobStatus.QUEUED
     error: str | None = None
     # Vision-extracted concrete description of the anchor's clothing, background,

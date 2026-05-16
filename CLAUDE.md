@@ -9,9 +9,9 @@
 Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. **Eight top-level tabs:**
 
 - **Swap** (the original 5-step character-swap flow described below — default tab).
-- **Image** — free-form text-to-image. Pick model (GPT Image, DALL·E 3, Grok Imagine, Nano Banana, FLUX variants, Ideogram, Recraft, SD3.5, Seedream, Higgsfield Soul). Optional reference images, aspect ratio, prompt → output appears in a grid below.
+- **Image** — free-form text-to-image. Pick model (GPT Image, DALL·E 3, Grok Imagine, Nano Banana, FLUX variants, Ideogram, Recraft, SD3.5, Seedream, Higgsfield Soul). Optional reference images, aspect ratio, prompt → output appears in a grid below. Two opt-in prompt-quality toggles: **✨ enrich** (gpt-4o text expansion) and **🎬 AI Director** (Claude Opus reads the reference image with vision and writes a tailored prompt — requires `ANTHROPIC_API_KEY`).
 - **Reel** — batch-consistent image edit for video reels. Upload N frames (3–12) from one UGC reel, pick a named **preset** (baseline-prompt library — seed default is "UGC reel (visual consistency)"), type per-video tweak, hit Generate. Pipeline: **(1)** gpt-4o vision pre-pass describes the composition of each input frame (people count, framing, props) → injected into follower prompts. **(2)** Anchor frame (default: frame 0) renders first with only its own input as ref, parks at `awaiting_anchor_approval`. **(3)** gpt-4o vision-extracts hex-coded style spec from the anchor output → stored as `anchor_description`. **(4)** User approves / rerenders anchor / edits-and-rerenders prompt. **(5)** Followers render — for `gpt-image`: refs=[anchor, input_k] with style+composition specs injected; for `nano-banana-pro`: refs=[anchor, *all_inputs] (Gemini batch-coherence). **(6)** gpt-4o drift audit per follower (CLOTHING_COLOR / CLOTHING_TYPE / BACKGROUND / PERSON_COUNT) → auto-correction second pass when severity=major. **(7)** ✎ refine button on each frame for free-text targeted corrections. **(8)** Optional `mini_approval` mode renders followers sequentially with per-frame approve/retry/refine. Endpoints under `/api/reel/*`. Outputs live under `output/reel/<job_id>/`.
-- **Video** — free-form image-to-video. Pick model (Grok Imagine, Veo 3, Kling, Runway, Luma, Pika, Hailuo, Sora 2, Wan, Seedance, Higgsfield variants). Required reference image + motion prompt + aspect/duration → polled output appears in a grid.
+- **Video** — free-form image-to-video. Pick model (Grok Imagine, Veo 3, Kling, Runway, Luma, Pika, Hailuo, Sora 2, Wan, Seedance, Higgsfield variants). Required reference image + motion prompt + aspect/duration → polled output appears in a grid. Same two prompt-quality toggles as Image tab: **✨ enrich** + **🎬 AI Director** (Director looks at the start frame and writes a cinematic shot direction with camera move + performance cues).
 - **Avatar** — talking-head avatar video via HeyGen. Pick avatar + voice, paste a script, hit Generate. Two avatar models:
   - `heygen-avatar-5` — uses a HeyGen catalogue avatar (`avatar_id` + `voice_id` + script)
   - `heygen-photo-avatar` — uses an uploaded photo as the talking subject (`reference_paths[0]` + `voice_id` + script). Triggered via the 🎙 button on any ready variant in the Swap flow's Step 3.
@@ -23,7 +23,7 @@ Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. **Eight 
 
 - **B-roll** — drop a narration audio/video → Whisper transcribes → GPT-4o plans cinematic medical-realism B-roll prompts (the 4-mode "elite creative director" system prompt) → for each line, Grok generates a seed image + a short clip → trim each clip to match its phrase's spoken duration → concat in order → mux the original narration on top. Endpoints under `/api/broll/*`. The pipeline pauses at `awaiting_approval` so the user can reject + regenerate specific clips before finalizing. State lives per-job at `output/broll/<broll_id>/state.json`. See "B-roll details" section below.
 
-- **Editor** — upload a video and run any combination of: (a) auto-trim silent gaps via ffmpeg silencedetect + concat, (b) **per-clip WPM normalization** (time-stretch each clip independently so the speaker hits target_wpm, pitch-preserving via ffmpeg `atempo`), (c) voice swap via ElevenLabs STS, (d) burn in word-level captions transcribed by OpenAI Whisper. **Captions ship in two engines**: (1) the legacy ASS path with 19 templates (popout-yellow family, submagic, modern-bold, rounded-soft/pop, instagram/-pop, tiktok-pop/-black, mrbeast, tiktok, karaoke, minimal, subtitle, kinetic, clean-shadow, bold-shadow, typewriter, bottom-third) burned in via `ffmpeg subtitles=` filter, and (2) the new **Remotion path** with 3 React-rendered animated templates (`submagic-pop` = spring-physics word entrance + yellow active word, `mrbeast-bold` = Anton ALLCAPS with yellow keyword pop, `capcut-glow` = cyan-glow phrase entrance). Remotion templates require Node ≥ 18 and a one-time `character-swap remotion-install` (installs `remotion/node_modules/` + builds `web/static/remotion-preview.js` via esbuild so the in-browser preview uses `@remotion/player` — preview matches render exactly). Server-side render: `npx remotion render <CompositionId> <out.mp4> --props=props.json`, wrapped in `src/character_swap/remotion_render.py` with a SHA-256 cache. **Multi-clip mode**: upload N clips + a script, the system transcribes each, fuzzy-matches them to script positions, orders them, normalizes WPM per clip, concats. Plus a **CapCut-style timeline editor** for trim/split/segment-reorder on any finished result. Endpoints under `/api/editor/*`. Outputs live under `output/editor/<edit_id>/`.
+- **Editor** — upload a video and run any combination of: (a) auto-trim silent gaps via ffmpeg silencedetect + concat, (b) **per-clip WPM normalization** (time-stretch each clip independently so the speaker hits target_wpm, pitch-preserving via ffmpeg `atempo`), (c) voice swap via ElevenLabs STS, (d) burn in word-level captions transcribed by OpenAI Whisper. **Captions ship in two engines**: (1) the legacy ASS path with 19 templates (popout-yellow family, submagic, modern-bold, rounded-soft/pop, instagram/-pop, tiktok-pop/-black, mrbeast, tiktok, karaoke, minimal, subtitle, kinetic, clean-shadow, bold-shadow, typewriter, bottom-third) burned in via `ffmpeg subtitles=` filter, and (2) the **Remotion path** with 4 React-rendered animated templates — `submagic-pro` (recommended default: Montserrat 900 italic, 22% active-word scale boost, per-word spring entrance, random per-card emphasis colors, accent glow halo), `submagic-pop` (Inter 900 italic, 20% active scale, random keyword highlights), `mrbeast-bold` (Anton ALLCAPS with 28% keyword size jump + per-word spring), `capcut-glow` (Poppins 900 cyan-glow + 18% active scale + outline stroke). Remotion templates require Node ≥ 18 and a one-time `character-swap remotion-install` (installs `remotion/node_modules/` + builds `web/static/remotion-preview.js` via esbuild so the in-browser preview uses `@remotion/player` — preview matches render exactly). Server-side render: `npx remotion render <CompositionId> <out.mp4> --props=props.json`, wrapped in `src/character_swap/remotion_render.py` with a SHA-256 cache. **Multi-clip mode**: upload N clips + a script, the system transcribes each, fuzzy-matches them to script positions, orders them, normalizes WPM per clip, concats. Plus a **CapCut-style timeline editor** for trim/split/segment-reorder on any finished result. **Visual caption editor** (✎ Edit captions button on any finished caption render): horizontal scrubbing timeline with draggable card rectangles + a rose-colored playhead that auto-follows preview playback and is grab-to-scrub; drag a card's left/right edge to retime the first/last word, drag the card body to shift the whole block; per-card text edit (cards-view) + per-word text+timing edit (per-word view) with split/merge/delete; live Remotion preview re-mounts on edit (180ms debounced) so changes show immediately. Endpoints under `/api/editor/*`. Outputs live under `output/editor/<edit_id>/`.
 
 The Image/Video/Audio/Avatar tabs share the same sidebar (project/job history is swap-specific). Each tab has its own generation history grid loaded from `/api/generations?kind=...`. Locked models show a 🔒 chip with a tooltip naming the missing API key — they're rendered in the picker so users can see what's available but disabled.
 
@@ -38,10 +38,10 @@ The Image/Video/Audio/Avatar tabs share the same sidebar (project/job history is
 The Swap flow (5 steps): persistent left sidebar of past jobs + main panel:
 
 1. **Scene** — upload **one or more** scene images. Supports drop, click, and **Cmd+V paste** (multiple at once). Each scene becomes a separate reference background; the character gets variants for every scene. Per-tile ✕ to remove. Counter shows "(N scenes — each character gets variants for every scene)".
-2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default".
-3. **Generate** — GPT Image 2 generates `images_per_character × N_scenes` variant images per character (scene as ref #1, character as ref #2). When multiple scenes exist, variants render under per-scene subgroup headers inside each character section. For each (character × scene), user picks ONE variant to approve. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. **Per-variant retry** (↻) re-runs just one failed slot, leaving the other variants intact. Per-variant download with friendly filename.
-4. **Movement prompt** — type one movement prompt + choose **M videos per approved image** (1–4, default 1).
-5. **Videos** — Grok Imagine animates each approved image M times. Live progress + per-video download with friendly filename.
+2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default". Two opt-in prompt-quality toggles: **✨ enrich** (cheap, gpt-4o single-shot expansion of the user's prompt) and **🎬 AI Director** (Claude Opus agent with vision + tool-use; writes a tailored prompt per (character × scene × variant) — see "AI Director" section below).
+3. **Generate** — GPT Image 2 (or Nano Banana / Nano Banana Pro / Grok Image, picked in Step 2) generates `images_per_character × N_scenes` variant images per character. When multiple scenes exist, variants render under per-scene subgroup headers inside each character section. **Multi-variant approval** — user picks ONE variant per (character × scene) by clicking the ✓ on each (re-click un-approves). **"✓ Approve all" button** auto-picks the first ready variant per (char, scene) for all characters at once. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. **Per-variant retry** (↻) re-runs just one failed slot. Per-variant download with friendly filename.
+4. **Movement prompt** — **per-scene textareas** (one per scene with at least one approved variant). Each scene gets its own movement direction; the same prompt is applied uniformly to every approved variant of that scene across all characters. **Video provider picker** lets you pick any of: Grok Imagine, Veo 3, Veo 3 Fast, Kling 2.0/2.1 Pro/1.6, Runway Gen-4/Gen-3, Luma Ray-2, Pika 2.2, Hailuo 01/02, Sora 2, Wan 2.1/2.2, Seedance, Higgsfield variants. **Submit kicks off all approved variants × M videos in parallel**, all using the chosen provider. The toggle from Step 2 carries over — when AI Director is on, the per-scene prompts also flow through Claude Opus for cinematic shot expansion before submit.
+5. **Videos** — chosen provider animates each approved image M times. Live progress + per-video download with friendly filename.
 
 **Sidebar:** jobs grouped by **project** (collapsible). "+ New project" → modal. "+" on a project header pre-selects it for the next job. "⇄" icon moves a job between projects. **Cross-kind "Recent media" thumbnail strip at the bottom** shows the 32 newest items across all tabs (image / video / audio / avatar / broll) — click a thumbnail to jump to its tab and scroll to the card.
 
@@ -112,6 +112,8 @@ XAI_API_KEY=...
 Optional — each unlocks one or more models in the Image/Video model picker
 (14 image + 17 video models registered):
 ```
+ANTHROPIC_API_KEY=...             # 🎬 AI Director (Claude Opus with vision; opt-in toggle
+                                  # on Swap, Image, Video tabs). ~$0.05 per Director call.
 GEMINI_API_KEY=...                # Nano Banana + Nano Banana Pro + Veo 3 + Veo 3 Fast
 KLING_ACCESS_KEY=...              # Both required for Kling 2.0 / 2.1 Pro / 1.6
 KLING_SECRET_KEY=...
@@ -138,6 +140,8 @@ OPENAI_IMAGE_MODEL=gpt-image-2
 GROK_VIDEO_MODEL=grok-imagine-video
 GROK_IMAGE_MODEL=grok-imagine-image      # bumped from grok-2-image-1212 (deprecated 2026-02-24)
 XAI_BASE_URL=https://api.x.ai/v1
+CLAUDE_OPUS_MODEL=claude-opus-4-5        # AI Director — override to roll forward to a newer Opus
+CLAUDE_OPUS_PRICE_USD=0.05               # rough per-call estimate, recorded in state/calls.jsonl
 IMAGE_SIZE=1024x1792
 IMAGE_CONCURRENCY=2
 VIDEO_DURATION_SECS=10
@@ -196,8 +200,12 @@ src/character_swap/
                          scene-group chaining → trim → concat → mux audio
 ├── broll.py           — System prompt + plan_visuals (GPT-4o) + parser +
                          match_lines_to_timestamps + state I/O helpers
-├── pipeline.py        — Pure primitives: generate_image, edit_image,
-                         submit_video, wait_for_video, GENERATION_PROMPT
+├── pipeline.py        — Pure primitives: generate_image, generate_variant (multi-model
+                         image dispatch — gpt-image / grok-image / nano-banana /
+                         nano-banana-pro), edit_image, submit_video + wait_for_video
+                         (multi-model video dispatch — Grok / Veo / Kling / Runway /
+                         Luma / Pika / Hailuo / Sora / Wan / Seedance / Higgsfield),
+                         GENERATION_PROMPT
 ├── video_edit.py      — ffmpeg primitives + Whisper + caption templates (ASS engine +
                          Remotion engine branch) + WPM helpers + time_stretch +
                          extract_last_frame + apply_timeline (CapCut)
@@ -214,18 +222,32 @@ src/character_swap/
 ├── events.py          — Asyncio pub/sub for live updates
 ├── state.py           — Atomic JSON state OR SQLite (depending on USE_SQLITE_STATE)
 ├── models.py          — Pydantic: SceneAsset, CharacterAsset, ProjectAsset (+default_prompt),
-                         GeneratedImage (+scene_id), VideoVariant, JobCharacter,
-                         Job (+scene_ids list), ReelPreset, ReelFrame
+                         GeneratedImage (+scene_id), VideoVariant,
+                         JobCharacter (+approved_variant_ids list — supports one approval
+                         per scene per character),
+                         Job (+scene_ids list, +video_model, +movement_prompts dict
+                         {scene_id: prompt}, +enriched_movement_prompts dict,
+                         +use_director, +director_prompts_json cache),
+                         MediaGeneration (+enrich_prompt, +enriched_prompt,
+                         +use_director, +director_prompt),
+                         ReelPreset, ReelFrame
                          (+input_description, last_drift_audit, approved),
                          ReelJob (+anchor_description, mini_approval),
                          AppState + StrEnums (incl. ReelFrameStatus/ReelJobStatus)
 ├── config.py          — Settings via pydantic-settings
 ├── images.py          — sha256, base64, atomic write/copy
-├── call_log.py        — JSONL call logger
+├── call_log.py        — JSONL call logger (now also bills director_swap / director_movement)
+├── prompt_enrich.py   — Cheap (✨) prompt expansion via gpt-4o JSON-mode
+├── prompt_director.py — Heavy (🎬) AI Director: Claude Opus vision + tool-use writes
+                         tailored per-(char × scene × variant) prompts (direct_swap)
+                         and per-scene cinematic shot prompts (direct_movement)
 ├── cli.py             — Typer: serve, status, reset, migrate
 └── clients/
     ├── __init__.py       — `ProviderNotConfigured` exception (→ HTTP 503)
     ├── openai_image.py   — GPT Image 2 wrapper; text-only or with refs
+    ├── anthropic_client.py — Lazy Anthropic SDK wrapper. messages_with_tools(...) +
+                              extract_tool_call(...). Pillow-resizes images to 1024 px
+                              long edge before base64. Wrapped in call_log.record.
     ├── grok.py           — xAI Grok REST: video submit/poll/download +
                             image generate. submit() accepts duration_secs kwarg
                             (clamped to [5, 15]) for B-roll per-clip duration matching.
@@ -239,19 +261,29 @@ src/character_swap/
     └── _stubs.py         — collected stubs for FLUX/Ideogram/Recraft/Stability
                             + Runway/Luma/Pika/MiniMax/Sora/Wan/Seedance/Higgsfield.
 
-remotion/                  — React + Remotion project for the new caption engine.
+remotion/                  — React + Remotion project for the caption engine.
 ├── package.json           — remotion 4.0.247, @remotion/player, @remotion/google-fonts, react 19
 ├── remotion.config.ts     — Chromium config, concurrency=1
 ├── build-preview.mjs      — esbuild → web/static/remotion-preview.js (in-browser Player)
 ├── src/index.ts           — registerRoot(Root)
-├── src/Root.tsx           — three <Composition> registrations
+├── src/Root.tsx           — four <Composition> registrations
 ├── src/types.ts           — BaseCaptionProps, Word, DEFAULT_CAPTION_PROPS
 ├── src/lib/useCurrentWord.ts  — frame → active-card / active-word helpers
 ├── src/lib/colors.ts          — hex→rgb / rgba helpers
-├── src/compositions/SubmagicPop.tsx   — spring-physics word entrance, yellow active
-├── src/compositions/MrBeastBold.tsx   — Anton ALLCAPS + yellow keyword pop
-├── src/compositions/CapCutGlow.tsx    — cyan-glow phrase entrance
-└── src/preview/index.tsx      — @remotion/player mount/update wrapper for the Editor tab
+├── src/compositions/SubmagicPro.tsx   — RECOMMENDED: Montserrat italic ALLCAPS,
+                                          22% active scale, random emphasis palette,
+                                          per-word spring entrance, accent glow halo
+├── src/compositions/SubmagicPop.tsx   — Inter 900 italic, 20% active scale, random
+                                          keyword color emphasis, thick outline
+├── src/compositions/MrBeastBold.tsx   — Anton ALLCAPS + 28% keyword size jump +
+                                          per-word spring (snappy for keyword, gentle
+                                          for filler), double-layered drop shadow
+├── src/compositions/CapCutGlow.tsx    — Poppins 900, 18% active scale, per-word
+                                          entrance spring, cyan glow + outline stroke
+└── src/preview/index.tsx      — @remotion/player mount/update + playback API surface:
+                                  seekToSecs, getCurrentTimeSecs, play, pause, isPlaying,
+                                  onFrameUpdate (used by the visual caption editor's
+                                  scrubbing playhead to auto-follow + drag-to-seek)
 
 web/
 ├── index.html      — Single page; Tailwind via CDN + Alpine
@@ -348,6 +380,56 @@ queued → transcribing → planning → generating_clips → awaiting_approval 
 
 ---
 
+## AI Director
+
+Opt-in Claude/Opus agent that writes tailored per-variant prompts. Toggle (🎬) sits next to ✨ enrich on the Swap (Step 2), Image-tab, and Video-tab forms. Disabled when `ANTHROPIC_API_KEY` isn't set; UI greys out the checkbox + shows a tooltip.
+
+### What it does
+
+- **Swap** — ONE Claude Opus call before image gen. Sees every character image + every scene image with vision. Uses tool-use (`submit_swap_plan`) to return a complete plan: a tailored prompt per (character × scene × variant_index). Plan is cached as JSON on `Job.director_prompts_json` so retries / resumes don't re-bill. `runner._kick_char` reads the cache and assigns each `GeneratedImage.prompt` from `plan.lookup(char_id, scene_id)[variant_idx]`. Falls back to enrich → raw → `GENERATION_PROMPT` per slot if the plan is missing or fails.
+- **Swap movement (Step 4)** — second Claude call with the scene image + every approved variant image + the user's per-scene movement text. Returns one cinematic shot prompt per scene; merged into `enriched_movement_prompts` so the existing per-scene resolver in `run_video_synthesis` transparently picks it up.
+- **Image tab (freeform)** — single-char/single-scene shape — Director sees the reference image as both "scene" and "character" and writes ONE tailored prompt. Stored on `MediaGeneration.director_prompt`.
+- **Video tab (freeform)** — single-scene movement — Director sees the start frame and writes one cinematic shot description. Stored on `MediaGeneration.director_prompt`.
+
+### Architecture
+
+```
+clients/anthropic_client.py    — Lazy SDK wrapper. messages_with_tools(...) + extract_tool_call(...).
+                                 Pillow-resizes images to max 1024 px long edge before base64.
+                                 Wrapped in call_log.record(phase="director_swap"|"director_movement").
+prompt_director.py             — Orchestrator. SwapDirectorPlan / MovementDirectorPlan Pydantic
+                                 schemas. SWAP_DIRECTOR_TOOL + MOVEMENT_DIRECTOR_TOOL JSON schemas.
+                                 Forces tool_choice so the agent MUST call the structured-output tool.
+                                 ALL failures → returns None → caller falls back transparently.
+```
+
+System prompts instruct the agent to:
+- Refer to characters by **visible features** ("the woman in the yellow sundress…"), NEVER by image index.
+- Preserve every verbatim user constraint WORD-FOR-WORD (e.g. "exact same pose", hex codes, brand names).
+- For swap-only intent: preserve scene composition / framing / camera angle EXACTLY.
+- Vary the N variants per (char, scene) only with subtle lighting / expression / micro-framing — never identity or scene changes.
+
+### Failure modes (all silent fallback — image gen never blocks)
+
+| Trigger | Behavior |
+|---|---|
+| `ANTHROPIC_API_KEY` missing | `_client()` raises `ProviderNotConfigured` → `direct_*` returns None. UI toggle greyed out. |
+| `anthropic` SDK not installed | Lazy import fails → `direct_*` returns None. Logged in calls.jsonl. |
+| API timeout / 5xx | Caught → None. Logged. |
+| Tool not called in response | `extract_tool_call` returns None. |
+| Pydantic validation fails | Returns None with reason logged. |
+| Plan missing some (char, scene) pairs | Per-pair fallback: pairs covered get tailored prompts; missing pairs fall back. |
+
+### Cost tracking
+
+`call_log._cost_usd` returns `settings.claude_opus_price_usd` ($0.05 default) when phase ∈ `{director_swap, director_movement}` and `ok=True`. Aggregated by existing `read_costs(job_id=...)`. Reel intentionally excluded in v1 — Reel has its own anchor-first vision pipeline already.
+
+### Precedence
+
+When `enrich_prompt=True` AND `use_director=True`: Director wins where it succeeds, enrich is the safety net. When Director returns None for a slot, that slot uses `enriched_image_prompt`; when enrich is also off, falls back to raw / `GENERATION_PROMPT`.
+
+---
+
 ## Editor details
 
 ### Single-clip auto-edit
@@ -388,7 +470,16 @@ POST /api/editor/timeline_render apply a CapCut-style timeline
 
 ## Caption templates
 
-In `video_edit.TEMPLATES`. Each is a `CaptionStyle` dataclass with font, size, colors, outline, shadow, margin, words-per-card, optional highlight color, optional all-caps. Available templates:
+In `video_edit.TEMPLATES`. Each is a `CaptionStyle` dataclass with font, size, colors, outline, shadow, margin, words-per-card, optional highlight color, optional all-caps. Two render engines: **ASS** (legacy ffmpeg subtitles filter, 19 templates) and **Remotion** (4 React-rendered animated templates — recommended for modern social reels). Available templates:
+
+### Remotion engine (engine="remotion") — animated, CapCut/Submagic-grade
+
+- **`submagic-pro`** (RECOMMENDED DEFAULT) — Montserrat 900 italic ALLCAPS, **22% active-word scale boost**, per-word spring entrance (160ms bounce), random per-card emphasis colors (6-palette deterministic hash by word), accent glow halo on active word only, 5.5% font-size outline (4px min), drop shadow.
+- **`submagic-pop`** — Inter 900 italic, **20% active-word scale boost** (was 5% pre-upgrade), random keyword emphasis colors flashed when speaking, thick outline + drop shadow. Submagic's "mostly yellow + occasional accent" pattern.
+- **`mrbeast-bold`** — Anton ALLCAPS, **28% keyword size jump** (was 8%), per-word entrance spring (snappier for keywords, gentle for fillers), double-layered drop shadow (flat + soft), 6% font-size outline.
+- **`capcut-glow`** — Poppins 900, **18% active-word scale boost**, per-word entrance spring (was card-level only), 5% outline stroke (was missing — glow-only before), triple-layered text-shadow (cyan glow + soft drop + crisp stroke).
+
+### ASS engine (engine="ass") — burned via ffmpeg subtitles filter
 
 - **Submagic-style**: `popout-yellow`, `popout-white`, `popout-pink`, `popout-green` (Anton, all-caps, big outline)
 - **Modern bold**: `modern-bold` (Poppins ExtraBold), `bold-shadow` (Montserrat Black)
@@ -397,7 +488,22 @@ In `video_edit.TEMPLATES`. Each is a `CaptionStyle` dataclass with font, size, c
 - **Specialty**: `kinetic` (one word per card, Bebas Neue 160px), `typewriter` (Courier monospace boxed), `bottom-third` (broadcast lower-third), `submagic` (Montserrat Bold mixed-case)
 - **Legacy**: `mrbeast`, `tiktok`, `karaoke`, `minimal`, `subtitle`
 
-Fonts are auto-downloaded from Google Fonts on first use into `state/fonts/`. Locally-installed TTFs (Arial Rounded MT, Instagram Sans, TikTok Sans) are dropped directly into `state/fonts/` and resolved by `_ensure_font` which checks for local files BEFORE consulting the download URL dict.
+Fonts are auto-downloaded from Google Fonts on first use into `state/fonts/` (ASS engine). Locally-installed TTFs (Arial Rounded MT, Instagram Sans, TikTok Sans) are dropped directly into `state/fonts/` and resolved by `_ensure_font` which checks for local files BEFORE consulting the download URL dict. Remotion engine ships `@remotion/google-fonts` subpath modules for Inter, Montserrat, Anton, Bebas Neue, Poppins.
+
+### Visual caption editor (✎ Edit captions)
+
+After any successful caption render, click ✎ Edit captions on the result panel:
+
+- **Horizontal scrubbing timeline** at the top — each caption card rendered as an amber rectangle on a track proportional to its `[start, end]` in seconds. A rose-colored playhead line moves across them.
+- **Auto-follow during playback** — `window.RemotionPreview.onFrameUpdate(...)` callback updates `playheadSecs` ~30 times/sec so the playhead tracks the live Remotion Player frame stream.
+- **Drag-to-scrub** — grab the rose handle; pauses playback, follows the cursor in real time, seeks the Remotion Player to that position via `seekToSecs(...)`.
+- **Card-edge drag** (1.5 px-wide handles, fade in on hover) → retime first/last word of the card. Clamped between neighbor cards' edges so cards never overlap.
+- **Card-body drag** (≥4 px delta) → shift every word in the card by the same time delta. Click-without-drag falls back to seeking to the card's start.
+- **Active-card highlight** — the card whose `[start, end]` contains the playhead gets a brighter fill + ring on the timeline, AND its corresponding edit row in the Cards-view list below gets an amber border. Keeps the editor and timeline visually in sync.
+- **Cards-view editor** — words grouped by `words_per_card`, each card shows start/end timecodes + inline-editable word inputs sized to text length.
+- **Per-word view editor** — one row per word with numeric start/end inputs (0.05s steps), text, plus split (halve duration + insert placeholder), merge-left, and delete actions.
+- **Live preview re-mount** — `editor.editedWords` is watched (180ms debounce) and re-mounts the Remotion preview so changes show in the preview within a fraction of a second.
+- **Save = re-render** — clicking "▶ Apply changes" posts `words_json=...` to `POST /api/editor/rerender`. The server persists the edits to `words.json` (with a `.original.json` backup on first edit) so all future rerenders inherit them.
 
 ---
 
@@ -425,17 +531,29 @@ GET    /api/projects                           list
 PATCH  /api/projects/{project_id}              body: name? / character_ids? / default_prompt?
 DELETE /api/projects/{project_id}              CASCADE
 
-POST   /api/jobs                               body: scene_id OR scene_ids, character_ids, ...
+POST   /api/jobs                               body: scene_id OR scene_ids, character_ids,
+                                                images_per_character, prompt?, image_model?,
+                                                enrich_prompt?, use_director?, ...
 GET    /api/jobs                               list (?summary=1 for compact)
-GET    /api/jobs/{job_id}                      full state
+GET    /api/jobs/{job_id}                      full state (exposes use_director +
+                                                director_plan_summary = {present, intent, n_chars,
+                                                n_scenes, n_prompts})
 PATCH  /api/jobs/{job_id}                      title / project_id
 DELETE /api/jobs/{job_id}                      hard delete
 POST   /api/jobs/{job_id}/approve              body: char_id, action, variant_id?
+                                                (action=approve TOGGLES variant_id in
+                                                approved_variant_ids list; allows one approval
+                                                per scene per character)
+POST   /api/jobs/{job_id}/approve_all          bulk: picks the first ready variant per
+                                                (character, scene) where none is approved yet
 POST   /api/jobs/{job_id}/edit_variant         body: char_id, variant_id, prompt
-POST   /api/jobs/{job_id}/movement             body: prompt, videos_per_character
+POST   /api/jobs/{job_id}/movement             body: prompt? (legacy single) OR
+                                                movement_prompts: {scene_id: prompt}, video_model?,
+                                                videos_per_character
 POST   /api/jobs/{job_id}/duplicate            new job with same scenes + chars
 POST   /api/jobs/{job_id}/compact              strip non-approved files
 POST   /api/jobs/{job_id}/retry_video          retry one failed video
+POST   /api/jobs/{job_id}/unlock_movement      clear movement_prompts + videos so user can re-prompt
 PATCH  /api/jobs/{job_id}/characters/{char_id}/source_image   body: image_id
 POST   /api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/retry   per-variant retry
 
@@ -458,7 +576,15 @@ POST   /api/broll/{id}/finalize
 
 POST   /api/editor/auto_edit, /multi_auto_edit, /trim_silences, /captions, /rerender,
        /timeline_render
-GET    /api/editor/templates                   (each row carries `engine: 'ass' | 'remotion'` + `composition_id` for remotion entries)
+POST   /api/editor/rerender                    body: edit_id, template, overrides?,
+                                                trim_start_secs?, trim_end_secs?, words_json?
+                                                (words_json = JSON list of {text, start, end} from
+                                                the visual caption editor — persists back to
+                                                words.json with words.original.json backup so all
+                                                future rerenders inherit the edits)
+GET    /api/editor/templates                   (each row carries `engine: 'ass' | 'remotion'` +
+                                                `composition_id` for remotion entries:
+                                                SubmagicPro / SubmagicPop / MrBeastBold / CapCutGlow)
 
 GET    /api/reel/presets                       list named presets
 POST   /api/reel/presets                       body: name, baseline_prompt, is_default?
@@ -476,7 +602,13 @@ POST   /api/reel/jobs/{job_id}/frames/{frame_id}/approve  mini-approval mode: ad
 
 WS     /ws/reel/{job_id}                       live anchor + follower events (job-status + frame-status + drift_audit)
 
-GET    /api/health                             {ok, version, openai_key, xai_key, gemini_key, kling_key, ..., remotion_available}
+POST   /api/generations                        multipart form fields include enrich_prompt? +
+                                                use_director? (Image + Video kinds only — Avatar /
+                                                Audio scripts are literal and would corrupt under
+                                                enrichment/Director)
+
+GET    /api/health                             {ok, version, openai_key, anthropic_key, xai_key,
+                                                gemini_key, kling_key, ..., remotion_available}
 ```
 
 ---

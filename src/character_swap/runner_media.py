@@ -106,12 +106,50 @@ async def run_image_gen(gen_id: str) -> None:
         return
     _persist(gen, status=GenStatus.RUNNING)
 
+    # AI Director — ONE Claude call to tailor the prompt around the actual
+    # reference image. Skipped if there's no ref (Director needs vision input
+    # to be useful). Treats the one ref as both "scene" and "character" from
+    # the agent's POV so it can describe what's in the image and tailor a
+    # single prompt back.
+    if gen.use_director and not gen.director_prompt and gen.reference_paths:
+        from character_swap import prompt_director
+        ref_path = Path(gen.reference_paths[0])
+        plan = await asyncio.to_thread(
+            prompt_director.direct_swap,
+            user_prompt=gen.prompt,
+            characters=[("ref", "reference", ref_path)],
+            scenes=[("scene", ref_path)],
+            images_per_character=1,
+            job_id=gen_id,
+        )
+        if plan is not None:
+            tailored = plan.lookup("ref", "scene")
+            if tailored:
+                gen.director_prompt = tailored[0]
+                _persist(gen)
+
+    # Optional prompt enrichment — expand short text into a cinematic spec
+    # so the downstream image model has more to work with. Mirrors what
+    # web UIs do internally (Grok Imagine, etc.) and closes most of the
+    # "API result is worse than web result" gap. Skipped if Director
+    # already provided a tailored prompt.
+    if gen.enrich_prompt and not gen.enriched_prompt and not gen.director_prompt:
+        from character_swap import prompt_enrich
+        enriched = await asyncio.to_thread(
+            prompt_enrich.enrich_prompt, gen.prompt, "image", job_id=gen_id,
+        )
+        if enriched and enriched != gen.prompt:
+            gen.enriched_prompt = enriched
+            _persist(gen)
+
     try:
         refs = [Path(p) for p in gen.reference_paths]
+        # Precedence: director > enriched > raw.
+        effective_prompt = gen.director_prompt or gen.enriched_prompt or gen.prompt
         if gen.model == "gpt-image":
             data = await asyncio.to_thread(
                 openai_image.generate,
-                prompt=gen.prompt,
+                prompt=effective_prompt,
                 reference_images=refs if refs else None,
                 phase="generate", character="freeform",
                 size=_openai_size_for(gen.aspect_ratio), job_id=gen_id,
@@ -119,7 +157,7 @@ async def run_image_gen(gen_id: str) -> None:
         elif gen.model == "dall-e-3":
             data = await asyncio.to_thread(
                 openai_image.generate,
-                prompt=gen.prompt,
+                prompt=effective_prompt,
                 reference_images=refs if refs else None,
                 phase="generate", character="freeform",
                 size=_openai_size_for(gen.aspect_ratio), job_id=gen_id,
@@ -128,7 +166,7 @@ async def run_image_gen(gen_id: str) -> None:
         elif gen.model == "grok-image":
             data = await asyncio.to_thread(
                 grok.generate_image,
-                prompt=gen.prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model in {"nano-banana", "nano-banana-pro"}:
             gemini_model = ("gemini-2.5-pro-image-preview"
@@ -136,41 +174,41 @@ async def run_image_gen(gen_id: str) -> None:
                             else "gemini-2.5-flash-image-preview")
             data = await asyncio.to_thread(
                 google_genai.generate_nano_banana,
-                prompt=gen.prompt, reference_images=refs,
+                prompt=effective_prompt, reference_images=refs,
                 aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
                 model=gemini_model,
             )
         elif gen.model in {"flux-pro-1.1-ultra", "flux-pro", "flux-schnell", "flux-kontext"}:
             data = await asyncio.to_thread(
                 _stubs.generate_flux,
-                prompt=gen.prompt, model=gen.model,
+                prompt=effective_prompt, model=gen.model,
                 reference_images=refs, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model == "ideogram-3":
             data = await asyncio.to_thread(
                 _stubs.generate_ideogram,
-                prompt=gen.prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model == "recraft-v3":
             data = await asyncio.to_thread(
                 _stubs.generate_recraft,
-                prompt=gen.prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model == "sd-3.5":
             data = await asyncio.to_thread(
                 _stubs.generate_stability,
-                prompt=gen.prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model in {"seedream-3", "seededit"}:
             data = await asyncio.to_thread(
                 _stubs.generate_seedream,
-                prompt=gen.prompt, model=gen.model,
+                prompt=effective_prompt, model=gen.model,
                 reference_images=refs, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         elif gen.model == "higgsfield-soul-img":
             data = await asyncio.to_thread(
                 _stubs.generate_higgsfield_soul_img,
-                prompt=gen.prompt, reference_images=refs,
+                prompt=effective_prompt, reference_images=refs,
                 aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         else:
@@ -218,15 +256,50 @@ async def run_video_gen(gen_id: str) -> None:
                      completed_at=datetime.utcnow())
         return
     _persist(gen, status=GenStatus.RUNNING)
+
+    # AI Director — vision-aware cinematic shot expansion that looks at the
+    # actual reference frame. Higher quality than text-only enrichment for
+    # video, because the agent can describe pose / lighting / what's in the
+    # frame and write a shot direction that fits.
+    if gen.use_director and not gen.director_prompt and gen.reference_paths:
+        from character_swap import prompt_director
+        ref_path = Path(gen.reference_paths[0])
+        plan = await asyncio.to_thread(
+            prompt_director.direct_movement,
+            scenes=[("scene", ref_path, [ref_path], gen.prompt)],
+            job_id=gen_id,
+        )
+        if plan is not None:
+            mapping = plan.as_dict()
+            if mapping.get("scene"):
+                gen.director_prompt = mapping["scene"]
+                _persist(gen)
+
+    # Prompt enrichment for image-to-video: expand short directions
+    # ("him pouring oil") into cinematic shot descriptions with camera
+    # movement + performance cues. Closes the gap to Grok Imagine's web UI
+    # which does this internally before sending to the video model. Skipped
+    # if Director already provided a tailored prompt.
+    if gen.enrich_prompt and not gen.enriched_prompt and not gen.director_prompt:
+        from character_swap import prompt_enrich
+        enriched = await asyncio.to_thread(
+            prompt_enrich.enrich_prompt, gen.prompt, "video", job_id=gen_id,
+        )
+        if enriched and enriched != gen.prompt:
+            gen.enriched_prompt = enriched
+            _persist(gen)
+
     image_path = Path(gen.reference_paths[0])
     dest = _output_dir(gen.gen_id) / "result.mp4"
+    # Precedence: director > enriched > raw.
+    effective_prompt = gen.director_prompt or gen.enriched_prompt or gen.prompt
 
     try:
         if gen.model == "grok-imagine":
             provider_id = await asyncio.to_thread(
                 grok.submit,
                 image=image_path,
-                prompt=gen.prompt,
+                prompt=effective_prompt,
                 character="freeform",
                 app_job_id=gen_id,
             )
@@ -244,7 +317,7 @@ async def run_video_gen(gen_id: str) -> None:
             op_id = await asyncio.to_thread(
                 google_genai.submit_veo,
                 image=image_path,
-                prompt=gen.prompt,
+                prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio,
                 duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
@@ -254,7 +327,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model in {"kling", "kling-2.1-pro", "kling-1.6"}:
             task_id = await asyncio.to_thread(
                 kling.submit_kling,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -263,7 +336,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "veo-3-fast":
             op_id = await asyncio.to_thread(
                 google_genai.submit_veo,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -272,7 +345,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "runway-gen4" or gen.model == "runway-gen3-alpha":
             task_id = await asyncio.to_thread(
                 _stubs.submit_runway,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -281,7 +354,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "luma-ray2":
             task_id = await asyncio.to_thread(
                 _stubs.submit_luma,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -290,7 +363,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "pika-2":
             task_id = await asyncio.to_thread(
                 _stubs.submit_pika,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -299,7 +372,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model in {"hailuo-02", "hailuo-01"}:
             task_id = await asyncio.to_thread(
                 _stubs.submit_minimax,
-                image=image_path, prompt=gen.prompt, model=gen.model,
+                image=image_path, prompt=effective_prompt, model=gen.model,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -308,7 +381,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "sora-2":
             task_id = await asyncio.to_thread(
                 _stubs.submit_sora,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -317,7 +390,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model.startswith("wan-"):
             task_id = await asyncio.to_thread(
                 _stubs.submit_wan,
-                image=image_path, prompt=gen.prompt, model=gen.model,
+                image=image_path, prompt=effective_prompt, model=gen.model,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -326,7 +399,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model == "seedance":
             task_id = await asyncio.to_thread(
                 _stubs.submit_seedance,
-                image=image_path, prompt=gen.prompt,
+                image=image_path, prompt=effective_prompt,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )
@@ -335,7 +408,7 @@ async def run_video_gen(gen_id: str) -> None:
         elif gen.model.startswith("higgsfield-"):
             task_id = await asyncio.to_thread(
                 _stubs.submit_higgsfield,
-                image=image_path, prompt=gen.prompt, model=gen.model,
+                image=image_path, prompt=effective_prompt, model=gen.model,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )

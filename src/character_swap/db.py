@@ -243,6 +243,52 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE generations ADD COLUMN voice_id TEXT")
     if "voice_provider" not in gen_cols:
         conn.execute("ALTER TABLE generations ADD COLUMN voice_provider TEXT")
+    # Prompt-enrichment columns (added when prompt_enrich.py landed).
+    if "enrich_prompt" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN enrich_prompt INTEGER NOT NULL DEFAULT 0")
+    if "enriched_prompt" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN enriched_prompt TEXT")
+    job_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "enrich_prompt" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN enrich_prompt INTEGER NOT NULL DEFAULT 0")
+    if "enriched_image_prompt" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN enriched_image_prompt TEXT")
+    if "enriched_movement_prompt" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN enriched_movement_prompt TEXT")
+    # Per-job video provider — picker added to Step 4 UI so users can swap
+    # Grok for Kling / Veo / Runway / Luma / Pika / etc. without leaving the
+    # swap flow. Old jobs read NULL → defaults to 'grok-imagine' in code.
+    if "video_model" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN video_model TEXT NOT NULL DEFAULT 'grok-imagine'")
+    # Multi-variant approval: JSON-encoded list of variant_ids the user
+    # picked. With N scenes a character can have N approvals (one per scene)
+    # so all of them animate in parallel in Step 4. Old jobs read NULL →
+    # the loader falls back to wrapping `approved_variant_id` in a list.
+    jc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(job_characters)")}
+    if "approved_variant_ids_json" not in jc_cols:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN approved_variant_ids_json TEXT")
+    # Per-scene movement prompts (scene_id → prompt) for Step 4. Old jobs
+    # only have the singular `movement_prompt` field — the loader broadcasts
+    # it across every scene so the dict is always populated for callers.
+    job_cols = {r["name"] for r in conn.execute("PRAGMA table_info(jobs)")}
+    if "movement_prompts_json" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN movement_prompts_json TEXT")
+    if "enriched_movement_prompts_json" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN enriched_movement_prompts_json TEXT")
+    # AI Director — opt-in Claude/Opus agent that writes tailored per-variant
+    # prompts. `use_director` flips the runner into the director path;
+    # `director_prompts_json` caches the SwapDirectorPlan so retries don't
+    # re-bill the Anthropic API.
+    if "use_director" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN use_director INTEGER NOT NULL DEFAULT 0")
+    if "director_prompts_json" not in job_cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN director_prompts_json TEXT")
+    # Same fields on generations (freeform Image / Video tabs).
+    gen_cols = {r["name"] for r in conn.execute("PRAGMA table_info(generations)")}
+    if "use_director" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN use_director INTEGER NOT NULL DEFAULT 0")
+    if "director_prompt" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN director_prompt TEXT")
 
 
 @contextmanager
@@ -331,12 +377,27 @@ def _video_from_row(r: sqlite3.Row) -> VideoVariant:
 def _jc_from_row(r: sqlite3.Row, images: list[GeneratedImage],
                  videos: list[VideoVariant]) -> JobCharacter:
     from character_swap.models import CharStatus
+    keys = r.keys()
+    # Multi-variant approval: prefer the new JSON column. Falls back to the
+    # legacy single `approved_variant_id` so jobs created before the
+    # migration ran are still readable.
+    approved_ids: list[str] = []
+    if "approved_variant_ids_json" in keys and r["approved_variant_ids_json"]:
+        try:
+            parsed = _reel_json.loads(r["approved_variant_ids_json"])
+            if isinstance(parsed, list):
+                approved_ids = [str(x) for x in parsed if x]
+        except (ValueError, TypeError):
+            approved_ids = []
+    if not approved_ids and r["approved_variant_id"]:
+        approved_ids = [r["approved_variant_id"]]
     return JobCharacter(
         char_id=r["char_id"],
         name=r["name"],
         source_image_path=r["source_image_path"],
         status=CharStatus(r["status"]),
-        approved_variant_id=r["approved_variant_id"],
+        approved_variant_id=approved_ids[0] if approved_ids else None,
+        approved_variant_ids=approved_ids,
         error=r["error"],
         images=images,
         videos=videos,
@@ -400,7 +461,31 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
     has_compacted = "compacted" in job_cols
     has_prompt = "prompt" in job_cols
     has_image_model = "image_model" in job_cols
+    has_video_model = "video_model" in job_cols
+    has_enrich = "enrich_prompt" in job_cols
+    has_movement_prompts = "movement_prompts_json" in job_cols
+    has_director = "use_director" in job_cols
+
+    def _parse_prompts_dict(raw: str | None) -> dict[str, str]:
+        if not raw:
+            return {}
+        try:
+            parsed = _reel_json.loads(raw)
+            if isinstance(parsed, dict):
+                return {str(k): str(v) for k, v in parsed.items() if v}
+        except (ValueError, TypeError):
+            pass
+        return {}
+
     for r in conn.execute("SELECT * FROM jobs ORDER BY created_at"):
+        movement_prompts = (
+            _parse_prompts_dict(r["movement_prompts_json"])
+            if has_movement_prompts else {}
+        )
+        enriched_movement_prompts = (
+            _parse_prompts_dict(r["enriched_movement_prompts_json"])
+            if has_movement_prompts else {}
+        )
         j = Job(
             job_id=r["job_id"],
             title=r["title"],
@@ -409,10 +494,18 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
             scene_image_path=r["scene_image_path"],
             prompt=r["prompt"] if has_prompt else None,
             image_model=r["image_model"] if has_image_model else "gpt-image",
+            video_model=(r["video_model"] if has_video_model else None) or "grok-imagine",
             movement_prompt=r["movement_prompt"],
+            movement_prompts=movement_prompts,
             images_per_character=r["images_per_character"],
             videos_per_character=r["videos_per_character"],
             compacted=bool(r["compacted"]) if has_compacted else False,
+            enrich_prompt=bool(r["enrich_prompt"]) if has_enrich else False,
+            enriched_image_prompt=r["enriched_image_prompt"] if has_enrich else None,
+            enriched_movement_prompt=r["enriched_movement_prompt"] if has_enrich else None,
+            enriched_movement_prompts=enriched_movement_prompts,
+            use_director=bool(r["use_director"]) if has_director else False,
+            director_prompts_json=r["director_prompts_json"] if has_director else None,
             characters=jc_by_job.get(r["job_id"], {}),
             created_at=_parse_iso(r["created_at"]),
             updated_at=_parse_iso(r["updated_at"]),
@@ -518,10 +611,15 @@ def delete_project(conn: sqlite3.Connection, project_id: str) -> list[str]:
 def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
     conn.execute(
         """INSERT INTO jobs (job_id, title, project_id, scene_id, scene_image_path,
-                             prompt, image_model,
-                             movement_prompt, images_per_character, videos_per_character,
-                             compacted, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             prompt, image_model, video_model,
+                             movement_prompt, movement_prompts_json,
+                             images_per_character, videos_per_character,
+                             compacted, enrich_prompt, enriched_image_prompt,
+                             enriched_movement_prompt,
+                             enriched_movement_prompts_json,
+                             use_director, director_prompts_json,
+                             created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(job_id) DO UPDATE SET
              title = excluded.title,
              project_id = excluded.project_id,
@@ -529,16 +627,31 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
              scene_image_path = excluded.scene_image_path,
              prompt = excluded.prompt,
              image_model = excluded.image_model,
+             video_model = excluded.video_model,
              movement_prompt = excluded.movement_prompt,
+             movement_prompts_json = excluded.movement_prompts_json,
              images_per_character = excluded.images_per_character,
              videos_per_character = excluded.videos_per_character,
              compacted = excluded.compacted,
+             enrich_prompt = excluded.enrich_prompt,
+             enriched_image_prompt = excluded.enriched_image_prompt,
+             enriched_movement_prompt = excluded.enriched_movement_prompt,
+             enriched_movement_prompts_json = excluded.enriched_movement_prompts_json,
+             use_director = excluded.use_director,
+             director_prompts_json = excluded.director_prompts_json,
              updated_at = excluded.updated_at""",
         (
             j.job_id, j.title, j.project_id, j.scene_id, j.scene_image_path,
-            j.prompt, j.image_model,
-            j.movement_prompt, j.images_per_character, j.videos_per_character,
+            j.prompt, j.image_model, j.video_model,
+            j.movement_prompt,
+            _reel_json.dumps(dict(j.movement_prompts or {})),
+            j.images_per_character, j.videos_per_character,
             1 if j.compacted else 0,
+            1 if j.enrich_prompt else 0,
+            j.enriched_image_prompt, j.enriched_movement_prompt,
+            _reel_json.dumps(dict(j.enriched_movement_prompts or {})),
+            1 if j.use_director else 0,
+            j.director_prompts_json,
             _iso(j.created_at), _iso(j.updated_at),
         ),
     )
@@ -547,15 +660,24 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
     conn.execute("DELETE FROM variants WHERE job_id = ?", (j.job_id,))
     conn.execute("DELETE FROM videos WHERE job_id = ?", (j.job_id,))
     for char_pos, (cid, jc) in enumerate(j.characters.items()):
+        # Keep the legacy `approved_variant_id` column in sync with the
+        # first entry of the list, so older queries / migrations still see
+        # a sensible value. Source of truth is `approved_variant_ids_json`.
+        approved_ids = list(jc.approved_variant_ids or [])
+        if not approved_ids and jc.approved_variant_id:
+            approved_ids = [jc.approved_variant_id]
+        legacy_single = approved_ids[0] if approved_ids else None
         conn.execute(
             """INSERT INTO job_characters
                  (job_id, char_id, position, name, source_image_path,
-                  status, approved_variant_id, error, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  status, approved_variant_id, approved_variant_ids_json,
+                  error, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 j.job_id, cid, char_pos, jc.name, jc.source_image_path,
-                str(jc.status), jc.approved_variant_id, jc.error,
-                _iso(jc.updated_at),
+                str(jc.status), legacy_single,
+                _reel_json.dumps(approved_ids),
+                jc.error, _iso(jc.updated_at),
             ),
         )
         for i, v in enumerate(jc.images):
@@ -595,10 +717,12 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
     conn.execute(
         """INSERT INTO generations (gen_id, kind, model, prompt, aspect_ratio,
                                     duration_secs, avatar_id, voice_id, voice_provider,
+                                    enrich_prompt, enriched_prompt,
+                                    use_director, director_prompt,
                                     status, output_path,
                                     provider_job_id, cost_usd, error,
                                     created_at, completed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(gen_id) DO UPDATE SET
              kind = excluded.kind,
              model = excluded.model,
@@ -608,6 +732,10 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
              avatar_id = excluded.avatar_id,
              voice_id = excluded.voice_id,
              voice_provider = excluded.voice_provider,
+             enrich_prompt = excluded.enrich_prompt,
+             enriched_prompt = excluded.enriched_prompt,
+             use_director = excluded.use_director,
+             director_prompt = excluded.director_prompt,
              status = excluded.status,
              output_path = excluded.output_path,
              provider_job_id = excluded.provider_job_id,
@@ -617,6 +745,8 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
         (
             g.gen_id, str(g.kind), g.model, g.prompt, g.aspect_ratio,
             g.duration_secs, g.avatar_id, g.voice_id, g.voice_provider,
+            1 if g.enrich_prompt else 0, g.enriched_prompt,
+            1 if g.use_director else 0, g.director_prompt,
             str(g.status), g.output_path, g.provider_job_id,
             g.cost_usd, g.error,
             _iso(g.created_at), _iso(g.completed_at),
@@ -646,6 +776,10 @@ def _gen_from_row(r: sqlite3.Row, ref_paths: list[str]) -> MediaGeneration:
         avatar_id=r["avatar_id"] if "avatar_id" in keys else None,
         voice_id=r["voice_id"] if "voice_id" in keys else None,
         voice_provider=r["voice_provider"] if "voice_provider" in keys else None,
+        enrich_prompt=bool(r["enrich_prompt"]) if "enrich_prompt" in keys else False,
+        enriched_prompt=r["enriched_prompt"] if "enriched_prompt" in keys else None,
+        use_director=bool(r["use_director"]) if "use_director" in keys else False,
+        director_prompt=r["director_prompt"] if "director_prompt" in keys else None,
         status=GenStatus(r["status"]),
         output_path=r["output_path"],
         provider_job_id=r["provider_job_id"],

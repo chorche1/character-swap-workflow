@@ -147,13 +147,13 @@ def _generate_one(*, prompt: str, refs: list[Path], model: str,
             quality="high",
         )
     if model in {"nano-banana", "nano-banana-pro"}:
-        gemini_model = ("gemini-2.5-pro-image-preview"
-                        if model == "nano-banana-pro"
-                        else "gemini-2.5-flash-image-preview")
+        # Pass the SLUG (not a hardcoded google model name). The client at
+        # google_genai.py maps slugs → current Google model names in one
+        # place so this dispatch doesn't go stale when Google renames.
         return google_genai.generate_nano_banana(
             prompt=full_prompt, reference_images=refs,
             aspect_ratio=aspect, app_job_id=job_id,
-            model=gemini_model,
+            model=model,
         )
     raise ValueError(
         f"Reel runner does not yet support image_model={model!r}. "
@@ -518,8 +518,13 @@ async def run_reel_followers(job_id: str) -> None:
         return
 
     # Parallel mode (default): all followers run concurrently, each with
-    # its own two-pass drift-correction.
-    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    # its own two-pass drift-correction. Concurrency is throttled to 1 for
+    # Gemini preview models — they have low per-minute caps (~5-10 RPM)
+    # that parallel rendering blows through. GPT Image 2 doesn't have
+    # this constraint at this scale.
+    concurrency = (1 if job.image_model in {"nano-banana", "nano-banana-pro"}
+                   else max(1, settings.image_concurrency))
+    sem = asyncio.Semaphore(concurrency)
 
     async def _bounded(frame: ReelFrame) -> bool:
         async with sem:

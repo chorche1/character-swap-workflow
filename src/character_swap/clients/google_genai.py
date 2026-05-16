@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import time
 from pathlib import Path
 
 import httpx
@@ -23,10 +24,13 @@ from character_swap.config import settings
 
 GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
-# Map our model slugs → Google's full model names.
+# Map our model slugs → Google's full model names. Verified live against
+# /v1beta/models?key=... on 2026-05-16. Google has been renaming these in
+# preview, so if a call 404s, re-run that ListModels call to see what's
+# current and update this table.
 _NANO_BANANA_MODELS = {
-    "nano-banana": "gemini-2.5-flash-image-preview",
-    "nano-banana-pro": "gemini-2.5-pro-image-preview",
+    "nano-banana": "gemini-2.5-flash-image",      # the flash variant
+    "nano-banana-pro": "nano-banana-pro-preview", # marketing name == model name
 }
 
 
@@ -90,16 +94,27 @@ def generate_nano_banana(
         "Content-Type": "application/json",
     }
 
+    # Retry with exponential backoff on transient errors (429 quota,
+    # 5xx server). Preview image models have low per-minute caps that
+    # parallel follower rendering can spike — retrying after a beat
+    # nearly always recovers without the user seeing a "failed" frame.
+    RETRYABLE = {429, 500, 502, 503, 504}
+    MAX_ATTEMPTS = 5
+    BACKOFFS = [2.0, 5.0, 12.0, 30.0]  # seconds between attempt 1→2, 2→3, ...
+
     with record(phase="reel_render", model=google_model,
                 character="reel", job_id=app_job_id,
                 n_references=len(refs)):
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(url, headers=headers, json=body)
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"Gemini API error {resp.status_code}: "
-                f"{resp.text[:500]}"
-            )
+        last_error = None
+        for attempt in range(MAX_ATTEMPTS):
+            with httpx.Client(timeout=180.0) as client:
+                resp = client.post(url, headers=headers, json=body)
+            if resp.status_code == 200:
+                break
+            last_error = f"{resp.status_code}: {resp.text[:400]}"
+            if resp.status_code not in RETRYABLE or attempt == MAX_ATTEMPTS - 1:
+                raise RuntimeError(f"Gemini API error {last_error}")
+            time.sleep(BACKOFFS[min(attempt, len(BACKOFFS) - 1)])
         payload = resp.json()
 
     # Walk the response, find the first inline_data image part.

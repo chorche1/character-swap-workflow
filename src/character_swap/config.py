@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     )
 
     openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
     xai_api_key: str = Field(default="", validation_alias="XAI_API_KEY")
     gemini_api_key: str = Field(default="", validation_alias="GEMINI_API_KEY")
     kling_access_key: str = Field(default="", validation_alias="KLING_ACCESS_KEY")
@@ -90,6 +91,13 @@ class Settings(BaseSettings):
     elevenlabs_tts_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_TTS_PRICE_USD")
     elevenlabs_vc_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_VC_PRICE_USD")
 
+    # AI Director: Claude/Opus agent that writes tailored per-variant prompts.
+    # Model is env-overridable so a fresher Opus version can drop in without code changes.
+    # claude_opus_price_usd is a rough per-call estimate (one Director call ≈ one Opus
+    # request with vision); recorded in calls.jsonl via call_log._cost_usd.
+    claude_opus_model: str = Field(default="claude-opus-4-5", validation_alias="CLAUDE_OPUS_MODEL")
+    claude_opus_price_usd: float = Field(default=0.05, validation_alias="CLAUDE_OPUS_PRICE_USD")
+
     # Opt-in SQLite state backend. Default off — JSON file remains canonical
     # until the user runs `character-swap migrate` + flips this on. Once stable
     # the JSON path will be deleted.
@@ -130,6 +138,7 @@ class Settings(BaseSettings):
         """Cheap UI-facing 'is this provider's credentials present' check."""
         return {
             "openai":     bool(self.openai_api_key),
+            "anthropic":  bool(self.anthropic_api_key),
             "xai":        bool(self.xai_api_key),
             "gemini":     bool(self.gemini_api_key),
             "kling":      bool(self.kling_access_key and self.kling_secret_key),

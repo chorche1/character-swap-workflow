@@ -1,16 +1,29 @@
 import React from "react";
-import { AbsoluteFill, OffthreadVideo } from "remotion";
-import { loadFont } from "@remotion/google-fonts/Anton";
+import {
+  AbsoluteFill,
+  OffthreadVideo,
+  spring,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
+import { loadFont as loadAnton } from "@remotion/google-fonts/Anton";
+import { loadFont as loadBebas } from "@remotion/google-fonts/BebasNeue";
 import type { BaseCaptionProps } from "../types";
 import { useActiveCard } from "../lib/useCurrentWord";
 import { rgba } from "../lib/colors";
 
-loadFont();
+// Both Anton and Bebas Neue come default-bold; load both so the UI's
+// font swap doesn't fall back to a sans serif.
+loadAnton();
+loadBebas();
 
+// Words to skip when picking the per-card emphasis keyword.
 const FILLER_WORDS = new Set([
-  "the", "a", "an", "is", "are", "was", "were", "be", "to", "of", "in", "on",
-  "at", "for", "and", "or", "but", "i", "you", "we", "they", "it", "this",
-  "that", "with", "as", "from", "by", "so", "if", "then", "than",
+  "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+  "to", "of", "in", "on", "at", "for", "and", "or", "but", "i", "you",
+  "we", "they", "it", "this", "that", "with", "as", "from", "by", "so",
+  "if", "then", "than", "do", "did", "does", "have", "has", "had", "will",
+  "would", "should", "could", "can", "may", "might", "just",
 ]);
 
 function pickKeyword(words: { text: string }[]): number {
@@ -28,11 +41,18 @@ function pickKeyword(words: { text: string }[]): number {
 }
 
 export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
-  const { videoSrc, words, accent, fontFamily, sizeScale, positionPct, allCaps, wordsPerCard, videoWidth, videoHeight } = props;
+  const {
+    videoSrc, words, accent, fontFamily, sizeScale, positionPct,
+    allCaps, wordsPerCard, videoWidth, videoHeight,
+  } = props;
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
   const { card, activeWordIdx } = useActiveCard(words, wordsPerCard);
 
-  const baseFontSize = Math.round(videoHeight * 0.07 * sizeScale);
-  const accentFontSize = Math.round(baseFontSize * 1.08);
+  const baseFontSize = Math.round(videoHeight * 0.075 * sizeScale);
+  // Keyword gets a real size jump (28% bigger). Previously 8% which barely
+  // registered as emphasis. MrBeast titles use HUGE keywords for impact.
+  const accentFontSize = Math.round(baseFontSize * 1.28);
   const keywordIdx = card ? pickKeyword(card.words) : -1;
 
   const containerStyle: React.CSSProperties = {
@@ -45,8 +65,8 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
     justifyContent: "center",
     alignItems: "baseline",
     flexWrap: "wrap",
-    gap: `${baseFontSize * 0.2}px`,
-    padding: `0 ${videoWidth * 0.05}px`,
+    gap: `${baseFontSize * 0.18}px`,
+    padding: `0 ${videoWidth * 0.04}px`,
     transform: `translateY(-50%) translateX(${(positionPct.x - 0.5) * videoWidth}px)`,
   };
 
@@ -57,22 +77,56 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
         <div style={containerStyle}>
           {card.words.map((w, i) => {
             const isAccent = i === keywordIdx;
-            const isActiveButNotAccent = i === activeWordIdx && !isAccent;
+            const isActive = i === activeWordIdx;
             const display = allCaps ? w.text.toUpperCase().trim() : w.text.trim();
             const size = isAccent ? accentFontSize : baseFontSize;
+            // Color hierarchy: keyword always accent (yellow), current word
+            // accent IF it's also the keyword, otherwise plain white. Inactive
+            // non-keyword words sit at 95% opacity to push the focus.
             const color = isAccent ? accent : "#FFFFFF";
+
+            // Per-word entrance — was MISSING entirely before. Subtle pop
+            // (180ms, mild damping) since MrBeast captions favor punch over
+            // animation noise. The keyword pops a touch harder.
+            const entranceFrames = Math.round(fps * 0.18);
+            const enter = spring({
+              frame: frame - w.startFrame,
+              fps,
+              config: isAccent
+                ? { damping: 9, stiffness: 240, mass: 0.5 }   // keyword: snappier
+                : { damping: 14, stiffness: 180, mass: 0.6 }, // normal: gentle
+              durationInFrames: entranceFrames,
+            });
+            // Active word gets an extra subtle scale so karaoke read is
+            // still trackable even though the dominant emphasis is the
+            // pre-picked keyword.
+            const activeBoost = isActive && !isAccent ? 0.06 : 0;
+            const scale = 0.7 + enter * 0.3 + activeBoost;
+
+            // Outline scaling — bigger keyword needs proportionally bigger
+            // stroke to stay readable on busy backgrounds.
+            const outlinePx = Math.max(3, Math.round(size * 0.06));
             const wordStyle: React.CSSProperties = {
-              fontFamily: `${fontFamily}, Impact, system-ui, sans-serif`,
+              fontFamily: `${fontFamily}, "Anton", "Bebas Neue", "Impact", system-ui, sans-serif`,
               fontWeight: 900,
               fontSize: `${size}px`,
               lineHeight: 1.0,
               color,
-              textShadow: `0 ${Math.round(size * 0.05)}px 0 ${rgba("#000000", 0.9)}, 0 ${Math.round(size * 0.1)}px ${Math.round(size * 0.18)}px ${rgba("#000000", 0.5)}`,
-              WebkitTextStroke: `${Math.max(3, Math.round(size * 0.06))}px #000000`,
+              // Double layered shadow — flat solid drop (1px below for
+              // crispness) + softer fade further down. Mimics the typical
+              // MrBeast / Hormozi title-card stack.
+              textShadow: [
+                `0 ${Math.round(size * 0.05)}px 0 ${rgba("#000000", 0.95)}`,
+                `0 ${Math.round(size * 0.1)}px ${Math.round(size * 0.18)}px ${rgba("#000000", 0.55)}`,
+              ].join(", "),
+              WebkitTextStroke: `${outlinePx}px #000000`,
               paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
-              letterSpacing: "0.01em",
-              opacity: isActiveButNotAccent ? 1 : 0.96,
+              letterSpacing: "0.005em",
+              opacity: enter * (isActive || isAccent ? 1 : 0.96),
               display: "inline-block",
+              transform: `scale(${scale}) translateY(${(1 - enter) * size * 0.25}px)`,
+              transformOrigin: "center center",
+              willChange: "transform, opacity",
             };
             return (
               <span key={`${w.startFrame}-${i}`} style={wordStyle}>

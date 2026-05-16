@@ -27,6 +27,9 @@ def _cost_usd(phase: str, ok: bool) -> float:
         return settings.openai_image_price_usd
     if phase == "phase4_submit":
         return settings.grok_video_price_usd
+    # AI Director — one Opus call per Director invocation (swap or movement).
+    if phase in {"director_swap", "director_movement"}:
+        return settings.claude_opus_price_usd
     return 0.0
 
 

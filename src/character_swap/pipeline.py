@@ -70,9 +70,14 @@ def generate_variant(
     Dispatch a swap-variant generation to the right model. Used by runner.py
     so it doesn't need to know provider details.
 
-    - gpt-image:   scene + character as refs (image-to-image)
-    - grok-image:  text-only (Grok image API doesn't take refs today)
-    - nano-banana: scene + character as refs via Gemini multi-image input
+    - gpt-image:        scene + character as refs (image-to-image; weak at
+                        strict spatial preservation — model often drifts to
+                        a generic photo of the character)
+    - grok-image:       text-only (Grok image API doesn't take refs today)
+    - nano-banana:      Gemini 2.5 Flash Image — multi-ref edit, faster
+    - nano-banana-pro:  Gemini Pro Image — multi-ref edit with strongest
+                        scene-preservation. Recommended for swap-into-scene
+                        when GPT Image 2 drifts to generic photos.
     """
     if model == "gpt-image":
         return generate_image(
@@ -91,11 +96,15 @@ def generate_variant(
         )
         atomic_write_bytes(dest, data)
         return dest
-    if model == "nano-banana":
+    if model in ("nano-banana", "nano-banana-pro"):
+        # Pass the slug through — google_genai client maps to the current
+        # Google model name internally (nano-banana → gemini-2.5-flash-image,
+        # nano-banana-pro → nano-banana-pro-preview).
         data = google_genai.generate_nano_banana(
             prompt=prompt,
             reference_images=[scene_image, character_image],
             app_job_id=job_id,
+            model=model,
         )
         atomic_write_bytes(dest, data)
         return dest
@@ -131,15 +140,103 @@ def submit_video(
     movement_prompt: str,
     character_name: str,
     job_id: str | None = None,
+    model: str = "grok-imagine",
 ) -> str:
-    """Submit a Grok Imagine video job. Returns the (Grok) job_id."""
-    return grok.submit(image=image, prompt=movement_prompt,
-                       character=character_name, app_job_id=job_id)
+    """Submit a video job to the chosen provider. Returns the provider's job/task id.
+
+    `model` defaults to grok-imagine for back-compat with older callers that
+    don't yet pass it. The Step-4 UI lets users pick any of: grok-imagine,
+    veo, veo-3-fast, kling*, runway*, luma-ray2, pika-2, hailuo*, sora-2,
+    wan*, seedance, higgsfield-*.
+    """
+    if model == "grok-imagine":
+        return grok.submit(image=image, prompt=movement_prompt,
+                           character=character_name, app_job_id=job_id)
+
+    # Lazy imports so older keyless installs don't pay the import cost for
+    # providers they'll never use.
+    from character_swap.clients import _stubs, google_genai, kling
+    if model in {"veo", "veo-3-fast"}:
+        return google_genai.submit_veo(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model in {"kling", "kling-2.1-pro", "kling-1.6"}:
+        return kling.submit_kling(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model in {"runway-gen4", "runway-gen3-alpha"}:
+        return _stubs.submit_runway(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model == "luma-ray2":
+        return _stubs.submit_luma(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model == "pika-2":
+        return _stubs.submit_pika(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model in {"hailuo-02", "hailuo-01"}:
+        return _stubs.submit_minimax(
+            image=image, prompt=movement_prompt, model=model,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model == "sora-2":
+        return _stubs.submit_sora(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model.startswith("wan-"):
+        return _stubs.submit_wan(
+            image=image, prompt=movement_prompt, model=model,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model == "seedance":
+        return _stubs.submit_seedance(
+            image=image, prompt=movement_prompt,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    if model.startswith("higgsfield-"):
+        return _stubs.submit_higgsfield(
+            image=image, prompt=movement_prompt, model=model,
+            aspect_ratio=settings.video_aspect_ratio,
+            duration_secs=settings.video_duration_secs,
+            app_job_id=job_id,
+        )
+    raise ValueError(f"Unknown video model: {model}")
 
 
 def poll_video_once(*, job_id: str, character_name: str,
                     app_job_id: str | None = None) -> tuple[str, str | None]:
-    """One poll. Returns (status, download_url_or_none)."""
+    """One poll. Returns (status, download_url_or_none).
+
+    Grok-only — used internally by `wait_for_video` for the grok-imagine
+    branch. Other providers' clients expose their own blocking `wait_for_*`
+    helpers that don't surface per-poll progress.
+    """
     payload = grok.status(job_id=job_id, character=character_name, app_job_id=app_job_id)
     return _extract_status(payload)
 
@@ -151,29 +248,66 @@ def wait_for_video(
     dest: Path,
     on_progress=None,
     app_job_id: str | None = None,
+    model: str = "grok-imagine",
 ) -> Path:
     """
-    Blocking poll loop. Downloads to `dest` on success. Raises grok.GrokError
-    on timeout or terminal failure.
+    Blocking poll loop. Downloads to `dest` on success. Raises GrokError or
+    provider-specific exceptions on timeout / terminal failure.
 
-    `on_progress(status: str, url: str | None)` is called once per poll.
+    `on_progress(status: str, url: str | None)` is called once per poll
+    (Grok only — other providers don't expose intermediate status today, so
+    callers should not rely on it firing for them).
     """
-    deadline = time.monotonic() + settings.video_timeout_secs
-    interval = settings.video_poll_interval_secs
-    while time.monotonic() < deadline:
-        status, url = poll_video_once(job_id=job_id, character_name=character_name,
-                                      app_job_id=app_job_id)
-        if on_progress is not None:
-            on_progress(status, url)
-        if status in grok.SUCCESS_STATES:
-            if not url:
-                raise grok.GrokError("Video reported done but no download URL")
-            grok.download_video(url=url, dest=dest)
-            return dest
-        if status in grok.TERMINAL_STATES:
-            raise grok.GrokError(f"Video job ended in state '{status}'")
-        time.sleep(interval)
-    raise grok.GrokError(f"Video job {job_id} timed out after {settings.video_timeout_secs}s")
+    if model == "grok-imagine":
+        deadline = time.monotonic() + settings.video_timeout_secs
+        interval = settings.video_poll_interval_secs
+        while time.monotonic() < deadline:
+            status, url = poll_video_once(job_id=job_id, character_name=character_name,
+                                          app_job_id=app_job_id)
+            if on_progress is not None:
+                on_progress(status, url)
+            if status in grok.SUCCESS_STATES:
+                if not url:
+                    raise grok.GrokError("Video reported done but no download URL")
+                grok.download_video(url=url, dest=dest)
+                return dest
+            if status in grok.TERMINAL_STATES:
+                raise grok.GrokError(f"Video job ended in state '{status}'")
+            time.sleep(interval)
+        raise grok.GrokError(f"Video job {job_id} timed out after {settings.video_timeout_secs}s")
+
+    # Non-grok providers: delegate to their wait_for_* helpers, which block
+    # until the output is downloaded to `dest`. We fire one synthetic
+    # "processing" progress event up-front so the UI shows movement.
+    if on_progress is not None:
+        on_progress("processing", None)
+    from character_swap.clients import _stubs, google_genai, kling
+    if model in {"veo", "veo-3-fast"}:
+        google_genai.wait_for_veo(op_id=job_id, dest=dest)
+    elif model in {"kling", "kling-2.1-pro", "kling-1.6"}:
+        kling.wait_for_kling(task_id=job_id, dest=dest)
+    elif model in {"runway-gen4", "runway-gen3-alpha"}:
+        _stubs.wait_for_runway(task_id=job_id, dest=dest)
+    elif model == "luma-ray2":
+        _stubs.wait_for_luma(task_id=job_id, dest=dest)
+    elif model == "pika-2":
+        _stubs.wait_for_pika(task_id=job_id, dest=dest)
+    elif model in {"hailuo-02", "hailuo-01"}:
+        _stubs.wait_for_minimax(task_id=job_id, dest=dest)
+    elif model == "sora-2":
+        _stubs.wait_for_sora(task_id=job_id, dest=dest)
+    elif model.startswith("wan-"):
+        _stubs.wait_for_wan(task_id=job_id, dest=dest)
+    elif model == "seedance":
+        _stubs.wait_for_seedance(task_id=job_id, dest=dest)
+    elif model.startswith("higgsfield-"):
+        _stubs.wait_for_higgsfield(task_id=job_id, dest=dest)
+    else:
+        raise ValueError(f"Unknown video model: {model}")
+
+    if on_progress is not None:
+        on_progress("done", str(dest))
+    return dest
 
 
 def _extract_status(payload: dict) -> tuple[str, str | None]:

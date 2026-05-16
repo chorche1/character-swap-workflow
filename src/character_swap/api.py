@@ -179,6 +179,37 @@ def _effective_scene_paths(job: Job) -> list[str]:
     return [job.scene_image_path]
 
 
+def _director_plan_summary(plan_json: str | None) -> dict | None:
+    """Parse the cached SwapDirectorPlan JSON down to a compact UI summary:
+    `{present: bool, intent: str, n_chars, n_scenes, n_prompts}`. Returns
+    None if no plan was cached on the Job."""
+    if not plan_json:
+        return None
+    try:
+        import json as _json
+        data = _json.loads(plan_json)
+    except (ValueError, TypeError):
+        return {"present": True, "intent": "(unparseable)",
+                "n_chars": 0, "n_scenes": 0, "n_prompts": 0}
+    chars = data.get("characters") or []
+    n_chars = len(chars)
+    seen_scenes: set[str] = set()
+    n_prompts = 0
+    for c in chars:
+        for sc in c.get("scenes") or []:
+            sid = sc.get("scene_id")
+            if sid:
+                seen_scenes.add(sid)
+            n_prompts += len(sc.get("variants") or [])
+    return {
+        "present": True,
+        "intent": data.get("intent") or "",
+        "n_chars": n_chars,
+        "n_scenes": len(seen_scenes),
+        "n_prompts": n_prompts,
+    }
+
+
 def _job_to_dict(job: Job) -> dict:
     eff_ids = _effective_scene_ids(job)
     eff_paths = _effective_scene_paths(job)
@@ -197,7 +228,16 @@ def _job_to_dict(job: Job) -> dict:
         ],
         "prompt": job.prompt,
         "image_model": job.image_model,
+        "video_model": job.video_model,
+        # Legacy single + new per-scene dict. The UI prefers the dict;
+        # the singular is the "first" scene's value for old code paths.
         "movement_prompt": job.movement_prompt,
+        "movement_prompts": dict(job.movement_prompts or {}),
+        # AI Director: opt-in toggle + a small summary parsed from the
+        # cached plan so the UI can show a 🎬 badge ("12 tailored prompts").
+        # The plan JSON itself stays on the server (too large for the UI).
+        "use_director": bool(job.use_director),
+        "director_plan_summary": _director_plan_summary(job.director_prompts_json),
         "images_per_character": job.images_per_character,
         "videos_per_character": job.videos_per_character,
         "compacted": job.compacted,
@@ -209,7 +249,12 @@ def _job_to_dict(job: Job) -> dict:
                 "name": jc.name,
                 "source_image_url": _file_url(jc.source_image_path),
                 "status": jc.status.value,
+                # Legacy single-pick + the canonical multi-pick list. The UI
+                # keys all green-ring / approved-badge logic off
+                # `approved_variant_ids`; `approved_variant_id` is kept in
+                # sync as the first element for old code paths.
                 "approved_variant_id": jc.approved_variant_id,
+                "approved_variant_ids": list(jc.approved_variant_ids or []),
                 "error": jc.error,
                 "images": [
                     {
@@ -521,7 +566,11 @@ async def character_gallery(char_id: str) -> dict:
                 "url": _file_url(Path(v.path)),
                 "job_id": job.job_id,
                 "job_title": job.title or job.job_id,
-                "is_approved": v.variant_id == jc.approved_variant_id,
+                # Approved in EITHER the multi-pick list or the legacy
+                # single field (the latter for jobs created before the
+                # multi-approve migration ran).
+                "is_approved": (v.variant_id in (jc.approved_variant_ids or [])
+                                or v.variant_id == jc.approved_variant_id),
                 "is_edit": v.parent_variant_id is not None,
                 "created_at": v.created_at.isoformat() + "Z",
             })
@@ -713,6 +762,19 @@ class CreateJobBody(BaseModel):
     # Lets users pick a non-primary reference in Step 2 BEFORE generation,
     # without needing to start the job and then PATCH source_image.
     character_source_image_ids: dict[str, str] | None = None
+    # When True, expand the custom `prompt` (and later the movement_prompt
+    # when submitted) through GPT-4o into a cinematic spec before sending
+    # to the image / video model. See `prompt_enrich.py`.
+    enrich_prompt: bool = False
+    # When True, route the job through the AI Director: one Claude Opus
+    # call with vision + tool-use writes a tailored prompt per (character,
+    # scene, variant). Slower (~15-25s) and higher cost (~$0.05) than
+    # `enrich_prompt`, but produces character-specific prompts that
+    # reference visible features instead of "the second picture".
+    # See `prompt_director.py`. Director takes precedence over enrich;
+    # both can be enabled simultaneously (Director wins where it succeeds,
+    # enrich is the fallback).
+    use_director: bool = False
 
 
 async def _run_async(coro_fn, *args, **kwargs) -> None:
@@ -814,6 +876,8 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         images_per_character=body.images_per_character,
         prompt=custom_prompt,
         image_model=image_model,
+        enrich_prompt=body.enrich_prompt,
+        use_director=body.use_director,
     )
     s.add_job(job)
     background.add_task(_run_async, runner.run_image_generation, job_id)
@@ -934,17 +998,40 @@ async def approve(job_id: str, body: ApproveBody, background: BackgroundTasks) -
             raise HTTPException(404, "Variant not found on this character")
         if match.status != VariantStatus.READY:
             raise HTTPException(409, f"Variant is '{match.status}', cannot approve")
-        jc.approved_variant_id = body.variant_id
-        jc.status = CharStatus.APPROVED
+
+        # Multi-variant approval — TOGGLE the variant. Clicking ✓ on an
+        # already-approved variant un-approves it; clicking on a fresh one
+        # adds it to the list so multiple (typically one per scene) can be
+        # animated in parallel in Step 4.
+        approved_ids = list(jc.approved_variant_ids or [])
+        if not approved_ids and jc.approved_variant_id:
+            approved_ids = [jc.approved_variant_id]
+        if body.variant_id in approved_ids:
+            approved_ids = [vid for vid in approved_ids if vid != body.variant_id]
+            event_kind = "char.unapproved"
+        else:
+            approved_ids.append(body.variant_id)
+            event_kind = "char.approved"
+        # Keep ordering aligned with jc.images so the UI shows approvals in
+        # a stable order across scene groups.
+        order = {v.variant_id: i for i, v in enumerate(jc.images)}
+        approved_ids.sort(key=lambda x: order.get(x, len(jc.images)))
+
+        jc.approved_variant_ids = approved_ids
+        jc.approved_variant_id = approved_ids[0] if approved_ids else None
+        jc.status = (CharStatus.APPROVED if approved_ids
+                     else CharStatus.AWAITING_APPROVAL)
         jc.updated_at = datetime.utcnow()
         job.characters[body.char_id] = jc
         s.update_job(job)
-        await events.publish(job_id, {"kind": "char.approved", "job_id": job_id,
+        await events.publish(job_id, {"kind": event_kind, "job_id": job_id,
                                       "char_id": body.char_id,
-                                      "variant_id": body.variant_id})
+                                      "variant_id": body.variant_id,
+                                      "approved_variant_ids": approved_ids})
     elif body.action == "reject":
         jc.status = CharStatus.REJECTED
         jc.approved_variant_id = None
+        jc.approved_variant_ids = []
         jc.updated_at = datetime.utcnow()
         job.characters[body.char_id] = jc
         s.update_job(job)
@@ -955,6 +1042,92 @@ async def approve(job_id: str, body: ApproveBody, background: BackgroundTasks) -
     else:
         raise HTTPException(400, f"Unknown action '{body.action}'")
     return _job_to_dict(job)
+
+
+@app.post("/api/jobs/{job_id}/approve_all")
+async def approve_all(job_id: str) -> dict:
+    """Bulk-approve one READY variant per (character, scene) pair.
+
+    For multi-scene jobs this fills in a default pick for every scene that
+    doesn't yet have an approved variant — typically the FIRST ready
+    variant (by position). Single-scene jobs collapse to "approve one per
+    character" (same behavior as before). Skips characters that are
+    rejected / animating / done. Idempotent.
+
+    Used by the "✓ Approve all" button in Step 3. Each approval emits a
+    `char.approved` event so the UI updates in place.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.movement_prompt:
+        raise HTTPException(409, "Movement prompt already submitted; approvals are locked")
+
+    scene_ids = _effective_scene_ids(job) or [job.scene_id]
+    # Legacy single-scene variants have scene_id = None; treat them as
+    # belonging to the first (only) scene so the per-scene check still works.
+    primary_scene = scene_ids[0] if scene_ids else None
+
+    def variant_scene(v) -> str | None:
+        return v.scene_id or primary_scene
+
+    picked: list[dict] = []
+    for cid, jc in job.characters.items():
+        if jc.status in {CharStatus.REJECTED, CharStatus.ANIMATING, CharStatus.DONE}:
+            continue
+        approved_ids = list(jc.approved_variant_ids or [])
+        if not approved_ids and jc.approved_variant_id:
+            approved_ids = [jc.approved_variant_id]
+        approved_set = set(approved_ids)
+
+        # Which scenes already have at least one approval?
+        scenes_covered = {
+            variant_scene(v)
+            for v in jc.images
+            if v.variant_id in approved_set
+        }
+
+        char_changed = False
+        for sid in scene_ids:
+            if sid in scenes_covered:
+                continue
+            # First READY variant for THIS scene (by position).
+            ready = next(
+                (v for v in jc.images
+                 if variant_scene(v) == sid and v.status == VariantStatus.READY),
+                None,
+            )
+            if ready is None:
+                continue
+            approved_ids.append(ready.variant_id)
+            approved_set.add(ready.variant_id)
+            scenes_covered.add(sid)
+            picked.append({"char_id": cid, "variant_id": ready.variant_id,
+                           "scene_id": sid})
+            char_changed = True
+
+        if char_changed:
+            # Keep variant order aligned with jc.images for stable UI.
+            order = {v.variant_id: i for i, v in enumerate(jc.images)}
+            approved_ids.sort(key=lambda x: order.get(x, len(jc.images)))
+            jc.approved_variant_ids = approved_ids
+            jc.approved_variant_id = approved_ids[0] if approved_ids else None
+            jc.status = CharStatus.APPROVED
+            jc.updated_at = datetime.utcnow()
+            job.characters[cid] = jc
+
+    if picked:
+        s.update_job(job)
+        for p in picked:
+            await events.publish(
+                job_id,
+                {"kind": "char.approved", "job_id": job_id,
+                 "char_id": p["char_id"], "variant_id": p["variant_id"],
+                 "scene_id": p["scene_id"]},
+            )
+
+    return {"job": _job_to_dict(job), "approved": picked}
 
 
 class SetSourceImageBody(BaseModel):
@@ -1061,12 +1234,18 @@ async def delete_variant(job_id: str, char_id: str, variant_id: str) -> dict:
             p.unlink()
 
     jc.images = [v for v in jc.images if v.variant_id != variant_id]
+    # Drop the deleted variant from BOTH the legacy field and the multi-pick
+    # list, then keep them in sync (legacy = first entry of list, or None).
+    jc.approved_variant_ids = [
+        vid for vid in (jc.approved_variant_ids or []) if vid != variant_id
+    ]
     if jc.approved_variant_id == variant_id:
-        jc.approved_variant_id = None
+        jc.approved_variant_id = (jc.approved_variant_ids[0]
+                                  if jc.approved_variant_ids else None)
     if not jc.images:
         jc.status = CharStatus.FAILED
         jc.error = "all variants deleted; click regenerate to re-run"
-    elif jc.approved_variant_id is None:
+    elif not jc.approved_variant_ids:
         jc.status = CharStatus.AWAITING_APPROVAL
         jc.error = None
 
@@ -1112,32 +1291,114 @@ async def edit_variant(job_id: str, body: EditVariantBody,
 
 
 class MovementBody(BaseModel):
-    prompt: str
+    # Legacy single-prompt path — applied to every scene that has approvals.
+    # Kept for back-compat with older client builds; new UI sends
+    # `movement_prompts` instead.
+    prompt: str | None = None
+    # Per-scene prompts: scene_id → prompt. Every scene with at least one
+    # approved variant must have a non-empty entry. Scenes without approvals
+    # are skipped (no videos to render for them).
+    movement_prompts: dict[str, str] | None = None
     videos_per_character: int = Field(default=1, ge=1, le=4)
+    # Which video provider to use. Defaults to grok-imagine (legacy behavior);
+    # the Step-4 picker in web/index.html sends this field so the user can pick
+    # Kling / Veo / Runway / Luma / Pika / etc. for the swap flow too.
+    video_model: str = "grok-imagine"
+
+
+# Pre-check map for video providers — refuses to start a job if the user
+# picked a model whose API key isn't configured. Mirrors runner_media's
+# implicit checks but surfaces the error UPFRONT, before kicking N parallel
+# submits that would all fail with the same auth error.
+_VIDEO_MODEL_KEYS: dict[str, str] = {
+    "grok-imagine": "xai",
+    "veo": "gemini",
+    "veo-3-fast": "gemini",
+    "kling": "kling",
+    "kling-2.1-pro": "kling",
+    "kling-1.6": "kling",
+}
 
 
 @app.post("/api/jobs/{job_id}/movement")
 async def set_movement(job_id: str, body: MovementBody,
                        background: BackgroundTasks) -> dict:
-    settings.require_keys("xai")
+    """Lock in a per-scene movement direction and kick off the video phase.
+
+    Each scene with at least one approved variant needs its own non-empty
+    prompt — the runner uses scene-S's prompt for every approved variant
+    that belongs to scene S, across all characters. Legacy clients still
+    sending a single `prompt` get it broadcast to every scene-with-approvals
+    (1-scene jobs collapse to the historical behavior).
+    """
+    key_name = _VIDEO_MODEL_KEYS.get(body.video_model)
+    if key_name:
+        settings.require_keys(key_name)
     s = store()
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if job.movement_prompt:
+    if job.movement_prompt or job.movement_prompts:
         raise HTTPException(409, "Movement prompt already set")
-    prompt = body.prompt.strip()
-    if not prompt:
-        raise HTTPException(400, "Movement prompt is empty")
-    approved = [jc for jc in job.characters.values() if jc.status == CharStatus.APPROVED]
-    if not approved:
+    approved_chars = [jc for jc in job.characters.values()
+                      if jc.status == CharStatus.APPROVED]
+    if not approved_chars:
         raise HTTPException(409, "No approved characters to animate")
-    job.movement_prompt = prompt
+
+    # Which scenes actually need a prompt? Any scene with ≥1 approved variant
+    # across all characters. Legacy variants with scene_id=None map to the
+    # job's primary scene_id.
+    scene_ids = _effective_scene_ids(job) or [job.scene_id]
+    primary_scene = scene_ids[0] if scene_ids else job.scene_id
+    scenes_with_approvals: set[str] = set()
+    for jc in approved_chars:
+        approved_set = set(jc.approved_variant_ids or [])
+        if jc.approved_variant_id:
+            approved_set.add(jc.approved_variant_id)
+        for v in jc.images:
+            if v.variant_id in approved_set:
+                scenes_with_approvals.add(v.scene_id or primary_scene)
+
+    # Build the canonical dict from whichever field the client populated.
+    if body.movement_prompts:
+        # Trim whitespace, drop empty entries.
+        prompts = {sid: (p or "").strip()
+                   for sid, p in body.movement_prompts.items()
+                   if (p or "").strip()}
+    elif body.prompt and body.prompt.strip():
+        # Legacy single-prompt: broadcast to every scene-with-approvals.
+        single = body.prompt.strip()
+        prompts = {sid: single for sid in scenes_with_approvals}
+    else:
+        raise HTTPException(400, "Movement prompt is empty")
+
+    # Validate: every scene with approvals must have a non-empty prompt.
+    missing = scenes_with_approvals - set(prompts.keys())
+    if missing:
+        raise HTTPException(
+            400,
+            f"Missing movement prompt for {len(missing)} scene(s) "
+            f"that have approved images: {sorted(missing)}",
+        )
+
+    job.movement_prompts = prompts
+    # Keep singular field in sync (first scene with a prompt) so legacy
+    # `if job.movement_prompt:` lock checks stay truthy.
+    job.movement_prompt = (
+        prompts.get(primary_scene)
+        or next(iter(prompts.values()), None)
+    )
+    # Reset any stale enriched cache so the runner re-enriches per-scene.
+    job.enriched_movement_prompts = {}
+    job.enriched_movement_prompt = None
     job.videos_per_character = body.videos_per_character
+    job.video_model = body.video_model or "grok-imagine"
     job.updated_at = datetime.utcnow()
     s.update_job(job)
     await events.publish(job_id, {"kind": "movement.set", "job_id": job_id,
-                                  "prompt": prompt,
+                                  "prompt": job.movement_prompt,
+                                  "movement_prompts": prompts,
+                                  "video_model": job.video_model,
                                   "videos_per_character": body.videos_per_character})
     background.add_task(_run_async, runner.run_video_synthesis, job_id)
     return _job_to_dict(job)
@@ -1157,10 +1418,13 @@ async def compact_job(job_id: str) -> dict:
 
     bytes_freed = 0
     for jc in job.characters.values():
-        keep_variant = jc.approved_variant_id
+        # Keep EVERY approved variant — multi-scene jobs may have several.
+        keep_variants = set(jc.approved_variant_ids or [])
+        if jc.approved_variant_id:
+            keep_variants.add(jc.approved_variant_id)
         remaining_images: list[GeneratedImage] = []
         for v in jc.images:
-            if v.variant_id == keep_variant:
+            if v.variant_id in keep_variants:
                 remaining_images.append(v)
                 continue
             with contextlib.suppress(OSError):
@@ -1244,7 +1508,17 @@ async def duplicate_job(job_id: str, background: BackgroundTasks) -> dict:
         scene_ids=src_scene_ids,
         scene_image_paths=[str(p) for p in scene_paths],
         characters=new_chars,
+        prompt=src.prompt,
+        image_model=src.image_model,
+        video_model=src.video_model,
         images_per_character=src.images_per_character,
+        videos_per_character=src.videos_per_character,
+        enrich_prompt=src.enrich_prompt,
+        use_director=src.use_director,
+        # Do NOT copy movement_prompts NOR director_prompts_json — the
+        # duplicate is meant to re-run generation (Director re-plans against
+        # the new variants), not skip straight to videos or reuse stale
+        # Director output. User submits a new movement direction in Step 4.
     )
     s.add_job(new_job)
     background.add_task(_run_async, runner.run_image_generation, new_id)
@@ -1259,11 +1533,15 @@ class RetryVideoBody(BaseModel):
 @app.post("/api/jobs/{job_id}/retry_video")
 async def retry_video(job_id: str, body: RetryVideoBody,
                       background: BackgroundTasks) -> dict:
-    settings.require_keys("xai")
     s = store()
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
+    # Whichever provider the job is configured for must have its key set —
+    # otherwise the retry would silently 401 on the worker thread.
+    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
+    if key_name:
+        settings.require_keys(key_name)
     if not job.movement_prompt:
         raise HTTPException(409, "Job has no movement prompt yet")
     jc = job.characters.get(body.char_id)
@@ -1300,10 +1578,15 @@ async def unlock_movement(job_id: str) -> dict:
         raise HTTPException(409,
                             "At least one video has already completed; cannot unlock")
     job.movement_prompt = None
+    job.movement_prompts = {}
+    job.enriched_movement_prompt = None
+    job.enriched_movement_prompts = {}
     for jc in job.characters.values():
         jc.videos = []
+        # Re-arm any char that has at least one approved variant.
+        has_approved = bool(jc.approved_variant_ids) or bool(jc.approved_variant_id)
         if jc.status in {CharStatus.ANIMATING, CharStatus.DONE, CharStatus.FAILED} \
-                and jc.approved_variant_id:
+                and has_approved:
             jc.status = CharStatus.APPROVED
             jc.error = None
         jc.updated_at = datetime.utcnow()
@@ -1414,6 +1697,10 @@ def _gen_to_dict(gen: MediaGeneration) -> dict:
         "avatar_id": gen.avatar_id,
         "voice_id": gen.voice_id,
         "voice_provider": gen.voice_provider,
+        "enrich_prompt": bool(gen.enrich_prompt),
+        "enriched_prompt": gen.enriched_prompt,
+        "use_director": bool(gen.use_director),
+        "director_prompt": gen.director_prompt,
         "status": gen.status.value,
         "output_url": _file_url(Path(gen.output_path)) if gen.output_path else None,
         "provider_job_id": gen.provider_job_id,
@@ -1485,6 +1772,8 @@ async def create_generation(
     avatar_id: str | None = Form(None),
     voice_id: str | None = Form(None),
     voice_provider: str | None = Form(None),
+    enrich_prompt: bool = Form(False),
+    use_director: bool = Form(False),
     files: list[UploadFile] = File(default=[]),
 ) -> dict:
     try:
@@ -1563,6 +1852,13 @@ async def create_generation(
         avatar_id=avatar_id,
         voice_id=voice_id,
         voice_provider=voice_provider or ("heygen" if kind_enum is GenKind.AVATAR else None),
+        # Only enrich image + video — avatar/audio prompts are literal scripts,
+        # NOT creative descriptions, so enrichment would corrupt them.
+        enrich_prompt=enrich_prompt and kind_enum in (GenKind.IMAGE, GenKind.VIDEO),
+        # AI Director also limited to image + video (and requires a ref image
+        # since Director relies on vision input). Runner_media handles the
+        # no-ref case by silently skipping the Director call.
+        use_director=use_director and kind_enum in (GenKind.IMAGE, GenKind.VIDEO),
     )
     store().add_generation(gen)
 
@@ -2198,10 +2494,19 @@ async def editor_rerender(
     overrides: str | None = Form(None),
     trim_start_secs: float = Form(0.0),
     trim_end_secs: float = Form(0.0),   # 0 = until end
+    # Optional per-word edits from the CapCut-style caption editor. JSON list
+    # of `{text, start, end}` that REPLACES the cached `words.json` for this
+    # render only. We also persist the edits back to words.json so subsequent
+    # rerenders pick them up automatically.
+    words_json: str | None = Form(None),
 ) -> dict:
     """Re-render captions (and optionally manually-trim) the pre-caption
     video produced by a previous /api/editor/auto_edit run. Reuses the cached
-    transcript so no Whisper call is needed."""
+    transcript so no Whisper call is needed.
+
+    When `words_json` is provided, it overrides the cached transcript with
+    user-edited text/timings (from the visual caption editor) and is
+    persisted back to words.json so future rerenders use the edits."""
     from character_swap import video_edit
     edit_dir = settings.output_dir / "editor" / edit_id
     words_path = edit_dir / "words.json"
@@ -2213,7 +2518,28 @@ async def editor_rerender(
     if not pre_caption.exists():
         raise HTTPException(404, "Cached pre-caption video missing on disk")
 
-    words = video_edit.words_from_json(words_path.read_text(encoding="utf-8"))
+    # User-edited transcript takes precedence and gets persisted so future
+    # rerenders inherit the edits.
+    if words_json:
+        try:
+            words = video_edit.words_from_json(words_json)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            raise HTTPException(400, "words_json must be a JSON list of {text, start, end}")
+        if words:
+            # Persist atomically. Keep a `.original.json` backup the first
+            # time so users can recover if they regret edits.
+            backup = edit_dir / "words.original.json"
+            if not backup.exists():
+                try:
+                    backup.write_text(words_path.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+                except OSError:
+                    pass
+            tmp = words_path.with_suffix(".json.tmp")
+            tmp.write_text(words_json, encoding="utf-8")
+            tmp.replace(words_path)
+    else:
+        words = video_edit.words_from_json(words_path.read_text(encoding="utf-8"))
     if not words:
         raise HTTPException(422, "Cached transcript is empty")
 
@@ -2678,6 +3004,7 @@ async def create_reel_job(
     aspect_ratio: str = Form("9:16"),
     title: str | None = Form(None),
     mini_approval: bool = Form(False),
+    enrich_prompt: bool = Form(False),
 ) -> dict:
     """Upload N reference frames + create a reel job. Anchor (frame 0) is
     rendered first; followers run in parallel once anchor lands."""
@@ -2708,7 +3035,23 @@ async def create_reel_job(
         preset = next((p for p in s.list_reel_presets() if p.is_default), None)
     baseline = preset.baseline_prompt if preset else ""
     custom = (custom_prompt or "").strip()
-    full_prompt = (baseline + "\n\n" + custom).strip() if custom else baseline.strip()
+    # Optional prompt enrichment — expand the user's per-video tweak into a
+    # structured numbered list of corrections before concatenating with the
+    # preset's baseline. Runs synchronously (one quick GPT-4o call) so the
+    # frontend sees the final full_prompt immediately.
+    enriched_custom: str | None = None
+    if enrich_prompt and custom:
+        from character_swap import prompt_enrich as _pe
+        expanded = await asyncio.to_thread(
+            _pe.enrich_prompt, custom, "reel",
+        )
+        if expanded and expanded != custom:
+            enriched_custom = expanded
+    effective_custom = enriched_custom or custom
+    full_prompt = (
+        (baseline + "\n\n" + effective_custom).strip() if effective_custom
+        else baseline.strip()
+    )
     if not full_prompt:
         raise HTTPException(400, "Either a preset or a custom_prompt is required")
 
@@ -2743,6 +3086,8 @@ async def create_reel_job(
         aspect_ratio=aspect_ratio,
         frames=frames,
         mini_approval=mini_approval,
+        enrich_prompt=enrich_prompt,
+        enriched_custom_prompt=enriched_custom,
     )
     s.add_reel_job(job)
 
@@ -2784,9 +3129,23 @@ async def rerender_reel_anchor(job_id: str, body: dict, background: BackgroundTa
         raise HTTPException(409, "Anchor is already generating")
     if "custom_prompt" in body:
         j.custom_prompt = (body["custom_prompt"] or "").strip()
+        # Re-enrich if the user has enrichment enabled — they're editing the
+        # prompt, so the prior enrichment is stale.
+        j.enriched_custom_prompt = None
+        if j.enrich_prompt and j.custom_prompt:
+            from character_swap import prompt_enrich as _pe
+            expanded = await asyncio.to_thread(
+                _pe.enrich_prompt, j.custom_prompt, "reel", job_id=j.job_id,
+            )
+            if expanded and expanded != j.custom_prompt:
+                j.enriched_custom_prompt = expanded
+        effective = j.enriched_custom_prompt or j.custom_prompt
         preset = s.get_reel_preset(j.preset_id) if j.preset_id else None
         baseline = preset.baseline_prompt if preset else ""
-        j.full_prompt = (baseline + "\n\n" + j.custom_prompt).strip() if j.custom_prompt else baseline.strip()
+        j.full_prompt = (
+            (baseline + "\n\n" + effective).strip() if effective
+            else baseline.strip()
+        )
         s.update_reel_job(j)
     background.add_task(_run_async, _reel_runner.run_reel_anchor, job_id)
     return _reel_job_to_dict(j)
@@ -2892,7 +3251,9 @@ async def ws_reel(websocket: WebSocket, job_id: str) -> None:
         while True:
             ev = await queue.get()
             await websocket.send_json(ev)
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        # CancelledError = server shutdown or client closed connection.
+        # WebSocketDisconnect = client closed. Both are routine, not errors.
         pass
     except Exception:
         pass
@@ -2909,6 +3270,8 @@ async def health() -> dict:
         "ok": True,
         "version": "0.5.0",
         "openai_key": bool(settings.openai_api_key),
+        # Drives the 🎬 AI Director toggle's disabled state in the UI.
+        "anthropic_key": bool(settings.anthropic_api_key),
         "xai_key": bool(settings.xai_api_key),
         "gemini_key": bool(settings.gemini_api_key),
         "kling_key": bool(settings.kling_access_key and settings.kling_secret_key),

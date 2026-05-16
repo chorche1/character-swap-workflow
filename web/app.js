@@ -2,7 +2,7 @@
 
 function studio() {
   return {
-    health: { openai_key: false, xai_key: false },
+    health: { openai_key: false, anthropic_key: false, xai_key: false },
     // Step 1: array of uploaded scene objects {scene_id, url, original_name, ...}.
     // Empty until the user uploads at least one scene. The job is created from
     // scenes[] — each scene generates `images_per_character` variants per char.
@@ -91,6 +91,26 @@ function studio() {
     models: { image: [], video: [], avatar: [], audio: [] },
     imageGen: { model: 'gpt-image', prompt: '', refs: [], aspect: '9:16', generating: false },
     videoGen: { model: 'grok-imagine', prompt: '', ref: null, aspect: '9:16', duration: 10, generating: false },
+    // Prompt enrichment toggles — per-form so Hugo can A/B per pipeline.
+    // Defaults match where enrichment helps most (video especially).
+    // Persisted in init() via $watch.
+    enrich: {
+      swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.swap')  !== '0') : true,
+      image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.image') !== '0') : true,
+      video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.video') !== '0') : true,
+      reel:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.reel')  !== '0') : true,
+    },
+    // 🎬 AI Director toggles — opt-in Claude Opus agent that writes tailored
+    // per-(character, scene, variant) prompts. Slower (~15-25s) and pricier
+    // (~$0.05) than ✨ enrich, but produces character-specific prompts that
+    // reference visible features. Default OFF; persisted via $watch.
+    // `reel` slot kept false in v1 (reel uses its own pipeline).
+    director: {
+      swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.swap')  === '1') : false,
+      image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.image') === '1') : false,
+      video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.video') === '1') : false,
+      reel:  false,
+    },
     avatarGen: { model: 'heygen-avatar-5', script: '', avatarId: '', voiceId: '', voiceProvider: 'heygen', aspect: '9:16', generating: false },
     audioGen: { model: 'elevenlabs-vc', voiceId: '', sourceAudio: null, script: '', generating: false },
     // B-roll: audio → transcript → planned visual prompts → clips → final mp4
@@ -132,7 +152,25 @@ function studio() {
         all_caps: null, shadow: null, alignment: null, outline: null,
       },
       lastResult: null,            // {output_url, kind: 'trim'|'captions', ...}
+      // --- CapCut-style caption editor ---
+      // Visible only when the user clicks "Edit captions" on a finished
+      // caption render. Mirrors Submagic's transcript edit: each card row
+      // shows start/end + the words; user retunes timing or fixes
+      // misheard words, then "Save & re-render" posts edits back.
+      captionEditOpen: false,
+      captionEditMode: 'line',       // 'line' (group by words_per_card) | 'word' (per-word fine-tune)
+      // The editable transcript. Initialized from lastResult.words when the
+      // panel opens; saved back to /api/editor/rerender as words_json.
+      editedWords: [],
+      savingCaptionEdits: false,
     },
+    // --- Visual scrubbing timeline state (kept at top level for Alpine
+    // x-show / x-bind brevity in markup; logically belongs to the caption
+    // editor). `playheadSecs` is driven by the Remotion Player's
+    // frameupdate event during playback OR by the user dragging the
+    // playhead. `isScrubbing` blocks the auto-follow from fighting the user.
+    playheadSecs: 0,
+    isScrubbing: false,
     // --- Studio-specific state, top-level so HTML can bind directly ---
     propTab: 'template',
     promptDropActive: false,         // highlights prompt area on file drag-over
@@ -168,6 +206,10 @@ function studio() {
     multiResult: null,             // last response from /multi_auto_edit
     swapPrompt: '',
     swapModel: 'gpt-image',
+    // Step-4 video provider for the swap flow. Defaults to grok-imagine for
+    // back-compat; users can switch to Kling / Veo / Runway / Luma / Pika /
+    // Hailuo / Sora / Wan / Seedance / Higgsfield via the picker.
+    swapVideoModel: 'grok-imagine',
     swapDefaultPrompt: '',          // effective default (project's if set, else global)
     swapGlobalDefaultPrompt: '',    // always the global pipeline.GENERATION_PROMPT
     swapProjectDefaultPrompt: '',   // current project's override, if any
@@ -210,7 +252,13 @@ function studio() {
     },
     _genPollTimer: null,
     generating: false,
+    // Legacy single-prompt; kept as a buffer for the single-scene case to
+    // simplify x-model binding. New flow uses `movementPrompts` (dict).
     movementPrompt: '',
+    // Per-scene movement prompts: scene_id → string. Hugo's multi-scene
+    // jobs get one textarea per scene in Step 4; this dict is what posts
+    // to /api/jobs/{id}/movement.
+    movementPrompts: {},
     editingVariant: null,    // {char_id, variant_id}
     editPrompt: '',
     editingTitle: false,
@@ -280,6 +328,15 @@ function studio() {
       this._requestNotifPermission();
       this.$watch('notif.os',    v => localStorage.setItem('notif.os',    v ? '1' : '0'));
       this.$watch('notif.sound', v => localStorage.setItem('notif.sound', v ? '1' : '0'));
+      // Persist enrichment toggles per-pipeline.
+      ['swap', 'image', 'video', 'reel'].forEach(k => {
+        this.$watch(`enrich.${k}`, v => localStorage.setItem(`enrich.${k}`, v ? '1' : '0'));
+      });
+      // Persist 🎬 AI Director toggles per-pipeline (swap/image/video only).
+      // Skip `reel` — kept false in v1, no UI toggle.
+      ['swap', 'image', 'video'].forEach(k => {
+        this.$watch(`director.${k}`, v => localStorage.setItem(`director.${k}`, v ? '1' : '0'));
+      });
       // Drive the Remotion preview: react to template / overrides / source-video
       // changes so the in-browser player mirrors what the server will render.
       this.$watch('editor.template', () => this._refreshRemotionPreview());
@@ -290,6 +347,14 @@ function studio() {
        'margin_v','margin_h','highlight_color','box','all_caps',
        'outline','shadow','alignment'].forEach(k => {
         this.$watch(`editor.overrides.${k}`, () => this._refreshRemotionPreview());
+      });
+      // Live preview: rerender Remotion when the caption editor's transcript
+      // changes. Debounced (180ms) so per-keystroke retyping doesn't spam
+      // re-mounts — Remotion's mount/unmount is cheap but not free.
+      this.$watch('editor.captionEditOpen', () => this._refreshRemotionPreview());
+      this.$watch('editor.editedWords', () => {
+        if (this._editedWordsTimer) clearTimeout(this._editedWordsTimer);
+        this._editedWordsTimer = setTimeout(() => this._refreshRemotionPreview(), 180);
       });
       // Poll in-flight generations every 4s
       this._genPollTimer = setInterval(() => this.pollActiveGens(), 4000);
@@ -1202,6 +1267,13 @@ function studio() {
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         if (this.editor.rerenderTrimStart > 0) fd.append('trim_start_secs', this.editor.rerenderTrimStart);
         if (this.editor.rerenderTrimEnd > 0) fd.append('trim_end_secs', this.editor.rerenderTrimEnd);
+        // If the user edited captions, send the modified words back so the
+        // server persists + re-renders against THEM. Skip when unchanged
+        // to keep the rerender path identical to the no-edit case.
+        if (this.editor.captionEditOpen && this.editor.editedWords.length) {
+          const cleanWords = this._editedWordsForPost();
+          if (cleanWords) fd.append('words_json', JSON.stringify(cleanWords));
+        }
         const r = await fetch('/api/editor/rerender', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Rerender failed: ' + await r.text()); return; }
         const data = await r.json();
@@ -1225,6 +1297,424 @@ function studio() {
       } finally {
         this.editor.rerendering = false;
       }
+    },
+
+    // --- CapCut/Submagic-style caption editor ---------------------------
+    //
+    // The transcript comes back from Whisper as word-level `{text, start, end}`
+    // entries. The user can now:
+    //   - retune per-word start/end (precision drag handles in the UI)
+    //   - fix misheard words inline
+    //   - split / merge words via the per-word panel
+    // Submit triggers /api/editor/rerender with `words_json=...` which
+    // persists the edits back to `words.json` so subsequent rerenders pick
+    // them up automatically.
+
+    openCaptionEditor() {
+      const words = this.editor.lastResult?.captions?.words
+        || this.editor.lastResult?.words
+        || [];
+      if (!words.length) {
+        this.notifyError('No transcript on this render to edit');
+        return;
+      }
+      // Deep clone so live mutations don't mutate `lastResult.words`.
+      this.editor.editedWords = words.map(w => ({
+        text: String(w.text || ''),
+        start: Number(w.start) || 0,
+        end: Number(w.end) || 0,
+      }));
+      this.editor.captionEditOpen = true;
+      this.playheadSecs = 0;
+      // Make sure the rerender panel is open too — the Save button lives
+      // inside that flow.
+      this.editor.rerenderOpen = true;
+      // Subscribe to the Remotion Player's frameupdate so the playhead
+      // follows playback automatically.
+      this._attachPlayheadFollower();
+    },
+
+    closeCaptionEditor() {
+      this.editor.captionEditOpen = false;
+      this._detachPlayheadFollower();
+    },
+
+    revertCaptionEdits() {
+      const words = this.editor.lastResult?.captions?.words
+        || this.editor.lastResult?.words
+        || [];
+      this.editor.editedWords = words.map(w => ({
+        text: String(w.text || ''),
+        start: Number(w.start) || 0,
+        end: Number(w.end) || 0,
+      }));
+    },
+
+    // Group editedWords into "cards" the way the renderer will. Mirrors the
+    // backend's `_group_words` so the UI shows lines exactly as they'll
+    // appear on the rendered video. `words_per_card` honors the user's
+    // override; falls back to the template default.
+    captionCards() {
+      const perCard = Math.max(1, parseInt(
+        this.editor.rerenderOverrides.words_per_card
+          ?? this._activeOverrides().words_per_card
+          ?? this._currentTemplateInfo()?.words_per_card
+          ?? 3,
+      10) || 3);
+      const cards = [];
+      for (let i = 0; i < this.editor.editedWords.length; i += perCard) {
+        const slice = this.editor.editedWords.slice(i, i + perCard);
+        if (!slice.length) continue;
+        cards.push({
+          startIdx: i,
+          endIdx: i + slice.length - 1,
+          start: slice[0].start,
+          end: slice[slice.length - 1].end,
+          words: slice,
+        });
+      }
+      return cards;
+    },
+
+    _currentTemplateInfo() {
+      const slug = this.editor.rerenderTemplate || this.editor.template;
+      return (this.editorTemplates || []).find(t => t.slug === slug);
+    },
+
+    // Adjust a single word's start time (clamped between previous word's
+    // end and this word's own end). Used by the per-word drag handles.
+    setWordStart(idx, newStart) {
+      const ws = this.editor.editedWords;
+      if (idx < 0 || idx >= ws.length) return;
+      const min = idx === 0 ? 0 : ws[idx - 1].end;
+      const max = ws[idx].end - 0.02;  // keep a tiny non-zero duration
+      ws[idx].start = Math.min(max, Math.max(min, parseFloat(newStart) || 0));
+    },
+
+    setWordEnd(idx, newEnd) {
+      const ws = this.editor.editedWords;
+      if (idx < 0 || idx >= ws.length) return;
+      const min = ws[idx].start + 0.02;
+      const max = idx === ws.length - 1
+        ? (ws[idx].end + 60)  // open-ended at the end (clamped to +60s)
+        : ws[idx + 1].start;
+      ws[idx].end = Math.min(max, Math.max(min, parseFloat(newEnd) || 0));
+    },
+
+    setWordText(idx, newText) {
+      const ws = this.editor.editedWords;
+      if (idx < 0 || idx >= ws.length) return;
+      ws[idx].text = String(newText || '');
+    },
+
+    // Split one word into two equal-time halves at its midpoint. Useful
+    // when Whisper merged two words. Inserts a placeholder right after.
+    splitWord(idx) {
+      const ws = this.editor.editedWords;
+      if (idx < 0 || idx >= ws.length) return;
+      const w = ws[idx];
+      const mid = (w.start + w.end) / 2;
+      const newWord = { text: '', start: mid, end: w.end };
+      ws[idx] = { ...w, end: mid };
+      ws.splice(idx + 1, 0, newWord);
+    },
+
+    // Merge a word into its previous neighbor (concatenate text + extend
+    // the previous word's end to swallow this one).
+    mergeWordLeft(idx) {
+      const ws = this.editor.editedWords;
+      if (idx <= 0 || idx >= ws.length) return;
+      const cur = ws[idx];
+      const prev = ws[idx - 1];
+      prev.text = `${prev.text} ${cur.text}`.trim();
+      prev.end = cur.end;
+      ws.splice(idx, 1);
+    },
+
+    removeWord(idx) {
+      const ws = this.editor.editedWords;
+      if (idx < 0 || idx >= ws.length) return;
+      ws.splice(idx, 1);
+    },
+
+    // True iff editedWords differs from the original lastResult.words —
+    // gates the "Save & re-render" button and the "Unsaved" badge.
+    captionEditsDirty() {
+      const orig = this.editor.lastResult?.captions?.words
+        || this.editor.lastResult?.words
+        || [];
+      const cur = this.editor.editedWords || [];
+      if (orig.length !== cur.length) return true;
+      for (let i = 0; i < cur.length; i++) {
+        const a = orig[i], b = cur[i];
+        if (!a || a.text !== b.text) return true;
+        if (Math.abs((a.start || 0) - (b.start || 0)) > 0.005) return true;
+        if (Math.abs((a.end || 0) - (b.end || 0)) > 0.005) return true;
+      }
+      return false;
+    },
+
+    // Sanitize before posting: drop blanks, sort by start. Returns null
+    // when nothing meaningful changed (so submitRerender doesn't send a
+    // pointless words_json field).
+    _editedWordsForPost() {
+      if (!this.captionEditsDirty()) return null;
+      const cleaned = (this.editor.editedWords || [])
+        .map(w => ({
+          text: String(w.text || '').trim(),
+          start: Math.max(0, Number(w.start) || 0),
+          end: Math.max(0, Number(w.end) || 0),
+        }))
+        .filter(w => w.text && w.end > w.start);
+      cleaned.sort((a, b) => a.start - b.start);
+      return cleaned.length ? cleaned : null;
+    },
+
+    fmtSecs(s) {
+      const v = Math.max(0, Number(s) || 0);
+      const mm = Math.floor(v / 60);
+      const ss = (v - mm * 60).toFixed(2);
+      return `${mm}:${ss.padStart(5, '0')}`;
+    },
+
+    // --- Visual scrubbing playhead + draggable timeline cards ----------
+    //
+    // Render the caption cards as positioned rectangles on a horizontal
+    // track. A vertical playhead line moves across them, auto-following
+    // the Remotion preview during playback and draggable for scrubbing.
+    // Dragging a card's left/right edge retimes the first/last word in
+    // that card; dragging the card body shifts ALL words in the card.
+
+    // Total timeline length — the longer of (last word end) and (video
+    // duration), since the user may want to retime past the last word.
+    captionTimelineLength() {
+      const words = this.editor.editedWords || [];
+      const lastEnd = words.length ? Math.max(...words.map(w => w.end || 0)) : 0;
+      const videoDur = this.editor.sourceVideo?.durationSecs
+        || this.editor.sourceVideo?.duration
+        || this.editor.lastResult?.duration
+        || 0;
+      return Math.max(0.5, lastEnd, videoDur);
+    },
+
+    // Map a time-in-seconds to a percentage offset across the timeline.
+    secsToPercent(secs) {
+      const total = this.captionTimelineLength();
+      return Math.max(0, Math.min(100, (Number(secs) || 0) / total * 100));
+    },
+
+    // True iff the playhead is currently inside this card's [start, end].
+    isCardActiveAtPlayhead(card) {
+      const p = this.playheadSecs;
+      return card.start <= p && p <= card.end;
+    },
+
+    // Open the Remotion preview's frame-update listener so the playhead
+    // follows playback. Called automatically when the caption editor opens
+    // and the Remotion bundle is available.
+    _attachPlayheadFollower() {
+      this._detachPlayheadFollower();
+      if (typeof window === 'undefined' || !window.RemotionPreview?.onFrameUpdate) return;
+      // Defer slightly so the Player has time to mount.
+      this._followerAttachTimer = setTimeout(() => {
+        if (!this.editor.captionEditOpen) return;
+        try {
+          this._unsubFollower = window.RemotionPreview.onFrameUpdate(
+            'remotion-preview-host',
+            (secs) => {
+              // Ignore frame events while the user is actively dragging —
+              // they're the source of truth.
+              if (this.isScrubbing) return;
+              this.playheadSecs = secs;
+            },
+          );
+        } catch { /* player not ready */ }
+      }, 250);
+    },
+
+    _detachPlayheadFollower() {
+      if (this._followerAttachTimer) {
+        clearTimeout(this._followerAttachTimer);
+        this._followerAttachTimer = null;
+      }
+      if (typeof this._unsubFollower === 'function') {
+        try { this._unsubFollower(); } catch { /* nothing */ }
+        this._unsubFollower = null;
+      }
+    },
+
+    // Click anywhere on the timeline track → jump playhead AND seek
+    // the Remotion preview to that point. Same handler used for the
+    // mousedown that starts a playhead drag.
+    seekTimeline(ev) {
+      const track = ev.currentTarget;
+      const rect = track.getBoundingClientRect();
+      const x = (ev.clientX ?? (ev.touches && ev.touches[0]?.clientX)) - rect.left;
+      const ratio = Math.max(0, Math.min(1, x / Math.max(1, rect.width)));
+      const secs = ratio * this.captionTimelineLength();
+      this.playheadSecs = secs;
+      this._seekRemotion(secs);
+    },
+
+    startPlayheadDrag(ev) {
+      ev.preventDefault();
+      const track = ev.currentTarget.closest('.cap-tl-track');
+      if (!track) return;
+      this.isScrubbing = true;
+      // Pause playback so the user can scrub freely.
+      try { window.RemotionPreview?.pause('remotion-preview-host'); } catch { /* nothing */ }
+      const rect = track.getBoundingClientRect();
+      const onMove = (m) => {
+        const x = (m.clientX ?? (m.touches && m.touches[0]?.clientX)) - rect.left;
+        const ratio = Math.max(0, Math.min(1, x / Math.max(1, rect.width)));
+        const secs = ratio * this.captionTimelineLength();
+        this.playheadSecs = secs;
+        this._seekRemotion(secs);
+      };
+      const onUp = () => {
+        this.isScrubbing = false;
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onUp);
+    },
+
+    _seekRemotion(secs) {
+      try { window.RemotionPreview?.seekToSecs('remotion-preview-host', secs); }
+      catch { /* nothing */ }
+    },
+
+    // Click on a card → jump playhead to its start (snap-to-card scrubbing).
+    seekToCard(card) {
+      this.playheadSecs = card.start;
+      this._seekRemotion(card.start);
+    },
+
+    togglePlayhead() {
+      if (typeof window === 'undefined' || !window.RemotionPreview) return;
+      const playing = window.RemotionPreview.isPlaying('remotion-preview-host');
+      if (playing) window.RemotionPreview.pause('remotion-preview-host');
+      else window.RemotionPreview.play('remotion-preview-host');
+    },
+
+    // Drag the LEFT edge of a card → adjust first word's start time.
+    // Clamped between previous card's end and this card's existing end.
+    startCardLeftDrag(ev, card) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const track = ev.currentTarget.closest('.cap-tl-track');
+      if (!track) return;
+      const rect = track.getBoundingClientRect();
+      const onMove = (m) => {
+        const x = (m.clientX ?? (m.touches && m.touches[0]?.clientX)) - rect.left;
+        const ratio = Math.max(0, Math.min(1, x / Math.max(1, rect.width)));
+        const newStart = ratio * this.captionTimelineLength();
+        // Clamp: must stay after previous word's end (gap from card-1's last
+        // word) and at least 0.05s before this card's last-word end.
+        const cards = this.captionCards();
+        const cardIdx = cards.findIndex(c => c.startIdx === card.startIdx);
+        const prevEnd = cardIdx > 0 ? cards[cardIdx - 1].end : 0;
+        const max = card.words[card.words.length - 1].end - 0.05;
+        const clamped = Math.max(prevEnd, Math.min(max, newStart));
+        this.setWordStart(card.startIdx, clamped);
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onUp);
+    },
+
+    // Drag the RIGHT edge of a card → adjust last word's end time.
+    startCardRightDrag(ev, card) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const track = ev.currentTarget.closest('.cap-tl-track');
+      if (!track) return;
+      const rect = track.getBoundingClientRect();
+      const onMove = (m) => {
+        const x = (m.clientX ?? (m.touches && m.touches[0]?.clientX)) - rect.left;
+        const ratio = Math.max(0, Math.min(1, x / Math.max(1, rect.width)));
+        const newEnd = ratio * this.captionTimelineLength();
+        const cards = this.captionCards();
+        const cardIdx = cards.findIndex(c => c.startIdx === card.startIdx);
+        const nextStart = cardIdx < cards.length - 1
+          ? cards[cardIdx + 1].start
+          : this.captionTimelineLength();
+        const min = card.words[0].start + 0.05;
+        const clamped = Math.min(nextStart, Math.max(min, newEnd));
+        // setWordEnd targets the LAST word in the card.
+        this.setWordEnd(card.endIdx, clamped);
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onUp);
+    },
+
+    // Drag the BODY of a card → shift every word in the card by the same
+    // delta. Clamped so the whole card stays within [prev_card.end, next_card.start].
+    // Click-without-drag (move < 4px) falls back to seeking to the card.
+    startCardBodyDrag(ev, card) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const track = ev.currentTarget.closest('.cap-tl-track');
+      if (!track) return;
+      const rect = track.getBoundingClientRect();
+      const startX = ev.clientX ?? (ev.touches && ev.touches[0]?.clientX);
+      const originalWords = card.words.map((w, i) => ({
+        start: w.start, end: w.end, idx: card.startIdx + i,
+      }));
+      const cards = this.captionCards();
+      const cardIdx = cards.findIndex(c => c.startIdx === card.startIdx);
+      const prevEnd = cardIdx > 0 ? cards[cardIdx - 1].end : 0;
+      const nextStart = cardIdx < cards.length - 1
+        ? cards[cardIdx + 1].start
+        : this.captionTimelineLength();
+      const minDelta = prevEnd - card.start;
+      const maxDelta = nextStart - card.end;
+      let dragged = false;
+
+      const onMove = (m) => {
+        const x = m.clientX ?? (m.touches && m.touches[0]?.clientX);
+        if (!dragged && Math.abs(x - startX) < 4) return;  // tap, not drag
+        dragged = true;
+        const pixelsPerSec = Math.max(1, rect.width) / Math.max(0.01, this.captionTimelineLength());
+        let delta = (x - startX) / pixelsPerSec;
+        delta = Math.max(minDelta, Math.min(maxDelta, delta));
+        for (const ow of originalWords) {
+          this.editor.editedWords[ow.idx].start = Math.max(0, ow.start + delta);
+          this.editor.editedWords[ow.idx].end = Math.max(0.02, ow.end + delta);
+        }
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('touchmove', onMove);
+        window.removeEventListener('touchend', onUp);
+        // No drag happened → treat as a click → seek to this card.
+        if (!dragged) this.seekToCard(card);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      window.addEventListener('touchmove', onMove, { passive: false });
+      window.addEventListener('touchend', onUp);
     },
 
     // --- CapCut-style timeline: trim + split + delete + reorder ----------
@@ -1824,7 +2314,16 @@ function studio() {
         accent: '#FFD400', fontFamily: 'Inter', sizeScale: 1.0,
         positionPct: { x: 0.5, y: 0.78 }, allCaps: true, wordsPerCard: 3,
       };
-      const realWords = this.editor?.lastResult?.words;
+      // Caption-editor preview: when the user is editing, prefer the
+      // currently-edited transcript so the preview updates LIVE as they
+      // retime / fix words. Falls back to the cached `lastResult.words`
+      // when the editor isn't open.
+      const editing = this.editor?.captionEditOpen
+                       && Array.isArray(this.editor?.editedWords)
+                       && this.editor.editedWords.length > 0;
+      const realWords = editing
+        ? this.editor.editedWords
+        : this.editor?.lastResult?.words;
       const words = (Array.isArray(realWords) && realWords.length > 0)
         ? realWords
         : this._remotionSampleWords();
@@ -2140,6 +2639,8 @@ function studio() {
         fd.append('model', this.imageGen.model);
         fd.append('prompt', this.imageGen.prompt.trim());
         if (this.imageGen.aspect) fd.append('aspect_ratio', this.imageGen.aspect);
+        if (this.enrich.image) fd.append('enrich_prompt', 'true');
+        if (this.director.image && this.health.anthropic_key) fd.append('use_director', 'true');
         for (const r of this.imageGen.refs) fd.append('files', r.file);
         const resp = await fetch('/api/generations', { method: 'POST', body: fd });
         if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
@@ -2179,6 +2680,8 @@ function studio() {
         fd.append('prompt', this.videoGen.prompt.trim());
         if (this.videoGen.aspect) fd.append('aspect_ratio', this.videoGen.aspect);
         if (this.videoGen.duration) fd.append('duration_secs', String(this.videoGen.duration));
+        if (this.enrich.video) fd.append('enrich_prompt', 'true');
+        if (this.director.video && this.health.anthropic_key) fd.append('use_director', 'true');
         fd.append('files', this.videoGen.ref.file);
         const resp = await fetch('/api/generations', { method: 'POST', body: fd });
         if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
@@ -2846,9 +3349,24 @@ function studio() {
             character_ids: this.selectedCharacters,
             images_per_character: this.imagesPerChar,
             project_id: this.currentProjectId,
-            prompt: (this.swapPrompt || '').trim() || null,
+            // Only send `prompt` as a CUSTOM override when it differs from
+            // the default — otherwise the backend treats unchanged default
+            // text as a user-customised prompt and (with enrich on) runs it
+            // through GPT-4o, which destroys the constraint phrasing
+            // ("exact same pose / position / stuff") and produces a generic
+            // image instead of a true swap.
+            prompt: this.swapPromptIsDefault() ? null
+                       : ((this.swapPrompt || '').trim() || null),
             image_model: this.swapModel,
             character_source_image_ids: Object.keys(overrides).length ? overrides : null,
+            // Enrich only matters when the user TYPED a short custom prompt.
+            // If they're using the default GENERATION_PROMPT (already very
+            // detailed + constraint-heavy), enrichment hurts more than helps.
+            enrich_prompt: !!this.enrich.swap && !this.swapPromptIsDefault(),
+            // 🎬 AI Director — opt-in Claude Opus path. Independent of
+            // enrich; works even when prompt is default since Director uses
+            // vision on the reference images. Requires ANTHROPIC_API_KEY.
+            use_director: !!this.director.swap && !!this.health.anthropic_key,
           }),
         });
         if (!r.ok) { this.notifyError('Job creation failed: ' + await r.text()); return; }
@@ -2896,8 +3414,22 @@ function studio() {
       this.imagesPerChar = this.job.images_per_character || 1;
       this.videosPerChar = this.job.videos_per_character || 1;
       this.movementPrompt = this.job.movement_prompt || '';
+      // Per-scene prompts: prefer the server dict, fall back to broadcasting
+      // the legacy singular field across every scene (so older jobs render
+      // their existing prompt in each textarea).
+      this.movementPrompts = {};
+      const _scenes = this.job.scenes || (this.job.scene_id
+        ? [{ scene_id: this.job.scene_id }] : []);
+      const _fromServer = this.job.movement_prompts || {};
+      const _hasDict = Object.keys(_fromServer).length > 0;
+      for (const s of _scenes) {
+        this.movementPrompts[s.scene_id] = _hasDict
+          ? (_fromServer[s.scene_id] || '')
+          : (this.job.movement_prompt || '');
+      }
       this.swapPrompt = this.job.prompt || this.swapDefaultPrompt;
       this.swapModel = this.job.image_model || 'gpt-image';
+      this.swapVideoModel = this.job.video_model || 'grok-imagine';
       this.editingVariant = null;
       this.editingTitle = false;
       this.connectWS(jobId);
@@ -3111,19 +3643,142 @@ function studio() {
       this._scheduleSidebarRefresh();
     },
 
+    // True iff variant `v` is currently approved on character `jc`. Multi-
+    // scene jobs may have multiple approvals (one per scene), all of which
+    // animate in parallel in Step 4. Falls back to legacy single-field for
+    // jobs created before the multi-approve migration ran.
+    isApproved(jc, v) {
+      if (!jc || !v) return false;
+      const ids = jc.approved_variant_ids || [];
+      if (ids.includes(v.variant_id)) return true;
+      return jc.approved_variant_id === v.variant_id;
+    },
+
+    // Distinct (char, scene) pairs that have ≥1 ready variant but no
+    // approval yet. Multi-scene jobs: a char with 3 scenes pending counts
+    // as 3 here, not 1. Drives the "Approve all (N)" counter.
+    _pendingApprovalPairs() {
+      if (!this.job) return [];
+      const sceneIds = (this.job.scenes || []).map(s => s.scene_id);
+      const fallbackScene = sceneIds[0] || this.job.scene_id || null;
+      const effectiveScenes = sceneIds.length ? sceneIds : [fallbackScene];
+      const pairs = [];
+      for (const jc of Object.values(this.job.characters || {})) {
+        if (['rejected', 'animating', 'done'].includes(jc.status)) continue;
+        const approved = new Set(jc.approved_variant_ids || []);
+        if (jc.approved_variant_id) approved.add(jc.approved_variant_id);
+        // Which scenes does this char already have an approval for?
+        const coveredScenes = new Set();
+        for (const v of (jc.images || [])) {
+          if (approved.has(v.variant_id)) {
+            coveredScenes.add(v.scene_id || fallbackScene);
+          }
+        }
+        for (const sid of effectiveScenes) {
+          if (coveredScenes.has(sid)) continue;
+          const hasReady = (jc.images || []).some(
+            v => (v.scene_id || fallbackScene) === sid && v.status === 'ready',
+          );
+          if (hasReady) pairs.push({ char_id: jc.char_id, scene_id: sid });
+        }
+      }
+      return pairs;
+    },
+
+    canApproveAll() {
+      if (!this.job || this.job.movement_prompt) return false;
+      return this._pendingApprovalPairs().length > 0;
+    },
+
+    pendingApprovalCount() {
+      return this._pendingApprovalPairs().length;
+    },
+
+    async approveAll() {
+      if (!this.job) return;
+      const r = await fetch('/api/jobs/' + this.job.job_id + '/approve_all', {
+        method: 'POST',
+      });
+      if (!r.ok) { this.notifyError('Approve all failed: ' + await r.text()); return; }
+      const data = await r.json();
+      this.job = data.job;
+      this._scheduleSidebarRefresh();
+    },
+
     async submitMovement() {
-      if (!this.job || !this.movementPrompt.trim()) return;
+      if (!this.job) return;
+      // Build the dict from the per-scene textareas. Trim + drop empties so
+      // the server-side validator (which requires a prompt for every scene
+      // that has approved variants) gets a clean payload.
+      const prompts = {};
+      for (const [sid, raw] of Object.entries(this.movementPrompts || {})) {
+        const t = (raw || '').trim();
+        if (t) prompts[sid] = t;
+      }
+      if (Object.keys(prompts).length === 0) {
+        this.notifyError('Add a movement prompt for at least one scene first');
+        return;
+      }
       const r = await fetch('/api/jobs/' + this.job.job_id + '/movement', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          prompt: this.movementPrompt.trim(),
+          movement_prompts: prompts,
           videos_per_character: this.videosPerChar,
+          video_model: this.swapVideoModel || 'grok-imagine',
         }),
       });
       if (!r.ok) { this.notifyError('Movement submit failed: ' + await r.text()); return; }
       this.job = await r.json();
       this._scheduleSidebarRefresh();
+    },
+
+    // Which scenes (by scene_id) actually need a movement prompt? A scene
+    // needs one iff at least one character has an approved variant whose
+    // scene_id matches. Legacy variants with scene_id=null map to the job's
+    // primary scene. Drives the Step-4 textareas + the submit-enabled flag.
+    scenesNeedingMovementPrompts() {
+      if (!this.job) return [];
+      const scenes = this.job.scenes || [];
+      const primaryId = scenes[0]?.scene_id || this.job.scene_id || null;
+      const needed = new Set();
+      for (const jc of Object.values(this.job.characters || {})) {
+        const approved = new Set(jc.approved_variant_ids || []);
+        if (jc.approved_variant_id) approved.add(jc.approved_variant_id);
+        for (const v of (jc.images || [])) {
+          if (!approved.has(v.variant_id)) continue;
+          needed.add(v.scene_id || primaryId);
+        }
+      }
+      return scenes.filter(s => needed.has(s.scene_id));
+    },
+
+    canSubmitMovement() {
+      if (!this.job || this.job.movement_prompt) return false;
+      if (!this.videoModelAvailable()) return false;
+      const required = this.scenesNeedingMovementPrompts();
+      if (required.length === 0) return false;
+      return required.every(s => (this.movementPrompts[s.scene_id] || '').trim());
+    },
+
+    // For the locked summary: rows of {sceneIndex, url, prompt} so the UI
+    // can show what was submitted scene by scene.
+    movementPromptRows() {
+      if (!this.job) return [];
+      const dict = this.job.movement_prompts || {};
+      const scenes = this.job.scenes || [];
+      const rows = [];
+      scenes.forEach((s, idx) => {
+        const p = dict[s.scene_id];
+        if (p) rows.push({ sceneIndex: idx + 1, url: s.url, prompt: p,
+                            scene_id: s.scene_id });
+      });
+      // Fall back to legacy single prompt if dict is empty (very old jobs).
+      if (rows.length === 0 && this.job.movement_prompt) {
+        rows.push({ sceneIndex: 1, url: scenes[0]?.url,
+                     prompt: this.job.movement_prompt, scene_id: null });
+      }
+      return rows;
     },
 
     async retryVideo(charId, videoId) {
@@ -3146,6 +3801,7 @@ function studio() {
       if (!r.ok) { this.notifyError('Unlock failed: ' + await r.text()); return; }
       this.job = await r.json();
       this.movementPrompt = '';
+      this.movementPrompts = {};
       this._scheduleSidebarRefresh();
     },
 
@@ -3154,6 +3810,32 @@ function studio() {
       return !Object.values(this.job.characters).some(
         c => (c.videos || []).some(v => v.status === 'done')
       );
+    },
+
+    // --- Step-4 video model helpers ----------------------------------------
+
+    // Lookup the chosen video model in the models registry, falling back to
+    // a minimal stub so the UI still renders before /api/generations/models
+    // has loaded.
+    _videoModelEntry() {
+      const slug = this.swapVideoModel || 'grok-imagine';
+      return (this.models.video || []).find(m => m.slug === slug)
+        || { slug, label: slug, available: true };
+    },
+
+    videoModelLabel() {
+      return this._videoModelEntry().label;
+    },
+
+    videoModelAvailable() {
+      return !!this._videoModelEntry().available;
+    },
+
+    videoModelLockedReason() {
+      const m = this._videoModelEntry();
+      if (m.available) return '';
+      // Match the label-style hint used elsewhere in the app for missing keys.
+      return `${m.label} is locked — add the matching API key in .env to unlock.`;
     },
 
     openEdit(charId, variantId) {
@@ -3195,11 +3877,23 @@ function studio() {
       return !!(this.job && this.job.movement_prompt);
     },
 
+    // Total number of APPROVED IMAGES across all characters (multi-scene
+    // jobs may have multiple per char — one per scene). Drives the Step-4
+    // total-video calculation and cost estimate. Falls back to counting the
+    // legacy single field for very old jobs whose state predates the
+    // multi-approve migration.
     approvedCount() {
       if (!this.job) return 0;
-      return Object.values(this.job.characters)
-        .filter(c => c.status === 'approved' || ['animating','done'].includes(c.status))
-        .length;
+      let total = 0;
+      for (const c of Object.values(this.job.characters || {})) {
+        const ids = c.approved_variant_ids || [];
+        if (ids.length) {
+          total += ids.length;
+        } else if (c.approved_variant_id) {
+          total += 1;
+        }
+      }
+      return total;
     },
 
     // Rough per-video cost in USD. Override via localStorage 'video_price_usd'
@@ -3247,6 +3941,7 @@ function studio() {
       // override this with the project's preset if there is one.
       this.selectedCharacters = (this.library || []).map(c => c.char_id);
       this.movementPrompt = '';
+      this.movementPrompts = {};
       this.editingVariant = null;
       this.editPrompt = '';
       this.editingTitle = false;
@@ -3254,6 +3949,7 @@ function studio() {
       this.jobCost = null;
       this.swapPrompt = this.swapDefaultPrompt;
       this.swapModel = 'gpt-image';
+      this.swapVideoModel = 'grok-imagine';
     },
 
     connectWS(jobId) {
@@ -3499,6 +4195,7 @@ function studio() {
         fd.append('image_model', this.reel.model);
         fd.append('aspect_ratio', this.reel.aspect);
         if (this.reel.miniApproval) fd.append('mini_approval', 'true');
+        if (this.enrich.reel) fd.append('enrich_prompt', 'true');
         const r = await fetch('/api/reel/jobs', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Reel submit failed: ' + await r.text()); return; }
         const job = await r.json();
