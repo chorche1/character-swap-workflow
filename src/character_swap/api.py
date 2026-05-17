@@ -543,7 +543,7 @@ async def delete_character_image(char_id: str, image_id: str) -> dict:
         for project in s.state.projects.values():
             if char_id in project.character_ids:
                 project.character_ids = [c for c in project.character_ids if c != char_id]
-        s.save()
+                s.update_project(project)
         return {"ok": True, "character_deleted": True}
 
     if asset.primary_image_id == image_id:
@@ -616,6 +616,7 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
     asset = s.get_character(char_id)
     if asset is None:
         raise HTTPException(404, "Character not found")
+    affected_jobs: list = []
     if body.name is not None:
         new_name = body.name.strip()
         if not new_name:
@@ -625,6 +626,7 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
         for job in s.state.jobs.values():
             if char_id in job.characters:
                 job.characters[char_id].name = new_name
+                affected_jobs.append(job)
     if body.voice_id is not None:
         # Empty string clears the preset voice (user picked "— none —").
         new_voice = body.voice_id.strip()
@@ -637,7 +639,9 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
     elif body.voice_provider is not None:
         # Allow swapping provider without changing voice_id (rare).
         asset.voice_provider = body.voice_provider.strip() or None
-    s.save()
+    s.update_character(asset)
+    for job in affected_jobs:
+        s.update_job(job)
     return _char_to_dict(asset)
 
 
@@ -651,7 +655,7 @@ async def delete_character(char_id: str) -> dict:
     for project in s.state.projects.values():
         if char_id in project.character_ids:
             project.character_ids = [c for c in project.character_ids if c != char_id]
-    s.save()
+            s.update_project(project)
     with contextlib.suppress(OSError):
         (settings.characters_dir / asset.filename).unlink(missing_ok=True)
     return {"ok": True}

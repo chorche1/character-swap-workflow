@@ -104,6 +104,10 @@ class JsonStateStore:
         self._state.characters[character.char_id] = character
         self.save()
 
+    def update_character(self, character: CharacterAsset) -> None:
+        self._state.characters[character.char_id] = character
+        self.save()
+
     def remove_character(self, char_id: str) -> CharacterAsset | None:
         return self._state.characters.pop(char_id, None)
 
@@ -200,9 +204,10 @@ class SqliteStateStore:
         return self._state
 
     def save(self) -> None:
-        # No-op: each mutator below already writes its own row(s). Kept so
-        # rare callers that explicitly call `save()` (e.g. character rename
-        # propagation in api.py) re-flush every job that may have changed.
+        # No-op for typical mutators (each writes its own row inline). Kept
+        # only as an explicit "touch" — bumps last_updated and re-flushes
+        # every job, useful when a caller has mutated job rows in bulk and
+        # doesn't want to track them individually.
         with self._lock, db.transaction(self._conn) as conn:
             for j in self._state.jobs.values():
                 db.upsert_job(conn, j)
@@ -219,6 +224,11 @@ class SqliteStateStore:
 
     # characters
     def add_character(self, character: CharacterAsset) -> None:
+        self._state.characters[character.char_id] = character
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_character(conn, character)
+
+    def update_character(self, character: CharacterAsset) -> None:
         self._state.characters[character.char_id] = character
         with self._lock, db.transaction(self._conn) as conn:
             db.upsert_character(conn, character)
