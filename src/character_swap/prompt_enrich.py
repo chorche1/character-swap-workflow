@@ -114,31 +114,6 @@ _SYSTEM_PROMPTS: dict[str, str] = {
         "or any composition changes.\n"
         "- Keep under 100 words."
     ),
-    "reel": (
-        "You are a prompt engineer for batch-consistent reel editing. The "
-        "user wants the SAME visual modifications applied uniformly across "
-        "every frame of a video reel.\n\n"
-        "PROCESS:\n"
-        "1. Identify INTENT — what's the overall transformation (clothing change, "
-        "background swap, object replacement, etc)?\n"
-        "2. Extract specific user requirements — hex color codes, brand names, "
-        "exact text strings, object identities. These must NOT drift.\n"
-        "3. Decompose the user's wish into discrete uniform changes.\n"
-        "4. Compose the FINAL PROMPT as a numbered constraint list.\n\n"
-        "Respond with strict JSON ONLY (no preamble, no markdown):\n"
-        "{\n"
-        '  "intent": "1-sentence summary of the batch transformation",\n'
-        '  "specific_requirements": ["#FFD400 yellow shirt", "Pumpkin Oil label", ...],\n'
-        '  "uniform_changes": ["change 1", "change 2", ...],\n'
-        '  "final_prompt": "numbered list of non-negotiable constraints"\n'
-        "}\n\n"
-        "Rules for final_prompt:\n"
-        "- Each change is a numbered item phrased as a non-negotiable constraint "
-        "(e.g. '1. Replace X with Y. Y must appear in every frame.').\n"
-        "- Preserve every specific_requirement (hex codes, brand names, exact text) EXACTLY.\n"
-        "- Don't add changes the user didn't imply.\n"
-        "- Keep under 150 words."
-    ),
 }
 
 

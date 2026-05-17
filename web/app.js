@@ -19,9 +19,6 @@ function studio() {
     // the job is created or the character is deselected.
     charSourceOverrides: {},
     imagesPerChar: 1,
-    // --- Reel tab state (batch-consistent image edit) -------------------
-    reelPresets: [],
-    reelJobs: [],
     // OS-level notification preferences. Persisted to localStorage in init().
     // Both default to ON; user can disable via header toggles. The chime is
     // synthesized via Web Audio API (no asset file). OS popup needs browser
@@ -36,31 +33,6 @@ function studio() {
     _lastSwapJobSnapshot: {},
     // Same idea for freeform gens: stash previous status keyed by gen_id.
     _lastGenStatus: {},
-    reel: {
-      presetId: null,
-      customPrompt: '',
-      model: 'gpt-image',
-      aspect: '9:16',
-      frames: [],           // {file, previewUrl}
-      dropActive: false,
-      submitting: false,
-      miniApproval: false,  // when true: render followers sequentially with per-frame review
-      showPresetEditor: false,
-      draftPresetName: '',
-      draftPresetBaseline: '',
-      draftPresetIsDefault: false,
-      savingPreset: false,
-      // Anchor-approval inline editor: which job is currently being edited,
-      // plus the draft prompt text being typed into the textarea.
-      anchorEditJobId: null,
-      anchorEditDraft: '',
-      // Per-frame refine inline editor (✎ button): which frame is being
-      // refined + the user's free-text correction text.
-      refineJobId: null,
-      refineFrameId: null,
-      refineCorrection: '',
-    },
-    _reelWs: null,
     videosPerChar: 1,
     job: null,
     jobsList: [],
@@ -98,18 +70,15 @@ function studio() {
       swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.swap')  !== '0') : true,
       image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.image') !== '0') : true,
       video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.video') !== '0') : true,
-      reel:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.reel')  !== '0') : true,
     },
     // 🎬 AI Director toggles — opt-in Claude Opus agent that writes tailored
     // per-(character, scene, variant) prompts. Slower (~15-25s) and pricier
     // (~$0.05) than ✨ enrich, but produces character-specific prompts that
     // reference visible features. Default OFF; persisted via $watch.
-    // `reel` slot kept false in v1 (reel uses its own pipeline).
     director: {
       swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.swap')  === '1') : false,
       image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.image') === '1') : false,
       video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.video') === '1') : false,
-      reel:  false,
     },
     avatarGen: { model: 'heygen-avatar-5', script: '', avatarId: '', voiceId: '', voiceProvider: 'heygen', aspect: '9:16', generating: false },
     audioGen: { model: 'elevenlabs-vc', voiceId: '', sourceAudio: null, script: '', generating: false },
@@ -152,6 +121,11 @@ function studio() {
         all_caps: null, shadow: null, alignment: null, outline: null,
       },
       lastResult: null,            // {output_url, kind: 'trim'|'captions', ...}
+      // Editor "Character" dropdown (Phase B). When the user picks a
+      // character from their library, its preset voice_id auto-fills
+      // `editor.voiceId`. Manual voice override still works afterwards —
+      // we only auto-fill on dropdown CHANGE, not on every render.
+      linkedCharId: '',
       // --- CapCut-style caption editor ---
       // Visible only when the user clicks "Edit captions" on a finished
       // caption render. Mirrors Submagic's transcript edit: each card row
@@ -164,6 +138,18 @@ function studio() {
       editedWords: [],
       savingCaptionEdits: false,
     },
+    // Step 6: per-character compile settings. Shared across all characters
+    // in the active job (one set of editor settings → one batch). Voice
+    // override blank → each character uses its library preset voice.
+    compileSettings: {
+      template: (typeof localStorage !== 'undefined' && localStorage.getItem('compile.template')) || 'submagic-pro',
+      enableTrim: true,
+      enableCaptions: true,
+      enableWpmNormalize: true,
+      targetWpm: parseFloat((typeof localStorage !== 'undefined' && localStorage.getItem('compile.targetWpm')) || '190') || 190,
+      voiceOverride: '',
+    },
+    compiling: false,
     // --- Visual scrubbing timeline state (kept at top level for Alpine
     // x-show / x-bind brevity in markup; logically belongs to the caption
     // editor). `playheadSecs` is driven by the Remotion Player's
@@ -290,11 +276,6 @@ function studio() {
       // the pickers are ready without waiting for a tab-switch.
       if (this.elevenlabsAvailable()) this.loadElevenlabsVoices();
       this.loadEditorTemplates();
-      // Reel: load presets + jobs eagerly so the picker has data even when
-      // the user lands directly on the Reel tab (the $watch below only fires
-      // on tab CHANGE, which doesn't happen on initial mount).
-      this.loadReelPresets();
-      this.loadReelJobs();
       await this.loadGenerations();
       await this.loadSwapDefaults();
       // Restore last-used picks per-tab so the model/voice/aspect we used
@@ -329,11 +310,10 @@ function studio() {
       this.$watch('notif.os',    v => localStorage.setItem('notif.os',    v ? '1' : '0'));
       this.$watch('notif.sound', v => localStorage.setItem('notif.sound', v ? '1' : '0'));
       // Persist enrichment toggles per-pipeline.
-      ['swap', 'image', 'video', 'reel'].forEach(k => {
+      ['swap', 'image', 'video'].forEach(k => {
         this.$watch(`enrich.${k}`, v => localStorage.setItem(`enrich.${k}`, v ? '1' : '0'));
       });
-      // Persist 🎬 AI Director toggles per-pipeline (swap/image/video only).
-      // Skip `reel` — kept false in v1, no UI toggle.
+      // Persist 🎬 AI Director toggles per-pipeline.
       ['swap', 'image', 'video'].forEach(k => {
         this.$watch(`director.${k}`, v => localStorage.setItem(`director.${k}`, v ? '1' : '0'));
       });
@@ -1475,6 +1455,92 @@ function studio() {
       const mm = Math.floor(v / 60);
       const ss = (v - mm * 60).toFixed(2);
       return `${mm}:${ss.padStart(5, '0')}`;
+    },
+
+    // --- Step 6: per-character compile -----------------------------------
+    //
+    // After Step 5 finishes generating per-(char, scene) videos, this lets
+    // the user compile ONE final MP4 per character by concatenating their
+    // scene videos in order and running through the Editor pipeline.
+
+    // Characters that have at least one approved variant AND at least one
+    // DONE video — eligible for compile.
+    compilableCharacters() {
+      if (!this.job) return {};
+      const out = {};
+      for (const [cid, jc] of Object.entries(this.job.characters || {})) {
+        const hasApproved = (jc.approved_variant_ids || []).length > 0
+          || !!jc.approved_variant_id;
+        const hasDoneVideo = (jc.videos || []).some(
+          v => v.status === 'done' && v.url,
+        );
+        if (hasApproved && hasDoneVideo) out[cid] = jc;
+      }
+      return out;
+    },
+
+    hasCompilableChars() {
+      return Object.keys(this.compilableCharacters()).length > 0;
+    },
+
+    compilableCharCount() {
+      return Object.keys(this.compilableCharacters()).length;
+    },
+
+    canCompile() {
+      return this.hasCompilableChars() && !!this.health.openai_key;
+    },
+
+    async submitCompile() {
+      if (!this.job || !this.canCompile()) return;
+      this.compiling = true;
+      try {
+        // Persist common settings so they survive page reloads.
+        try {
+          localStorage.setItem('compile.template', this.compileSettings.template);
+          localStorage.setItem('compile.targetWpm', String(this.compileSettings.targetWpm));
+        } catch (_) { /* private window etc. */ }
+
+        const body = {
+          template: this.compileSettings.template,
+          enable_trim: !!this.compileSettings.enableTrim,
+          enable_captions: !!this.compileSettings.enableCaptions,
+          enable_wpm_normalize: !!this.compileSettings.enableWpmNormalize,
+          target_wpm: Number(this.compileSettings.targetWpm) || 190,
+          voice_override: this.compileSettings.voiceOverride || null,
+        };
+        const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { this.notifyError('Compile failed: ' + await r.text()); return; }
+        this.job = await r.json();  // server flips eligible chars to compiling
+      } finally {
+        this.compiling = false;
+      }
+    },
+
+    // Per-character retry (called from the failed-card's ↻). Just resubmits
+    // with `char_ids: [cid]` so only that character re-compiles.
+    async retryCompile(charId) {
+      if (!this.job) return;
+      const body = {
+        template: this.compileSettings.template,
+        enable_trim: !!this.compileSettings.enableTrim,
+        enable_captions: !!this.compileSettings.enableCaptions,
+        enable_wpm_normalize: !!this.compileSettings.enableWpmNormalize,
+        target_wpm: Number(this.compileSettings.targetWpm) || 190,
+        voice_override: this.compileSettings.voiceOverride || null,
+        char_ids: [charId],
+      };
+      const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { this.notifyError('Retry compile failed: ' + await r.text()); return; }
+      this.job = await r.json();
     },
 
     // --- Visual scrubbing playhead + draggable timeline cards ----------
@@ -3324,6 +3390,36 @@ function studio() {
       if (this.job) await this.refreshActiveJob();
     },
 
+    // Set the preset ElevenLabs voice for a character. Empty string clears
+    // the preset (server treats it as "no voice"). Called by the 🎤 dropdown
+    // on each library card; auto-applies when the user later compiles a
+    // Step-6 video for this character OR picks the character in the
+    // Editor tab's "Character" dropdown.
+    async setCharacterVoice(charId, voiceId) {
+      const body = { voice_id: voiceId || '' };
+      if (voiceId) body.voice_provider = 'elevenlabs';
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { this.notifyError('Voice update failed: ' + await r.text()); return; }
+      await this.loadLibrary();
+    },
+
+    // Editor tab: when user picks a character in the "Character preset"
+    // dropdown, auto-fill `editor.voiceId` with that character's preset.
+    // Only fires on dropdown CHANGE so manual voice overrides aren't
+    // silently overwritten on re-render.
+    onEditorCharacterChange() {
+      const cid = this.editor.linkedCharId;
+      if (!cid) return;  // "— none —" picked; leave voice as-is
+      const ch = (this.library || []).find(c => c.char_id === cid);
+      if (ch && ch.voice_id) {
+        this.editor.voiceId = ch.voice_id;
+      }
+    },
+
     // --- job lifecycle -------------------------------------------------------
 
     async startJob() {
@@ -3983,10 +4079,24 @@ function studio() {
         const r = await fetch('/api/jobs/' + this.job.job_id);
         if (r.ok) this.job = await r.json();
       } catch (_) {}
-      // Refresh job cost on terminal-ish events (a variant landed / video done / failed).
-      if (['variant.ready', 'variant.failed', 'video.ready', 'video.failed', 'video.submitted'].includes(evt.kind)) {
+      // Refresh job cost on terminal-ish events (a variant landed / video done / failed
+      // / compile done — compile runs Whisper + maybe ElevenLabs which both bill).
+      if (['variant.ready', 'variant.failed', 'video.ready', 'video.failed', 'video.submitted',
+           'char.compile_done', 'char.compile_failed'].includes(evt.kind)) {
         this.loadJobCost(this.job.job_id);
         this.loadDailyCost();
+      }
+      // Notify the user when their compile is done (matches the existing
+      // per-batch milestone pattern).
+      if (evt.kind === 'char.compile_done') {
+        const jc = this.job?.characters?.[evt.char_id];
+        if (jc && this.notifyMilestone) {
+          this.notifyMilestone(
+            `${jc.name} compile done`,
+            'Final video ready in Step 6',
+            { kind: 'done', tag: `compile-${this.job.job_id}-${evt.char_id}` },
+          );
+        }
       }
       // A fresh variant means this character's library gallery is stale.
       if (evt.kind === 'variant.ready' && evt.char_id) {
@@ -4030,444 +4140,5 @@ function studio() {
       this._lastSwapJobSnapshot[job.job_id] = { chars: nextChars, allTerminal };
     },
 
-    // ----- Reel tab (batch-consistent image edit) ------------------------
-
-    async loadReelPresets() {
-      try {
-        const r = await fetch('/api/reel/presets');
-        if (!r.ok) { this.notifyError('Reel presets: ' + await r.text()); return; }
-        this.reelPresets = await r.json();
-        if (!this.reel.presetId && this.reelPresets.length > 0) {
-          const def = this.reelPresets.find(p => p.is_default) || this.reelPresets[0];
-          this.reel.presetId = def.preset_id;
-        }
-      } catch (e) {
-        this.notifyError('Reel presets: ' + e.message);
-      }
-    },
-
-    async loadReelJobs() {
-      try {
-        const r = await fetch('/api/reel/jobs');
-        if (!r.ok) { this.notifyError('Reel jobs: ' + await r.text()); return; }
-        this.reelJobs = await r.json();
-        // Reattach a WS to any job that's still in flight so the grid live-updates.
-        for (const rj of this.reelJobs) {
-          if (rj.status === 'queued' || rj.status === 'generating') {
-            this._attachReelWs(rj.job_id);
-          }
-        }
-      } catch (e) {
-        this.notifyError('Reel jobs: ' + e.message);
-      }
-    },
-
-    currentReelPreset() {
-      return this.reelPresets.find(p => p.preset_id === this.reel.presetId) || null;
-    },
-
-    isReelPresetDefault(presetId) {
-      const p = this.reelPresets.find(x => x.preset_id === presetId);
-      return !!(p && p.is_default);
-    },
-
-    onReelPresetChange() {
-      // Mirror the freshly-picked preset's content into the draft editor so
-      // "Save" updates THIS preset (and "Create" creates a clone) without
-      // the user having to manually copy-paste.
-      this.prefillPresetEditorFromCurrent();
-    },
-
-    prefillPresetEditorFromCurrent() {
-      const p = this.currentReelPreset();
-      if (!p) return;
-      this.reel.draftPresetName = p.name;
-      this.reel.draftPresetBaseline = p.baseline_prompt;
-      this.reel.draftPresetIsDefault = !!p.is_default;
-    },
-
-    async saveReelPreset() {
-      // If draftName === current preset name AND a preset is picked → PATCH it.
-      // Otherwise → POST a new preset.
-      const name = (this.reel.draftPresetName || '').trim();
-      const baseline = (this.reel.draftPresetBaseline || '').trim();
-      if (!name || !baseline) {
-        this.notifyError('Preset name and baseline prompt are both required');
-        return;
-      }
-      this.reel.savingPreset = true;
-      try {
-        const current = this.currentReelPreset();
-        const isUpdate = !!current && current.name === name;
-        const url = isUpdate ? `/api/reel/presets/${current.preset_id}` : '/api/reel/presets';
-        const method = isUpdate ? 'PATCH' : 'POST';
-        const r = await fetch(url, {
-          method,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            name, baseline_prompt: baseline, is_default: !!this.reel.draftPresetIsDefault,
-          }),
-        });
-        if (!r.ok) { this.notifyError('Preset save failed: ' + await r.text()); return; }
-        const saved = await r.json();
-        await this.loadReelPresets();
-        this.reel.presetId = saved.preset_id;
-        this.reel.showPresetEditor = false;
-        this.notifyInfo(isUpdate ? 'Preset updated' : 'Preset created');
-      } catch (e) {
-        this.notifyError('Preset save failed: ' + e.message);
-      } finally {
-        this.reel.savingPreset = false;
-      }
-    },
-
-    async deleteCurrentReelPreset() {
-      const p = this.currentReelPreset();
-      if (!p) return;
-      if (p.is_default) { this.notifyError("Can't delete the default preset"); return; }
-      if (!confirm(`Delete preset "${p.name}"?`)) return;
-      try {
-        const r = await fetch(`/api/reel/presets/${p.preset_id}`, { method: 'DELETE' });
-        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
-        this.reel.presetId = null;
-        await this.loadReelPresets();
-        this.notifyInfo('Preset deleted');
-      } catch (e) {
-        this.notifyError('Delete failed: ' + e.message);
-      }
-    },
-
-    reelSupportedModels() {
-      // Reel runner currently dispatches gpt-image + nano-banana[-pro]. Surface
-      // those (with availability based on configured provider keys).
-      const slugs = ['gpt-image', 'nano-banana', 'nano-banana-pro'];
-      const out = [];
-      for (const slug of slugs) {
-        const m = (this.models.image || []).find(x => x.slug === slug);
-        out.push(m
-          ? { slug, label: m.label, available: m.available }
-          : { slug, label: slug, available: false });
-      }
-      return out;
-    },
-
-    addReelFiles(fileList) {
-      if (!fileList) return;
-      const arr = Array.from(fileList).filter(f => f.type && f.type.startsWith('image/'));
-      const remaining = 12 - this.reel.frames.length;
-      const toAdd = arr.slice(0, Math.max(0, remaining));
-      for (const file of toAdd) {
-        this.reel.frames.push({ file, previewUrl: URL.createObjectURL(file) });
-      }
-      if (arr.length > toAdd.length) {
-        this.notifyInfo(`Reel capped at 12 frames — ignored ${arr.length - toAdd.length}.`);
-      }
-    },
-
-    removeReelFile(idx) {
-      const f = this.reel.frames[idx];
-      if (f?.previewUrl) URL.revokeObjectURL(f.previewUrl);
-      this.reel.frames.splice(idx, 1);
-    },
-
-    canSubmitReel() {
-      return this.reel.frames.length >= 2
-             && !!(this.reel.presetId || (this.reel.customPrompt || '').trim());
-    },
-
-    reelSummaryHint() {
-      const n = this.reel.frames.length;
-      if (n === 0) return 'Drop or pick at least 2 frames to start.';
-      if (n === 1) return 'Need at least 2 frames (anchor + 1 follower).';
-      return `Anchor: frame 1. Followers: ${n - 1}. They'll match the anchor's clothing/background.`;
-    },
-
-    async submitReel() {
-      if (!this.canSubmitReel()) return;
-      this.reel.submitting = true;
-      try {
-        const fd = new FormData();
-        for (const f of this.reel.frames) fd.append('files', f.file, f.file.name);
-        if (this.reel.presetId) fd.append('preset_id', this.reel.presetId);
-        if ((this.reel.customPrompt || '').trim()) {
-          fd.append('custom_prompt', this.reel.customPrompt.trim());
-        }
-        fd.append('image_model', this.reel.model);
-        fd.append('aspect_ratio', this.reel.aspect);
-        if (this.reel.miniApproval) fd.append('mini_approval', 'true');
-        if (this.enrich.reel) fd.append('enrich_prompt', 'true');
-        const r = await fetch('/api/reel/jobs', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Reel submit failed: ' + await r.text()); return; }
-        const job = await r.json();
-        // Clear the staging form. Keep prompt + preset + model — they're
-        // intentional defaults for the next reel.
-        for (const f of this.reel.frames) {
-          if (f.previewUrl) URL.revokeObjectURL(f.previewUrl);
-        }
-        this.reel.frames = [];
-        this.reelJobs = [job, ...this.reelJobs];
-        this._attachReelWs(job.job_id);
-        this.notifyInfo(`Reel submitted — ${job.frames.length} frames (anchor first).`);
-      } catch (e) {
-        this.notifyError('Reel submit failed: ' + e.message);
-      } finally {
-        this.reel.submitting = false;
-      }
-    },
-
-    async deleteReelJob(jobId) {
-      if (!confirm('Delete this reel + its outputs?')) return;
-      try {
-        const r = await fetch(`/api/reel/jobs/${jobId}`, { method: 'DELETE' });
-        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
-        this.reelJobs = this.reelJobs.filter(rj => rj.job_id !== jobId);
-      } catch (e) {
-        this.notifyError('Delete failed: ' + e.message);
-      }
-    },
-
-    _attachReelWs(jobId) {
-      // One WS connection per page — multiplexed by switching to whichever
-      // job most recently changed. Cheap to recreate if it drops.
-      try {
-        if (this._reelWs) { try { this._reelWs.close(); } catch (_) {} this._reelWs = null; }
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const ws = new WebSocket(`${proto}//${window.location.host}/ws/reel/${jobId}`);
-        this._reelWs = ws;
-        ws.onmessage = (m) => this._onReelEvent(jobId, JSON.parse(m.data));
-        ws.onclose = () => { if (this._reelWs === ws) this._reelWs = null; };
-      } catch (e) {
-        console.warn('Reel WS failed:', e);
-      }
-    },
-
-    _onReelEvent(jobId, ev) {
-      if (!ev) return;
-      const rj = this.reelJobs.find(x => x.job_id === jobId);
-      if (!rj) return;
-      if (ev.type === 'snapshot' && ev.job) {
-        Object.assign(rj, ev.job);
-        return;
-      }
-      if (ev.type === 'job') {
-        const prevStatus = rj.status;
-        if (ev.status) rj.status = ev.status;
-        if (ev.error) rj.error = ev.error;
-        if (ev.anchor_description) rj.anchor_description = ev.anchor_description;
-        // Approval gate — anchor just landed and is awaiting Hugo's review.
-        if (prevStatus !== 'awaiting_anchor_approval'
-            && ev.status === 'awaiting_anchor_approval') {
-          this.notifyMilestone(
-            'Reel anchor ready — approve',
-            `${jobId}: anchor finished, review before followers run`,
-            { kind: 'approval', tag: `reel-${jobId}-anchor` },
-          );
-        }
-        // Batch complete (or terminal failure).
-        if (!['done', 'partial', 'failed'].includes(prevStatus)
-            && ['done', 'partial', 'failed'].includes(ev.status)) {
-          const verb = ev.status === 'done' ? 'complete'
-                       : ev.status === 'partial' ? 'partial (some failed)'
-                       : 'failed';
-          this.notifyMilestone(
-            `Reel ${verb}`,
-            `${jobId}: ${rj.frames.length} frames`,
-            { kind: 'done', tag: `reel-${jobId}-done` },
-          );
-        }
-        return;
-      }
-      if (ev.type === 'frame') {
-        const f = rj.frames.find(x => x.frame_id === ev.frame_id);
-        if (!f) return;
-        const prevStatus = f.status;
-        if (ev.status) f.status = ev.status;
-        if (ev.error) f.error = ev.error;
-        if (ev.drift_audit) f.last_drift_audit = ev.drift_audit;
-        if (ev.output_filename) {
-          // Append a cache-buster (Date.now()) so retries that overwrite the
-          // same file path still refresh the <img>. Matches the server's
-          // serialization pattern (?v=<completed_at_unix>).
-          f.output_filename = ev.output_filename;
-          f.output_url = `/files/output/reel/${jobId}/${ev.output_filename}?v=${Date.now()}`;
-        }
-        // Mini-approval milestone: a follower just landed in the per-frame
-        // approval gate. Reuses the same notification channel as the anchor
-        // approval gate.
-        if (prevStatus !== 'awaiting_approval'
-            && ev.status === 'awaiting_approval'
-            && !f.is_anchor) {
-          this.notifyMilestone(
-            `Frame #${f.sort_index + 1} ready — approve`,
-            `${jobId}: ${rj.frames.length - f.sort_index - 1} more after this one`,
-            { kind: 'approval', tag: `reel-${jobId}-frame-${f.frame_id}` },
-          );
-        }
-      }
-    },
-
-    // --- reel approval gate + retry --------------------------------------
-
-    reelStatusLabel(status) {
-      return ({
-        'queued': 'queued',
-        'generating_anchor': 'generating anchor…',
-        'awaiting_anchor_approval': 'awaiting your approval',
-        'generating': 'generating followers…',
-        'done': 'done',
-        'partial': 'partial (some failed)',
-        'failed': 'failed',
-      })[status] || status;
-    },
-
-    reelStatusColor(status) {
-      switch (status) {
-        case 'done': return 'text-emerald-400';
-        case 'awaiting_anchor_approval': return 'text-amber-300';
-        case 'generating_anchor':
-        case 'generating':
-        case 'queued': return 'text-amber-400';
-        case 'failed': return 'text-rose-400';
-        case 'partial': return 'text-orange-400';
-        default: return 'text-neutral-400';
-      }
-    },
-
-    reelAnchorEditOpen(jobId) {
-      return this.reel.anchorEditJobId === jobId;
-    },
-
-    openReelAnchorPromptEdit(jobId, currentPrompt) {
-      this.reel.anchorEditJobId = jobId;
-      this.reel.anchorEditDraft = currentPrompt || '';
-    },
-
-    closeReelAnchorPromptEdit() {
-      this.reel.anchorEditJobId = null;
-      this.reel.anchorEditDraft = '';
-    },
-
-    async approveReelAnchor(jobId) {
-      try {
-        const r = await fetch(`/api/reel/jobs/${jobId}/approve_anchor`, { method: 'POST' });
-        if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
-        const updated = await r.json();
-        const rj = this.reelJobs.find(x => x.job_id === jobId);
-        if (rj) Object.assign(rj, updated);
-        this._attachReelWs(jobId);
-      } catch (e) {
-        this.notifyError('Approve failed: ' + e.message);
-      }
-    },
-
-    async rerenderReelAnchor(jobId, newCustomPrompt) {
-      try {
-        const body = (typeof newCustomPrompt === 'string')
-                      ? { custom_prompt: newCustomPrompt }
-                      : {};
-        const r = await fetch(`/api/reel/jobs/${jobId}/rerender_anchor`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) { this.notifyError('Rerender failed: ' + await r.text()); return; }
-        const updated = await r.json();
-        const rj = this.reelJobs.find(x => x.job_id === jobId);
-        if (rj) Object.assign(rj, updated);
-        this.closeReelAnchorPromptEdit();
-        this._attachReelWs(jobId);
-      } catch (e) {
-        this.notifyError('Rerender failed: ' + e.message);
-      }
-    },
-
-    canRetryReelFrame(rj, frame) {
-      // Don't show retry while either the whole job or this frame is in
-      // flight (would either no-op or stomp the in-flight generation).
-      if (rj.status === 'generating' || rj.status === 'generating_anchor') return false;
-      if (frame.status === 'generating' || frame.status === 'queued') return false;
-      return true;
-    },
-
-    async retryReelFrame(jobId, frameId) {
-      try {
-        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/retry`, { method: 'POST' });
-        if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
-        const updated = await r.json();
-        const rj = this.reelJobs.find(x => x.job_id === jobId);
-        if (rj) Object.assign(rj, updated);
-        this._attachReelWs(jobId);
-      } catch (e) {
-        this.notifyError('Retry failed: ' + e.message);
-      }
-    },
-
-    openReelRefinePanel(jobId, frameId) {
-      this.reel.refineJobId = jobId;
-      this.reel.refineFrameId = frameId;
-      this.reel.refineCorrection = '';
-    },
-
-    closeReelRefinePanel() {
-      this.reel.refineJobId = null;
-      this.reel.refineFrameId = null;
-      this.reel.refineCorrection = '';
-    },
-
-    async submitReelRefine() {
-      const correction = (this.reel.refineCorrection || '').trim();
-      if (!correction) return;
-      const jobId = this.reel.refineJobId;
-      const frameId = this.reel.refineFrameId;
-      if (!jobId || !frameId) return;
-      try {
-        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/refine`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ correction }),
-        });
-        if (!r.ok) { this.notifyError('Refine failed: ' + await r.text()); return; }
-        const updated = await r.json();
-        const rj = this.reelJobs.find(x => x.job_id === jobId);
-        if (rj) Object.assign(rj, updated);
-        this.closeReelRefinePanel();
-        this._attachReelWs(jobId);
-      } catch (e) {
-        this.notifyError('Refine failed: ' + e.message);
-      }
-    },
-
-    async approveReelFrame(jobId, frameId) {
-      try {
-        const r = await fetch(`/api/reel/jobs/${jobId}/frames/${frameId}/approve`, { method: 'POST' });
-        if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
-        const updated = await r.json();
-        const rj = this.reelJobs.find(x => x.job_id === jobId);
-        if (rj) Object.assign(rj, updated);
-        this._attachReelWs(jobId);
-      } catch (e) {
-        this.notifyError('Approve failed: ' + e.message);
-      }
-    },
-
-    // Drift audit helpers: server stores audit as JSON-string on
-    // `frame.last_drift_audit`. Parse + read severity / summary lazily.
-    _parseDriftAudit(frame) {
-      if (!frame?.last_drift_audit) return null;
-      try { return JSON.parse(frame.last_drift_audit); } catch (_) { return null; }
-    },
-
-    reelDriftSeverity(frame) {
-      const a = this._parseDriftAudit(frame);
-      return a?.severity || 'none';
-    },
-
-    reelDriftSummary(frame) {
-      const a = this._parseDriftAudit(frame);
-      if (!a?.drifts || !a.drifts.length) return '';
-      return a.drifts
-        .map(d => `${d.field || '?'} (anchor: ${d.anchor || '?'} → got: ${d.candidate || '?'})`)
-        .slice(0, 2).join('; ');
-    },
   };
 }

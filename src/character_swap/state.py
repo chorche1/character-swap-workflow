@@ -28,8 +28,6 @@ from character_swap.models import (
     Job,
     MediaGeneration,
     ProjectAsset,
-    ReelJob,
-    ReelPreset,
     SceneAsset,
 )
 
@@ -178,47 +176,6 @@ class JsonStateStore:
             self.save()
         return out
 
-    # reel presets + jobs
-    def add_reel_preset(self, preset: ReelPreset) -> None:
-        self._state.reel_presets[preset.preset_id] = preset
-        self.save()
-
-    def get_reel_preset(self, preset_id: str) -> ReelPreset | None:
-        return self._state.reel_presets.get(preset_id)
-
-    def list_reel_presets(self) -> list[ReelPreset]:
-        return list(self._state.reel_presets.values())
-
-    def update_reel_preset(self, preset: ReelPreset) -> None:
-        self._state.reel_presets[preset.preset_id] = preset
-        self.save()
-
-    def delete_reel_preset(self, preset_id: str) -> ReelPreset | None:
-        out = self._state.reel_presets.pop(preset_id, None)
-        if out is not None:
-            self.save()
-        return out
-
-    def add_reel_job(self, job: ReelJob) -> None:
-        self._state.reel_jobs[job.job_id] = job
-        self.save()
-
-    def get_reel_job(self, job_id: str) -> ReelJob | None:
-        return self._state.reel_jobs.get(job_id)
-
-    def list_reel_jobs(self) -> list[ReelJob]:
-        return list(self._state.reel_jobs.values())
-
-    def update_reel_job(self, job: ReelJob) -> None:
-        self._state.reel_jobs[job.job_id] = job
-        self.save()
-
-    def delete_reel_job(self, job_id: str) -> ReelJob | None:
-        out = self._state.reel_jobs.pop(job_id, None)
-        if out is not None:
-            self.save()
-        return out
-
     def reset(self) -> None:
         self._state = AppState()
         self.save()
@@ -348,53 +305,6 @@ class SqliteStateStore:
         if out is not None:
             with self._lock, db.transaction(self._conn) as conn:
                 db.delete_generation(conn, gen_id)
-        return out
-
-    # reel presets + jobs
-    def add_reel_preset(self, preset: ReelPreset) -> None:
-        self._state.reel_presets[preset.preset_id] = preset
-        with self._lock, db.transaction(self._conn) as conn:
-            db.upsert_reel_preset(conn, preset)
-
-    def get_reel_preset(self, preset_id: str) -> ReelPreset | None:
-        return self._state.reel_presets.get(preset_id)
-
-    def list_reel_presets(self) -> list[ReelPreset]:
-        return list(self._state.reel_presets.values())
-
-    def update_reel_preset(self, preset: ReelPreset) -> None:
-        self._state.reel_presets[preset.preset_id] = preset
-        with self._lock, db.transaction(self._conn) as conn:
-            db.upsert_reel_preset(conn, preset)
-
-    def delete_reel_preset(self, preset_id: str) -> ReelPreset | None:
-        out = self._state.reel_presets.pop(preset_id, None)
-        if out is not None:
-            with self._lock, db.transaction(self._conn) as conn:
-                db.delete_reel_preset(conn, preset_id)
-        return out
-
-    def add_reel_job(self, job: ReelJob) -> None:
-        self._state.reel_jobs[job.job_id] = job
-        with self._lock, db.transaction(self._conn) as conn:
-            db.upsert_reel_job(conn, job)
-
-    def get_reel_job(self, job_id: str) -> ReelJob | None:
-        return self._state.reel_jobs.get(job_id)
-
-    def list_reel_jobs(self) -> list[ReelJob]:
-        return list(self._state.reel_jobs.values())
-
-    def update_reel_job(self, job: ReelJob) -> None:
-        self._state.reel_jobs[job.job_id] = job
-        with self._lock, db.transaction(self._conn) as conn:
-            db.upsert_reel_job(conn, job)
-
-    def delete_reel_job(self, job_id: str) -> ReelJob | None:
-        out = self._state.reel_jobs.pop(job_id, None)
-        if out is not None:
-            with self._lock, db.transaction(self._conn) as conn:
-                db.delete_reel_job(conn, job_id)
         return out
 
     def reset(self) -> None:

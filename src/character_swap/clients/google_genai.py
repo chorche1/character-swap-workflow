@@ -66,8 +66,7 @@ def generate_nano_banana(
 ) -> bytes:
     """Call Gemini's image-generation endpoint via REST. Returns raw image
     bytes. Accepts an arbitrary number of reference images — Gemini's
-    multi-reference is the whole reason we have this path; the reel runner
-    uses it to pass anchor + all input frames at once.
+    multi-reference is the whole reason we have this path.
 
     `model` may be a slug ('nano-banana', 'nano-banana-pro') or a full
     Google model name. Defaults to flash (nano-banana).
@@ -102,8 +101,8 @@ def generate_nano_banana(
     MAX_ATTEMPTS = 5
     BACKOFFS = [2.0, 5.0, 12.0, 30.0]  # seconds between attempt 1→2, 2→3, ...
 
-    with record(phase="reel_render", model=google_model,
-                character="reel", job_id=app_job_id,
+    with record(phase="nano_banana", model=google_model,
+                character="freeform", job_id=app_job_id,
                 n_references=len(refs)):
         last_error = None
         for attempt in range(MAX_ATTEMPTS):

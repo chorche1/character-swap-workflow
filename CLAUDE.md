@@ -6,11 +6,10 @@
 
 ## What this project does
 
-Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. **Eight top-level tabs:**
+Local web app (FastAPI + Alpine.js + Tailwind) for AI media generation. **Seven top-level tabs:**
 
-- **Swap** (the original 5-step character-swap flow described below — default tab).
+- **Swap** (the original 6-step character-swap flow described below — default tab).
 - **Image** — free-form text-to-image. Pick model (GPT Image, DALL·E 3, Grok Imagine, Nano Banana, FLUX variants, Ideogram, Recraft, SD3.5, Seedream, Higgsfield Soul). Optional reference images, aspect ratio, prompt → output appears in a grid below. Two opt-in prompt-quality toggles: **✨ enrich** (gpt-4o text expansion) and **🎬 AI Director** (Claude Opus reads the reference image with vision and writes a tailored prompt — requires `ANTHROPIC_API_KEY`).
-- **Reel** — batch-consistent image edit for video reels. Upload N frames (3–12) from one UGC reel, pick a named **preset** (baseline-prompt library — seed default is "UGC reel (visual consistency)"), type per-video tweak, hit Generate. Pipeline: **(1)** gpt-4o vision pre-pass describes the composition of each input frame (people count, framing, props) → injected into follower prompts. **(2)** Anchor frame (default: frame 0) renders first with only its own input as ref, parks at `awaiting_anchor_approval`. **(3)** gpt-4o vision-extracts hex-coded style spec from the anchor output → stored as `anchor_description`. **(4)** User approves / rerenders anchor / edits-and-rerenders prompt. **(5)** Followers render — for `gpt-image`: refs=[anchor, input_k] with style+composition specs injected; for `nano-banana-pro`: refs=[anchor, *all_inputs] (Gemini batch-coherence). **(6)** gpt-4o drift audit per follower (CLOTHING_COLOR / CLOTHING_TYPE / BACKGROUND / PERSON_COUNT) → auto-correction second pass when severity=major. **(7)** ✎ refine button on each frame for free-text targeted corrections. **(8)** Optional `mini_approval` mode renders followers sequentially with per-frame approve/retry/refine. Endpoints under `/api/reel/*`. Outputs live under `output/reel/<job_id>/`.
 - **Video** — free-form image-to-video. Pick model (Grok Imagine, Veo 3, Kling, Runway, Luma, Pika, Hailuo, Sora 2, Wan, Seedance, Higgsfield variants). Required reference image + motion prompt + aspect/duration → polled output appears in a grid. Same two prompt-quality toggles as Image tab: **✨ enrich** + **🎬 AI Director** (Director looks at the start frame and writes a cinematic shot direction with camera move + performance cues).
 - **Avatar** — talking-head avatar video via HeyGen. Pick avatar + voice, paste a script, hit Generate. Two avatar models:
   - `heygen-avatar-5` — uses a HeyGen catalogue avatar (`avatar_id` + `voice_id` + script)
@@ -33,15 +32,16 @@ The Image/Video/Audio/Avatar tabs share the same sidebar (project/job history is
 
 **Per-job source-image swap** (Step 2): if a character has 2+ reference images, the "N imgs ↕" badge on its card is clickable → opens a popover with all the character's gallery images → click any to swap it as the source for THIS job. **Works both before AND after the job is created** — before-job picks are staged client-side in `charSourceOverrides[charId]` and sent as `character_source_image_ids` on `POST /api/jobs`; after-job swaps go through `PATCH /api/jobs/{job_id}/characters/{char_id}/source_image`. Library primary stays unchanged. Existing variants keep their reference to the old source; only new variants from a regenerate use the new one.
 
-**OS-level notifications + audio chime** for milestone events. Browser Notification API + Web Audio synthesized 2-tone bell (no asset file). Fires at two levels: (a) **approval gates** — swap char `awaiting_approval`, reel `awaiting_anchor_approval`, reel per-frame `awaiting_approval` in mini-approval mode, b-roll `awaiting_approval`; (b) **batch completions** — swap all-chars-terminal, reel job done/partial/failed, every freeform gen done/failed, broll done/partial_success/failed, editor render (captions / rerender / timeline / multi-clip auto-edit / trim) done. Permission prompted once at `init()`; user toggles in header (🔔 OS popup + 🔊 chime), persisted to localStorage as `notif.os` / `notif.sound`. Greyed when browser permission is `denied`. Approval-pitch chime is higher (880→1320 Hz), done-pitch is softer (660→990 Hz). Tag-based dedup so same milestone doesn't fire twice. Single `notifyMilestone(title, body, opts)` fan-out point in `app.js`; in-app toast remains via existing `notify('info', ...)` channel.
+**OS-level notifications + audio chime** for milestone events. Browser Notification API + Web Audio synthesized 2-tone bell (no asset file). Fires at two levels: (a) **approval gates** — swap char `awaiting_approval`, b-roll `awaiting_approval`; (b) **batch completions** — swap all-chars-terminal, swap Step-6 per-character compile done, every freeform gen done/failed, broll done/partial_success/failed, editor render (captions / rerender / timeline / multi-clip auto-edit / trim) done. Permission prompted once at `init()`; user toggles in header (🔔 OS popup + 🔊 chime), persisted to localStorage as `notif.os` / `notif.sound`. Greyed when browser permission is `denied`. Approval-pitch chime is higher (880→1320 Hz), done-pitch is softer (660→990 Hz). Tag-based dedup so same milestone doesn't fire twice. Single `notifyMilestone(title, body, opts)` fan-out point in `app.js`; in-app toast remains via existing `notify('info', ...)` channel.
 
-The Swap flow (5 steps): persistent left sidebar of past jobs + main panel:
+The Swap flow (6 steps): persistent left sidebar of past jobs + main panel:
 
 1. **Scene** — upload **one or more** scene images. Supports drop, click, and **Cmd+V paste** (multiple at once). Each scene becomes a separate reference background; the character gets variants for every scene. Per-tile ✕ to remove. Counter shows "(N scenes — each character gets variants for every scene)".
-2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default". Two opt-in prompt-quality toggles: **✨ enrich** (cheap, gpt-4o single-shot expansion of the user's prompt) and **🎬 AI Director** (Claude Opus agent with vision + tool-use; writes a tailored prompt per (character × scene × variant) — see "AI Director" section below).
+2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. **Preset voice (🎤)** dropdown on each library card sets an ElevenLabs voice that auto-applies in Step 6 compile + Editor tab. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default". Two opt-in prompt-quality toggles: **✨ enrich** (cheap, gpt-4o single-shot expansion of the user's prompt) and **🎬 AI Director** (Claude Opus agent with vision + tool-use; writes a tailored prompt per (character × scene × variant) — see "AI Director" section below).
 3. **Generate** — GPT Image 2 (or Nano Banana / Nano Banana Pro / Grok Image, picked in Step 2) generates `images_per_character × N_scenes` variant images per character. When multiple scenes exist, variants render under per-scene subgroup headers inside each character section. **Multi-variant approval** — user picks ONE variant per (character × scene) by clicking the ✓ on each (re-click un-approves). **"✓ Approve all" button** auto-picks the first ready variant per (char, scene) for all characters at once. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. **Per-variant retry** (↻) re-runs just one failed slot. Per-variant download with friendly filename.
 4. **Movement prompt** — **per-scene textareas** (one per scene with at least one approved variant). Each scene gets its own movement direction; the same prompt is applied uniformly to every approved variant of that scene across all characters. **Video provider picker** lets you pick any of: Grok Imagine, Veo 3, Veo 3 Fast, Kling 2.0/2.1 Pro/1.6, Runway Gen-4/Gen-3, Luma Ray-2, Pika 2.2, Hailuo 01/02, Sora 2, Wan 2.1/2.2, Seedance, Higgsfield variants. **Submit kicks off all approved variants × M videos in parallel**, all using the chosen provider. The toggle from Step 2 carries over — when AI Director is on, the per-scene prompts also flow through Claude Opus for cinematic shot expansion before submit.
 5. **Videos** — chosen provider animates each approved image M times. Live progress + per-video download with friendly filename.
+6. **Compile final videos** — appears once every approved character has ≥1 DONE video. One click → for each character, concatenate that character's per-scene videos (in `scene_ids` order, picking the first DONE take per scene) into ONE final MP4 by running through the Editor pipeline (silence trim → voice swap → Whisper transcribe → WPM normalize → caption burn-in). All M characters compile **in parallel** using shared editor settings (template, target WPM, opt-out toggles). Each character's library-set preset voice auto-applies via ElevenLabs voice-changer; a batch-wide `voice_override` overrides all of them at once. Per-character cards show live `compiling → done / failed` status with preview + download. Failed compiles offer a per-character ↻ retry. Endpoint: `POST /api/jobs/{job_id}/compile_videos`; runner: [src/character_swap/runner_compile.py](src/character_swap/runner_compile.py). Output: `output/<job_id>/compiled/<char_id>.mp4` (plus full editor edit_id under `output/editor/<edit_id>/` so the compile result is also re-renderable from the Editor tab).
 
 **Sidebar:** jobs grouped by **project** (collapsible). "+ New project" → modal. "+" on a project header pre-selects it for the next job. "⇄" icon moves a job between projects. **Cross-kind "Recent media" thumbnail strip at the bottom** shows the 32 newest items across all tabs (image / video / audio / avatar / broll) — click a thumbnail to jump to its tab and scroll to the card.
 
@@ -213,27 +213,26 @@ src/character_swap/
                          `npx remotion render` as a subprocess; SHA-256 caches outputs
                          under `output/cache/remotion/<hash>.mp4`. Wrapped in
                          `call_log.record(phase="remotion_render", ...)`.
-├── reel_runner.py     — Reel-tab orchestration: vision pre-passes (`_describe_anchor`,
-                         `_describe_input_frame`, `_audit_drift`), `_follower_refs`
-                         (model-aware ref list — multi-ref for nano-banana-pro),
-                         `_run_follower_with_correction` (two-pass auto-correct on
-                         major drift), `refine_frame` (user-driven targeted fix),
-                         `approve_frame` (mini-approval advance), `seed_default_preset`.
+├── runner_compile.py  — Step 6: per-character compile. `compile_job_videos()` fans
+                         out across every approved character via asyncio.gather; each
+                         character concatenates its per-scene DONE videos (in
+                         `scene_ids` order) and runs the result through the Editor
+                         pipeline (trim → voice swap → transcribe → WPM → captions).
+                         Settings apply uniformly batch-wide. Failure is per-character.
 ├── events.py          — Asyncio pub/sub for live updates
 ├── state.py           — Atomic JSON state OR SQLite (depending on USE_SQLITE_STATE)
-├── models.py          — Pydantic: SceneAsset, CharacterAsset, ProjectAsset (+default_prompt),
+├── models.py          — Pydantic: SceneAsset, ProjectAsset (+default_prompt),
+                         CharacterAsset (+voice_id, +voice_provider preset),
                          GeneratedImage (+scene_id), VideoVariant,
                          JobCharacter (+approved_variant_ids list — supports one approval
-                         per scene per character),
+                         per scene per character; +compile_status / compiled_video_path
+                         / compile_edit_id / compile_error for Step 6),
                          Job (+scene_ids list, +video_model, +movement_prompts dict
                          {scene_id: prompt}, +enriched_movement_prompts dict,
                          +use_director, +director_prompts_json cache),
                          MediaGeneration (+enrich_prompt, +enriched_prompt,
                          +use_director, +director_prompt),
-                         ReelPreset, ReelFrame
-                         (+input_description, last_drift_audit, approved),
-                         ReelJob (+anchor_description, mini_approval),
-                         AppState + StrEnums (incl. ReelFrameStatus/ReelJobStatus)
+                         AppState + StrEnums
 ├── config.py          — Settings via pydantic-settings
 ├── images.py          — sha256, base64, atomic write/copy
 ├── call_log.py        — JSONL call logger (now also bills director_swap / director_movement)
@@ -313,8 +312,11 @@ output/broll/<broll_id>/
                       for trim-and-concat), concat.mp4, final.mp4
 output/generations/<gen_id>/
                     — ref images + result for free-form tabs
-output/reel/<job_id>/
-                    — input_NN.<ext>, output_NN.png per frame
+output/<job_id>/compiled/<char_id>.mp4
+                    — Step 6 per-character compiled final MP4 (concatenated scenes +
+                      editor pipeline). Each compile also produces a parallel copy
+                      under `output/editor/<edit_id>/04-final.mp4` so the result is
+                      re-renderable from the Editor tab.
 output/cache/remotion/<sha>.mp4
                     — SHA-256-keyed Remotion render cache
 web/static/remotion-preview.js
@@ -422,7 +424,7 @@ System prompts instruct the agent to:
 
 ### Cost tracking
 
-`call_log._cost_usd` returns `settings.claude_opus_price_usd` ($0.05 default) when phase ∈ `{director_swap, director_movement}` and `ok=True`. Aggregated by existing `read_costs(job_id=...)`. Reel intentionally excluded in v1 — Reel has its own anchor-first vision pipeline already.
+`call_log._cost_usd` returns `settings.claude_opus_price_usd` ($0.05 default) when phase ∈ `{director_swap, director_movement}` and `ok=True`. Aggregated by existing `read_costs(job_id=...)`.
 
 ### Precedence
 
@@ -586,21 +588,17 @@ GET    /api/editor/templates                   (each row carries `engine: 'ass' 
                                                 `composition_id` for remotion entries:
                                                 SubmagicPro / SubmagicPop / MrBeastBold / CapCutGlow)
 
-GET    /api/reel/presets                       list named presets
-POST   /api/reel/presets                       body: name, baseline_prompt, is_default?
-PATCH  /api/reel/presets/{preset_id}           rename / edit baseline / set default
-DELETE /api/reel/presets/{preset_id}
-POST   /api/reel/jobs                          multipart files + preset_id? + custom_prompt + image_model + aspect_ratio + mini_approval?
-GET    /api/reel/jobs                          list (newest first)
-GET    /api/reel/jobs/{job_id}                 full state w/ frames + anchor_description
-DELETE /api/reel/jobs/{job_id}                 hard delete (state + output/reel/<id>/)
-POST   /api/reel/jobs/{job_id}/approve_anchor  kick off followers
-POST   /api/reel/jobs/{job_id}/rerender_anchor body: custom_prompt? (override)
-POST   /api/reel/jobs/{job_id}/frames/{frame_id}/retry    re-render frame (no correction)
-POST   /api/reel/jobs/{job_id}/frames/{frame_id}/refine   body: correction (free-text targeted fix)
-POST   /api/reel/jobs/{job_id}/frames/{frame_id}/approve  mini-approval mode: advance loop
+POST   /api/jobs/{job_id}/compile_videos       Step 6: per-character compile. Body:
+                                                template? overrides? enable_trim? enable_captions?
+                                                enable_wpm_normalize? target_wpm? voice_override?
+                                                char_ids? (filter — used by retry-one).
+                                                Schedules runner_compile.compile_job_videos via
+                                                BackgroundTasks; chars flip to compile_status=
+                                                "compiling" immediately. WS emits char.compile_started
+                                                / char.compile_done / char.compile_failed events.
 
-WS     /ws/reel/{job_id}                       live anchor + follower events (job-status + frame-status + drift_audit)
+PATCH  /api/characters/{char_id}                body: name? voice_id? voice_provider? — all optional.
+                                                voice_id="" clears the preset.
 
 POST   /api/generations                        multipart form fields include enrich_prompt? +
                                                 use_director? (Image + Video kinds only — Avatar /

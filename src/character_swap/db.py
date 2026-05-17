@@ -34,13 +34,14 @@ from character_swap.models import (
     JobCharacter,
     MediaGeneration,
     ProjectAsset,
-    ReelJob,
-    ReelPreset,
     SceneAsset,
     VariantStatus,
     VideoStatus,
     VideoVariant,
 )
+# Historical name kept for stable JSON serialization across migrations
+# (originally added for the reel feature, now used by all JSON-serialized
+# columns like movement_prompts_json + approved_variant_ids_json).
 import json as _reel_json
 
 
@@ -177,28 +178,6 @@ CREATE TABLE IF NOT EXISTS gen_reference_paths (
     PRIMARY KEY (gen_id, position),
     FOREIGN KEY (gen_id) REFERENCES generations(gen_id) ON DELETE CASCADE
 );
-
--- Reel: batch-consistent image-edit feature (Image-tab "Reel" subsystem).
--- The full Pydantic models are JSON-encoded in `data` to avoid schema churn
--- as the feature evolves. Indexed columns are duplicated for cheap listing.
-CREATE TABLE IF NOT EXISTS reel_presets (
-    preset_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    is_default INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    data TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS reel_jobs (
-    job_id TEXT PRIMARY KEY,
-    title TEXT,
-    status TEXT NOT NULL,
-    image_model TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    data TEXT NOT NULL
-);
 """
 
 
@@ -289,6 +268,29 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE generations ADD COLUMN use_director INTEGER NOT NULL DEFAULT 0")
     if "director_prompt" not in gen_cols:
         conn.execute("ALTER TABLE generations ADD COLUMN director_prompt TEXT")
+    # Per-character preset ElevenLabs voice. Auto-applied when generating a
+    # video for the character via the Editor tab's optional "Character"
+    # dropdown OR the Swap-flow Step 6 compile feature.
+    char_cols = {r["name"] for r in conn.execute("PRAGMA table_info(characters)")}
+    if "voice_id" not in char_cols:
+        conn.execute("ALTER TABLE characters ADD COLUMN voice_id TEXT")
+    if "voice_provider" not in char_cols:
+        conn.execute("ALTER TABLE characters ADD COLUMN voice_provider TEXT")
+    # Step 6 (Compile) per-character output. Concatenated + editor-processed
+    # final video for each character. Status null = never compiled.
+    jc_cols2 = {r["name"] for r in conn.execute("PRAGMA table_info(job_characters)")}
+    if "compiled_video_path" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN compiled_video_path TEXT")
+    if "compile_edit_id" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN compile_edit_id TEXT")
+    if "compile_status" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN compile_status TEXT")
+    if "compile_error" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN compile_error TEXT")
+    # One-time cleanup migration: the Reel feature has been removed. Drop
+    # its tables if a prior schema left them behind. No-op on fresh DBs.
+    conn.execute("DROP TABLE IF EXISTS reel_jobs")
+    conn.execute("DROP TABLE IF EXISTS reel_presets")
 
 
 @contextmanager
@@ -322,6 +324,8 @@ def _char_from_row(r: sqlite3.Row, images: list[CharacterImage]) -> CharacterAss
         name=r["name"],
         images=images,
         primary_image_id=r["primary_image_id"] if "primary_image_id" in keys else None,
+        voice_id=r["voice_id"] if "voice_id" in keys else None,
+        voice_provider=r["voice_provider"] if "voice_provider" in keys else None,
         created_at=_parse_iso(r["created_at"]),
     )
 
@@ -401,6 +405,10 @@ def _jc_from_row(r: sqlite3.Row, images: list[GeneratedImage],
         error=r["error"],
         images=images,
         videos=videos,
+        compiled_video_path=r["compiled_video_path"] if "compiled_video_path" in keys else None,
+        compile_edit_id=r["compile_edit_id"] if "compile_edit_id" in keys else None,
+        compile_status=r["compile_status"] if "compile_status" in keys else None,
+        compile_error=r["compile_error"] if "compile_error" in keys else None,
         updated_at=_parse_iso(r["updated_at"]),
     )
 
@@ -521,19 +529,6 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
         g = _gen_from_row(r, refs_by_gen.get(r["gen_id"], []))
         state.generations[g.gen_id] = g
 
-    # Reel — both tables store the full Pydantic model as JSON in `data`.
-    try:
-        for r in conn.execute("SELECT data FROM reel_presets ORDER BY created_at"):
-            p = ReelPreset.model_validate_json(r["data"])
-            state.reel_presets[p.preset_id] = p
-        for r in conn.execute("SELECT data FROM reel_jobs ORDER BY created_at"):
-            j = ReelJob.model_validate_json(r["data"])
-            state.reel_jobs[j.job_id] = j
-    except sqlite3.OperationalError:
-        # Tables not yet created on a partial-migration DB — skip silently;
-        # ensure_schema() on next boot creates them.
-        pass
-
     return state
 
 
@@ -552,13 +547,17 @@ def upsert_scene(conn: sqlite3.Connection, s: SceneAsset) -> None:
 
 def upsert_character(conn: sqlite3.Connection, c: CharacterAsset) -> None:
     conn.execute(
-        """INSERT INTO characters (char_id, filename, name, primary_image_id, created_at)
-           VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO characters (char_id, filename, name, primary_image_id,
+                                   voice_id, voice_provider, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(char_id) DO UPDATE SET
              filename = excluded.filename,
              name = excluded.name,
-             primary_image_id = excluded.primary_image_id""",
-        (c.char_id, c.filename, c.name, c.primary_image_id, _iso(c.created_at)),
+             primary_image_id = excluded.primary_image_id,
+             voice_id = excluded.voice_id,
+             voice_provider = excluded.voice_provider""",
+        (c.char_id, c.filename, c.name, c.primary_image_id,
+         c.voice_id, c.voice_provider, _iso(c.created_at)),
     )
     # Replace the image rows atomically.
     conn.execute("DELETE FROM character_images WHERE char_id = ?", (c.char_id,))
@@ -671,13 +670,17 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
             """INSERT INTO job_characters
                  (job_id, char_id, position, name, source_image_path,
                   status, approved_variant_id, approved_variant_ids_json,
-                  error, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  error, compiled_video_path, compile_edit_id,
+                  compile_status, compile_error, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 j.job_id, cid, char_pos, jc.name, jc.source_image_path,
                 str(jc.status), legacy_single,
                 _reel_json.dumps(approved_ids),
-                jc.error, _iso(jc.updated_at),
+                jc.error,
+                jc.compiled_video_path, jc.compile_edit_id,
+                jc.compile_status, jc.compile_error,
+                _iso(jc.updated_at),
             ),
         )
         for i, v in enumerate(jc.images):
@@ -794,47 +797,7 @@ def reset_all(conn: sqlite3.Connection) -> None:
     for table in ("gen_reference_paths", "generations",
                   "videos", "variants", "job_characters", "jobs",
                   "project_characters", "projects",
-                  "character_images", "characters", "scenes",
-                  "reel_jobs", "reel_presets"):
+                  "character_images", "characters", "scenes"):
         conn.execute(f"DELETE FROM {table}")
 
 
-# --- Reel CRUD ----------------------------------------------------------------------
-
-def upsert_reel_preset(conn: sqlite3.Connection, preset: ReelPreset) -> None:
-    conn.execute(
-        """INSERT INTO reel_presets (preset_id, name, is_default, created_at, updated_at, data)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(preset_id) DO UPDATE SET
-             name=excluded.name,
-             is_default=excluded.is_default,
-             updated_at=excluded.updated_at,
-             data=excluded.data""",
-        (preset.preset_id, preset.name, 1 if preset.is_default else 0,
-         _iso(preset.created_at), _iso(preset.updated_at),
-         _reel_json.dumps(preset.model_dump(mode="json"))),
-    )
-
-
-def delete_reel_preset(conn: sqlite3.Connection, preset_id: str) -> None:
-    conn.execute("DELETE FROM reel_presets WHERE preset_id = ?", (preset_id,))
-
-
-def upsert_reel_job(conn: sqlite3.Connection, job: ReelJob) -> None:
-    conn.execute(
-        """INSERT INTO reel_jobs (job_id, title, status, image_model, created_at, updated_at, data)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(job_id) DO UPDATE SET
-             title=excluded.title,
-             status=excluded.status,
-             image_model=excluded.image_model,
-             updated_at=excluded.updated_at,
-             data=excluded.data""",
-        (job.job_id, job.title, str(job.status), job.image_model,
-         _iso(job.created_at), _iso(job.updated_at),
-         _reel_json.dumps(job.model_dump(mode="json"))),
-    )
-
-
-def delete_reel_job(conn: sqlite3.Connection, job_id: str) -> None:
-    conn.execute("DELETE FROM reel_jobs WHERE job_id = ?", (job_id,))
