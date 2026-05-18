@@ -2805,6 +2805,111 @@ async def editor_timeline_render(
     }
 
 
+# --- Export to DaVinci Resolve project (download zip) -----------------------------
+
+def _find_editor_videos(edit_dir: Path) -> tuple[Path | None, Path | None]:
+    """Pick the rendered (post-caption) and pre-caption MP4s for an edit.
+
+    Returns (final_video, pre_caption_video). Either can be None if the
+    pipeline didn't produce that step (e.g. captions disabled → no
+    post-caption, only pre-caption).
+
+    Priority for FINAL: 04-final.mp4 → captioned.mp4 → rerender-NN.mp4
+    (highest version) → newest .mp4 in the dir.
+    Priority for PRE-CAPTION: pre_caption.txt (records the exact path the
+    auto-edit pipeline used) → 03-stretched.mp4 → 02-swapped.mp4 →
+    01-trimmed.mp4 → trimmed.mp4 → 00-concat.mp4. None if none of those
+    exist or they're the same as the chosen final.
+    """
+    if not edit_dir.is_dir():
+        return None, None
+
+    # FINAL — preferred captioned outputs first.
+    final: Path | None = None
+    for name in ("04-final.mp4", "captioned.mp4"):
+        candidate = edit_dir / name
+        if candidate.exists():
+            final = candidate
+            break
+    if final is None:
+        rerenders = sorted(
+            edit_dir.glob("rerender-*.mp4"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if rerenders:
+            final = rerenders[-1]
+    if final is None:
+        all_mp4 = sorted(
+            edit_dir.glob("*.mp4"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if all_mp4:
+            final = all_mp4[-1]
+
+    # PRE-CAPTION — prefer the pipeline's own recorded path.
+    pre: Path | None = None
+    marker = edit_dir / "pre_caption.txt"
+    if marker.exists():
+        try:
+            recorded = Path(marker.read_text(encoding="utf-8").strip())
+            if recorded.exists() and recorded != final:
+                pre = recorded
+        except OSError:
+            pre = None
+    if pre is None:
+        for name in ("03-stretched.mp4", "02-swapped.mp4",
+                     "01-trimmed.mp4", "trimmed.mp4", "00-concat.mp4"):
+            candidate = edit_dir / name
+            if candidate.exists() and candidate != final:
+                pre = candidate
+                break
+
+    return final, pre
+
+
+@app.get("/api/editor/export_resolve/{edit_id}")
+async def editor_export_resolve(edit_id: str):
+    """Download the edit as a DaVinci Resolve-ready project bundle (.zip).
+
+    Contains: final MP4 + pre-caption MP4 (if available) + captions.srt
+    (from words.json) + raw words.json + starter Python script driving
+    Resolve's scripting API + README. See `exporter.build_export_zip`.
+    """
+    from fastapi.responses import Response
+    from character_swap import exporter
+
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {edit_id!r} not found")
+
+    final_video, pre_caption = _find_editor_videos(edit_dir)
+    if final_video is None:
+        raise HTTPException(404, f"No rendered video in {edit_id!r}")
+
+    words: list[dict] | None = None
+    words_path = edit_dir / "words.json"
+    if words_path.exists():
+        try:
+            words = json.loads(words_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            words = None
+
+    zip_bytes = exporter.build_export_zip(
+        final_video=final_video,
+        pre_caption_video=pre_caption,
+        words=words,
+        project_name=edit_id,
+    )
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{edit_id}-resolve.zip"',
+            "Content-Length": str(len(zip_bytes)),
+        },
+    )
+
+
 # --- B-roll generation (audio → cinematic medical-realism clips → final mp4) -----
 
 @app.post("/api/broll/generate")

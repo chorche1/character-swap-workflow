@@ -2888,6 +2888,11 @@
                   class="px-3 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium"
                   :class="(editor.lastResult?.kind === 'auto' && editor.lastResult?.rerender_available !== false) ? '' : 'ml-auto'"
                   @click="openTimeline()">Trim &amp; split</button>
+          <a x-show="editor.lastResult?.edit_id"
+             :href="`/api/editor/export_resolve/${editor.lastResult?.edit_id}`"
+             :download="`${editor.lastResult?.edit_id}-resolve.zip`"
+             class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-800 text-white text-xs font-medium inline-flex items-center"
+             title="Download video + captions.srt + starter Python script for DaVinci Resolve">↓ Export to Resolve</a>
         </div>
 
         <!-- Re-render panel — change template/size/position/trim on the existing edit -->
