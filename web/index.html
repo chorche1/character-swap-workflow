@@ -3376,7 +3376,7 @@
                   <div class="relative group">
                     <img :src="img.url" loading="lazy"
                          draggable="true"
-                         @dragstart="onCharDragStart($event, ch)"
+                         @dragstart="onCharDragStart($event, ch, img)"
                          class="w-full aspect-square object-cover rounded border cursor-grab active:cursor-grabbing"
                          :class="ch.primary_image_id === img.image_id
                                    ? 'border-amber-400 ring-1 ring-amber-300'
@@ -3387,6 +3387,9 @@
                     <button class="absolute top-0.5 right-0.5 bg-neutral-900/70 text-white text-[10px] w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 leading-none"
                             title="Remove this image"
                             @click.stop="deleteCharacterImage(ch.char_id, img.image_id)">✕</button>
+                    <button class="absolute bottom-0 inset-x-0 bg-indigo-600/85 hover:bg-indigo-600 text-white text-[10px] py-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Add as reference image on the active tab"
+                            @click.stop="addLibraryImageAsRef(img.url)">+ ref</button>
                   </div>
                 </template>
               </div>
@@ -3408,6 +3411,9 @@
                          class="absolute top-0.5 right-0.5 bg-emerald-500 text-white text-[9px] px-1 py-0.5 rounded leading-none">✓</div>
                     <div x-show="img.is_edit"
                          class="absolute top-0.5 left-0.5 bg-neutral-900/70 text-white text-[9px] px-1 py-0.5 rounded leading-none">↳</div>
+                    <button class="absolute bottom-0 inset-x-0 bg-indigo-600/85 hover:bg-indigo-600 text-white text-[10px] py-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Add as reference image on the active tab"
+                            @click.stop="addLibraryImageAsRef(img.url)">+ ref</button>
                   </div>
                 </template>
               </div>

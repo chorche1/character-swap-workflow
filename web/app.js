@@ -2715,6 +2715,37 @@ function studio() {
       }
     },
 
+    async addLibraryImageAsRef(url) {
+      // Click-handler for the "+ ref" button on every library image. Fetches
+      // the URL into a File and routes it through the same addImageRefs /
+      // setVideoRef plumbing as drag-and-drop. Tabs without a reference-image
+      // slot (Avatar, Audio, B-roll, Editor, Swap) get a notify and no-op.
+      if (!url) return;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const ext = (url.split('?')[0].split('.').pop() || 'png').toLowerCase();
+        const file = new File([blob], `char-ref.${ext}`,
+                              { type: blob.type || `image/${ext}` });
+        if (this.activeTab === 'image') {
+          if (this.imageGen.refs.length >= 3) {
+            this.notifyInfo('Image tab already has 3 reference images — remove one first');
+            return;
+          }
+          this.addImageRefs([file]);
+          this.notifyInfo('Added as reference image');
+        } else if (this.activeTab === 'video') {
+          this.setVideoRef(file);
+          this.notifyInfo('Set as video reference image');
+        } else {
+          this.notifyInfo('Switch to the Image or Video tab first');
+        }
+      } catch (e) {
+        this.notifyError('Could not load image: ' + e.message);
+      }
+    },
+
     removeImageRef(i) {
       const r = this.imageGen.refs[i];
       if (r?.url) URL.revokeObjectURL(r.url);
