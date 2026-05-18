@@ -283,6 +283,9 @@ def _job_to_dict(job: Job) -> dict:
                 "compile_status": jc.compile_status,
                 "compile_edit_id": jc.compile_edit_id,
                 "compile_error": jc.compile_error,
+                "pipeline_status": jc.pipeline_status,
+                "pipeline_error": jc.pipeline_error,
+                "pipeline_drive_link": jc.pipeline_drive_link,
                 "images": [
                     {
                         "variant_id": v.variant_id,
@@ -2822,6 +2825,45 @@ async def editor_timeline_render(
         "source_filename": src.name,
         **summary,
     }
+
+
+# --- Full auto-pipeline (compile → Resolve → Drive in one click) -----------------
+
+class RunFullPipelineBody(BaseModel):
+    """POST /api/jobs/{job_id}/run_full_pipeline body. Empty = run every
+    eligible character. Pass `char_ids` to limit to specific characters
+    (handy for retrying one failed pipeline run)."""
+    char_ids: list[str] | None = None
+
+
+@app.post("/api/jobs/{job_id}/run_full_pipeline")
+async def run_full_pipeline(job_id: str, body: RunFullPipelineBody,
+                            background: BackgroundTasks) -> dict:
+    """Chain compile-no-captions → package → spawn automate.py per character.
+
+    Each character's pipeline runs in its own asyncio task — failures stay
+    isolated. UI tracks progress via JobCharacter.pipeline_status + the WS
+    `char.pipeline_status` events emitted by runner_pipeline.
+
+    Prerequisites the user must have set up (otherwise rendered MP4 appears
+    but no Drive upload):
+      - DaVinci Resolve installed + RUNNING (Mac: Privacy → Automation perm
+        granted to whichever process runs the server)
+      - ~/character-swap-data/credentials.json with OAuth Desktop client
+        (optional — Drive step skips gracefully if missing)
+      - pip install google-api-python-client google-auth-httplib2
+        google-auth-oauthlib (optional, same)
+    """
+    from character_swap import runner_pipeline
+
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    background.add_task(_run_async,
+                        runner_pipeline.run_full_pipeline,
+                        job_id, char_ids=body.char_ids)
+    return _job_to_dict(job)
 
 
 # --- Export to DaVinci Resolve project (download zip) -----------------------------

@@ -135,6 +135,17 @@ class JobCharacter(BaseModel):
     compile_edit_id: str | None = None       # the editor edit_id used (re-render / debug)
     compile_status: str | None = None        # None | "compiling" | "done" | "failed"
     compile_error: str | None = None
+    # Phase 4 (Full pipeline) per-character status. The "🚀 Run full pipeline"
+    # button in Step 6 chains: compile-no-captions → package zip into a temp
+    # dir → spawn `python automate.py` (Resolve render → Drive upload) → wait
+    # for completion. runner_pipeline.run_full_pipeline updates these fields.
+    pipeline_status: str | None = None
+    # Progression: None → "compiling" → "packaging" → "rendering" → "uploading"
+    # → "done" | "failed" (terminal). "rendering" + "uploading" come from
+    # parsing the spawned automate.py's stdout for marker lines.
+    pipeline_error: str | None = None
+    pipeline_temp_dir: str | None = None     # where the zip was unpacked
+    pipeline_drive_link: str | None = None   # final Drive URL on success
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 

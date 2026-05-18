@@ -1027,6 +1027,16 @@
           </span>
           <span x-show="compiling">Compiling…</span>
         </button>
+        <button class="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!canCompile() || pipelineRunning"
+                @click="runFullPipeline()"
+                title="Compile → spawn Resolve render → upload to Google Drive. Requires Resolve running + credentials.json in ~/character-swap-data/.">
+          <span x-show="!pipelineRunning">🚀 Run full pipeline
+            <span class="text-emerald-200 text-xs ml-1"
+                  x-text="`(${compilableCharCount()}× · Resolve + Drive)`"></span>
+          </span>
+          <span x-show="pipelineRunning">Pipeline running…</span>
+        </button>
       </div>
 
       <!-- Per-character compiled-video cards. Live status updates from WS. -->
@@ -1056,23 +1066,48 @@
                 </div>
               </template>
             </div>
-            <div class="p-2 flex items-center justify-between gap-2">
-              <div class="text-xs truncate min-w-0 flex-1">
-                <span x-text="jc.name"></span>
-                <span class="text-[10px] text-neutral-400 dark:text-neutral-500 ml-1"
-                      x-text="jc.compile_status || ''"></span>
+            <div class="p-2 space-y-1.5">
+              <div class="flex items-center justify-between gap-2">
+                <div class="text-xs truncate min-w-0 flex-1">
+                  <span x-text="jc.name"></span>
+                  <span class="text-[10px] text-neutral-400 dark:text-neutral-500 ml-1"
+                        x-text="jc.compile_status || ''"></span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                  <a x-show="jc.compile_status === 'done' && jc.compiled_video_url"
+                     :href="jc.compiled_video_url"
+                     :download="`${jc.name}-final.mp4`"
+                     title="Download MP4"
+                     class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
+                  <a x-show="jc.compile_status === 'done'"
+                     :href="`/api/jobs/${job.job_id}/characters/${cid}/export_resolve`"
+                     :download="`${jc.name}-resolve.zip`"
+                     title="Download Resolve project zip (video + SRT + automate.py)"
+                     class="text-xs text-slate-700 dark:text-slate-300 hover:underline font-medium">↓ Resolve</a>
+                </div>
               </div>
-              <div class="flex items-center gap-2 shrink-0">
-                <a x-show="jc.compile_status === 'done' && jc.compiled_video_url"
-                   :href="jc.compiled_video_url"
-                   :download="`${jc.name}-final.mp4`"
-                   title="Download MP4"
-                   class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
-                <a x-show="jc.compile_status === 'done'"
-                   :href="`/api/jobs/${job.job_id}/characters/${cid}/export_resolve`"
-                   :download="`${jc.name}-resolve.zip`"
-                   title="Download Resolve project zip (video + SRT + automate.py)"
-                   class="text-xs text-slate-700 dark:text-slate-300 hover:underline font-medium">↓ Resolve</a>
+              <!-- Phase 4 pipeline status (only shown when a 🚀 run has been kicked off) -->
+              <div x-show="jc.pipeline_status"
+                   class="text-[10px] flex items-center gap-1.5 px-2 py-1 rounded"
+                   :class="{
+                     'bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300':
+                       jc.pipeline_status === 'done',
+                     'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300':
+                       jc.pipeline_status === 'failed',
+                     'bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300':
+                       !['done','failed'].includes(jc.pipeline_status)
+                   }">
+                <span x-show="jc.pipeline_status === 'queued'">⏸ queued</span>
+                <span x-show="jc.pipeline_status === 'compiling'" class="animate-pulse">🎞 compiling…</span>
+                <span x-show="jc.pipeline_status === 'packaging'" class="animate-pulse">📦 packaging…</span>
+                <span x-show="jc.pipeline_status === 'rendering'" class="animate-pulse">🎬 rendering in Resolve…</span>
+                <span x-show="jc.pipeline_status === 'uploading'" class="animate-pulse">☁️ uploading to Drive…</span>
+                <span x-show="jc.pipeline_status === 'done' && !jc.pipeline_drive_link">✓ done (no Drive upload)</span>
+                <a x-show="jc.pipeline_status === 'done' && jc.pipeline_drive_link"
+                   :href="jc.pipeline_drive_link" target="_blank"
+                   class="font-medium hover:underline">✓ done · open in Drive ↗</a>
+                <span x-show="jc.pipeline_status === 'failed'" class="truncate"
+                      :title="jc.pipeline_error">✕ <span x-text="jc.pipeline_error || 'failed'"></span></span>
               </div>
             </div>
           </div>

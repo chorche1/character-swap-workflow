@@ -150,6 +150,7 @@ function studio() {
       voiceOverride: '',
     },
     compiling: false,
+    pipelineRunning: false,         // true while the 🚀 Run-full-pipeline orchestrator is running
     // --- Visual scrubbing timeline state (kept at top level for Alpine
     // x-show / x-bind brevity in markup; logically belongs to the caption
     // editor). `playheadSecs` is driven by the Remotion Player's
@@ -1528,6 +1529,32 @@ function studio() {
         this.job = await r.json();  // server flips eligible chars to compiling
       } finally {
         this.compiling = false;
+      }
+    },
+
+    async runFullPipeline() {
+      // Phase 4: chain compile-no-captions → spawn automate.py per char.
+      // Backend orchestrator runs each char in parallel; we just kick it off
+      // here and let WS events drive the per-char status badges.
+      if (!this.job || !this.canCompile()) return;
+      if (this.pipelineRunning) return;
+      this.pipelineRunning = true;
+      try {
+        const r = await fetch('/api/jobs/' + this.job.job_id + '/run_full_pipeline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ char_ids: null }),
+        });
+        if (!r.ok) {
+          this.notifyError('Pipeline failed to start: ' + await r.text());
+          this.pipelineRunning = false;
+          return;
+        }
+        this.job = await r.json();
+        this.notifyInfo(`Pipeline started for ${this.compilableCharCount()} character${this.compilableCharCount() === 1 ? '' : 's'}…`);
+      } catch (e) {
+        this.notifyError('Pipeline failed: ' + (e?.message || e));
+        this.pipelineRunning = false;
       }
     },
 
@@ -4203,6 +4230,31 @@ function studio() {
            'char.compile_done', 'char.compile_failed'].includes(evt.kind)) {
         this.loadJobCost(this.job.job_id);
         this.loadDailyCost();
+      }
+      // Phase 4 pipeline: refresh job whenever a char's pipeline status
+      // changes, plus notify on terminal states.
+      if (evt.kind === 'char.pipeline_status') {
+        try {
+          const r = await fetch('/api/jobs/' + this.job.job_id);
+          if (r.ok) this.job = await r.json();
+        } catch (_) {}
+        if (evt.status === 'done' || evt.status === 'failed') {
+          const jc = this.job?.characters?.[evt.char_id];
+          const allTerminal = this.job && Object.values(this.job.characters || {})
+            .filter(c => c.pipeline_status)
+            .every(c => ['done', 'failed'].includes(c.pipeline_status));
+          if (allTerminal) this.pipelineRunning = false;
+          if (jc && this.notifyMilestone) {
+            const ok = evt.status === 'done';
+            this.notifyMilestone(
+              `${jc.name} pipeline ${ok ? 'done' : 'failed'}`,
+              ok ? (evt.drive_link || 'Rendered in Resolve')
+                 : (evt.error || 'see UI for details'),
+              { kind: ok ? 'done' : 'error',
+                tag: `pipeline-${this.job.job_id}-${evt.char_id}` },
+            );
+          }
+        }
       }
       // Notify the user when their compile is done (matches the existing
       // per-batch milestone pattern).

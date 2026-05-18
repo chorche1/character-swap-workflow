@@ -287,6 +287,16 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE job_characters ADD COLUMN compile_status TEXT")
     if "compile_error" not in jc_cols2:
         conn.execute("ALTER TABLE job_characters ADD COLUMN compile_error TEXT")
+    # Phase 4 (Full pipeline) per-character status — chains compile → Resolve
+    # render → Drive upload via spawned automate.py subprocess.
+    if "pipeline_status" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN pipeline_status TEXT")
+    if "pipeline_error" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN pipeline_error TEXT")
+    if "pipeline_temp_dir" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN pipeline_temp_dir TEXT")
+    if "pipeline_drive_link" not in jc_cols2:
+        conn.execute("ALTER TABLE job_characters ADD COLUMN pipeline_drive_link TEXT")
     # Per-video movement-prompt override. Set when the user regenerates a
     # specific DONE video with a tweaked prompt (Step 5 regen button).
     video_cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
@@ -419,6 +429,10 @@ def _jc_from_row(r: sqlite3.Row, images: list[GeneratedImage],
         compile_edit_id=r["compile_edit_id"] if "compile_edit_id" in keys else None,
         compile_status=r["compile_status"] if "compile_status" in keys else None,
         compile_error=r["compile_error"] if "compile_error" in keys else None,
+        pipeline_status=r["pipeline_status"] if "pipeline_status" in keys else None,
+        pipeline_error=r["pipeline_error"] if "pipeline_error" in keys else None,
+        pipeline_temp_dir=r["pipeline_temp_dir"] if "pipeline_temp_dir" in keys else None,
+        pipeline_drive_link=r["pipeline_drive_link"] if "pipeline_drive_link" in keys else None,
         updated_at=_parse_iso(r["updated_at"]),
     )
 
@@ -681,8 +695,11 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                  (job_id, char_id, position, name, source_image_path,
                   status, approved_variant_id, approved_variant_ids_json,
                   error, compiled_video_path, compile_edit_id,
-                  compile_status, compile_error, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  compile_status, compile_error,
+                  pipeline_status, pipeline_error,
+                  pipeline_temp_dir, pipeline_drive_link,
+                  updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 j.job_id, cid, char_pos, jc.name, jc.source_image_path,
                 str(jc.status), legacy_single,
@@ -690,6 +707,8 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                 jc.error,
                 jc.compiled_video_path, jc.compile_edit_id,
                 jc.compile_status, jc.compile_error,
+                jc.pipeline_status, jc.pipeline_error,
+                jc.pipeline_temp_dir, jc.pipeline_drive_link,
                 _iso(jc.updated_at),
             ),
         )
