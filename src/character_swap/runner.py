@@ -542,12 +542,20 @@ async def _animate_character(
     )
 
 
-async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
-    """Re-submit a single failed video. Replaces the entry in-place with a fresh
-    `VideoVariant` (preserving its `source_variant_id`) and re-runs
-    `_animate_one_video`. Critical for multi-approve jobs: the new video must
-    re-target the SAME approved variant the failed one was animating, not
-    silently fall back to a different one."""
+async def retry_one_video(job_id: str, char_id: str, video_id: str,
+                          prompt_override: str | None = None) -> None:
+    """Re-submit a single video. Replaces the entry in-place with a fresh
+    `VideoVariant` (preserving `source_variant_id`) and re-runs
+    `_animate_one_video`. Works on ANY status now — FAILED/ERROR for normal
+    retries AND DONE for "I want a different take on this clip" regens.
+    Critical for multi-approve jobs: the new video must re-target the SAME
+    approved variant the old one was animating, not silently fall back.
+
+    `prompt_override` lets the caller tweak the movement prompt for THIS video
+    only (Step 5 regen flow). When None, falls back to the per-scene prompt
+    on the job (current behavior). Persisted on the new VideoVariant so the
+    UI's regen modal can pre-fill with the LAST iteration the user tried.
+    """
     s = store()
     job = s.get_job(job_id)
     if job is None or not job.movement_prompt:
@@ -560,8 +568,17 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
     idx = next((i for i, v in enumerate(jc.videos) if v.video_id == video_id), None)
     if idx is None:
         return
-    if jc.videos[idx].status not in {VideoStatus.FAILED, VideoStatus.ERROR}:
+    # DONE/PROCESSING is now also retryable. Skip only if mid-flight to a
+    # provider that hasn't returned (we'd leak a running Grok job otherwise).
+    if jc.videos[idx].status == VideoStatus.PROCESSING:
         return
+
+    # Inherit an existing override if the caller didn't supply a new one. This
+    # makes "regenerate again with the same override" a one-click action.
+    inherited_override = jc.videos[idx].movement_prompt_override
+    effective_override = (prompt_override
+                          if prompt_override is not None
+                          else inherited_override)
 
     # Preserve which approved variant this video was animating — falls back
     # to the first approved one only if the original wasn't recorded.
@@ -573,17 +590,19 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str) -> None:
         grok_job_id="",
         status=VideoStatus.PENDING,
         source_variant_id=source_variant_id,
+        movement_prompt_override=effective_override,
     )
     jc.videos[idx] = fresh
     _persist(job, jc, status=CharStatus.ANIMATING)
-    # Pick the prompt that matches THIS video's scene (multi-scene jobs).
+    # Resolve the prompt: per-video override > enriched > raw per-scene > job-level.
     source_variant = next(
         (iv for iv in jc.images if iv.variant_id == source_variant_id), None,
     )
     scene_id = source_variant.scene_id if source_variant else None
     sid = scene_id or _first_scene_id(job)
     movement_prompt = (
-        (job.enriched_movement_prompts or {}).get(sid)
+        effective_override
+        or (job.enriched_movement_prompts or {}).get(sid)
         or (job.movement_prompts or {}).get(sid)
         or job.enriched_movement_prompt
         or job.movement_prompt

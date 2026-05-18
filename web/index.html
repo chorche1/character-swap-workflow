@@ -911,14 +911,23 @@
                       </div>
                     </template>
                   </div>
-                  <div class="p-2 flex items-center justify-between">
-                    <div class="text-[10px] text-neutral-400 dark:text-neutral-500 truncate" x-text="vv.download_name || vv.video_id"></div>
-                    <div class="flex gap-2 text-xs">
+                  <div class="p-2 flex items-center justify-between gap-2">
+                    <div class="text-[10px] text-neutral-400 dark:text-neutral-500 truncate flex-1 min-w-0">
+                      <span x-text="vv.download_name || vv.video_id"></span>
+                      <span x-show="vv.movement_prompt_override"
+                            class="ml-1 text-amber-600 dark:text-amber-400"
+                            title="Custom prompt applied">✎</span>
+                    </div>
+                    <div class="flex gap-2 text-xs shrink-0">
                       <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
-                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                         class="text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
                       <button x-show="['failed','error'].includes(vv.status)"
                               class="text-indigo-600 dark:text-indigo-400 hover:underline"
                               @click="retryVideo(cid, vv.video_id)">↻ retry</button>
+                      <button x-show="vv.status === 'done'"
+                              class="text-amber-600 dark:text-amber-400 hover:underline"
+                              title="Generate a new take (optionally tweak the prompt)"
+                              @click="openRegenModal(cid, vv)">↻ regen</button>
                     </div>
                   </div>
                 </div>
@@ -3711,6 +3720,59 @@
                  x-text="formatBytes(row.bytes)"></div>
           </div>
         </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Regen-video modal: pre-fills with the per-scene movement prompt (or the
+       previous override) and submits a fresh take. Used from Step 5 video
+       cards' ↻ regen button on DONE clips. -->
+  <div x-show="regenModal.open"
+       @click="regenModal.open = false"
+       @keydown.window.escape="if (regenModal.open) regenModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">Regenerate this clip</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            <span x-text="regenModal.charName"></span> · scene
+            <span x-text="(regenModal.sceneId || '').slice(-6)"></span>
+            · the new take replaces the current video
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="regenModal.open = false">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <label class="block">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+            Movement prompt
+            <span x-show="regenModal.hadOverride"
+                  class="ml-2 text-amber-600 dark:text-amber-400">
+              (last override — edit or keep)
+            </span>
+          </span>
+          <textarea x-model="regenModal.prompt"
+                    rows="5"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg"
+                    placeholder="Describe how the character moves in this scene…"></textarea>
+          <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1">
+            Same prompt = new random take. Edit to nudge the result (e.g. "less arm
+            movement", "smile less", "look slightly off-camera").
+          </p>
+        </label>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="regenModal.open = false">Cancel</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium disabled:opacity-40"
+                :disabled="regenModal.submitting"
+                @click="submitRegen()">
+          <span x-show="!regenModal.submitting">↻ Regenerate</span>
+          <span x-show="regenModal.submitting">Submitting…</span>
+        </button>
       </div>
     </div>
   </div>

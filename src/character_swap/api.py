@@ -305,6 +305,18 @@ def _job_to_dict(job: Job) -> dict:
                         "source_variant_id": vv.source_variant_id,
                         "error": vv.error,
                         "download_name": _video_download_name(jc, vv),
+                        # Per-video override + the fallback per-scene prompt,
+                        # so the Step 5 regen modal can pre-fill correctly
+                        # without re-fetching the job.
+                        "movement_prompt_override": vv.movement_prompt_override,
+                        "effective_movement_prompt": (
+                            vv.movement_prompt_override
+                            or (job.movement_prompts or {}).get(
+                                next((iv.scene_id for iv in jc.images
+                                      if iv.variant_id == vv.source_variant_id),
+                                     None) or job.scene_id)
+                            or job.movement_prompt
+                        ),
                     }
                     for vv in jc.videos
                 ],
@@ -1581,6 +1593,10 @@ async def duplicate_job(job_id: str, background: BackgroundTasks) -> dict:
 class RetryVideoBody(BaseModel):
     char_id: str
     video_id: str
+    # Optional per-video prompt override. When None, retry uses the job's
+    # per-scene movement prompt (or any existing override on this video).
+    # When set (even to empty string), persists on the new VideoVariant.
+    prompt_override: str | None = None
 
 
 @app.post("/api/jobs/{job_id}/retry_video")
@@ -1603,11 +1619,14 @@ async def retry_video(job_id: str, body: RetryVideoBody,
     target = next((v for v in jc.videos if v.video_id == body.video_id), None)
     if target is None:
         raise HTTPException(404, "Video not found on this character")
-    if target.status not in {VideoStatus.FAILED, VideoStatus.ERROR}:
-        raise HTTPException(409,
-                            f"Video is '{target.status}', only failed/error can retry")
+    # Allow retry on FAILED/ERROR (classic) AND DONE (Step 5 regen flow —
+    # user wants a different take on a successful clip). Block PROCESSING
+    # because we'd leak a running provider job.
+    if target.status == VideoStatus.PROCESSING:
+        raise HTTPException(409, "Video is still processing; wait for it to finish")
     background.add_task(
         _run_async, runner.retry_one_video, job_id, body.char_id, body.video_id,
+        body.prompt_override,
     )
     return _job_to_dict(job)
 

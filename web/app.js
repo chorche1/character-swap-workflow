@@ -3940,6 +3940,61 @@ function studio() {
       return rows;
     },
 
+    // Step 5 regen modal state. Opened by ↻ regen on any DONE video card.
+    regenModal: {
+      open: false, charId: null, videoId: null, charName: '',
+      sceneId: null, prompt: '', hadOverride: false, submitting: false,
+    },
+
+    openRegenModal(charId, vv) {
+      // Pre-fill the prompt with the previous override if any (so iterating
+      // on the same video keeps building on what the user last tried),
+      // otherwise the effective per-scene prompt the API resolved for us.
+      this.regenModal = {
+        open: true,
+        charId,
+        videoId: vv.video_id,
+        charName: this.job?.characters?.[charId]?.name || charId,
+        sceneId: this._sceneIdForVideo(charId, vv),
+        prompt: vv.movement_prompt_override || vv.effective_movement_prompt || '',
+        hadOverride: !!vv.movement_prompt_override,
+        submitting: false,
+      };
+    },
+
+    _sceneIdForVideo(charId, vv) {
+      const jc = this.job?.characters?.[charId];
+      if (!jc) return null;
+      const src = (jc.images || []).find(im => im.variant_id === vv.source_variant_id);
+      return src?.scene_id || null;
+    },
+
+    async submitRegen() {
+      if (!this.regenModal.charId || !this.regenModal.videoId) return;
+      this.regenModal.submitting = true;
+      try {
+        const body = {
+          char_id: this.regenModal.charId,
+          video_id: this.regenModal.videoId,
+          prompt_override: this.regenModal.prompt,
+        };
+        const r = await fetch('/api/jobs/' + this.job.job_id + '/retry_video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          this.notifyError('Regen failed: ' + await r.text());
+          return;
+        }
+        this.job = await r.json();
+        this.regenModal.open = false;
+        this.notifyInfo(`Regenerating ${this.regenModal.charName}'s clip…`);
+      } finally {
+        this.regenModal.submitting = false;
+      }
+    },
+
     async retryVideo(charId, videoId) {
       if (!this.job) return;
       const r = await fetch('/api/jobs/' + this.job.job_id + '/retry_video', {

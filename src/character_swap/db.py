@@ -287,6 +287,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE job_characters ADD COLUMN compile_status TEXT")
     if "compile_error" not in jc_cols2:
         conn.execute("ALTER TABLE job_characters ADD COLUMN compile_error TEXT")
+    # Per-video movement-prompt override. Set when the user regenerates a
+    # specific DONE video with a tweaked prompt (Step 5 regen button).
+    video_cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
+    if "movement_prompt_override" not in video_cols:
+        conn.execute("ALTER TABLE videos ADD COLUMN movement_prompt_override TEXT")
     # One-time cleanup migration: the Reel feature has been removed. Drop
     # its tables if a prior schema left them behind. No-op on fresh DBs.
     conn.execute("DROP TABLE IF EXISTS reel_jobs")
@@ -365,6 +370,7 @@ def _video_from_row(r: sqlite3.Row) -> VideoVariant:
         st = VideoStatus(r["status"])
     except ValueError:
         st = VideoStatus.PROCESSING
+    keys = r.keys()
     return VideoVariant(
         video_id=r["video_id"],
         grok_job_id=r["grok_job_id"],
@@ -375,6 +381,10 @@ def _video_from_row(r: sqlite3.Row) -> VideoVariant:
         final_video_path=r["final_video_path"],
         source_variant_id=r["source_variant_id"],
         error=r["error"],
+        movement_prompt_override=(
+            r["movement_prompt_override"]
+            if "movement_prompt_override" in keys else None
+        ),
     )
 
 
@@ -700,13 +710,15 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                 """INSERT INTO videos
                     (video_id, job_id, char_id, position, grok_job_id,
                      status, submitted_at, completed_at, download_url,
-                     final_video_path, source_variant_id, error)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     final_video_path, source_variant_id, error,
+                     movement_prompt_override)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     vv.video_id, j.job_id, cid, i, vv.grok_job_id,
                     str(vv.status), _iso(vv.submitted_at),
                     _iso(vv.completed_at), vv.download_url,
                     vv.final_video_path, vv.source_variant_id, vv.error,
+                    vv.movement_prompt_override,
                 ),
             )
 

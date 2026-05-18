@@ -102,6 +102,12 @@ class VideoVariant(BaseModel):
     final_video_path: str | None = None
     source_variant_id: str | None = None
     error: str | None = None
+    # Per-video movement-prompt override. Set when the user regenerates this
+    # specific video (Step 5 regen button) with a tweaked prompt. Falls back
+    # to the job's per-scene movement_prompt when null. Persisted so a second
+    # regen of the same video pre-fills the modal with the LAST override
+    # the user iterated on instead of going back to the original.
+    movement_prompt_override: str | None = None
 
 
 class JobCharacter(BaseModel):
