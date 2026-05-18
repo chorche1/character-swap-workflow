@@ -220,7 +220,12 @@ src/character_swap/
                          pipeline (trim → voice swap → transcribe → WPM → captions).
                          Settings apply uniformly batch-wide. Failure is per-character.
 ├── events.py          — Asyncio pub/sub for live updates
-├── state.py           — Atomic JSON state OR SQLite (depending on USE_SQLITE_STATE)
+├── state.py           — Atomic JSON state OR SQLite (depending on USE_SQLITE_STATE).
+                         Every entity (scene, character, project, job, generation) has
+                         add_/update_/remove_ mutators that flush their own row(s)
+                         inline. save() is a bulk-jobs re-flush only — call it when
+                         you've mutated many job rows in one transaction (e.g. retroactive
+                         character rename); use update_<entity> for everything else.
 ├── models.py          — Pydantic: SceneAsset, ProjectAsset (+default_prompt),
                          CharacterAsset (+voice_id, +voice_provider preset),
                          GeneratedImage (+scene_id), VideoVariant,
@@ -655,6 +660,7 @@ Grok image model: `grok-imagine-image` (xAI deprecated `grok-2-image-1212` on 20
 - Head-of-chain B-roll regen: rejecting the FIRST clip in a scene group doesn't auto-rechain downstream clips (they still point at the old first-clip's last frame). UI hint to manually reject downstream too is a follow-up.
 - Edit-chain visualization beyond the small "↳ edit" badge.
 - SQLite-backed state is opt-in via `USE_SQLITE_STATE=1` but full migration tooling isn't shipped yet.
+- **All persistent data lives inside the active worktree**: `state/`, `characters/`, `input/scenes/`, `output/<job_id>/`, and `.env`. Running `git worktree remove` wipes every one of those — no Trash, no recovery. If you're done with a feature branch but want to keep the uploaded scenes, characters, or generated jobs, move those dirs out (or copy them to the main checkout) before removing the worktree.
 - Mobile / iPad UI: not optimized. Sidebar layout assumes ≥md breakpoint.
 
 ---
