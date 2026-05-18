@@ -2299,39 +2299,58 @@
                        controls playsinline
                        class="absolute inset-0 w-full h-full object-contain bg-black rounded-lg"></video>
 
-                <!-- Live caption overlay — drag anywhere on screen, resize via corner handle -->
-                <div x-show="!useRemotionPlayer()" class="absolute inset-0 pointer-events-none">
+                <!-- Live caption overlay — shown on BOTH ASS and Remotion paths so
+                     the user can drag-position + resize regardless of template.
+                     On ASS path the sample text is the only preview; on Remotion
+                     path the actual rendered text shows underneath, and this is
+                     a transparent grab-handle box that adjusts margin_v/h/size. -->
+                <div class="absolute inset-0 pointer-events-none">
                   <div :style="previewWrapStyle(activeStyle())"
-                       class="pointer-events-auto cursor-grab select-none"
-                       :class="draggingText ? 'cursor-grabbing' : ''"
+                       class="pointer-events-auto cursor-grab select-none rounded transition-colors"
+                       :class="{
+                         'cursor-grabbing': draggingText,
+                         'outline outline-2 outline-dashed outline-indigo-400 outline-offset-4 bg-indigo-500/5':
+                           useRemotionPlayer() || draggingText,
+                         'hover:outline hover:outline-2 hover:outline-dashed hover:outline-indigo-400/70 hover:outline-offset-4':
+                           true
+                       }"
                        @mousedown="startTextDrag($event)"
                        @touchstart.passive="startTextDrag($event)"
                        @wheel.prevent="onTextWheel($event)">
-                    <span :style="previewWordStyle(activeStyle(), false)"
-                          x-text="activeStyle().all_caps ? 'NEVER' : 'never'"></span>
-                    <span :style="previewWordStyle(activeStyle(), true)"
-                          x-text="activeStyle().all_caps ? 'BUY' : 'buy'"></span>
-                    <span :style="previewWordStyle(activeStyle(), false)"
-                          x-text="activeStyle().all_caps ? 'HONEY' : 'honey'"></span>
+                    <!-- Sample words: only on ASS path. On Remotion path the real
+                         text shows behind us; we render an invisible placeholder so
+                         the wrapper still has the right dimensions to drag/resize. -->
+                    <template x-if="!useRemotionPlayer()">
+                      <span class="contents">
+                        <span :style="previewWordStyle(activeStyle(), false)"
+                              x-text="activeStyle().all_caps ? 'NEVER' : 'never'"></span>
+                        <span :style="previewWordStyle(activeStyle(), true)"
+                              x-text="activeStyle().all_caps ? 'BUY' : 'buy'"></span>
+                        <span :style="previewWordStyle(activeStyle(), false)"
+                              x-text="activeStyle().all_caps ? 'HONEY' : 'honey'"></span>
+                      </span>
+                    </template>
+                    <template x-if="useRemotionPlayer()">
+                      <span class="invisible" :style="previewWordStyle(activeStyle(), false)"
+                            x-text="activeStyle().all_caps ? 'NEVER BUY HONEY' : 'never buy honey'"></span>
+                    </template>
 
-                    <!-- Resize handle — drag this square to scale text -->
-                    <div class="absolute -right-2 -bottom-2 w-4 h-4 bg-indigo-500 border-2 border-white rounded-sm cursor-nwse-resize hover:scale-125 transition-transform shadow-md"
+                    <!-- Resize handle — bigger + diagonal-arrow icon so it's easy to find -->
+                    <div class="absolute -right-3 -bottom-3 w-6 h-6 bg-indigo-500 hover:bg-indigo-600 border-2 border-white rounded cursor-nwse-resize shadow-lg flex items-center justify-center text-white text-xs font-bold transition-transform hover:scale-110"
                          @mousedown.stop="startTextResize($event)"
                          @touchstart.stop.passive="startTextResize($event)"
-                         title="drag to resize"></div>
+                         title="drag to resize">↘</div>
                   </div>
                 </div>
 
-                <div x-show="!useRemotionPlayer()" class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
-                  drag text · drag corner to resize · scroll also resizes
-                </div>
-
-                <!-- Remotion Player path — exact preview matching rendered output -->
+                <!-- Remotion Player path — actual rendered captions (sits behind the drag overlay) -->
                 <div x-show="useRemotionPlayer()"
                      id="remotion-preview-host"
                      class="absolute inset-0 bg-black rounded-lg overflow-hidden"></div>
-                <div x-show="useRemotionPlayer()" class="absolute top-2 right-2 text-[10px] text-white/60 bg-black/40 px-1.5 py-0.5 rounded pointer-events-none">
-                  live Remotion preview · matches render
+
+                <!-- Single help hint — applies to both engines now -->
+                <div class="absolute top-2 right-2 text-[10px] text-white/70 bg-black/50 px-2 py-1 rounded pointer-events-none">
+                  drag text to move · drag ↘ corner to resize · scroll to resize
                 </div>
               </div>
 
