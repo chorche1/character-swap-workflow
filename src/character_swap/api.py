@@ -119,14 +119,32 @@ async def _save_upload(upload: UploadFile, dest: Path) -> bytes:
 
 
 def _file_url(path: Path | str | None) -> str | None:
+    """Map a filesystem path to a /files/... URL served by one of the mounts.
+
+    Three explicit mount prefixes (characters/, input/scenes/, output/)
+    handle the canonical data dirs — checked first so paths in those dirs
+    resolve correctly even when they're OUTSIDE project_root (the shared
+    data store at ~/character-swap-data/). Falls back to project_root for
+    web assets and anything else that happens to live inside the repo.
+    """
     if path is None:
         return None
     p = Path(path).resolve()
+    for prefix, base in (
+        ("characters", settings.characters_dir.resolve()),
+        ("input/scenes", settings.scenes_dir.resolve()),
+        ("output", settings.output_dir.resolve()),
+    ):
+        try:
+            rel = p.relative_to(base)
+            return f"/files/{prefix}/{rel.as_posix()}"
+        except ValueError:
+            continue
     try:
         rel = p.relative_to(settings.project_root.resolve())
+        return f"/files/{rel.as_posix()}"
     except ValueError:
         return None
-    return f"/files/{rel.as_posix()}"
 
 
 def _variant_download_name(jc: JobCharacter, variant: GeneratedImage) -> str:

@@ -402,6 +402,11 @@ function studio() {
         // Also set text/plain as a fallback so devtools / drop targets that
         // only inspect text/plain see something sensible.
         ev.dataTransfer.setData('text/plain', char.name || char.char_id);
+        // Image URL so the Image/Video tab prompt areas can pull it in as
+        // a reference image. Prefer the specific image being dragged; fall
+        // back to the character's primary image when dragging the card row.
+        const url = img?.url || char.url;
+        if (url) ev.dataTransfer.setData('text/x-charswap-image-url', url);
       } catch (_) {}
     },
 
@@ -2612,7 +2617,28 @@ function studio() {
       }
     },
 
-    onPromptDrop(ev, target) {
+    async onPromptDrop(ev, target) {
+      // Path 1: dragged from the character library — pull the image URL
+      // from the custom payload, fetch it, hand it in as a File.
+      const libUrl = ev.dataTransfer?.getData('text/x-charswap-image-url');
+      if (libUrl) {
+        ev.preventDefault();
+        this.promptDropActive = false;
+        try {
+          const resp = await fetch(libUrl);
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const blob = await resp.blob();
+          const ext = (libUrl.split('?')[0].split('.').pop() || 'png').toLowerCase();
+          const file = new File([blob], `char-ref.${ext}`,
+                                { type: blob.type || `image/${ext}` });
+          if (target === 'image') this.addImageRefs([file]);
+          else if (target === 'video') this.setVideoRef(file);
+        } catch (e) {
+          this.notifyError('Could not load character image: ' + e.message);
+        }
+        return;
+      }
+      // Path 2: OS-level file drop.
       const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
       if (files.length === 0) return;
       ev.preventDefault();
@@ -2622,9 +2648,10 @@ function studio() {
     },
 
     onPromptDragOver(ev) {
-      // Only highlight when actual files are being dragged (avoid plain text drags).
+      // Highlight for native file drags AND for drags from the character
+      // library (which carry text/x-charswap-image-url instead of files).
       const types = Array.from(ev.dataTransfer?.types || []);
-      if (types.includes('Files')) {
+      if (types.includes('Files') || types.includes('text/x-charswap-image-url')) {
         ev.preventDefault();
         this.promptDropActive = true;
       }
