@@ -97,6 +97,35 @@ character-swap serve --reload --no-open
 character-swap remotion-install [--force]   # rebuild Remotion preview bundle
 ```
 
+### Shared data store (multi-worktree safe)
+
+By default `state/`, `characters/`, `input/`, and `output/` live inside the active worktree. For multi-worktree dev (or to survive `git worktree remove`), move them to a shared location and point env vars at it:
+
+```
+~/character-swap-data/
+├── .env              ← real file, symlinked into each worktree
+├── state/            ← state.sqlite3 + calls.jsonl
+├── characters/       ← uploaded character images
+├── input/scenes/     ← uploaded scenes
+└── output/           ← variants, videos, Editor renders, compile output
+```
+
+Add to the shared `.env`:
+```
+USE_SQLITE_STATE=1
+CHARACTERS_DIR=/Users/hugonorrbom/character-swap-data/characters
+INPUT_DIR=/Users/hugonorrbom/character-swap-data/input
+OUTPUT_DIR=/Users/hugonorrbom/character-swap-data/output
+STATE_DIR=/Users/hugonorrbom/character-swap-data/state
+```
+
+Then symlink in each worktree:
+```bash
+ln -s ~/character-swap-data/.env .env
+```
+
+All four data dirs are env-overridable via `CHARACTERS_DIR` / `INPUT_DIR` / `OUTPUT_DIR` / `STATE_DIR` ([config.py:107-110](src/character_swap/config.py)). Fall back to per-worktree defaults if env vars are unset.
+
 ---
 
 ## Environment / Keys
@@ -660,7 +689,7 @@ Grok image model: `grok-imagine-image` (xAI deprecated `grok-2-image-1212` on 20
 - Head-of-chain B-roll regen: rejecting the FIRST clip in a scene group doesn't auto-rechain downstream clips (they still point at the old first-clip's last frame). UI hint to manually reject downstream too is a follow-up.
 - Edit-chain visualization beyond the small "↳ edit" badge.
 - SQLite-backed state is opt-in via `USE_SQLITE_STATE=1` but full migration tooling isn't shipped yet.
-- **All persistent data lives inside the active worktree**: `state/`, `characters/`, `input/scenes/`, `output/<job_id>/`, and `.env`. Running `git worktree remove` wipes every one of those — no Trash, no recovery. If you're done with a feature branch but want to keep the uploaded scenes, characters, or generated jobs, move those dirs out (or copy them to the main checkout) before removing the worktree.
+- **Persistent data location**: by default `state/`, `characters/`, `input/scenes/`, `output/<job_id>/`, and `.env` live in the active worktree — meaning `git worktree remove` wipes them (no Trash). Set `CHARACTERS_DIR` / `INPUT_DIR` / `OUTPUT_DIR` / `STATE_DIR` in `.env` (see Quickstart → "Shared data store") to point at `~/character-swap-data/` so all worktrees share one library + DB and removal is safe.
 - Mobile / iPad UI: not optimized. Sidebar layout assumes ≥md breakpoint.
 
 ---

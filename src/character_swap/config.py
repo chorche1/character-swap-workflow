@@ -104,10 +104,14 @@ class Settings(BaseSettings):
     use_sqlite_state: bool = Field(default=False, validation_alias="USE_SQLITE_STATE")
 
     project_root: Path = PROJECT_ROOT
-    characters_dir: Path = PROJECT_ROOT / "characters"
-    input_dir: Path = PROJECT_ROOT / "input"
-    output_dir: Path = PROJECT_ROOT / "output"
-    state_dir: Path = PROJECT_ROOT / "state"
+    # Data dirs default to <repo>/<name>, but can be overridden via env vars
+    # so multiple worktrees + the main checkout can share a single data store
+    # (uploaded scenes, character library, generated jobs, SQLite DB). When
+    # set, point them ALL at the same location; the four dirs are siblings.
+    characters_dir: Path = Field(default=PROJECT_ROOT / "characters", validation_alias="CHARACTERS_DIR")
+    input_dir: Path = Field(default=PROJECT_ROOT / "input", validation_alias="INPUT_DIR")
+    output_dir: Path = Field(default=PROJECT_ROOT / "output", validation_alias="OUTPUT_DIR")
+    state_dir: Path = Field(default=PROJECT_ROOT / "state", validation_alias="STATE_DIR")
     web_dir: Path = PROJECT_ROOT / "web"
 
     @property
