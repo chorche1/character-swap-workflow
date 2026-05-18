@@ -178,6 +178,74 @@ def test_build_export_zip_starter_script_imports_resolve_module(fake_videos):
         assert "AppendToTimeline" in script or "CreateTimelineFromClips" in script
 
 
+def test_build_export_zip_starter_script_includes_render_phase(fake_videos):
+    """Phase 2: the script must configure render settings and start a render
+    job — not just open the project. Hugo expects a finished MP4."""
+    final, _ = fake_videos
+    zip_bytes = build_export_zip(
+        final_video=final, pre_caption_video=None,
+        words=None, project_name="probe",
+    )
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        script = zf.read("probe/automate.py").decode("utf-8")
+    assert "SetRenderSettings" in script
+    assert "AddRenderJob" in script
+    assert "StartRendering" in script
+    assert "IsRenderingInProgress" in script  # script must wait for render
+    assert "ExportSubtitle" in script         # burn-in subtitles in render
+    assert "DO_RENDER" in script              # toggle flag exists
+
+
+def test_build_export_zip_starter_script_includes_drive_upload(fake_videos):
+    """Phase 3: the script must contain a Drive upload path gated on
+    credentials.json — even if the user never enables it, the code is there."""
+    final, _ = fake_videos
+    zip_bytes = build_export_zip(
+        final_video=final, pre_caption_video=None,
+        words=None, project_name="probe",
+    )
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        script = zf.read("probe/automate.py").decode("utf-8")
+    assert "InstalledAppFlow" in script
+    assert "MediaFileUpload" in script
+    assert "credentials.json" in script
+    assert "token.json" in script
+    assert "DRIVE_FOLDER_ID" in script
+    assert "drive.file" in script           # the OAuth scope
+
+
+def test_build_export_zip_readme_documents_google_cloud_setup(fake_videos):
+    """README must walk the user through the Google Cloud setup — the script
+    won't be useful for Drive without it."""
+    final, _ = fake_videos
+    zip_bytes = build_export_zip(
+        final_video=final, pre_caption_video=None,
+        words=None, project_name="probe",
+    )
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        readme = zf.read("probe/README.md").decode("utf-8")
+    assert "console.cloud.google.com" in readme
+    assert "Drive API" in readme
+    assert "OAuth" in readme
+    assert "credentials.json" in readme
+    assert "google-api-python-client" in readme   # pip install instructions
+
+
+def test_build_export_zip_readme_calls_out_auto_color_limitation(fake_videos):
+    """Free Resolve doesn't expose Auto Balance via scripting. The README
+    must tell users about the manual workaround so they don't get stuck."""
+    final, _ = fake_videos
+    zip_bytes = build_export_zip(
+        final_video=final, pre_caption_video=None,
+        words=None, project_name="probe",
+    )
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        readme = zf.read("probe/README.md").decode("utf-8")
+    assert "Auto color" in readme or "Auto Balance" in readme
+    assert "Shift+B" in readme       # the manual fallback shortcut
+    assert "Studio" in readme        # mention paid alternative
+
+
 def test_build_export_zip_uses_project_name_as_folder_root(fake_videos):
     """Every file in the zip should be nested under the project_name folder
     so `unzip` produces a clean directory instead of dumping everything."""
