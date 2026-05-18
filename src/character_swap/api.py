@@ -2867,6 +2867,66 @@ def _find_editor_videos(edit_dir: Path) -> tuple[Path | None, Path | None]:
     return final, pre
 
 
+@app.get("/api/jobs/{job_id}/characters/{char_id}/export_resolve")
+async def job_char_export_resolve(job_id: str, char_id: str):
+    """Download one compiled per-character video as a Resolve project zip.
+
+    Mirrors `editor_export_resolve` but takes the (job_id, char_id) of a
+    Step 6 compile output instead of an arbitrary edit_id. The final MP4
+    is `jc.compiled_video_path`; pre-caption + words.json live in the
+    underlying edit_dir (jc.compile_edit_id) so we can still emit SRT
+    even when the compile was run with captions disabled.
+    """
+    from fastapi.responses import Response
+    from character_swap import exporter
+
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    if jc.compile_status != "done" or not jc.compiled_video_path:
+        raise HTTPException(409,
+            f"Character {char_id!r} has no compiled video "
+            f"(compile_status={jc.compile_status!r})")
+
+    final_video = Path(jc.compiled_video_path)
+    if not final_video.exists():
+        raise HTTPException(404, f"Compiled video missing on disk: {final_video}")
+
+    pre_caption: Path | None = None
+    words: list[dict] | None = None
+    if jc.compile_edit_id:
+        edit_dir = settings.output_dir / "editor" / jc.compile_edit_id
+        if edit_dir.is_dir():
+            _, pre_caption = _find_editor_videos(edit_dir)
+            words_path = edit_dir / "words.json"
+            if words_path.exists():
+                try:
+                    words = json.loads(words_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    words = None
+
+    char_slug = _safe_filename_stem(jc.name) or char_id
+    project_name = f"{job_id}-{char_slug}"
+    zip_bytes = exporter.build_export_zip(
+        final_video=final_video,
+        pre_caption_video=pre_caption,
+        words=words,
+        project_name=project_name,
+    )
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{project_name}-resolve.zip"',
+            "Content-Length": str(len(zip_bytes)),
+        },
+    )
+
+
 @app.get("/api/editor/export_resolve/{edit_id}")
 async def editor_export_resolve(edit_id: str):
     """Download the edit as a DaVinci Resolve-ready project bundle (.zip).

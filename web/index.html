@@ -998,15 +998,27 @@
         </div>
       </details>
 
-      <button class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-              :disabled="!canCompile() || compiling"
-              @click="submitCompile()">
-        <span x-show="!compiling">🎞 Compile final videos
-          <span class="text-violet-200 text-xs ml-1"
-                x-text="`(${compilableCharCount()} character${compilableCharCount() === 1 ? '' : 's'})`"></span>
-        </span>
-        <span x-show="compiling">Compiling…</span>
-      </button>
+      <div class="flex flex-wrap items-center gap-3">
+        <button class="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!canCompile() || compiling"
+                @click="submitCompile()">
+          <span x-show="!compiling">🎞 Compile final videos
+            <span class="text-violet-200 text-xs ml-1"
+                  x-text="`(${compilableCharCount()} character${compilableCharCount() === 1 ? '' : 's'})`"></span>
+          </span>
+          <span x-show="compiling">Compiling…</span>
+        </button>
+        <button class="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-800 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!canCompile() || compiling"
+                @click="submitCompile({forResolve: true})"
+                title="Compile concat + silence trim + voice swap (no captions). Each character then gets an 'Export to Resolve' link below.">
+          <span x-show="!compiling">🎬 Compile → Resolve
+            <span class="text-slate-300 text-xs ml-1"
+                  x-text="`(${compilableCharCount()} character${compilableCharCount() === 1 ? '' : 's'} · captions in Resolve)`"></span>
+          </span>
+          <span x-show="compiling">Compiling…</span>
+        </button>
+      </div>
 
       <!-- Per-character compiled-video cards. Live status updates from WS. -->
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
@@ -1035,16 +1047,24 @@
                 </div>
               </template>
             </div>
-            <div class="p-2 flex items-center justify-between">
-              <div class="text-xs truncate">
+            <div class="p-2 flex items-center justify-between gap-2">
+              <div class="text-xs truncate min-w-0 flex-1">
                 <span x-text="jc.name"></span>
                 <span class="text-[10px] text-neutral-400 dark:text-neutral-500 ml-1"
                       x-text="jc.compile_status || ''"></span>
               </div>
-              <a x-show="jc.compile_status === 'done' && jc.compiled_video_url"
-                 :href="jc.compiled_video_url"
-                 :download="`${jc.name}-final.mp4`"
-                 class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓</a>
+              <div class="flex items-center gap-2 shrink-0">
+                <a x-show="jc.compile_status === 'done' && jc.compiled_video_url"
+                   :href="jc.compiled_video_url"
+                   :download="`${jc.name}-final.mp4`"
+                   title="Download MP4"
+                   class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
+                <a x-show="jc.compile_status === 'done'"
+                   :href="`/api/jobs/${job.job_id}/characters/${cid}/export_resolve`"
+                   :download="`${jc.name}-resolve.zip`"
+                   title="Download Resolve project zip (video + SRT + automate.py)"
+                   class="text-xs text-slate-700 dark:text-slate-300 hover:underline font-medium">↓ Resolve</a>
+              </div>
             </div>
           </div>
         </template>

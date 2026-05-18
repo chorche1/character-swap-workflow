@@ -1496,8 +1496,13 @@ function studio() {
       return this.hasCompilableChars() && !!this.health.openai_key;
     },
 
-    async submitCompile() {
+    async submitCompile(opts) {
+      // opts.forResolve: boolean — forces enable_captions=false so the
+      // compile produces a clean MP4 ready for caption + color work in
+      // DaVinci Resolve. Per-char "Export to Resolve" links appear after
+      // each compile_status flips to 'done'.
       if (!this.job || !this.canCompile()) return;
+      const forResolve = !!opts?.forResolve;
       this.compiling = true;
       try {
         // Persist common settings so they survive page reloads.
@@ -1509,7 +1514,7 @@ function studio() {
         const body = {
           template: this.compileSettings.template,
           enable_trim: !!this.compileSettings.enableTrim,
-          enable_captions: !!this.compileSettings.enableCaptions,
+          enable_captions: forResolve ? false : !!this.compileSettings.enableCaptions,
           enable_wpm_normalize: !!this.compileSettings.enableWpmNormalize,
           target_wpm: Number(this.compileSettings.targetWpm) || 190,
           voice_override: this.compileSettings.voiceOverride || null,

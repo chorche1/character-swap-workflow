@@ -102,6 +102,7 @@ async def _compile_one_character(
     min_silence_secs: float,
     pad_secs: float,
     voice_override: str | None,
+    enable_transcribe: bool = True,
 ) -> None:
     """Compile one character's per-scene videos into a single final MP4.
 
@@ -209,9 +210,12 @@ async def _compile_one_character(
                 # WPM still produce a usable MP4 without it.
                 pass
 
-        # Step 4a: transcribe (needed for captions OR WPM normalize).
+        # Step 4a: transcribe. Needed for: captions, WPM normalize, AND the
+        # Resolve-export flow (SRT generated from words.json). `enable_transcribe`
+        # defaults True so the words are always available for downstream consumers
+        # even when captions + WPM are both off.
         words: list = []
-        if enable_captions or enable_wpm_normalize:
+        if enable_transcribe or enable_captions or enable_wpm_normalize:
             try:
                 words = await asyncio.to_thread(
                     video_edit.transcribe_words, current, job_id=edit_id,
@@ -236,13 +240,21 @@ async def _compile_one_character(
             except Exception:
                 pass
 
+        # Persist the transcript NOW (after any WPM scaling) so the Resolve
+        # export can build an SRT even when caption burn-in is skipped, AND
+        # so re-renders / debug have the canonical word list.
+        if words:
+            try:
+                (edit_dir / "words.json").write_text(
+                    video_edit.words_to_json(words), encoding="utf-8",
+                )
+            except OSError:
+                pass
+
         # Step 4c: captions burn-in.
         if enable_captions and words:
             try:
                 style = video_edit.style_from_params(template, overrides)
-                (edit_dir / "words.json").write_text(
-                    video_edit.words_to_json(words), encoding="utf-8",
-                )
                 (edit_dir / "pre_caption.txt").write_text(
                     str(current), encoding="utf-8",
                 )
@@ -258,6 +270,16 @@ async def _compile_one_character(
                 await _emit(job_id, "char.compile_warning",
                             char_id=char_id,
                             message=f"caption render failed: {e}")
+        else:
+            # No captions → the compiled output IS the pre-caption file. Record
+            # that for the Resolve-export endpoint (so it can pick the right
+            # video as pre-caption AND skip the duplicate copy).
+            try:
+                (edit_dir / "pre_caption.txt").write_text(
+                    str(current), encoding="utf-8",
+                )
+            except OSError:
+                pass
 
         # Copy the final result to the canonical per-character location so
         # the UI can grab it from `output/<job_id>/compiled/<char_id>.mp4`.
@@ -295,11 +317,17 @@ async def compile_job_videos(
     pad_secs: float = 0.05,
     voice_override: str | None = None,
     char_ids: list[str] | None = None,
+    enable_transcribe: bool = True,
 ) -> None:
     """Fan out compile across every (or selected) approved character. All M
     chars compile in parallel via asyncio.gather. Settings apply uniformly
     — the only per-character thing is the preset voice (and `voice_override`
     takes precedence over it batch-wide if set).
+
+    `enable_transcribe` defaults True so the words.json is always written
+    even when captions + WPM normalize are off — the Resolve-export flow
+    needs the transcript for SRT generation. Pass False ONLY when you don't
+    need any downstream caption work (saves one Whisper call per character).
     """
     job = store().get_job(job_id)
     if job is None:
@@ -335,6 +363,7 @@ async def compile_job_videos(
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
             pad_secs=pad_secs, voice_override=voice_override,
+            enable_transcribe=enable_transcribe,
         )
         for cid in targets
     ])
