@@ -3346,7 +3346,7 @@
       </template>
       <template x-for="ch in filteredLibrary()" :key="'lib'+ch.char_id">
         <div class="mb-1">
-          <div class="flex items-center gap-2 p-1.5 rounded-md cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800"
+          <div class="group flex items-center gap-2 p-1.5 rounded-md cursor-pointer hover:bg-neutral-100 dark:hover:bg-neutral-800"
                draggable="true"
                @dragstart="onCharDragStart($event, ch)"
                @click="toggleCharGallery(ch.char_id)">
@@ -3357,6 +3357,9 @@
               <div class="text-[10px] text-neutral-500 dark:text-neutral-400"
                    x-text="`${(ch.images || []).length} image${(ch.images || []).length === 1 ? '' : 's'}`"></div>
             </div>
+            <button class="text-neutral-400 hover:text-red-500 text-xs px-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Delete character from library"
+                    @click.stop="deleteCharacter(ch.char_id)">✕</button>
             <span class="text-neutral-400 text-xs"
                   x-text="expandedCharId === ch.char_id ? '▾' : '▸'"></span>
           </div>
