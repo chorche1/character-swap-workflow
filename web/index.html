@@ -2303,8 +2303,12 @@
                      the user can drag-position + resize regardless of template.
                      On ASS path the sample text is the only preview; on Remotion
                      path the actual rendered text shows underneath, and this is
-                     a transparent grab-handle box that adjusts margin_v/h/size. -->
-                <div class="absolute inset-0 pointer-events-none">
+                     a transparent grab-handle box that adjusts margin_v/h/size.
+                     z-20 makes sure the drag wrapper sits ABOVE the Remotion
+                     player (which comes later in the DOM); pointer-events:none
+                     on the outer container lets clicks outside the wrapper
+                     still hit the Remotion play/pause/scrubber underneath. -->
+                <div class="absolute inset-0 pointer-events-none z-20">
                   <div :style="previewWrapStyle(activeStyle())"
                        class="pointer-events-auto cursor-grab select-none rounded transition-colors"
                        :class="{
