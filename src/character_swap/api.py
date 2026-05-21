@@ -2360,6 +2360,23 @@ async def editor_auto_edit(
         if enable_captions and not words:
             raise HTTPException(422, "No speech detected — nothing to caption")
 
+    # Step 3a.5: Whisper-precise leading-silence recut. silencedetect's energy
+    # threshold can miss quiet ambient noise that Whisper correctly identifies
+    # as "no speech yet" — re-cut to the first word so output starts EXACTLY
+    # on speech. Word timestamps are shifted to match the recut timeline.
+    if enable_trim and words and words[0].start > 0.1:
+        recut = edit_dir / "03c-whisper-recut.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.trim_to_first_word, current, recut, words,
+                pad_secs=0.0, job_id=edit_id,
+            )
+            offset = words[0].start
+            words = video_edit.shift_word_timestamps(words, offset)
+            current = recut
+        except (RuntimeError, ValueError):
+            pass  # leave `current` + words alone; existing trim still applied
+
     # Step 3b: WPM normalization (time-stretch so spoken pace ≈ target_wpm)
     wpm_info: dict | None = None
     if enable_wpm_normalize and words:
@@ -2543,26 +2560,46 @@ async def editor_multi_auto_edit(
             encoding="utf-8",
         )
 
-    # 4.5. Per-clip leading-silence trim (only when global trim is enabled).
-    # Each individual clip is cut at its start to the moment speech begins
-    # — no inter-clip gap accumulates when we concat. Internal silences are
-    # preserved here; the post-concat trim_silences pass handles those.
+    # 4.5. Per-clip leading-silence trim — cut each clip to start EXACTLY
+    # on the first transcribed word (Hugo's "exakt på tal" requirement).
+    # Uses Whisper words from step 2, scaled by the WPM speed_factor if
+    # the clip was stretched in step 4. Falls back to silencedetect-based
+    # trim_leading_silence when no words / no first-word timestamp.
     if enable_trim:
         leading_trimmed: list[Path] = []
         for i, p in enumerate(ordered_paths):
+            words_for_clip = list(ordered_transcripts[i])
+            # If we WPM-stretched this clip the file timing is now scaled;
+            # scale the word timestamps accordingly so we trim at the right
+            # post-stretch offset.
+            if wpm_decisions:
+                speed = wpm_decisions[i].get("speed_factor", 1.0)
+                if abs(speed - 1.0) > 1e-3:
+                    words_for_clip = video_edit.scale_word_timestamps(
+                        words_for_clip, speed)
             cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
-            try:
-                await asyncio.to_thread(
-                    video_edit.trim_leading_silence, p, cut,
-                    threshold_db=threshold_db,
-                    min_silence_secs=max(0.1, min_silence_secs / 2),
-                    job_id=edit_id,
-                )
-                leading_trimmed.append(cut)
-            except (RuntimeError, ValueError):
-                # ffmpeg failure on this clip — fall back to original; the
-                # post-concat trim_silences will still catch most of it.
-                leading_trimmed.append(p)
+            trimmed_ok = False
+            if words_for_clip:
+                try:
+                    await asyncio.to_thread(
+                        video_edit.trim_to_first_word, p, cut,
+                        words_for_clip, pad_secs=0.0, job_id=edit_id,
+                    )
+                    leading_trimmed.append(cut)
+                    trimmed_ok = True
+                except (RuntimeError, ValueError):
+                    pass
+            if not trimmed_ok:
+                try:
+                    await asyncio.to_thread(
+                        video_edit.trim_leading_silence, p, cut,
+                        threshold_db=threshold_db,
+                        min_silence_secs=0.05,  # very aggressive — exact start
+                        job_id=edit_id,
+                    )
+                    leading_trimmed.append(cut)
+                except (RuntimeError, ValueError):
+                    leading_trimmed.append(p)
         ordered_paths = leading_trimmed
 
     # 5. Concat in script order.

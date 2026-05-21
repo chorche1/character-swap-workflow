@@ -179,6 +179,78 @@ def _invert_silences(silences: list[tuple[float, float]],
     return [(a, b) for a, b in keep if b - a > 0.05]  # drop microscopic slivers
 
 
+def trim_to_first_word(input_path: Path, output_path: Path, words: list,
+                       *, pad_secs: float = 0.0,
+                       job_id: str | None = None) -> dict:
+    """Trim the start of `input_path` so it begins exactly at the first
+    transcribed word — the literal "starts on speech" cut Hugo asked for.
+
+    `words` is a list of objects with `.start` attribute (or 'start' key if
+    dict) — the canonical Whisper word list this codebase passes around
+    everywhere. `pad_secs` defaults to 0 (true "exact") — set to e.g. 0.02
+    if you ever want a tiny phoneme-safety cushion.
+
+    No-op (copies the file) when there are no words OR when the first word
+    starts within `pad_secs + 50ms` of zero (already starts on speech).
+
+    Returns {leading_silence_secs, original_duration, trimmed_duration}.
+    """
+    import shutil as _shutil
+    with record(phase="editor_trim_to_first_word",
+                model="whisper-first-word",
+                character="editor", job_id=job_id) as entry:
+        duration = _probe_duration(input_path)
+        entry["n_words"] = len(words)
+        # Extract first-word start, supporting both Word dataclass and dict.
+        if not words:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["leading_silence_secs"] = 0.0
+            entry["trimmed"] = False
+            return {"leading_silence_secs": 0.0,
+                    "original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2)}
+        first = words[0]
+        first_start = getattr(first, "start", None)
+        if first_start is None and isinstance(first, dict):
+            first_start = first.get("start")
+        if first_start is None:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["leading_silence_secs"] = 0.0
+            entry["trimmed"] = False
+            entry["error"] = "first word missing start timestamp"
+            return {"leading_silence_secs": 0.0,
+                    "original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2)}
+        first_start = max(0.0, float(first_start) - max(0.0, pad_secs))
+        # If the first word is already at the very start, no-op copy.
+        if first_start <= 0.05:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["leading_silence_secs"] = 0.0
+            entry["trimmed"] = False
+            return {"leading_silence_secs": 0.0,
+                    "original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2)}
+        entry["leading_silence_secs"] = round(first_start, 3)
+        entry["trimmed"] = True
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # -ss AFTER -i for accurate audio-synced seek (slower than -ss before
+        # but matters for voice-swap downstream which keys off the audio).
+        _run([
+            _ffmpeg(), "-y", "-i", str(input_path),
+            "-ss", f"{first_start:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ])
+        trimmed_dur = _probe_duration(output_path)
+        return {"leading_silence_secs": round(first_start, 3),
+                "original_duration": round(duration, 2),
+                "trimmed_duration": round(trimmed_dur, 2)}
+
+
 def trim_leading_silence(input_path: Path, output_path: Path, *,
                          threshold_db: float = -30.0,
                          min_silence_secs: float = 0.2,
@@ -876,6 +948,21 @@ def time_stretch(input_path: Path, output_path: Path, *,
             str(output_path),
         ])
     return output_path
+
+
+def shift_word_timestamps(words: list[Word], offset: float) -> list[Word]:
+    """Subtract `offset` from every word's start/end timestamps (clamped to 0).
+    Used after `trim_to_first_word` re-cuts the start of a clip so the
+    transcript still lines up with the new file's timeline.
+    """
+    if offset <= 0:
+        return list(words)
+    out: list[Word] = []
+    for w in words:
+        new_start = max(0.0, w.start - offset)
+        new_end = max(new_start + 0.001, w.end - offset)
+        out.append(Word(text=w.text, start=new_start, end=new_end))
+    return out
 
 
 def scale_word_timestamps(words: list[Word], speed_factor: float) -> list[Word]:

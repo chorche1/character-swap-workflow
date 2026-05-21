@@ -165,7 +165,7 @@ async def _compile_one_character(
                     await asyncio.to_thread(
                         video_edit.trim_leading_silence, p, cut,
                         threshold_db=threshold_db,
-                        min_silence_secs=max(0.1, min_silence_secs / 2),
+                        min_silence_secs=0.05,  # very aggressive — exact start
                         job_id=edit_id,
                     )
                     no_lead.append(cut)
@@ -242,6 +242,22 @@ async def _compile_one_character(
                 )
             except Exception:
                 words = []
+
+        # Step 4a.5: Whisper-precise leading-silence recut. The pre-concat
+        # silencedetect trim catches gross leading silence per scene; this
+        # catches the residual gap before the FIRST word of the final concat
+        # output that quiet ambient noise might have hidden from silencedetect.
+        if enable_trim and words and words[0].start > 0.1:
+            recut = edit_dir / "01b-whisper-recut.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_to_first_word, current, recut, words,
+                    pad_secs=0.0, job_id=edit_id,
+                )
+                words = video_edit.shift_word_timestamps(words, words[0].start)
+                current = recut
+            except Exception:
+                pass
 
         # Step 4b: WPM normalize (time-stretch).
         if enable_wpm_normalize and words:

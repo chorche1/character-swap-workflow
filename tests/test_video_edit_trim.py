@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from character_swap.video_edit import _invert_silences
+from character_swap.video_edit import _invert_silences, Word, shift_word_timestamps
 
 
 def test_invert_silences_no_silences_returns_full_clip():
@@ -97,3 +97,50 @@ def test_invert_silences_first_silence_not_at_zero_means_clip_starts_on_speech()
     assert keep[0] == (0.0, 1.55)
     # Second keep: gets the interior pre-pad.
     assert keep[1] == (2.95, 10.0)
+
+
+# --- shift_word_timestamps -------------------------------------------------------------
+
+
+def test_shift_word_timestamps_zero_offset_returns_unchanged():
+    words = [Word("hi", 0.0, 0.3), Word("there", 0.4, 0.7)]
+    out = shift_word_timestamps(words, 0.0)
+    assert out == words
+
+
+def test_shift_word_timestamps_negative_offset_returns_unchanged():
+    """Negative or zero offset = no-op (we don't time-shift forward)."""
+    words = [Word("hi", 1.0, 1.3)]
+    out = shift_word_timestamps(words, -0.5)
+    assert out[0].start == 1.0
+    assert out[0].end == 1.3
+
+
+def test_shift_word_timestamps_subtracts_offset_from_each():
+    """After a 0.5s recut, every timestamp moves 0.5s earlier."""
+    words = [Word("hi", 0.5, 0.8), Word("there", 1.0, 1.3)]
+    out = shift_word_timestamps(words, 0.5)
+    assert out[0].start == 0.0 and out[0].end == pytest.approx(0.3)
+    assert out[1].start == 0.5 and out[1].end == 0.8
+
+
+def test_shift_word_timestamps_clamps_negative_starts_to_zero():
+    """If a word's pre-shift start is BEFORE the offset (shouldn't happen in
+    practice but defensive), clamp to 0 rather than negative."""
+    words = [Word("hi", 0.3, 0.6), Word("you", 0.8, 1.0)]
+    out = shift_word_timestamps(words, 0.5)
+    # First word's start (0.3) - offset (0.5) = -0.2 → clamped to 0
+    assert out[0].start == 0.0
+    # End is also clamped but kept > start to avoid zero-duration cues
+    assert out[0].end > out[0].start
+    # Second word lands correctly
+    assert out[1].start == pytest.approx(0.3)
+
+
+def test_shift_word_timestamps_returns_new_list_not_mutation():
+    """Caller's original list must not be mutated in place."""
+    words = [Word("hi", 1.0, 1.5)]
+    original_start = words[0].start
+    out = shift_word_timestamps(words, 0.5)
+    assert words[0].start == original_start  # unchanged
+    assert out[0].start == 0.5               # shifted
