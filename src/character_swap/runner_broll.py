@@ -225,8 +225,12 @@ async def _do_run_generation(broll_id: str, state: dict) -> None:
         aspect_ratio=aspect_ratio,
     )
     if not planned:
+        raw_path = work / "plan_raw.txt"
+        hint = (f" — raw LLM output saved to {raw_path.name} for inspection"
+                if raw_path.exists() else "")
         _update_state(broll_id, status="failed",
-                      error="LLM returned no valid LINE:/PROMPT: pairs",
+                      error=("LLM returned no valid LINE:/PROMPT: pairs"
+                             + hint),
                       completed_at=_now())
         return
 

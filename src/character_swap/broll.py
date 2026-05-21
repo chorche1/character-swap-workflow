@@ -456,8 +456,58 @@ def plan_visuals(transcript_text: str, *, broll_id: str | None = None,
         raw = resp.choices[0].message.content or ""
         entry["n_chars_in"] = len(transcript_text)
         entry["n_chars_out"] = len(raw)
+    # Always persist the raw LLM output next to plan.json. Critical when the
+    # parser returns zero clips and the user needs to inspect what GPT-4o
+    # actually said — without this, the bug is invisible.
+    if broll_id:
+        try:
+            (broll_dir(broll_id) / "plan_raw.txt").write_text(raw, encoding="utf-8")
+        except OSError:
+            pass
     clips = _parse_line_prompt_pairs(raw)
     return clips
+
+
+# Strip wrappers GPT models commonly add around the keyword markers. The base
+# regex below requires `LINE:` / `MODE:` / `SCENE_GROUP:` / `PROMPT:` to appear
+# at a line start (or after a numbered/bullet prefix), so we normalize the raw
+# response first. Two patterns are needed: bold/italic wraps the colon ITSELF
+# (`**LINE:**`) or wraps just the keyword (`**LINE**:`).
+_MARKDOWN_KEYWORD_RE = re.compile(
+    r"^[\s>#\-\*0-9.]*"
+    r"[*_]{1,3}\s*(LINE|MODE|SCENE_GROUP|PROMPT)\s*"
+    r"(?:"
+    r":\s*[*_]{1,3}"           # colon INSIDE the wrapper, then closing **
+    r"|"
+    r"[*_]{1,3}\s*:"           # closing ** first, then the colon
+    r")",
+    re.MULTILINE | re.IGNORECASE | re.VERBOSE,
+)
+_PLAIN_KEYWORD_PREFIX_RE = re.compile(
+    r"^[\s>#\-\*0-9.]+(LINE|MODE|SCENE_GROUP|PROMPT)\s*:",
+    re.MULTILINE | re.IGNORECASE,
+)
+_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\s*$", re.MULTILINE)
+
+
+def _normalize_llm_format(raw: str) -> str:
+    """Strip Markdown / list / code-block decoration around LINE/MODE/
+    SCENE_GROUP/PROMPT keywords so the strict pair regex matches reliably.
+
+    Common LLM variations this handles:
+      - `**LINE:** ...` / `*LINE:* ...`           bold/italic wrappers
+      - `# LINE: ...` / `## LINE: ...`            heading prefixes
+      - `1. LINE: ...` / `- LINE: ...`            list-item prefixes
+      - ``` ```\nLINE:\n...\n``` ```              fenced code blocks
+      - mixed-case `Line:` / `prompt:`            (regex is IGNORECASE already)
+    """
+    # 1. Drop code fences entirely (keep the content between them).
+    raw = _CODE_FENCE_RE.sub("", raw)
+    # 2. Strip markdown bold/italic around any keyword and any list/heading
+    # prefix on the same line. Both substitutions normalize to "<KEYWORD>:".
+    raw = _MARKDOWN_KEYWORD_RE.sub(lambda m: m.group(1).upper() + ":", raw)
+    raw = _PLAIN_KEYWORD_PREFIX_RE.sub(lambda m: m.group(1).upper() + ":", raw)
+    return raw
 
 
 _PAIR_RE = re.compile(
@@ -475,9 +525,14 @@ def _parse_line_prompt_pairs(raw: str) -> list[PlannedClip]:
     """Pull out every LINE:/(MODE:)/(SCENE_GROUP:)/PROMPT: tuple from the
     LLM output, tolerant of quoting variations and stray blank lines.
     MODE and SCENE_GROUP are optional — the LLM may drop one or both for
-    a given clip; we just leave them empty rather than losing the clip."""
+    a given clip; we just leave them empty rather than losing the clip.
+
+    Normalizes Markdown / list / code-block wrappers first so the strict
+    pair regex isn't tripped up by `**LINE:**` / `1. LINE:` / ``` blocks.
+    """
+    normalized = _normalize_llm_format(raw)
     pairs: list[PlannedClip] = []
-    for m in _PAIR_RE.finditer(raw):
+    for m in _PAIR_RE.finditer(normalized):
         line = m.group(1).strip().strip('"').strip()
         mode = (m.group(2) or "").strip().strip('"').strip()
         scene_group = (m.group(3) or "").strip().strip('"').strip()
