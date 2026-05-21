@@ -141,6 +141,7 @@ def submit_video(
     character_name: str,
     job_id: str | None = None,
     model: str = "grok-imagine",
+    aspect_ratio: str | None = None,
 ) -> str:
     """Submit a video job to the chosen provider. Returns the provider's job/task id.
 
@@ -148,10 +149,17 @@ def submit_video(
     don't yet pass it. The Step-4 UI lets users pick any of: grok-imagine,
     veo, veo-3-fast, kling*, runway*, luma-ray2, pika-2, hailuo*, sora-2,
     wan*, seedance, higgsfield-*.
+
+    `aspect_ratio` overrides `settings.video_aspect_ratio` for this call.
+    Used when a job needs a non-default aspect (1:1 for Instagram, 16:9 for
+    YouTube). None falls back to the global default.
     """
+    effective_ar = aspect_ratio or settings.video_aspect_ratio
     if model == "grok-imagine":
         return grok.submit(image=image, prompt=movement_prompt,
-                           character=character_name, app_job_id=job_id)
+                           character=character_name,
+                           aspect_ratio=effective_ar,
+                           app_job_id=job_id)
 
     # Lazy imports so older keyless installs don't pay the import cost for
     # providers they'll never use.
@@ -159,70 +167,70 @@ def submit_video(
     if model in {"veo", "veo-3-fast"}:
         return google_genai.submit_veo(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model in {"kling", "kling-2.1-pro", "kling-1.6"}:
         return kling.submit_kling(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model in {"runway-gen4", "runway-gen3-alpha"}:
         return _stubs.submit_runway(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model == "luma-ray2":
         return _stubs.submit_luma(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model == "pika-2":
         return _stubs.submit_pika(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model in {"hailuo-02", "hailuo-01"}:
         return _stubs.submit_minimax(
             image=image, prompt=movement_prompt, model=model,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model == "sora-2":
         return _stubs.submit_sora(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model.startswith("wan-"):
         return _stubs.submit_wan(
             image=image, prompt=movement_prompt, model=model,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model == "seedance":
         return _stubs.submit_seedance(
             image=image, prompt=movement_prompt,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
     if model.startswith("higgsfield-"):
         return _stubs.submit_higgsfield(
             image=image, prompt=movement_prompt, model=model,
-            aspect_ratio=settings.video_aspect_ratio,
+            aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )

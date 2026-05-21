@@ -67,6 +67,7 @@ def _retryable_status(response: httpx.Response) -> bool:
 )
 def submit(*, image: Path, prompt: str, character: str,
            duration_secs: int | None = None,
+           aspect_ratio: str | None = None,
            app_job_id: str | None = None) -> str:
     """Submit an image-to-video job to Grok Imagine.
 
@@ -75,6 +76,11 @@ def submit(*, image: Path, prompt: str, character: str,
     phrase. xAI's accepted duration buckets aren't documented; we clamp
     here to a safe integer range [5, 15] and let the retry loop discover
     rejections.
+
+    `aspect_ratio` overrides `settings.video_aspect_ratio` for this call.
+    None falls back to the global default. The B-roll runner + Step 4 video
+    generation pass per-job ratios so users picking 1:1 / 16:9 in the UI
+    actually get the chosen aspect, not the .env default.
     """
     # Per xAI docs, image is supplied via {"url": "..."}. We embed our local
     # image as a data URL so we don't need an external host.
@@ -85,7 +91,7 @@ def submit(*, image: Path, prompt: str, character: str,
         "model": settings.grok_video_model,
         "prompt": prompt,
         "duration": clamped,
-        "aspect_ratio": settings.video_aspect_ratio,
+        "aspect_ratio": aspect_ratio or settings.video_aspect_ratio,
         "resolution": settings.video_resolution,
         "image": {"url": data_url},
     }

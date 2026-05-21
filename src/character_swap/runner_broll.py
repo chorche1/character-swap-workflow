@@ -579,6 +579,7 @@ async def _generate_one_clip(broll_id: str, idx: int, prompt: str,
             provider_id = await asyncio.to_thread(
                 grok.submit, image=seed_image, prompt=prompt_with_duration,
                 character="broll", duration_secs=target_duration_secs,
+                aspect_ratio=aspect_ratio,
                 app_job_id=broll_id,
             )
             from character_swap import pipeline
