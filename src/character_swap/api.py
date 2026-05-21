@@ -2543,6 +2543,28 @@ async def editor_multi_auto_edit(
             encoding="utf-8",
         )
 
+    # 4.5. Per-clip leading-silence trim (only when global trim is enabled).
+    # Each individual clip is cut at its start to the moment speech begins
+    # — no inter-clip gap accumulates when we concat. Internal silences are
+    # preserved here; the post-concat trim_silences pass handles those.
+    if enable_trim:
+        leading_trimmed: list[Path] = []
+        for i, p in enumerate(ordered_paths):
+            cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_leading_silence, p, cut,
+                    threshold_db=threshold_db,
+                    min_silence_secs=max(0.1, min_silence_secs / 2),
+                    job_id=edit_id,
+                )
+                leading_trimmed.append(cut)
+            except (RuntimeError, ValueError):
+                # ffmpeg failure on this clip — fall back to original; the
+                # post-concat trim_silences will still catch most of it.
+                leading_trimmed.append(p)
+        ordered_paths = leading_trimmed
+
     # 5. Concat in script order.
     concat_out = edit_dir / "01-concat.mp4"
     try:

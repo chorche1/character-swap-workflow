@@ -1,0 +1,99 @@
+"""Tests for the silence-trim helpers in video_edit.
+
+Covers:
+  - _invert_silences first-keep-no-pad behavior (so leading silence is fully
+    discarded; interior keeps still get the pad_secs cushion).
+  - The "no silences detected" + "all silent" edge cases of _invert_silences.
+
+The end-to-end trim_silences + trim_leading_silence functions shell out to
+ffmpeg, so they're not unit-tested here — those are exercised by the live
+server and by manual smoke-tests when Hugo runs the Editor.
+"""
+from __future__ import annotations
+
+import pytest
+
+from character_swap.video_edit import _invert_silences
+
+
+def test_invert_silences_no_silences_returns_full_clip():
+    """No silences at all → one keep range covering the whole video. No pad
+    because the first keep gets no pre-pad (already starts at 0)."""
+    keep = _invert_silences([], total_duration=10.0, pad_secs=0.05)
+    assert keep == [(0.0, 10.0)]
+
+
+def test_invert_silences_leading_silence_fully_discarded():
+    """Video starts with 2s of silence → first keep starts EXACTLY at 2.0,
+    not at 1.95 (the old behavior added a 50ms pad before speech)."""
+    silences = [(0.0, 2.0)]  # leading silence only
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    assert len(keep) == 1
+    start, end = keep[0]
+    # Critical: no pre-pad on the first keep range — leading silence is gone.
+    assert start == 2.0, f"expected start=2.0 (no leading pad); got {start}"
+    assert end == 10.0
+
+
+def test_invert_silences_interior_keep_still_gets_pad():
+    """A mid-clip silence: the keep range AFTER it (interior) still gets the
+    pre-pad. This preserves natural in-breaths between sentences."""
+    silences = [(3.0, 4.0)]  # mid-clip silence; no leading
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    # Two keeps: (0..3.05) before silence, (3.95..10) after.
+    assert len(keep) == 2
+    # First keep (no leading silence to drop, so starts at 0):
+    assert keep[0] == (0.0, 3.05)
+    # Second keep: starts BEFORE silence ended (cursor=4.0 minus pad=0.05).
+    assert keep[1] == (3.95, 10.0)
+
+
+def test_invert_silences_leading_plus_mid_silence():
+    """Combined: leading silence + mid silence. First keep starts on speech
+    (no pad), second keep (interior) gets the pad."""
+    silences = [(0.0, 1.5), (5.0, 6.0)]
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    assert len(keep) == 2
+    # First keep: 1.5 (no pre-pad — leading discarded) → 5.05 (post-pad).
+    assert keep[0] == (1.5, 5.05)
+    # Second keep: 5.95 (pre-pad on interior) → 10.0 (trailing fully cut).
+    assert keep[1] == (5.95, 10.0)
+
+
+def test_invert_silences_all_silent_returns_empty():
+    """Silence covers the whole duration → no keep ranges (caller falls back
+    to a 0.5s stub clip)."""
+    silences = [(0.0, 10.0)]
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    assert keep == []
+
+
+def test_invert_silences_drops_microscopic_slivers():
+    """A keep range smaller than 50ms gets pruned — these are usually
+    detection artifacts and clipping them out keeps the output clean."""
+    # Tiny speech burst between two silences. Without the sliver-drop the
+    # output would have a 30ms "keep" of audio garbage.
+    silences = [(0.0, 1.0), (1.03, 5.0)]   # 30ms gap between silences
+    keep = _invert_silences(silences, total_duration=5.0, pad_secs=0.0)
+    assert keep == []
+
+
+def test_invert_silences_pad_does_not_overshoot_duration():
+    """Pad after the last interior keep can't go past total_duration."""
+    silences = [(0.0, 1.0), (8.0, 9.0)]
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    # First keep: 1.0 (no leading pad) → 8.05.
+    # Second keep: 8.95 (interior pre-pad) → 10.0 (trailing fully cut).
+    assert keep[-1][1] == 10.0
+
+
+def test_invert_silences_first_silence_not_at_zero_means_clip_starts_on_speech():
+    """If the first silence starts at e.g. 1.5s, the clip ALREADY begins
+    with speech. The first keep covers 0..1.55 with the post-pad."""
+    silences = [(1.5, 3.0)]
+    keep = _invert_silences(silences, total_duration=10.0, pad_secs=0.05)
+    assert len(keep) == 2
+    # First keep starts at 0 (no pre-pad needed anyway since cursor=0).
+    assert keep[0] == (0.0, 1.55)
+    # Second keep: gets the interior pre-pad.
+    assert keep[1] == (2.95, 10.0)

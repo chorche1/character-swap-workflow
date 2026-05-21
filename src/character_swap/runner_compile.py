@@ -153,6 +153,26 @@ async def _compile_one_character(
         return
 
     try:
+        # Step 0.5: per-scene leading-silence trim. Each scene's video is
+        # cut at the start to the moment speech begins so the concat:enade
+        # output has no inter-scene gaps. Only when global trim is enabled
+        # (otherwise we respect the user's "don't trim anything" intent).
+        if enable_trim and len(paths) > 1:
+            no_lead: list[Path] = []
+            for i, p in enumerate(paths):
+                cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
+                try:
+                    await asyncio.to_thread(
+                        video_edit.trim_leading_silence, p, cut,
+                        threshold_db=threshold_db,
+                        min_silence_secs=max(0.1, min_silence_secs / 2),
+                        job_id=edit_id,
+                    )
+                    no_lead.append(cut)
+                except (RuntimeError, ValueError):
+                    no_lead.append(p)
+            paths = no_lead
+
         # Step 1: concat per-scene MP4s into one.
         concat_out = edit_dir / "00-concat.mp4"
         await asyncio.to_thread(

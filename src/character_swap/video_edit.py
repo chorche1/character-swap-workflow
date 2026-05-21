@@ -155,16 +155,79 @@ def _invert_silences(silences: list[tuple[float, float]],
                      total_duration: float,
                      pad_secs: float = 0.05) -> list[tuple[float, float]]:
     """Return list of (start, end) speech-keep ranges by inverting silences.
-    Adds a tiny `pad_secs` either side of each keep range so words don't get clipped."""
+    Adds a tiny `pad_secs` either side of each INTERIOR keep range so words
+    don't get clipped — but NOT on the first keep range. Leading silence is
+    fully discarded so the clip starts exactly on speech, matching Hugo's
+    "no gap at the start" expectation. Trailing silence is similarly fully
+    cut (loop runs only while there's content after the last silence).
+    """
     keep: list[tuple[float, float]] = []
     cursor = 0.0
+    first_keep = True
     for s_start, s_end in silences:
         if s_start > cursor:
-            keep.append((max(0.0, cursor - pad_secs), min(total_duration, s_start + pad_secs)))
+            # First keep starts exactly at `cursor` (zero pre-pad → no
+            # leading-silence remnant). Subsequent keeps still get the
+            # pre-pad so mid-sentence pauses keep their natural in-breath.
+            pre_pad = 0.0 if first_keep else pad_secs
+            keep.append((max(0.0, cursor - pre_pad), min(total_duration, s_start + pad_secs)))
+            first_keep = False
         cursor = s_end
     if cursor < total_duration:
-        keep.append((max(0.0, cursor - pad_secs), total_duration))
+        pre_pad = 0.0 if first_keep else pad_secs
+        keep.append((max(0.0, cursor - pre_pad), total_duration))
     return [(a, b) for a, b in keep if b - a > 0.05]  # drop microscopic slivers
+
+
+def trim_leading_silence(input_path: Path, output_path: Path, *,
+                         threshold_db: float = -30.0,
+                         min_silence_secs: float = 0.2,
+                         job_id: str | None = None) -> dict:
+    """Drop ONLY the leading silence from `input_path` — internal silences are
+    preserved verbatim. Used per-clip before concat in multi-clip flows
+    (Editor multi_auto_edit + runner_compile) so every clip starts exactly
+    on speech instead of leaving 50ms remnants between concat boundaries.
+
+    `min_silence_secs` is smaller than the trim_silences default (0.4) so
+    even short half-second pauses at the start get cut.
+
+    Returns `{leading_silence_secs, original_duration, trimmed_duration}`.
+    No-op (just copies the file) when no leading silence is detected.
+    """
+    import shutil as _shutil
+    with record(phase="editor_trim_leading", model="ffmpeg-silencedetect",
+                character="editor", job_id=job_id) as entry:
+        silences = _detect_silences(input_path, threshold_db, min_silence_secs)
+        duration = _probe_duration(input_path)
+        entry["n_silences"] = len(silences)
+        # Only a real leading silence if it STARTS within the first 50ms
+        # (otherwise the clip already starts on speech).
+        if not silences or silences[0][0] > 0.05:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["leading_silence_secs"] = 0.0
+            entry["trimmed"] = False
+            return {"leading_silence_secs": 0.0,
+                    "original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2)}
+        start_offset = silences[0][1]
+        entry["leading_silence_secs"] = round(start_offset, 2)
+        entry["trimmed"] = True
+        # ffmpeg -ss before -i is keyframe-fast but can misalign audio on
+        # some containers; -ss after -i is accurate but slower. We use
+        # accurate seek because audio sync matters for voice-swap downstream.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _run([
+            _ffmpeg(), "-y", "-i", str(input_path),
+            "-ss", f"{start_offset:.3f}",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ])
+        trimmed_dur = _probe_duration(output_path)
+        return {"leading_silence_secs": round(start_offset, 2),
+                "original_duration": round(duration, 2),
+                "trimmed_duration": round(trimmed_dur, 2)}
 
 
 def trim_silences(input_path: Path, output_path: Path, *,
