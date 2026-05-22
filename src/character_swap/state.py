@@ -180,6 +180,28 @@ class JsonStateStore:
             self.save()
         return out
 
+    # chats (Claude-driven Chat tab)
+    def add_chat(self, chat) -> None:
+        self._state.chats[chat.chat_id] = chat
+        self.save()
+
+    def get_chat(self, chat_id: str):
+        return self._state.chats.get(chat_id)
+
+    def list_chats(self) -> list:
+        # Newest first.
+        return sorted(self._state.chats.values(),
+                      key=lambda c: c.updated_at, reverse=True)
+
+    def update_chat(self, chat) -> None:
+        from datetime import datetime
+        chat.updated_at = datetime.utcnow()
+        self._state.chats[chat.chat_id] = chat
+        self.save()
+
+    def delete_chat(self, chat_id: str):
+        return self._state.chats.pop(chat_id, None)
+
     def reset(self) -> None:
         self._state = AppState()
         self.save()
@@ -315,6 +337,32 @@ class SqliteStateStore:
         if out is not None:
             with self._lock, db.transaction(self._conn) as conn:
                 db.delete_generation(conn, gen_id)
+        return out
+
+    # chats (Claude-driven Chat tab)
+    def add_chat(self, chat) -> None:
+        self._state.chats[chat.chat_id] = chat
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_chat(conn, chat)
+
+    def get_chat(self, chat_id: str):
+        return self._state.chats.get(chat_id)
+
+    def list_chats(self) -> list:
+        return sorted(self._state.chats.values(),
+                      key=lambda c: c.updated_at, reverse=True)
+
+    def update_chat(self, chat) -> None:
+        chat.updated_at = datetime.utcnow()
+        self._state.chats[chat.chat_id] = chat
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_chat(conn, chat)
+
+    def delete_chat(self, chat_id: str):
+        out = self._state.chats.pop(chat_id, None)
+        if out is not None:
+            with self._lock, db.transaction(self._conn) as conn:
+                db.delete_chat(conn, chat_id)
         return out
 
     def reset(self) -> None:

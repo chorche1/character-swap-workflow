@@ -293,6 +293,7 @@
     <!-- TAB NAVIGATION -->
     <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 -mb-2">
       <template x-for="t in [
+          {slug: 'chat',   label: '💬 Chat'},
           {slug: 'swap',   label: 'Swap'},
           {slug: 'image',  label: 'Image'},
           {slug: 'video',  label: 'Video'},
@@ -308,6 +309,181 @@
                           : 'border-transparent text-neutral-500 dark:text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200'"
                 x-text="t.label"></button>
       </template>
+    </div>
+
+    <!-- ================= CHAT TAB (Claude-driven agent over all tabs) ================= -->
+    <div x-show="activeTab === 'chat'"
+         x-init="$watch('activeTab', t => { if (t === 'chat') initChat() })"
+         class="grid grid-cols-12 gap-4 h-[calc(100vh-12rem)]">
+
+      <!-- Sidebar: chat sessions -->
+      <aside class="col-span-3 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 p-3 overflow-y-auto">
+        <button @click="newChat()"
+                class="w-full px-3 py-2 mb-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
+          + New chat
+        </button>
+        <div class="space-y-1">
+          <template x-for="c in chatSessions" :key="'chat-'+c.chat_id">
+            <div class="group relative">
+              <button @click="selectChat(c.chat_id)"
+                      class="w-full text-left px-2 py-1.5 rounded text-xs truncate transition-colors pr-7"
+                      :class="activeChat?.chat_id === c.chat_id
+                                ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
+                                : 'hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-300'"
+                      x-text="c.title || 'Untitled'"></button>
+              <button @click="deleteChat(c.chat_id)"
+                      class="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-500 text-xs px-1"
+                      title="Delete chat">×</button>
+            </div>
+          </template>
+          <div x-show="chatSessions.length === 0"
+               class="text-xs text-neutral-500 dark:text-neutral-500 text-center py-4">
+            No chats yet. Click + New chat to start.
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main: conversation + input -->
+      <section class="col-span-9 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 flex flex-col overflow-hidden">
+
+        <!-- No-chat-selected placeholder -->
+        <div x-show="!activeChat" class="flex-1 flex items-center justify-center text-center p-8">
+          <div>
+            <div class="text-4xl mb-3">💬</div>
+            <h3 class="text-base font-semibold mb-2">Chat with Claude</h3>
+            <p class="text-sm text-neutral-500 dark:text-neutral-400 max-w-md mx-auto mb-4">
+              Tell Claude what you want to create and it will use your existing tools
+              (image gen, video gen, swap, captions, etc) to build it.
+            </p>
+            <p x-show="!health.anthropic_key"
+               class="text-xs text-amber-600 dark:text-amber-400">
+              ⚠️ Set ANTHROPIC_API_KEY in .env to enable the Chat tab.
+            </p>
+            <button x-show="health.anthropic_key" @click="newChat()"
+                    class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
+              Start your first chat
+            </button>
+          </div>
+        </div>
+
+        <!-- Active chat -->
+        <template x-if="activeChat">
+          <div class="flex-1 flex flex-col overflow-hidden">
+
+            <!-- Header -->
+            <div class="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-3">
+              <input type="text" x-model="activeChat.title"
+                     @blur="saveChatTitle()" @keydown.enter="$event.target.blur()"
+                     class="flex-1 bg-transparent text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-2 py-1" />
+              <span class="text-[10px] text-neutral-500 dark:text-neutral-500"
+                    x-text="`${activeChat.n_messages || 0} messages · ${activeChat.n_media || 0} media`"></span>
+            </div>
+
+            <!-- Message log -->
+            <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+                 x-ref="chatLog">
+              <template x-for="(msg, mi) in (activeChat.messages || [])" :key="'msg-'+mi">
+                <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
+                  <div class="max-w-3xl space-y-2"
+                       :class="msg.role === 'user'
+                                 ? 'bg-indigo-600 text-white rounded-2xl rounded-br-sm px-4 py-2.5'
+                                 : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl rounded-bl-sm px-4 py-2.5'">
+
+                    <!-- User message: string content -->
+                    <template x-if="msg.role === 'user' && typeof msg.content === 'string'">
+                      <div class="whitespace-pre-wrap text-sm" x-text="msg.content"></div>
+                    </template>
+
+                    <!-- User message: tool_result blocks (rendered as small tool cards) -->
+                    <template x-if="msg.role === 'user' && Array.isArray(msg.content)">
+                      <div class="space-y-1.5">
+                        <template x-for="(b, bi) in msg.content" :key="'tr-'+mi+'-'+bi">
+                          <div x-show="b.type === 'tool_result'"
+                               class="text-[10px] font-mono bg-neutral-200 dark:bg-neutral-700 rounded p-2 max-w-xl overflow-hidden">
+                            <span class="text-neutral-500">tool result →</span>
+                            <span class="text-neutral-300" x-text="(b.content || '').slice(0, 200) + ((b.content || '').length > 200 ? '…' : '')"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Assistant message: list of content blocks -->
+                    <template x-if="msg.role === 'assistant' && Array.isArray(msg.content)">
+                      <div class="space-y-2">
+                        <template x-for="(b, bi) in msg.content" :key="'b-'+mi+'-'+bi">
+                          <div>
+                            <!-- Text block -->
+                            <div x-show="b.type === 'text'"
+                                 class="whitespace-pre-wrap text-sm" x-text="b.text"></div>
+
+                            <!-- Tool use block: small chip showing what's running -->
+                            <div x-show="b.type === 'tool_use'"
+                                 class="text-[11px] font-mono bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 rounded px-2 py-1 inline-block">
+                              🛠 <span x-text="b.name"></span>(<span x-text="JSON.stringify(b.input || {}).slice(0,80)"></span>)
+                            </div>
+                          </div>
+                        </template>
+
+                        <!-- Inline media generated by tools in THIS assistant turn -->
+                        <template x-for="m in inlineMediaForMessage(mi)" :key="'media-'+mi+'-'+m.url">
+                          <div class="mt-2">
+                            <video x-show="m.kind === 'video' || m.kind === 'avatar'"
+                                   :src="m.url" controls
+                                   class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700"></video>
+                            <img x-show="m.kind === 'image'" :src="m.url"
+                                 class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700" />
+                            <audio x-show="m.kind === 'audio'" :src="m.url" controls
+                                   class="w-full max-w-sm"></audio>
+                            <video x-show="m.kind === 'edit'" :src="m.url" controls
+                                   class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700"></video>
+                            <div class="text-[10px] text-neutral-500 mt-0.5"
+                                 x-text="`${m.kind} · ${m.model || ''}`"></div>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Thinking indicator -->
+              <div x-show="chatPending" class="flex justify-start">
+                <div class="bg-neutral-100 dark:bg-neutral-800 rounded-2xl rounded-bl-sm px-4 py-2.5 max-w-md">
+                  <div class="flex items-center gap-2 text-sm text-neutral-500">
+                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse"></span>
+                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse" style="animation-delay: 200ms"></span>
+                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse" style="animation-delay: 400ms"></span>
+                    <span class="ml-1 text-xs"
+                          x-text="chatPendingLabel || 'thinking…'"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Input -->
+            <div class="border-t border-neutral-200 dark:border-neutral-800 p-3 bg-neutral-50 dark:bg-neutral-900/40">
+              <div class="flex items-end gap-2">
+                <textarea x-model="chatInput"
+                          @keydown.enter.prevent="if (!$event.shiftKey) sendChat()"
+                          :disabled="chatPending"
+                          rows="2"
+                          placeholder="Tell Claude what to create… (Shift+Enter for newline)"
+                          class="flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"></textarea>
+                <button @click="sendChat()"
+                        :disabled="!chatInput.trim() || chatPending"
+                        class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold shrink-0">
+                  Send
+                </button>
+              </div>
+              <div class="text-[10px] text-neutral-500 dark:text-neutral-500 mt-1.5">
+                Claude can call generate_image, generate_video, generate_audio, generate_avatar,
+                create_swap_job, caption_video, generate_broll, and a few list_/get_status tools.
+                Costs ~$0.05 per Claude call + each generation's own cost.
+              </div>
+            </div>
+          </div>
+        </template>
+      </section>
     </div>
 
     <!-- ================= SWAP TAB (existing 5-step flow) ================= -->

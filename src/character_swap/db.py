@@ -178,6 +178,16 @@ CREATE TABLE IF NOT EXISTS gen_reference_paths (
     PRIMARY KEY (gen_id, position),
     FOREIGN KEY (gen_id) REFERENCES generations(gen_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    messages_json TEXT NOT NULL DEFAULT '[]',
+    media_json TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at);
 """
 
 
@@ -553,6 +563,24 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
         g = _gen_from_row(r, refs_by_gen.get(r["gen_id"], []))
         state.generations[g.gen_id] = g
 
+    # chats — soft-load; table may not exist on installs predating the schema bump.
+    try:
+        from character_swap.models import ChatSession
+        for r in conn.execute("SELECT * FROM chats ORDER BY updated_at DESC"):
+            try:
+                state.chats[r["chat_id"]] = ChatSession(
+                    chat_id=r["chat_id"],
+                    title=r["title"],
+                    created_at=_parse_iso(r["created_at"]),
+                    updated_at=_parse_iso(r["updated_at"]),
+                    messages=_reel_json.loads(r["messages_json"] or "[]"),
+                    media=_reel_json.loads(r["media_json"] or "[]"),
+                )
+            except (ValueError, TypeError):
+                continue
+    except sqlite3.OperationalError:
+        pass
+
     return state
 
 
@@ -824,11 +852,38 @@ def _gen_from_row(r: sqlite3.Row, ref_paths: list[str]) -> MediaGeneration:
     )
 
 
+def upsert_chat(conn: sqlite3.Connection, c) -> None:
+    """Persist a ChatSession. Stored as JSON blobs for forward-compat with
+    Anthropic's evolving message-block shapes."""
+    conn.execute(
+        """INSERT INTO chats (chat_id, title, created_at, updated_at,
+                              messages_json, media_json)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(chat_id) DO UPDATE SET
+             title = excluded.title,
+             updated_at = excluded.updated_at,
+             messages_json = excluded.messages_json,
+             media_json = excluded.media_json""",
+        (c.chat_id, c.title, _iso(c.created_at), _iso(c.updated_at),
+         _reel_json.dumps(c.messages, default=str),
+         _reel_json.dumps(c.media, default=str)),
+    )
+
+
+def delete_chat(conn: sqlite3.Connection, chat_id: str) -> None:
+    conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+
+
 def reset_all(conn: sqlite3.Connection) -> None:
     for table in ("gen_reference_paths", "generations",
                   "videos", "variants", "job_characters", "jobs",
                   "project_characters", "projects",
-                  "character_images", "characters", "scenes"):
-        conn.execute(f"DELETE FROM {table}")
+                  "character_images", "characters", "scenes",
+                  "chats"):
+        # `chats` table may not exist on older DBs — tolerate that.
+        try:
+            conn.execute(f"DELETE FROM {table}")
+        except sqlite3.OperationalError:
+            pass
 
 

@@ -3354,6 +3354,87 @@ async def health() -> dict:
     }
 
 
+# --- Chat tab (Claude-driven agent over the existing endpoints) ----------------
+
+class ChatTurnBody(BaseModel):
+    message: str
+
+
+def _chat_to_dict(chat) -> dict:
+    return {
+        "chat_id": chat.chat_id,
+        "title": chat.title,
+        "created_at": chat.created_at.isoformat() + "Z",
+        "updated_at": chat.updated_at.isoformat() + "Z",
+        "messages": chat.messages,
+        "media": chat.media,
+        "n_messages": len(chat.messages),
+        "n_media": len(chat.media),
+    }
+
+
+@app.post("/api/chats")
+async def chats_create() -> dict:
+    from character_swap import chat as chat_mod
+    if not settings.has_provider("anthropic"):
+        raise HTTPException(503,
+            "ANTHROPIC_API_KEY not set — required for the Chat tab. Add it to .env.")
+    chat = chat_mod.new_chat()
+    return _chat_to_dict(chat)
+
+
+@app.get("/api/chats")
+async def chats_list() -> list[dict]:
+    chats = store().list_chats() if hasattr(store(), "list_chats") else []
+    return [_chat_to_dict(c) for c in chats]
+
+
+@app.get("/api/chats/{chat_id}")
+async def chats_get(chat_id: str) -> dict:
+    chat = store().get_chat(chat_id) if hasattr(store(), "get_chat") else None
+    if chat is None:
+        raise HTTPException(404, f"Chat {chat_id!r} not found")
+    return _chat_to_dict(chat)
+
+
+@app.delete("/api/chats/{chat_id}")
+async def chats_delete(chat_id: str) -> dict:
+    if not hasattr(store(), "delete_chat"):
+        raise HTTPException(404, "Chat backend not available")
+    removed = store().delete_chat(chat_id)
+    if removed is None:
+        raise HTTPException(404, f"Chat {chat_id!r} not found")
+    return {"deleted": chat_id}
+
+
+@app.patch("/api/chats/{chat_id}")
+async def chats_update(chat_id: str, body: dict) -> dict:
+    chat = store().get_chat(chat_id) if hasattr(store(), "get_chat") else None
+    if chat is None:
+        raise HTTPException(404, f"Chat {chat_id!r} not found")
+    if "title" in body and isinstance(body["title"], str):
+        chat.title = body["title"][:200]
+    store().update_chat(chat)
+    return _chat_to_dict(chat)
+
+
+@app.post("/api/chats/{chat_id}/turn")
+async def chats_turn(chat_id: str, body: ChatTurnBody) -> dict:
+    """Run one agent loop: append the user message, call Claude until it
+    stops requesting tools. Blocks until done — can take 30s+ for multi-tool
+    turns (image gen alone is ~15-30s). Frontend should show a spinner."""
+    from character_swap import chat as chat_mod
+    if not settings.has_provider("anthropic"):
+        raise HTTPException(503, "ANTHROPIC_API_KEY not set")
+    if not body.message.strip():
+        raise HTTPException(400, "empty message")
+    chat = store().get_chat(chat_id)
+    if chat is None:
+        raise HTTPException(404, f"Chat {chat_id!r} not found")
+    chat = await chat_mod.run_turn(chat_id, body.message)
+    return _chat_to_dict(chat)
+
+
 @app.exception_handler(404)
 async def not_found(_, exc):
     detail = str(exc.detail) if hasattr(exc, "detail") else "not found"

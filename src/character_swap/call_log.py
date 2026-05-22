@@ -33,6 +33,9 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     # AI Director — one Opus call per Director invocation (swap or movement).
     if phase in {"director_swap", "director_movement"}:
         return settings.claude_opus_price_usd
+    # Chat tab — each agent-loop iteration is one Opus call (vision + tool use).
+    if phase == "chat":
+        return settings.claude_opus_price_usd
     # VEED Subtitle Styling on fal.ai — billed per minute of input video.
     if phase == "fal_caption":
         duration_secs = float(payload.get("duration_secs", 0))

@@ -235,6 +235,13 @@ function studio() {
     heygenCatalogueError: '',
     elevenlabsVoices: [],
     elevenlabsCatalogueError: '',
+    // --- Chat tab ---------------------------------------------------------
+    chatSessions: [],        // list of {chat_id, title, n_messages, ...}
+    activeChat: null,        // full chat object incl messages + media
+    chatInput: '',
+    chatPending: false,
+    chatPendingLabel: '',
+    _chatInited: false,
     photoAvatarModal: {
       open: false,
       variantUrl: '',
@@ -355,6 +362,173 @@ function studio() {
     switchTab(slug) {
       this.activeTab = slug;
       localStorage.setItem('active_tab', slug);
+    },
+
+    // --- Chat tab -----------------------------------------------------------
+    // Claude agent loop: user types → /api/chats/<id>/turn → Claude runs
+    // tool_use loop until end_turn → we get back the full updated chat.
+    // Inline media for each assistant turn is matched by walking forward
+    // from the message's tool_use blocks → the tool_result that followed →
+    // the chat.media entry it produced.
+
+    async initChat() {
+      if (this._chatInited) return;
+      this._chatInited = true;
+      await this.loadChatSessions();
+      // Auto-select the most recent chat if any exist; otherwise show
+      // the empty-state placeholder.
+      if (this.chatSessions.length > 0 && !this.activeChat) {
+        await this.selectChat(this.chatSessions[0].chat_id);
+      }
+    },
+
+    async loadChatSessions() {
+      try {
+        const r = await fetch('/api/chats');
+        if (!r.ok) return;
+        this.chatSessions = await r.json();
+      } catch { /* offline / not configured */ }
+    },
+
+    async newChat() {
+      try {
+        const r = await fetch('/api/chats', { method: 'POST' });
+        if (!r.ok) {
+          this.notifyError('Could not start chat: ' + await r.text());
+          return;
+        }
+        const data = await r.json();
+        this.chatSessions = [data, ...this.chatSessions];
+        this.activeChat = data;
+        this.chatInput = '';
+      } catch (e) {
+        this.notifyError('Chat init error: ' + e);
+      }
+    },
+
+    async selectChat(chatId) {
+      try {
+        const r = await fetch(`/api/chats/${chatId}`);
+        if (!r.ok) return;
+        this.activeChat = await r.json();
+        this.$nextTick(() => this._scrollChatToBottom());
+      } catch { /* swallow */ }
+    },
+
+    async deleteChat(chatId) {
+      if (!confirm('Delete this chat?')) return;
+      try {
+        await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
+        this.chatSessions = this.chatSessions.filter(c => c.chat_id !== chatId);
+        if (this.activeChat?.chat_id === chatId) {
+          this.activeChat = null;
+        }
+      } catch (e) {
+        this.notifyError('Delete failed: ' + e);
+      }
+    },
+
+    async saveChatTitle() {
+      if (!this.activeChat) return;
+      try {
+        await fetch(`/api/chats/${this.activeChat.chat_id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: this.activeChat.title }),
+        });
+        // Mirror new title into the session list.
+        const row = this.chatSessions.find(c => c.chat_id === this.activeChat.chat_id);
+        if (row) row.title = this.activeChat.title;
+      } catch { /* swallow */ }
+    },
+
+    async sendChat() {
+      if (!this.activeChat || !this.chatInput.trim() || this.chatPending) return;
+      const msg = this.chatInput.trim();
+      this.chatInput = '';
+      // Optimistically render the user message so it shows up instantly.
+      this.activeChat.messages = [...(this.activeChat.messages || []),
+                                   { role: 'user', content: msg }];
+      this.activeChat.n_messages = (this.activeChat.n_messages || 0) + 1;
+      this.chatPending = true;
+      this.chatPendingLabel = 'Claude is thinking…';
+      this.$nextTick(() => this._scrollChatToBottom());
+
+      try {
+        const r = await fetch(`/api/chats/${this.activeChat.chat_id}/turn`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: msg }),
+        });
+        if (!r.ok) {
+          this.notifyError('Chat turn failed: ' + await r.text());
+          return;
+        }
+        this.activeChat = await r.json();
+        // Update sidebar row (title may have changed; updated_at moved it to top).
+        const idx = this.chatSessions.findIndex(c => c.chat_id === this.activeChat.chat_id);
+        if (idx >= 0) {
+          this.chatSessions[idx] = { ...this.chatSessions[idx],
+                                     title: this.activeChat.title,
+                                     n_messages: this.activeChat.n_messages,
+                                     n_media: this.activeChat.n_media,
+                                     updated_at: this.activeChat.updated_at };
+          // Move to top.
+          const [row] = this.chatSessions.splice(idx, 1);
+          this.chatSessions.unshift(row);
+        }
+        this.notifyMilestone('Chat turn done',
+          `${this.activeChat.n_messages} messages · ${this.activeChat.n_media} media`,
+          { kind: 'done', tag: `chat-${this.activeChat.chat_id}` });
+      } catch (e) {
+        this.notifyError('Chat error: ' + e);
+      } finally {
+        this.chatPending = false;
+        this.chatPendingLabel = '';
+        this.$nextTick(() => this._scrollChatToBottom());
+      }
+    },
+
+    // Walk forward from the assistant message at index `mi` to find the
+    // matching tool_result blocks (which arrive as the NEXT message with
+    // role=user, content=array). Each tool_result.tool_use_id maps back to
+    // a tool_use block in `msg` — and the result's parsed content tells us
+    // which chat.media URL to render.
+    inlineMediaForMessage(mi) {
+      const msg = this.activeChat?.messages?.[mi];
+      if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) return [];
+      const toolUses = msg.content.filter(b => b.type === 'tool_use');
+      if (toolUses.length === 0) return [];
+      const next = this.activeChat.messages[mi + 1];
+      if (!next || next.role !== 'user' || !Array.isArray(next.content)) return [];
+      const results = next.content.filter(b => b.type === 'tool_result');
+
+      const out = [];
+      for (const tr of results) {
+        let parsed = null;
+        try { parsed = JSON.parse(tr.content || '{}'); } catch { continue; }
+        if (!parsed || !parsed.url || parsed.status !== 'done') continue;
+        // Best-guess kind from the tool name. Falls back to "edit" or "image".
+        const use = toolUses.find(u => u.id === tr.tool_use_id);
+        const toolName = use?.name || '';
+        let kind = 'image';
+        if (toolName.includes('video')) kind = 'video';
+        else if (toolName.includes('audio')) kind = 'audio';
+        else if (toolName.includes('avatar')) kind = 'avatar';
+        else if (toolName.includes('caption')) kind = 'edit';
+        else if (toolName.includes('broll')) kind = 'video';
+        out.push({
+          kind, url: parsed.url,
+          generation_id: parsed.generation_id || parsed.edit_id || parsed.job_id,
+          model: parsed.model || parsed.template || '',
+        });
+      }
+      return out;
+    },
+
+    _scrollChatToBottom() {
+      const el = this.$refs?.chatLog;
+      if (el) el.scrollTop = el.scrollHeight;
     },
 
     // --- generations: models + history --------------------------------------
