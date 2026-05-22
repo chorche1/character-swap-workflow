@@ -2145,10 +2145,17 @@ def _remotion_available() -> bool:
 async def editor_templates() -> list[dict]:
     from character_swap import video_edit
     remotion_ok = _remotion_available()
+    fal_ok = settings.has_provider("fal")
     out = []
     for slug, style in video_edit.TEMPLATES.items():
         if style.engine == "remotion" and not remotion_ok:
             continue
+        # VEED templates stay in the picker even when no key is configured —
+        # we surface them as `locked` so the UI can show a 🔒 chip with the
+        # signup instruction tooltip rather than silently hiding them.
+        locked_reason: str | None = None
+        if style.engine == "veed" and not fal_ok:
+            locked_reason = "Requires FAL_API_KEY — sign up at fal.ai/dashboard/keys"
         row = {
             "slug": slug,
             "label": slug.title(),
@@ -2169,6 +2176,8 @@ async def editor_templates() -> list[dict]:
             "alignment": style.alignment,
             "engine": style.engine,
             "composition_id": style.composition_id,
+            "locked": locked_reason is not None,
+            "locked_reason": locked_reason,
         }
         if style.engine == "remotion":
             # Pack the exact props the Remotion Player will consume so the
@@ -3339,6 +3348,8 @@ async def health() -> dict:
         "kling_key": bool(settings.kling_access_key and settings.kling_secret_key),
         "heygen_key": bool(settings.heygen_api_key),
         "elevenlabs_key": bool(settings.elevenlabs_api_key),
+        # Drives the lock state on `veed-*` caption templates in the Editor.
+        "fal_key": bool(settings.fal_api_key),
         "remotion_available": _remotion_available(),
     }
 

@@ -2469,11 +2469,21 @@
                   </template>
                   <div x-show="editorTemplates.length > 0" class="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     <template x-for="t in editorTemplates" :key="'studio-tpl-'+t.slug">
-                      <button class="border-2 rounded-lg overflow-hidden transition-all text-left"
-                              :class="editor.template === t.slug
+                      <button class="border-2 rounded-lg overflow-hidden transition-all text-left relative"
+                              :class="[editor.template === t.slug
                                         ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 scale-[1.02]'
-                                        : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600'"
-                              @click="selectEditorTemplate(t.slug)">
+                                        : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600',
+                                       t.locked ? 'opacity-60' : '']"
+                              :title="t.locked ? t.locked_reason : t.label"
+                              @click="t.locked ? notifyError(t.locked_reason) : selectEditorTemplate(t.slug)">
+                        <span x-show="t.engine === 'veed'"
+                              class="absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-600/90 text-white z-10">
+                          CLOUD
+                        </span>
+                        <span x-show="t.locked"
+                              class="absolute top-1 right-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-600/90 text-white z-10">
+                          🔒
+                        </span>
                         <div class="relative bg-gradient-to-br from-neutral-700 to-neutral-900"
                              style="aspect-ratio: 9 / 16;">
                           <div :style="previewWrapStyle(t)">

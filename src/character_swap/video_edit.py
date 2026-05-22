@@ -428,13 +428,19 @@ class CaptionStyle:
     words_per_card: int = 3             # word-by-word grouping size
     highlight_color: str | None = None  # color used to highlight the active word
     all_caps: bool = False              # force-uppercase the rendered text (Submagic/TikTok aesthetic)
-    # Rendering engine. "ass" → existing ffmpeg+ASS path. "remotion" → React
-    # composition rendered via `npx remotion render`. Remotion supports
-    # animation/spring/glow that ASS can't.
-    engine: Literal["ass", "remotion"] = "ass"
+    # Rendering engine.
+    #   "ass"      → existing ffmpeg+ASS path (cheap, no animation)
+    #   "remotion" → React composition rendered via `npx remotion render`
+    #   "veed"     → cloud render via fal.ai's VEED Subtitle Styling endpoint
+    #                (~$0.10/min). Templates with engine="veed" carry their
+    #                preset params in `veed_params` — see TEMPLATES.
+    engine: Literal["ass", "remotion", "veed"] = "ass"
     # When engine="remotion", the id of the React composition to render.
     # Must match an entry in `remotion/src/Root.tsx`.
     composition_id: str | None = None
+    # When engine="veed", params sent verbatim to fal.ai's auto-subtitle
+    # endpoint (minus video_url). See clients/fal_veed.py for the schema.
+    veed_params: dict | None = None
 
     def to_remotion_props(self) -> dict:
         """Map ASS-style fields onto the typed props the Remotion
@@ -699,6 +705,99 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               highlight_color="&H00FFE500",   # #00E5FF cyan (BGR &HFFE500)
                               words_per_card=5, margin_v=380, all_caps=False,
                               engine="remotion", composition_id="CapCutGlow"),
+
+    # --- VEED Subtitle Styling templates (engine="veed") ----------------------
+    # Cloud-rendered captions via fal.ai's `fal-ai/workflow-utilities/auto-subtitle`
+    # endpoint. Higher visual quality than our local ASS/Remotion paths (matches
+    # Submagic/CapCut aesthetic). Costs ~$0.10/min. Requires FAL_API_KEY.
+    # The visible fields below are placeholders for the picker grid; the
+    # actual fal request params live in `veed_params`.
+
+    # Submagic-style: bold white + yellow active-word highlight, bottom position.
+    "veed-yellow":  CaptionStyle(font="Montserrat", size=100,
+                              primary_color="&H00FFFFFF",
+                              highlight_color="&H0000D4FF",   # #FFD400 yellow
+                              words_per_card=3, margin_v=200, all_caps=False,
+                              engine="veed",
+                              veed_params={
+                                  "font_name": "Montserrat",
+                                  "font_size": 100,
+                                  "font_weight": "bold",
+                                  "font_color": "white",
+                                  "highlight_color": "yellow",
+                                  "stroke_width": 3,
+                                  "stroke_color": "black",
+                                  "background_color": "none",
+                                  "position": "bottom",
+                                  "y_offset": 200,
+                                  "words_per_subtitle": 3,
+                                  "enable_animation": True,
+                              }),
+
+    # Purple/pink highlight — more editorial / IG-reels feel.
+    "veed-purple": CaptionStyle(font="Inter", size=100,
+                              primary_color="&H00FFFFFF",
+                              highlight_color="&H00FF00FF",   # magenta-ish
+                              words_per_card=3, margin_v=200, all_caps=False,
+                              engine="veed",
+                              veed_params={
+                                  "font_name": "Inter",
+                                  "font_size": 100,
+                                  "font_weight": "black",
+                                  "font_color": "white",
+                                  "highlight_color": "purple",
+                                  "stroke_width": 3,
+                                  "stroke_color": "black",
+                                  "background_color": "none",
+                                  "position": "bottom",
+                                  "y_offset": 200,
+                                  "words_per_subtitle": 3,
+                                  "enable_animation": True,
+                              }),
+
+    # Center-screen variant — talking-head reels where captions sit at eye level.
+    "veed-center": CaptionStyle(font="Montserrat", size=110,
+                              primary_color="&H00FFFFFF",
+                              highlight_color="&H0000D4FF",
+                              words_per_card=3, margin_v=960,
+                              alignment=5,                     # middle-center
+                              all_caps=False,
+                              engine="veed",
+                              veed_params={
+                                  "font_name": "Montserrat",
+                                  "font_size": 110,
+                                  "font_weight": "black",
+                                  "font_color": "white",
+                                  "highlight_color": "yellow",
+                                  "stroke_width": 4,
+                                  "stroke_color": "black",
+                                  "background_color": "none",
+                                  "position": "center",
+                                  "y_offset": 0,
+                                  "words_per_subtitle": 3,
+                                  "enable_animation": True,
+                              }),
+
+    # MrBeast/Hormozi-style ALLCAPS with heavy stroke and yellow active word.
+    "veed-mrbeast": CaptionStyle(font="Anton", size=120,
+                              primary_color="&H00FFFFFF",
+                              highlight_color="&H0000D4FF",
+                              words_per_card=3, margin_v=240, all_caps=True,
+                              engine="veed",
+                              veed_params={
+                                  "font_name": "Anton",
+                                  "font_size": 120,
+                                  "font_weight": "black",
+                                  "font_color": "white",
+                                  "highlight_color": "yellow",
+                                  "stroke_width": 5,
+                                  "stroke_color": "black",
+                                  "background_color": "none",
+                                  "position": "bottom",
+                                  "y_offset": 240,
+                                  "words_per_subtitle": 3,
+                                  "enable_animation": True,
+                              }),
 }
 
 
@@ -802,8 +901,42 @@ def _write_ass(words: list[Word], style: CaptionStyle, dest: Path) -> Path:
 def render_captions(input_video: Path, output_video: Path, *,
                     words: list[Word], style: CaptionStyle,
                     job_id: str | None = None) -> dict:
-    """Burn captions into `input_video`. Routes to Remotion (React-based) or
-    the legacy ASS+ffmpeg path based on `style.engine`. Returns a summary."""
+    """Burn captions into `input_video`. Routes between three engines based on
+    `style.engine`:
+      - "ass"      → legacy ffmpeg+ASS (no animation, fast)
+      - "remotion" → React composition via `npx remotion render`
+      - "veed"     → cloud render on fal.ai's VEED Subtitle Styling endpoint
+                     (highest quality, ~$0.10/min, requires FAL_API_KEY).
+                     For this engine `words` is ignored — VEED runs its own
+                     transcription internally so we hand off the raw MP4.
+    Returns a summary dict."""
+    if style.engine == "veed":
+        from character_swap.clients import fal_veed
+        params = dict(style.veed_params or {})
+        # Drop our explicit keyword-only fields from the dict so kwargs match.
+        summary = fal_veed.render_captions(
+            input_video, output_video,
+            font_name=params.pop("font_name", style.font),
+            font_size=params.pop("font_size", style.size),
+            font_weight=params.pop("font_weight", "bold"),
+            font_color=params.pop("font_color", "white"),
+            highlight_color=params.pop("highlight_color", "yellow"),
+            stroke_width=params.pop("stroke_width", 3),
+            stroke_color=params.pop("stroke_color", "black"),
+            background_color=params.pop("background_color", "none"),
+            background_opacity=params.pop("background_opacity", None),
+            position=params.pop("position", "bottom"),
+            y_offset=params.pop("y_offset", 75),
+            words_per_subtitle=params.pop("words_per_subtitle",
+                                          style.words_per_card),
+            enable_animation=params.pop("enable_animation", True),
+            language=params.pop("language", "en"),
+            extra_params=params or None,
+            job_id=job_id,
+        )
+        return {**summary,
+                "n_words": summary.get("n_words", 0),
+                "template": "veed"}
     if style.engine == "remotion":
         from character_swap import remotion_render
         if not style.composition_id:

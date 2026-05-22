@@ -19,10 +19,13 @@ def _path() -> Path:
     return p
 
 
-def _cost_usd(phase: str, ok: bool) -> float:
-    """Estimated USD cost for a recorded call. Polls are free; failures don't bill."""
+def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
+    """Estimated USD cost for a recorded call. Polls are free; failures don't bill.
+    `payload` lets us read per-call extras (e.g. duration_secs for time-billed
+    services like fal.ai)."""
     if not ok:
         return 0.0
+    payload = payload or {}
     if phase in {"generate", "edit"}:
         return settings.openai_image_price_usd
     if phase == "phase4_submit":
@@ -30,6 +33,10 @@ def _cost_usd(phase: str, ok: bool) -> float:
     # AI Director — one Opus call per Director invocation (swap or movement).
     if phase in {"director_swap", "director_movement"}:
         return settings.claude_opus_price_usd
+    # VEED Subtitle Styling on fal.ai — billed per minute of input video.
+    if phase == "fal_caption":
+        duration_secs = float(payload.get("duration_secs", 0))
+        return round(duration_secs / 60.0 * settings.fal_caption_price_per_minute_usd, 4)
     return 0.0
 
 
@@ -55,7 +62,7 @@ def record(phase: str, model: str, **extra: Any):
         payload["ok"] = err is None
         if err is not None:
             payload["error"] = f"{type(err).__name__}: {err}"
-        payload["cost_usd"] = _cost_usd(phase, payload["ok"])
+        payload["cost_usd"] = _cost_usd(phase, payload["ok"], payload)
         append(payload)
 
 

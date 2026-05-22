@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     higgsfield_api_key: str = Field(default="", validation_alias="HIGGSFIELD_API_KEY")
     heygen_api_key: str = Field(default="", validation_alias="HEYGEN_API_KEY")        # HeyGen Avatar 5 (talking heads)
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY") # ElevenLabs voice library + TTS + Voice Changer
+    fal_api_key: str = Field(default="", validation_alias="FAL_API_KEY")              # fal.ai (hosts VEED Subtitle Styling — auto-captioning)
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     grok_video_model: str = Field(default="grok-imagine-video", validation_alias="GROK_VIDEO_MODEL")
@@ -90,6 +91,11 @@ class Settings(BaseSettings):
     heygen_price_usd: float = Field(default=0.30, validation_alias="HEYGEN_PRICE_USD")
     elevenlabs_tts_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_TTS_PRICE_USD")
     elevenlabs_vc_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_VC_PRICE_USD")
+    # VEED Subtitle Styling on fal.ai is billed at ~$0.10/min input duration.
+    # We record per-call instead of per-minute so the cost banner shows the
+    # incremental hit; recompute via duration*rate inside fal_veed.render.
+    fal_caption_price_per_minute_usd: float = Field(default=0.10,
+                                                    validation_alias="FAL_CAPTION_PRICE_PER_MINUTE_USD")
 
     # AI Director: Claude/Opus agent that writes tailored per-variant prompts.
     # Model is env-overridable so a fresher Opus version can drop in without code changes.
@@ -159,6 +165,7 @@ class Settings(BaseSettings):
             "higgsfield": bool(self.higgsfield_api_key),
             "heygen":     bool(self.heygen_api_key),
             "elevenlabs": bool(self.elevenlabs_api_key),
+            "fal":        bool(self.fal_api_key),
         }.get(provider, False)
 
 
