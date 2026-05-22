@@ -2271,6 +2271,12 @@
                        class="w-14 px-1 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded disabled:opacity-40" />
                 <span class="text-neutral-300">WPM</span>
               </label>
+              <label class="flex items-center gap-1.5 cursor-pointer"
+                     title="When the render finishes, package as a DaVinci Resolve project and auto-run automate.py (Resolve renders + optional Drive upload). Requires Resolve installed and running.">
+                <input type="checkbox" x-model="editor.autoExportResolve"
+                       @change="localStorage.setItem('editor.autoExportResolve', editor.autoExportResolve ? '1' : '0')" />
+                <span class="text-neutral-300">🚀 Auto-export to Resolve</span>
+              </label>
               <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
             </div>
 
@@ -2705,6 +2711,12 @@
                            class="w-14 px-1 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded disabled:opacity-40" />
                     <span class="text-neutral-300">WPM</span>
                   </label>
+                  <label class="flex items-center gap-1.5 cursor-pointer"
+                         title="When the render finishes, package as a DaVinci Resolve project and auto-run automate.py (Resolve renders + optional Drive upload). Requires Resolve installed and running.">
+                    <input type="checkbox" x-model="editor.autoExportResolve"
+                           @change="localStorage.setItem('editor.autoExportResolve', editor.autoExportResolve ? '1' : '0')" />
+                    <span class="text-neutral-300">🚀 Auto-export to Resolve</span>
+                  </label>
                   <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
                 </div>
 
@@ -2957,6 +2969,27 @@
              :download="`${editor.lastResult?.edit_id}-resolve.zip`"
              class="px-3 py-1 rounded bg-slate-700 hover:bg-slate-800 text-white text-xs font-medium inline-flex items-center"
              title="Download video + captions.srt + starter Python script for DaVinci Resolve">↓ Export to Resolve</a>
+          <!-- Run-pipeline + live status pill (auto-export fires this same flow) -->
+          <button x-show="editor.lastResult?.edit_id && !['queued','packaging','rendering','uploading'].includes(editor.pipelineState?.status)"
+                  class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium inline-flex items-center"
+                  @click="runEditorPipeline(editor.lastResult?.edit_id)"
+                  title="Package + render in Resolve + (optionally) upload to Drive. Requires Resolve installed and running.">🚀 Run pipeline</button>
+          <span x-show="editor.pipelineState?.status"
+                class="px-3 py-1 rounded text-xs font-medium inline-flex items-center gap-1.5"
+                :class="{
+                  'bg-amber-900/40 text-amber-300': ['queued','packaging','rendering','uploading'].includes(editor.pipelineState?.status),
+                  'bg-emerald-900/40 text-emerald-300': editor.pipelineState?.status === 'done',
+                  'bg-red-900/40 text-red-300': editor.pipelineState?.status === 'failed',
+                }">
+            <span x-text="`🚀 ${editor.pipelineState?.status}`"></span>
+            <a x-show="editor.pipelineState?.drive_link"
+               :href="editor.pipelineState?.drive_link" target="_blank"
+               class="underline">Drive&nbsp;↗</a>
+            <span x-show="editor.pipelineState?.error"
+                  class="text-red-300 truncate max-w-xs"
+                  :title="editor.pipelineState?.error"
+                  x-text="editor.pipelineState?.error?.slice(0, 60)"></span>
+          </span>
         </div>
 
         <!-- Re-render panel — change template/size/position/trim on the existing edit -->

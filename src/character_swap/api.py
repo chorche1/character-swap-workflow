@@ -3047,6 +3047,61 @@ async def job_char_export_resolve(job_id: str, char_id: str):
     )
 
 
+class RunEditorPipelineBody(BaseModel):
+    """POST /api/editor/run_full_pipeline body."""
+    edit_id: str
+
+
+@app.post("/api/editor/run_full_pipeline")
+async def editor_run_full_pipeline(body: RunEditorPipelineBody,
+                                   background: BackgroundTasks) -> dict:
+    """Package an editor edit_id as a DaVinci Resolve project, then spawn
+    automate.py to render it in Resolve and (optionally) upload to Drive.
+
+    Same prerequisites as `/api/jobs/{job_id}/run_full_pipeline`:
+      - DaVinci Resolve installed + RUNNING (Mac: Privacy → Automation perm
+        granted to whichever process runs the server)
+      - ~/character-swap-data/credentials.json with OAuth Desktop client
+        (optional — Drive step skips gracefully if missing)
+
+    Returns immediately with the initial pipeline state. Poll
+    `GET /api/editor/{edit_id}/pipeline_state` for transitions.
+    """
+    from character_swap import runner_pipeline
+
+    edit_dir = settings.output_dir / "editor" / body.edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {body.edit_id!r} not found")
+    final, _ = runner_pipeline._editor_locate_videos(edit_dir)
+    if final is None:
+        raise HTTPException(409, f"No rendered video in {body.edit_id!r}")
+
+    state = runner_pipeline._persist_editor_pipeline(
+        body.edit_id, status="queued", error=None, drive_link=None,
+    )
+    background.add_task(_run_async,
+                        runner_pipeline.run_editor_pipeline, body.edit_id)
+    return state
+
+
+@app.get("/api/editor/{edit_id}/pipeline_state")
+async def editor_pipeline_state(edit_id: str) -> dict:
+    """Return the current pipeline state for one editor edit. Empty dict
+    `{}` when no pipeline has been kicked off for this edit_id."""
+    from character_swap import runner_pipeline
+
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {edit_id!r} not found")
+    path = runner_pipeline._editor_pipeline_state_path(edit_id)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 @app.get("/api/editor/export_resolve/{edit_id}")
 async def editor_export_resolve(edit_id: str):
     """Download the edit as a DaVinci Resolve-ready project bundle (.zip).

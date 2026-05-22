@@ -444,7 +444,15 @@ class CaptionStyle:
         sizeScale = max(0.4, min(2.5, self.size / 115.2))
         margin_v_clamped = max(0, min(1900, self.margin_v))
         margin_h_clamped = max(-540, min(540, self.margin_h))
-        y_pct = max(0.05, min(0.95, 1.0 - margin_v_clamped / 1920.0))
+        # Vertical position depends on alignment (ASS numpad layout):
+        # 1-3 bottom, 4-6 middle, 7-9 top. For middle, ignore margin_v entirely
+        # (matches libass behavior); for top, margin_v is distance from top.
+        if self.alignment in (4, 5, 6):
+            y_pct = 0.5
+        elif self.alignment in (7, 8, 9):
+            y_pct = max(0.05, min(0.95, margin_v_clamped / 1920.0))
+        else:
+            y_pct = max(0.05, min(0.95, 1.0 - margin_v_clamped / 1920.0))
         x_pct = max(0.05, min(0.95, 0.5 + margin_h_clamped / 1080.0))
         return {
             "accent": accent,
@@ -625,6 +633,19 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               words_per_card=3,
                               highlight_color="&H00B56BFF",       # RGB 255,107,181
                               margin_v=400, all_caps=False),
+
+    # Instagram Sans Bold, centered in the middle of the screen — for
+    # talking-head reels where you want eye-level captions instead of
+    # the usual lower-third position. ASS alignment=5 = middle-center;
+    # libass ignores margin_v at middle alignments so the text sits
+    # exactly at 50% Y.
+    "instagram-center": CaptionStyle(font="Instagram Sans Bold", size=92,
+                              primary_color="&H00FFFFFF",
+                              outline_color="&H00000000",
+                              outline=3, shadow=6, bold=True, box=False,
+                              words_per_card=3,
+                              alignment=5,                        # middle-center
+                              margin_v=0, all_caps=False),
 
     # TikTok Sans ExtraBold — the official TikTok-platform font. Very heavy,
     # condensed, designed for vertical mobile. Pairs with all-caps + cyan

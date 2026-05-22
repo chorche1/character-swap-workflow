@@ -105,6 +105,12 @@ function studio() {
       enableCaptions: true,
       enableNormalizeWpm: true,       // default-on; time-stretch each clip to target_wpm
       targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
+      // Auto-fire the Resolve pipeline (Phase 4) after a successful render.
+      // Persisted to localStorage so the toggle survives reloads.
+      autoExportResolve: (typeof localStorage !== 'undefined'
+                          && localStorage.getItem('editor.autoExportResolve') === '1'),
+      pipelineState: null,            // {status, drive_link, error, ...} from /api/editor/.../pipeline_state
+      _pipelinePoll: null,            // setInterval handle while polling
       rerendering: false,
       rerenderOpen: false,                    // shows the edit-result panel
       rerenderTemplate: 'popout-yellow',      // independent of editor.template so you can A/B
@@ -2108,6 +2114,9 @@ function studio() {
         this.notifyMilestone('Multi-clip auto-edit done',
           `${data.n_clips} clips${unmatched ? ` (${unmatched} unmatched)` : ''} · ${data.captions?.n_words} words captioned`,
           { kind: 'done', tag: 'editor-multi-auto-edit' });
+        if (this.editor.autoExportResolve && data.edit_id) {
+          await this.runEditorPipeline(data.edit_id);
+        }
       } finally {
         this.multiAutoEditing = false;
       }
@@ -2142,8 +2151,75 @@ function studio() {
         if (data.captions) parts.push(`${data.captions.n_words} words captioned`);
         this.notifyMilestone('Auto-edit pipeline done', parts.join(' · '),
           { kind: 'done', tag: 'editor-auto-edit' });
+        if (this.editor.autoExportResolve && data.edit_id) {
+          await this.runEditorPipeline(data.edit_id);
+        }
       } finally {
         this.editor.autoEditing = false;
+      }
+    },
+
+    // --- Editor → DaVinci Resolve auto-export ------------------------------
+    // Kicks off the same Phase-4 pipeline used by Step 6 of the Swap flow,
+    // but driven from an editor edit_id instead of a JobCharacter. The
+    // backend (runner_pipeline.run_editor_pipeline) packages the rendered
+    // MP4 + SRT + automate.py into a temp dir and spawns the subprocess.
+    // We then poll /api/editor/{edit_id}/pipeline_state every 2s for
+    // status transitions. Status pill in the result panel reflects the
+    // current `editor.pipelineState`.
+    async runEditorPipeline(editId) {
+      if (!editId) return;
+      this._stopPipelinePolling();
+      this.editor.pipelineState = { status: 'queued' };
+      try {
+        const r = await fetch('/api/editor/run_full_pipeline', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ edit_id: editId }),
+        });
+        if (!r.ok) {
+          const txt = await r.text();
+          this.editor.pipelineState = { status: 'failed', error: txt };
+          this.notifyError('Resolve pipeline failed to start: ' + txt);
+          return;
+        }
+        this.editor.pipelineState = await r.json();
+        this._startPipelinePolling(editId);
+      } catch (e) {
+        this.editor.pipelineState = { status: 'failed', error: String(e) };
+        this.notifyError('Resolve pipeline kickoff error: ' + e);
+      }
+    },
+
+    _startPipelinePolling(editId) {
+      this._stopPipelinePolling();
+      const self = this;
+      this.editor._pipelinePoll = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/editor/${editId}/pipeline_state`);
+          if (!r.ok) return;
+          const data = await r.json();
+          if (!data || !data.status) return;
+          self.editor.pipelineState = data;
+          if (data.status === 'done' || data.status === 'failed') {
+            self._stopPipelinePolling();
+            const title = data.status === 'done'
+              ? 'Resolve pipeline done'
+              : 'Resolve pipeline failed';
+            const body = data.drive_link
+              ? `Drive: ${data.drive_link}`
+              : (data.error || data.status);
+            self.notifyMilestone(title, body,
+              { kind: data.status, tag: `editor-pipeline-${editId}` });
+          }
+        } catch { /* ignore transient poll errors */ }
+      }, 2000);
+    },
+
+    _stopPipelinePolling() {
+      if (this.editor._pipelinePoll) {
+        clearInterval(this.editor._pipelinePoll);
+        this.editor._pipelinePoll = null;
       }
     },
 
