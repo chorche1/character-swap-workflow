@@ -44,6 +44,8 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
+    fontWeight, opacity, shadowDistance, shadowBlur,
+    outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -103,26 +105,33 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
             const activeBoost = isActive && !isAccent ? 0.06 : 0;
             const scale = 0.7 + enter * 0.3 + activeBoost;
 
-            // Outline scaling — bigger keyword needs proportionally bigger
-            // stroke to stay readable on busy backgrounds.
-            const outlinePx = Math.max(3, Math.round(size * 0.06));
+            // Outline scaling — user-tunable; default 6% of size for the
+            // bigger keyword so stroke stays proportional.
+            const outline = propOutlinePx > 0
+              ? propOutlinePx
+              : Math.max(3, Math.round(size * 0.06));
+            // Shadow: user-tunable distance + blur. Defaults preserve
+            // MrBeast's double-layered drop look (5% offset + 10/18% blur).
+            const shadowOffset = shadowDistance > 0
+              ? shadowDistance
+              : Math.round(size * 0.05);
+            const shadowSpread = shadowBlur > 0
+              ? shadowBlur
+              : Math.round(size * 0.18);
             const wordStyle: React.CSSProperties = {
               fontFamily: `${fontFamily}, "Anton", "Bebas Neue", "Impact", system-ui, sans-serif`,
-              fontWeight: 900,
+              fontWeight,
               fontSize: `${size}px`,
               lineHeight: 1.0,
               color,
-              // Double layered shadow — flat solid drop (1px below for
-              // crispness) + softer fade further down. Mimics the typical
-              // MrBeast / Hormozi title-card stack.
               textShadow: [
-                `0 ${Math.round(size * 0.05)}px 0 ${rgba("#000000", 0.95)}`,
-                `0 ${Math.round(size * 0.1)}px ${Math.round(size * 0.18)}px ${rgba("#000000", 0.55)}`,
+                `0 ${shadowOffset}px 0 ${rgba("#000000", 0.95)}`,
+                `0 ${Math.round(shadowOffset * 2)}px ${shadowSpread}px ${rgba("#000000", 0.55)}`,
               ].join(", "),
-              WebkitTextStroke: `${outlinePx}px #000000`,
-              paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
+              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               letterSpacing: "0.005em",
-              opacity: enter * (isActive || isAccent ? 1 : 0.96),
+              opacity: enter * (isActive || isAccent ? 1 : 0.96) * opacity,
               display: "inline-block",
               transform: `scale(${scale}) translateY(${(1 - enter) * size * 0.25}px)`,
               transformOrigin: "center center",

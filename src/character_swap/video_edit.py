@@ -428,6 +428,15 @@ class CaptionStyle:
     words_per_card: int = 3             # word-by-word grouping size
     highlight_color: str | None = None  # color used to highlight the active word
     all_caps: bool = False              # force-uppercase the rendered text (Submagic/TikTok aesthetic)
+    # New tunables (Hugo, May 2026): give the user direct control over
+    # font weight, opacity, and the two separate shadow components so the
+    # Remotion templates can be dialed in per-job from the Style tab
+    # rather than rebuilding compositions for every variant. Default
+    # values preserve the prior look of each template.
+    font_weight: int = 900              # 100-900; only meaningful for Remotion (ASS picks bold/normal from this)
+    opacity: float = 1.0                # text opacity 0.0-1.0
+    shadow_blur: int | None = None      # CSS text-shadow blur radius in px; None = derive from `shadow` value
+    shadow_distance: int | None = None  # CSS text-shadow offset in px; None = derive from `shadow` value
     # Rendering engine.
     #   "ass"      → existing ffmpeg+ASS path (cheap, no animation)
     #   "remotion" → React composition rendered via `npx remotion render`
@@ -460,6 +469,11 @@ class CaptionStyle:
         else:
             y_pct = max(0.05, min(0.95, 1.0 - margin_v_clamped / 1920.0))
         x_pct = max(0.05, min(0.95, 0.5 + margin_h_clamped / 1080.0))
+        # When the user doesn't set them explicitly, derive shadow blur +
+        # distance from the legacy single `shadow` value so existing templates
+        # keep their feel. Distance defaults to shadow, blur to ~2× shadow.
+        sd = self.shadow_distance if self.shadow_distance is not None else self.shadow
+        sb = self.shadow_blur if self.shadow_blur is not None else max(self.shadow * 2, 0)
         return {
             "accent": accent,
             "fontFamily": self.font,
@@ -467,6 +481,15 @@ class CaptionStyle:
             "positionPct": {"x": x_pct, "y": y_pct},
             "allCaps": self.all_caps,
             "wordsPerCard": self.words_per_card,
+            # New tunables — every Remotion composition reads these via
+            # `BaseCaptionProps` and applies them to text-shadow + element
+            # styles. Defaults are chosen to preserve each composition's
+            # original look when the user hasn't touched the new sliders.
+            "fontWeight": max(100, min(900, int(self.font_weight))),
+            "opacity": max(0.0, min(1.0, float(self.opacity))),
+            "shadowDistance": max(0, min(50, int(sd))),
+            "shadowBlur": max(0, min(60, int(sb))),
+            "outlinePx": max(0, min(20, int(self.outline))),
         }
 
 

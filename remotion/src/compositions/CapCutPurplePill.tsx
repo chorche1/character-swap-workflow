@@ -37,6 +37,7 @@ export const CapCutPurplePill: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     wordsPerCard, videoWidth, videoHeight,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -45,6 +46,12 @@ export const CapCutPurplePill: React.FC<BaseCaptionProps> = (props) => {
   // ~6% of video height looks right at 1080×1920 — matches the reference
   // (where caption height is ~115px on a 1920-tall canvas).
   const baseFontSize = Math.round(videoHeight * 0.06 * sizeScale);
+
+  // Compose text-shadow from user-tunable distance + blur. Skip entirely
+  // when both are zero so we don't ship an empty " 0px 0px 0 rgba(...)".
+  const textShadowCss = (shadowDistance > 0 || shadowBlur > 0)
+    ? `${shadowDistance}px ${shadowDistance}px ${shadowBlur}px rgba(0,0,0,0.55)`
+    : "none";
 
   // Pill geometry. Em-relative so it scales with font.
   const pillPadX = baseFontSize * 0.18;
@@ -101,17 +108,18 @@ export const CapCutPurplePill: React.FC<BaseCaptionProps> = (props) => {
 
             const wordStyle: React.CSSProperties = {
               fontFamily: `${fontFamily}, "Montserrat", system-ui, sans-serif`,
-              fontWeight: 900,
+              fontWeight,
               fontSize: `${baseFontSize}px`,
               lineHeight: 1.0,
               color: "#FFFFFF",
+              opacity,
               letterSpacing: "-0.01em",
               padding: `${pillPadY}px ${pillPadX}px`,
               borderRadius: `${pillRadius}px`,
               backgroundColor: pillBg,
-              // The pill should appear to "snap" to the word — no
-              // entrance animation, no scale boost, no shadow. Matches
-              // the reference's clean, geometric look.
+              textShadow: textShadowCss,
+              WebkitTextStroke: outlinePx > 0 ? `${outlinePx}px #000000` : undefined,
+              paintOrder: outlinePx > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               display: "inline-block",
               whiteSpace: "nowrap",
               transition: "background-color 60ms linear",

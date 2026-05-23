@@ -21,6 +21,8 @@ export const CapCutGlow: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
+    fontWeight, opacity, shadowDistance, shadowBlur,
+    outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -71,35 +73,43 @@ export const CapCutGlow: React.FC<BaseCaptionProps> = (props) => {
               durationInFrames: entranceFrames,
             });
             const display = allCaps ? w.text.toUpperCase().trim() : w.text.trim();
-            // Outline keeps text legible on any background; was missing
-            // before (glow-only). 5% of font size, min 3px. Matches CapCut's
-            // signature stroke-on-glow look.
-            const outlinePx = Math.max(3, Math.round(baseFontSize * 0.05));
+            // Outline: user-tunable; default 5% of font size.
+            const outline = propOutlinePx > 0
+              ? propOutlinePx
+              : Math.max(3, Math.round(baseFontSize * 0.05));
+            // Drop shadow: user-tunable distance + blur. Glow layer below
+            // is intentionally unaffected — it's the template's identity.
+            const shadowOffset = shadowDistance > 0
+              ? shadowDistance
+              : Math.round(baseFontSize * 0.06);
+            const shadowSpread = shadowBlur > 0
+              ? shadowBlur
+              : Math.round(baseFontSize * 0.14);
             // Active word scale boost up to 18% so the karaoke read is
             // unmistakable. Previously stuck at 4%.
             const activeBoost = isActive ? 0.18 : 0;
             const scale = 0.65 + wordEnter * 0.35 + activeBoost;
             const wordStyle: React.CSSProperties = {
               fontFamily: `${fontFamily}, "Poppins", "Inter", system-ui, sans-serif`,
-              fontWeight: 900,
+              fontWeight,
               fontSize: `${baseFontSize}px`,
               lineHeight: 1.05,
               color: isActive ? accent : "#FFFFFF",
               // Outline (stroke) + cyan glow + soft drop shadow. The triple
               // layering is the CapCut signature: legible on busy footage
               // AND visually distinctive.
-              WebkitTextStroke: `${outlinePx}px #000000`,
-              paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
+              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               textShadow: [
                 `0 0 ${Math.round(baseFontSize * 0.28)}px ${rgba(accent, 0.85)}`,
                 `0 0 ${Math.round(baseFontSize * 0.55)}px ${rgba(accent, 0.45)}`,
-                `0 ${Math.round(baseFontSize * 0.06)}px ${Math.round(baseFontSize * 0.14)}px ${rgba("#000000", 0.55)}`,
+                `0 ${shadowOffset}px ${shadowSpread}px ${rgba("#000000", 0.55)}`,
               ].join(", "),
               letterSpacing: "0.005em",
               display: "inline-block",
               transform: `scale(${scale}) translateY(${(1 - wordEnter) * baseFontSize * 0.25}px)`,
               transformOrigin: "center center",
-              opacity: wordEnter,
+              opacity: wordEnter * opacity,
               transition: "color 80ms linear",
               willChange: "transform, opacity, color",
             };

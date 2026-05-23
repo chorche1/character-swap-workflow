@@ -125,6 +125,12 @@ function studio() {
         font: null, size: null, primary_color: null, outline_color: null,
         words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, box: null,
         all_caps: null, shadow: null, alignment: null, outline: null,
+        // New tunables (May 2026): user-controllable font weight, opacity,
+        // and separate shadow blur + distance. `highlight_color_hex` is the
+        // UI-side mirror of `highlight_color` (which lives in ASS BGR format).
+        font_weight: null, opacity: null,
+        shadow_distance: null, shadow_blur: null,
+        highlight_color_hex: null,
       },
       lastResult: null,            // {output_url, kind: 'trim'|'captions', ...}
       // Editor "Character" dropdown (Phase B). When the user picks a
@@ -1374,10 +1380,32 @@ function studio() {
     _activeOverrides() {
       const o = this.editor.overrides;
       const out = {};
+      // `highlight_color_hex` is UI-only state — the backend wants the
+      // ASS BGR format in `highlight_color`. Drop the hex twin before sending.
+      const skip = new Set(['highlight_color_hex']);
       for (const k of Object.keys(o)) {
+        if (skip.has(k)) continue;
         if (o[k] !== null && o[k] !== '') out[k] = o[k];
       }
       return out;
+    },
+
+    // Color conversion helpers — the Style tab's color picker speaks CSS hex
+    // (#RRGGBB) but our CaptionStyle / ASS templates store colors as BGR
+    // (&H00BBGGRR). These two convert between the two so the UI swatch and
+    // the persisted override stay in sync.
+    _assToHex(ass) {
+      if (!ass || typeof ass !== 'string') return '#8B5CF6';
+      const hex = ass.replace(/^&H/i, '').padStart(8, '0').toUpperCase();
+      // ASS &HAABBGGRR: skip alpha, then swap BGR → RGB.
+      const bb = hex.slice(2, 4), gg = hex.slice(4, 6), rr = hex.slice(6, 8);
+      return `#${rr}${gg}${bb}`;
+    },
+    _hexToAss(hex) {
+      if (!hex || typeof hex !== 'string') return '&H008B5CF6';
+      const h = hex.replace(/^#/, '').toUpperCase().padStart(6, '0');
+      const rr = h.slice(0, 2), gg = h.slice(2, 4), bb = h.slice(4, 6);
+      return `&H00${bb}${gg}${rr}`;
     },
 
     async editorAddCaptions() {

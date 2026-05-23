@@ -2745,15 +2745,71 @@
                     </div>
                     <div>
                       <label class="flex items-center justify-between text-xs">
-                        <span class="text-neutral-600 dark:text-neutral-300">Shadow</span>
-                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow ?? currentTemplate().shadow ?? 0}`"></span>
+                        <span class="text-neutral-600 dark:text-neutral-300">Shadow distance</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow_distance ?? editor.overrides.shadow ?? currentTemplate().shadow ?? 0}px`"></span>
                       </label>
-                      <input type="range" min="0" max="15" step="1"
-                             :value="editor.overrides.shadow ?? currentTemplate().shadow ?? 0"
-                             @input="editor.overrides.shadow = parseInt($event.target.value)"
+                      <input type="range" min="0" max="30" step="1"
+                             :value="editor.overrides.shadow_distance ?? editor.overrides.shadow ?? currentTemplate().shadow ?? 0"
+                             @input="editor.overrides.shadow_distance = parseInt($event.target.value); editor.overrides.shadow = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Shadow blur</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow_blur ?? Math.max(2 * (currentTemplate().shadow ?? 0), 0)}px`"></span>
+                      </label>
+                      <input type="range" min="0" max="60" step="1"
+                             :value="editor.overrides.shadow_blur ?? Math.max(2 * (currentTemplate().shadow ?? 0), 0)"
+                             @input="editor.overrides.shadow_blur = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Font weight</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.font_weight ?? 900}`"></span>
+                      </label>
+                      <input type="range" min="100" max="900" step="100"
+                             :value="editor.overrides.font_weight ?? 900"
+                             @input="editor.overrides.font_weight = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Opacity</span>
+                        <span class="font-mono text-neutral-400" x-text="`${Math.round((editor.overrides.opacity ?? 1) * 100)}%`"></span>
+                      </label>
+                      <input type="range" min="0" max="100" step="5"
+                             :value="(editor.overrides.opacity ?? 1) * 100"
+                             @input="editor.overrides.opacity = parseInt($event.target.value) / 100"
                              class="w-full mt-1" />
                     </div>
                   </div>
+
+                  <!-- Highlight color (active-word animation color) -->
+                  <div class="pt-1 border-t border-neutral-200 dark:border-neutral-800">
+                    <label class="flex items-center justify-between text-xs mb-1.5">
+                      <span class="text-neutral-600 dark:text-neutral-300">Highlight color
+                        <span class="text-neutral-500 dark:text-neutral-500">(active word)</span>
+                      </span>
+                      <span class="font-mono text-neutral-400 text-[10px]"
+                            x-text="editor.overrides.highlight_color_hex || _assToHex(editor.overrides.highlight_color ?? currentTemplate().highlight_color)"></span>
+                    </label>
+                    <div class="flex items-center gap-2">
+                      <input type="color"
+                             :value="editor.overrides.highlight_color_hex || _assToHex(editor.overrides.highlight_color ?? currentTemplate().highlight_color)"
+                             @input="editor.overrides.highlight_color_hex = $event.target.value; editor.overrides.highlight_color = _hexToAss($event.target.value)"
+                             class="h-8 w-12 rounded cursor-pointer border border-neutral-300 dark:border-neutral-700 bg-transparent" />
+                      <div class="flex gap-1 flex-wrap">
+                        <template x-for="preset in ['#8B5CF6','#FFD400','#FF3B30','#34C759','#00C7FF','#FF2D92','#FF9500','#FFFFFF']" :key="'hl-'+preset">
+                          <button class="w-6 h-6 rounded border border-neutral-300 dark:border-neutral-700 hover:scale-110 transition-transform"
+                                  :style="`background-color: ${preset}`"
+                                  :title="preset"
+                                  @click="editor.overrides.highlight_color_hex = preset; editor.overrides.highlight_color = _hexToAss(preset)"></button>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+
                   <div>
                     <label class="flex items-center gap-2 text-xs cursor-pointer">
                       <input type="checkbox"
@@ -2763,7 +2819,7 @@
                     </label>
                   </div>
                   <button class="text-xs text-neutral-500 dark:text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
-                          @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, words_per_card: null, margin_v: null, highlight_color: null, box: null, all_caps: null, shadow: null, alignment: null, outline: null }">
+                          @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, highlight_color_hex: null, box: null, all_caps: null, shadow: null, shadow_distance: null, shadow_blur: null, alignment: null, outline: null, font_weight: null, opacity: null }">
                     ↺ reset to template defaults
                   </button>
                 </div>

@@ -69,6 +69,8 @@ export const SubmagicPro: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
+    fontWeight, opacity, shadowDistance, shadowBlur,
+    outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -148,9 +150,19 @@ export const SubmagicPro: React.FC<BaseCaptionProps> = (props) => {
             const activeBoost = isActive ? 0.22 : 0;
             const scale = 0.55 + enter * 0.45 + activeBoost;
 
-            // Thick outline (~5.5% of font size, min 4px) for high-contrast
-            // legibility on busy backgrounds. Submagic uses 5-7px on 1080.
-            const outlinePx = Math.max(4, Math.round(baseFontSize * 0.055));
+            // Outline: user-tunable via prop; default to 5.5% of font size.
+            const outline = propOutlinePx > 0
+              ? propOutlinePx
+              : Math.max(4, Math.round(baseFontSize * 0.055));
+
+            // Shadow: user-tunable distance + blur; defaults preserve Pro's
+            // 7% offset / 18% blur look when the user hasn't touched the sliders.
+            const shadowOffset = shadowDistance > 0
+              ? shadowDistance
+              : Math.round(baseFontSize * 0.07);
+            const shadowSpread = shadowBlur > 0
+              ? shadowBlur
+              : Math.round(baseFontSize * 0.18);
 
             // Glow: subtle accent-colored halo around the active word only;
             // inactive words get a quieter neutral shadow. This is what
@@ -161,19 +173,19 @@ export const SubmagicPro: React.FC<BaseCaptionProps> = (props) => {
 
             const wordStyle: React.CSSProperties = {
               fontFamily: `${fontFamily}, "Montserrat", "Anton", "Inter", system-ui, sans-serif`,
-              fontWeight: 900,
+              fontWeight,
               fontStyle: "italic",
               fontSize: `${baseFontSize}px`,
               lineHeight: 1.0,
               color,
               textShadow: [
-                `0 ${Math.round(baseFontSize * 0.07)}px ${Math.round(baseFontSize * 0.18)}px ${rgba("#000000", 0.65)}`,
+                `0 ${shadowOffset}px ${shadowSpread}px ${rgba("#000000", 0.65)}`,
                 activeGlow,
               ].filter(Boolean).join(""),
-              WebkitTextStroke: `${outlinePx}px #000000`,
-              paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
+              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               transform: `scale(${scale}) translateY(${(1 - enter) * baseFontSize * 0.28}px)`,
-              opacity: enter,
+              opacity: enter * opacity,
               display: "inline-block",
               letterSpacing: "-0.018em",
               transformOrigin: "center center",

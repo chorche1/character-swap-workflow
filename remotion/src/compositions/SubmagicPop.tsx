@@ -65,6 +65,7 @@ export const SubmagicPop: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -134,21 +135,32 @@ export const SubmagicPop: React.FC<BaseCaptionProps> = (props) => {
             // (was just 5%). Inactive words stay at scale 1.0 once entered.
             const activeBoost = isActive ? 0.2 : 0;
             const scale = 0.55 + enter * 0.45 + activeBoost;
-            // Outline: thick enough to read on busy backgrounds (~5% of
-            // font size, min 3px). Submagic uses 4-6px on 1080px wide video.
-            const outlinePx = Math.max(3, Math.round(baseFontSize * 0.055));
+            // Outline: user-tunable via `outlinePx` prop. When unset (0),
+            // we still ship a sensible default (~5% of font size) so the
+            // template doesn't go unreadable on busy backgrounds.
+            const effectiveOutline = outlinePx > 0
+              ? outlinePx
+              : Math.max(3, Math.round(baseFontSize * 0.055));
+            // Shadow comes from props if non-zero, else falls back to
+            // Submagic's signature drop-shadow recipe (8% offset, 20% blur).
+            const shadowOffset = shadowDistance > 0
+              ? shadowDistance
+              : Math.round(baseFontSize * 0.08);
+            const shadowSpread = shadowBlur > 0
+              ? shadowBlur
+              : Math.round(baseFontSize * 0.2);
             const wordStyle: React.CSSProperties = {
               fontFamily: `${fontFamily}, "Montserrat", "Inter", system-ui, sans-serif`,
-              fontWeight: 900,
+              fontWeight,
               fontStyle: "italic",
               fontSize: `${baseFontSize}px`,
               lineHeight: 1.0,
               color,
-              textShadow: `0 ${Math.round(baseFontSize * 0.08)}px ${Math.round(baseFontSize * 0.2)}px ${rgba("#000000", 0.6)}`,
-              WebkitTextStroke: `${outlinePx}px #000000`,
+              textShadow: `0 ${shadowOffset}px ${shadowSpread}px ${rgba("#000000", 0.6)}`,
+              WebkitTextStroke: `${effectiveOutline}px #000000`,
               paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
               transform: `scale(${scale}) translateY(${(1 - enter) * baseFontSize * 0.3}px)`,
-              opacity: enter,
+              opacity: enter * opacity,
               display: "inline-block",
               letterSpacing: "-0.015em",
               transformOrigin: "center center",
