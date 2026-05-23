@@ -141,9 +141,16 @@ def render_remotion(
         )
 
     probe = _probe_video(input_video)
-    file_url = f"file://{input_video.resolve()}"
+    input_video = input_video.resolve()
+    # Remotion 4 OffthreadVideo no longer accepts file:// URLs — the
+    # renderer's headless Chrome refuses anything that's not http(s).
+    # We use a placeholder URL when computing the cache key so the hash
+    # is stable across runs (the port number is random per process), then
+    # if it's a cache miss we spin up an ephemeral HTTP server below and
+    # substitute the real URL before running the render subprocess.
+    placeholder_url = f"local://{input_video.name}"
     full_props: dict[str, Any] = {
-        "videoSrc": file_url,
+        "videoSrc": placeholder_url,
         "words": words,
         "videoDurationSecs": probe.duration_secs,
         "videoWidth": probe.width,
@@ -166,10 +173,34 @@ def render_remotion(
 
     with record(phase="remotion_render", model=composition_id,
                 character="editor", job_id=job_id):
+        # Spin up an ephemeral HTTP server serving the directory that
+        # contains the input video; rewrite videoSrc to its real URL so
+        # the Remotion renderer's headless Chrome can fetch the file.
+        import functools
+        import http.server
+        import socketserver
+        import threading
+        import urllib.parse as _urlparse
+        serve_dir = input_video.parent
+
+        # Quiet handler — silences the per-request access log so render
+        # subprocess output stays clean. Still surfaces errors via HTTP codes.
+        class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *_a, **_k) -> None:  # type: ignore[override]
+                return
+        handler = functools.partial(_QuietHandler, directory=str(serve_dir))
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        server_port = httpd.server_address[1]
+        server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        server_thread.start()
+        safe_name = _urlparse.quote(input_video.name)
+        served_url = f"http://127.0.0.1:{server_port}/{safe_name}"
+        real_props = {**full_props, "videoSrc": served_url}
+
         # Write props JSON to a temp file alongside the output; Remotion CLI
         # reads it with `--props=<path>`.
         props_path = output_video.parent / f".remotion-props-{cache_key}.json"
-        props_path.write_text(json.dumps(full_props), encoding="utf-8")
+        props_path.write_text(json.dumps(real_props), encoding="utf-8")
         try:
             cmd = [
                 "npx", "--prefix", str(remotion_dir),
@@ -191,6 +222,8 @@ def render_remotion(
                 )
         finally:
             props_path.unlink(missing_ok=True)
+            httpd.shutdown()
+            httpd.server_close()
 
     shutil.copy2(cache_path, output_video)
     return {

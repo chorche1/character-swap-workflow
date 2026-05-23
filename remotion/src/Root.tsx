@@ -5,6 +5,7 @@ import { SubmagicPop } from "./compositions/SubmagicPop";
 import { MrBeastBold } from "./compositions/MrBeastBold";
 import { CapCutGlow } from "./compositions/CapCutGlow";
 import { SubmagicPro } from "./compositions/SubmagicPro";
+import { CapCutPurplePill } from "./compositions/CapCutPurplePill";
 
 const FPS = 30;
 
@@ -70,6 +71,27 @@ export const Root: React.FC = () => {
           fontFamily: "Montserrat",
           wordsPerCard: 3,
           allCaps: true,
+        }}
+        calculateMetadata={({ props }) => ({
+          durationInFrames: durationInFrames(props),
+          width: props.videoWidth,
+          height: props.videoHeight,
+        })}
+      />
+      <Composition
+        id="CapCutPurplePill"
+        component={CapCutPurplePill}
+        fps={FPS}
+        width={DEFAULT_CAPTION_PROPS.videoWidth}
+        height={DEFAULT_CAPTION_PROPS.videoHeight}
+        durationInFrames={durationInFrames(DEFAULT_CAPTION_PROPS)}
+        defaultProps={{
+          ...DEFAULT_CAPTION_PROPS,
+          accent: "#8B5CF6",            // Tailwind violet-500, matches CapCut reference
+          fontFamily: "Montserrat",
+          wordsPerCard: 3,
+          allCaps: true,
+          positionPct: { x: 0.5, y: 0.55 },  // slight-below-center, talking-head friendly
         }}
         calculateMetadata={({ props }) => ({
           durationInFrames: durationInFrames(props),

@@ -706,6 +706,18 @@ TEMPLATES: dict[str, CaptionStyle] = {
                               words_per_card=5, margin_v=380, all_caps=False,
                               engine="remotion", composition_id="CapCutGlow"),
 
+    # CapCut "purple pill on active word" — pixel-match for the reference
+    # video Hugo brought (33.mov). White ALLCAPS Montserrat Black, vibrant
+    # violet pill follows the currently-spoken word, no outline, mid-screen.
+    # Renders locally via Remotion because VEED's fal.ai API applies
+    # background_color to the WHOLE card, not per-active-word.
+    "capcut-purple-pill": CaptionStyle(font="Montserrat", size=115,
+                              highlight_color="&H00F65C8B",   # violet for the in-browser preview
+                              words_per_card=3, margin_v=864,  # 45% from bottom → y=0.55
+                              all_caps=True,
+                              engine="remotion",
+                              composition_id="CapCutPurplePill"),
+
     # --- VEED Subtitle Styling templates (engine="veed") ----------------------
     # Cloud-rendered captions via fal.ai's `fal-ai/workflow-utilities/auto-subtitle`
     # endpoint. Higher visual quality than our local ASS/Remotion paths (matches
@@ -774,6 +786,35 @@ TEMPLATES: dict[str, CaptionStyle] = {
                                   "background_color": "none",
                                   "position": "center",
                                   "y_offset": 0,
+                                  "words_per_subtitle": 3,
+                                  "enable_animation": True,
+                              }),
+
+    # CapCut "purple pill on active word" template — white ALLCAPS text with
+    # NO stroke, active word gets a vibrant purple background pill while
+    # inactive words stay transparent. Matches a common TikTok/IG-reels style
+    # Hugo brought a sample for (the "33.mov" reference in his CapCut library).
+    # Whether `background_color` applies per-active-word OR per-card depends
+    # on VEED's animation engine — first render against a real clip confirms.
+    "veed-purple-pill": CaptionStyle(font="Montserrat", size=110,
+                              primary_color="&H00FFFFFF",
+                              highlight_color="&H00F65C8B",       # purple-ish for ASS preview
+                              words_per_card=3, margin_v=900,     # ~50% down on 1920
+                              alignment=5,                         # middle-center
+                              all_caps=True,
+                              engine="veed",
+                              veed_params={
+                                  "font_name": "Montserrat",
+                                  "font_size": 110,
+                                  "font_weight": "black",
+                                  "font_color": "white",
+                                  "highlight_color": "white",     # text stays white when active
+                                  "stroke_width": 0,
+                                  "stroke_color": "black",
+                                  "background_color": "purple",   # pill behind active word
+                                  "background_opacity": 1.0,
+                                  "position": "center",
+                                  "y_offset": 50,                  # slight below center
                                   "words_per_subtitle": 3,
                                   "enable_animation": True,
                               }),
