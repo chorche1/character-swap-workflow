@@ -126,11 +126,12 @@ function studio() {
         words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, box: null,
         all_caps: null, shadow: null, alignment: null, outline: null,
         // New tunables (May 2026): user-controllable font weight, opacity,
-        // and separate shadow blur + distance. `highlight_color_hex` is the
-        // UI-side mirror of `highlight_color` (which lives in ASS BGR format).
+        // and separate shadow blur + distance. `highlight_color_hex` and
+        // `outline_color_hex` are UI-only mirrors of their ASS-BGR twins.
         font_weight: null, opacity: null,
         shadow_distance: null, shadow_blur: null,
         highlight_color_hex: null,
+        outline_color_hex: null,
       },
       lastResult: null,            // {output_url, kind: 'trim'|'captions', ...}
       // Editor "Character" dropdown (Phase B). When the user picks a
@@ -1380,9 +1381,9 @@ function studio() {
     _activeOverrides() {
       const o = this.editor.overrides;
       const out = {};
-      // `highlight_color_hex` is UI-only state — the backend wants the
-      // ASS BGR format in `highlight_color`. Drop the hex twin before sending.
-      const skip = new Set(['highlight_color_hex']);
+      // `*_color_hex` are UI-only mirrors — the backend wants the ASS BGR
+      // format in the canonical fields. Drop the hex twins before sending.
+      const skip = new Set(['highlight_color_hex', 'outline_color_hex']);
       for (const k of Object.keys(o)) {
         if (skip.has(k)) continue;
         if (o[k] !== null && o[k] !== '') out[k] = o[k];

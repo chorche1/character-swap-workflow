@@ -44,7 +44,7 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
-    fontWeight, opacity, shadowDistance, shadowBlur,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlineColor,
     outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
@@ -128,7 +128,7 @@ export const MrBeastBold: React.FC<BaseCaptionProps> = (props) => {
                 `0 ${shadowOffset}px 0 ${rgba("#000000", 0.95)}`,
                 `0 ${Math.round(shadowOffset * 2)}px ${shadowSpread}px ${rgba("#000000", 0.55)}`,
               ].join(", "),
-              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              WebkitTextStroke: outline > 0 ? `${outline}px ${outlineColor}` : undefined,
               paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               letterSpacing: "0.005em",
               opacity: enter * (isActive || isAccent ? 1 : 0.96) * opacity,

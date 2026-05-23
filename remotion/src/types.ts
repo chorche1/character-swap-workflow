@@ -25,6 +25,7 @@ export type BaseCaptionProps = {
   shadowDistance: number;   // text-shadow offset px
   shadowBlur: number;       // text-shadow blur radius px
   outlinePx: number;        // text stroke width px (0 = no outline)
+  outlineColor: string;     // CSS color for the outline stroke (default #000000)
 };
 
 export const DEFAULT_CAPTION_PROPS: BaseCaptionProps = {
@@ -44,4 +45,5 @@ export const DEFAULT_CAPTION_PROPS: BaseCaptionProps = {
   shadowDistance: 0,
   shadowBlur: 0,
   outlinePx: 0,
+  outlineColor: "#000000",
 };

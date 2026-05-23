@@ -37,7 +37,7 @@ export const CapCutPurplePill: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     wordsPerCard, videoWidth, videoHeight,
-    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx, outlineColor,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -118,7 +118,7 @@ export const CapCutPurplePill: React.FC<BaseCaptionProps> = (props) => {
               borderRadius: `${pillRadius}px`,
               backgroundColor: pillBg,
               textShadow: textShadowCss,
-              WebkitTextStroke: outlinePx > 0 ? `${outlinePx}px #000000` : undefined,
+              WebkitTextStroke: outlinePx > 0 ? `${outlinePx}px ${outlineColor}` : undefined,
               paintOrder: outlinePx > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               display: "inline-block",
               whiteSpace: "nowrap",

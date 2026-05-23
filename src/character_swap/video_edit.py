@@ -561,6 +561,7 @@ class CaptionStyle:
         # keep their feel. Distance defaults to shadow, blur to ~2× shadow.
         sd = self.shadow_distance if self.shadow_distance is not None else self.shadow
         sb = self.shadow_blur if self.shadow_blur is not None else max(self.shadow * 2, 0)
+        outline_color_hex = _ass_color_to_hex(self.outline_color, default="#000000")
         return {
             "accent": accent,
             "fontFamily": self.font,
@@ -577,6 +578,7 @@ class CaptionStyle:
             "shadowDistance": max(0, min(50, int(sd))),
             "shadowBlur": max(0, min(60, int(sb))),
             "outlinePx": max(0, min(20, int(self.outline))),
+            "outlineColor": outline_color_hex,
         }
 
 

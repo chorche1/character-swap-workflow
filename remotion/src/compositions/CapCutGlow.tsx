@@ -21,7 +21,7 @@ export const CapCutGlow: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
-    fontWeight, opacity, shadowDistance, shadowBlur,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlineColor,
     outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
@@ -98,7 +98,7 @@ export const CapCutGlow: React.FC<BaseCaptionProps> = (props) => {
               // Outline (stroke) + cyan glow + soft drop shadow. The triple
               // layering is the CapCut signature: legible on busy footage
               // AND visually distinctive.
-              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              WebkitTextStroke: outline > 0 ? `${outline}px ${outlineColor}` : undefined,
               paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               textShadow: [
                 `0 0 ${Math.round(baseFontSize * 0.28)}px ${rgba(accent, 0.85)}`,

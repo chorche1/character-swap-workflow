@@ -65,7 +65,7 @@ export const SubmagicPop: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
-    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlinePx, outlineColor,
   } = props;
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
@@ -157,7 +157,7 @@ export const SubmagicPop: React.FC<BaseCaptionProps> = (props) => {
               lineHeight: 1.0,
               color,
               textShadow: `0 ${shadowOffset}px ${shadowSpread}px ${rgba("#000000", 0.6)}`,
-              WebkitTextStroke: `${effectiveOutline}px #000000`,
+              WebkitTextStroke: `${effectiveOutline}px ${outlineColor}`,
               paintOrder: "stroke fill" as React.CSSProperties["paintOrder"],
               transform: `scale(${scale}) translateY(${(1 - enter) * baseFontSize * 0.3}px)`,
               opacity: enter * opacity,

@@ -69,7 +69,7 @@ export const SubmagicPro: React.FC<BaseCaptionProps> = (props) => {
   const {
     videoSrc, words, accent, fontFamily, sizeScale, positionPct,
     allCaps, wordsPerCard, videoWidth, videoHeight,
-    fontWeight, opacity, shadowDistance, shadowBlur,
+    fontWeight, opacity, shadowDistance, shadowBlur, outlineColor,
     outlinePx: propOutlinePx,
   } = props;
   const frame = useCurrentFrame();
@@ -182,7 +182,7 @@ export const SubmagicPro: React.FC<BaseCaptionProps> = (props) => {
                 `0 ${shadowOffset}px ${shadowSpread}px ${rgba("#000000", 0.65)}`,
                 activeGlow,
               ].filter(Boolean).join(""),
-              WebkitTextStroke: outline > 0 ? `${outline}px #000000` : undefined,
+              WebkitTextStroke: outline > 0 ? `${outline}px ${outlineColor}` : undefined,
               paintOrder: outline > 0 ? ("stroke fill" as React.CSSProperties["paintOrder"]) : undefined,
               transform: `scale(${scale}) translateY(${(1 - enter) * baseFontSize * 0.28}px)`,
               opacity: enter * opacity,

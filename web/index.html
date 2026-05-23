@@ -2810,6 +2810,31 @@
                     </div>
                   </div>
 
+                  <!-- Outline color (stroke around every word) -->
+                  <div>
+                    <label class="flex items-center justify-between text-xs mb-1.5">
+                      <span class="text-neutral-600 dark:text-neutral-300">Outline color
+                        <span class="text-neutral-500 dark:text-neutral-500">(stroke)</span>
+                      </span>
+                      <span class="font-mono text-neutral-400 text-[10px]"
+                            x-text="editor.overrides.outline_color_hex || _assToHex(editor.overrides.outline_color ?? currentTemplate().outline_color)"></span>
+                    </label>
+                    <div class="flex items-center gap-2">
+                      <input type="color"
+                             :value="editor.overrides.outline_color_hex || _assToHex(editor.overrides.outline_color ?? currentTemplate().outline_color)"
+                             @input="editor.overrides.outline_color_hex = $event.target.value; editor.overrides.outline_color = _hexToAss($event.target.value)"
+                             class="h-8 w-12 rounded cursor-pointer border border-neutral-300 dark:border-neutral-700 bg-transparent" />
+                      <div class="flex gap-1 flex-wrap">
+                        <template x-for="preset in ['#000000','#FFFFFF','#8B5CF6','#FFD400','#FF3B30','#34C759','#00C7FF','#FF2D92']" :key="'ol-'+preset">
+                          <button class="w-6 h-6 rounded border border-neutral-300 dark:border-neutral-700 hover:scale-110 transition-transform"
+                                  :style="`background-color: ${preset}`"
+                                  :title="preset"
+                                  @click="editor.overrides.outline_color_hex = preset; editor.overrides.outline_color = _hexToAss(preset)"></button>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+
                   <div>
                     <label class="flex items-center gap-2 text-xs cursor-pointer">
                       <input type="checkbox"
@@ -2819,7 +2844,7 @@
                     </label>
                   </div>
                   <button class="text-xs text-neutral-500 dark:text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
-                          @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, highlight_color_hex: null, box: null, all_caps: null, shadow: null, shadow_distance: null, shadow_blur: null, alignment: null, outline: null, font_weight: null, opacity: null }">
+                          @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, outline_color_hex: null, words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, highlight_color_hex: null, box: null, all_caps: null, shadow: null, shadow_distance: null, shadow_blur: null, alignment: null, outline: null, font_weight: null, opacity: null }">
                     ↺ reset to template defaults
                   </button>
                 </div>
