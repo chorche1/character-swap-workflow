@@ -39,19 +39,30 @@ def _ffmpeg() -> str:
 
 # Bundled fonts — downloaded lazily from Google Fonts (SIL Open Font License,
 # free for commercial use) and cached so libass/fontconfig can find them.
+#
+# Google migrated most families to a single "variable font" file containing
+# every weight, replacing the per-weight static files (May 2026 — the old
+# /static/Montserrat-Black.ttf etc paths now 404). We mirror that by pointing
+# every weight-named entry below at the same variable-font URL. libass 0.16+
+# and Chrome (Remotion) both auto-pick the right axis when CSS / ASS specifies
+# a fontWeight or bold flag against the variable file. The file is downloaded
+# under the requested name (e.g. "Montserrat_Black.ttf") so fontconfig still
+# resolves the heavier requests, even if the bytes are identical.
 _FONT_URLS = {
     "Anton": "https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf",
     "Bebas Neue": "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf",
-    "Montserrat Black": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Black.ttf",
-    # "Montserrat" alone is the Bold variant — Submagic's default caption font.
-    "Montserrat": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Bold.ttf",
-    "Montserrat ExtraBold": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-ExtraBold.ttf",
-    "Montserrat SemiBold": "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-SemiBold.ttf",
-    # The Bold Font-style — heavy, rounded, modern sans. Free Google Font matches.
-    "Poppins ExtraBold": "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-ExtraBold.ttf",
-    "Poppins Black":     "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Black.ttf",
-    "Inter ExtraBold":   "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-ExtraBold.ttf",
-    "Inter Black":       "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter-Black.ttf",
+    # Variable fonts cover every weight in one file.
+    "Montserrat":           "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Montserrat Black":     "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Montserrat ExtraBold": "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Montserrat SemiBold":  "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Montserrat Bold":      "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Poppins ExtraBold":    "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-ExtraBold.ttf",
+    "Poppins Black":        "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Black.ttf",
+    "Poppins":              "https://github.com/google/fonts/raw/main/ofl/poppins/Poppins-Regular.ttf",
+    "Inter":                "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf",
+    "Inter ExtraBold":      "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf",
+    "Inter Black":          "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf",
 }
 
 
@@ -89,6 +100,76 @@ def _ensure_font(name: str) -> Path | None:
         if dest.exists():
             dest.unlink(missing_ok=True)
         return None
+
+
+# Family → [(min_weight, exact_font_name), ...] lookup. Used by the ASS
+# render path to swap to a heavier installed font variant when the user
+# moves the Style-tab font-weight slider. Ordered heaviest-first; the
+# resolver picks the heaviest entry whose min_weight <= requested weight.
+# If a variant's font file isn't installed (and can't be downloaded by
+# _ensure_font), we skip it and try the next-heaviest.
+_FONT_WEIGHT_FAMILIES: dict[str, list[tuple[int, str]]] = {
+    "TikTok Sans": [
+        (900, "TikTok Sans Black"),
+        (800, "TikTok Sans ExtraBold"),
+        (700, "TikTok Sans Bold"),
+    ],
+    "Instagram Sans": [
+        (700, "Instagram Sans Bold"),
+        (500, "Instagram Sans Medium"),
+        (400, "Instagram Sans Regular"),
+        (300, "Instagram Sans Light"),
+    ],
+    "Montserrat": [
+        (900, "Montserrat Black"),
+        (700, "Montserrat Bold"),
+    ],
+    "Poppins": [
+        (900, "Poppins Black"),
+        (800, "Poppins ExtraBold"),
+    ],
+    "Inter": [
+        (900, "Inter Black"),
+        (800, "Inter ExtraBold"),
+    ],
+}
+
+
+def _resolve_font_for_weight(font_name: str, font_weight: int | None) -> str:
+    """Map (font_name, font_weight) to the best-matching installed font file.
+
+    When `font_weight` is None we return the input untouched — preserving
+    every existing template's explicit font choice. When the user has
+    explicitly set a weight (via the Style-tab slider), we:
+      1. Strip a trailing weight suffix from `font_name` so we work from
+         the base family (e.g. "TikTok Sans ExtraBold" → "TikTok Sans").
+      2. Look up the family in `_FONT_WEIGHT_FAMILIES`. If unknown, fall
+         back to the input unchanged.
+      3. Pick the heaviest variant whose min_weight <= requested weight.
+         If that variant's font file isn't available, try the next.
+      4. If nothing matches, return `font_name` unchanged.
+    """
+    if font_weight is None:
+        return font_name
+    suffixes = (" Black", " ExtraBold", " Bold", " Medium",
+                " Light", " Regular", " Heavy", " Italic")
+    base = font_name
+    for suffix in suffixes:
+        if base.endswith(suffix):
+            base = base[:-len(suffix)]
+            break
+    variants = _FONT_WEIGHT_FAMILIES.get(base)
+    if not variants:
+        return font_name
+    # variants is heaviest-first; find the heaviest whose min_weight <= w.
+    for w, name in variants:
+        if font_weight >= w and _ensure_font(name) is not None:
+            return name
+    # Below all thresholds — pick the lightest variant we can install.
+    for w, name in reversed(variants):
+        if _ensure_font(name) is not None:
+            return name
+    return font_name
 
 
 def _run(args: list[str]) -> str:
@@ -433,7 +514,13 @@ class CaptionStyle:
     # Remotion templates can be dialed in per-job from the Style tab
     # rather than rebuilding compositions for every variant. Default
     # values preserve the prior look of each template.
-    font_weight: int = 900              # 100-900; only meaningful for Remotion (ASS picks bold/normal from this)
+    #
+    # `font_weight = None` means "use `font` as-is" (the template's choice).
+    # When the user moves the Style-tab slider, an int 100-900 lands here
+    # and BOTH the Remotion path (CSS fontWeight) AND the ASS path
+    # (auto-swap to a heavier installed variant in the same family —
+    # e.g. TikTok Sans ExtraBold → TikTok Sans Black at weight=900) honor it.
+    font_weight: int | None = None
     opacity: float = 1.0                # text opacity 0.0-1.0
     shadow_blur: int | None = None      # CSS text-shadow blur radius in px; None = derive from `shadow` value
     shadow_distance: int | None = None  # CSS text-shadow offset in px; None = derive from `shadow` value
@@ -485,7 +572,7 @@ class CaptionStyle:
             # `BaseCaptionProps` and applies them to text-shadow + element
             # styles. Defaults are chosen to preserve each composition's
             # original look when the user hasn't touched the new sliders.
-            "fontWeight": max(100, min(900, int(self.font_weight))),
+            "fontWeight": max(100, min(900, int(self.font_weight if self.font_weight is not None else 900))),
             "opacity": max(0.0, min(1.0, float(self.opacity))),
             "shadowDistance": max(0, min(50, int(sd))),
             "shadowBlur": max(0, min(60, int(sb))),
@@ -1018,6 +1105,14 @@ def render_captions(input_video: Path, output_video: Path, *,
         )
     with record(phase="editor_captions", model="ffmpeg-subtitles",
                 character="editor", job_id=job_id):
+        # When the user has set font_weight via the Style tab, swap the
+        # template's font for a heavier installed variant in the same
+        # family (ASS engine has no synthetic weight — heaviness comes
+        # from the font file). When font_weight is None, this is a no-op.
+        import dataclasses as _dc
+        resolved_font_name = _resolve_font_for_weight(style.font, style.font_weight)
+        if resolved_font_name != style.font:
+            style = _dc.replace(style, font=resolved_font_name)
         # Ensure the chosen font is available (downloads on first use).
         _ensure_font(style.font)
         ass_path = input_video.with_suffix(".captions.ass")
