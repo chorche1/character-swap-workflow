@@ -204,6 +204,11 @@ function studio() {
     multiScript: '',
     multiAutoEditing: false,
     multiResult: null,             // last response from /multi_auto_edit
+    // Higgsfield Drive inbox — clips auto-pulled from a user-configured
+    // Drive folder via the background watcher. Shape:
+    // {drive: {ready, folder_name, folder_id, poll_secs}, items: [...]}
+    higgsfieldInbox: null,
+    higgsfieldPolling: false,
     swapPrompt: '',
     swapModel: 'gpt-image',
     // Step-4 video provider for the swap flow. Defaults to grok-imagine for
@@ -2281,6 +2286,102 @@ function studio() {
 
     formatMB(b) {
       return (b / 1024 / 1024).toFixed(1) + ' MB';
+    },
+
+    // --- Higgsfield Drive inbox ------------------------------------------
+    // Server polls a user-configured Drive folder for Supercomputer outputs
+    // and stages them under `output/higgsfield-inbox/`. UI shows them as a
+    // strip above the manual clips upload area; click → add to multi-clip
+    // list. Same shape as addMultiClips(fileList), but we fetch the file
+    // from our own /files/ mount and wrap it in a File object so all the
+    // downstream multi-clip code keeps working unchanged.
+
+    async loadHiggsfieldInbox() {
+      try {
+        const r = await fetch('/api/higgsfield/inbox');
+        if (!r.ok) return;
+        this.higgsfieldInbox = await r.json();
+      } catch { /* offline */ }
+    },
+
+    async pollHiggsfieldInbox() {
+      if (this.higgsfieldPolling) return;
+      this.higgsfieldPolling = true;
+      try {
+        const r = await fetch('/api/higgsfield/inbox/poll', { method: 'POST' });
+        if (!r.ok) {
+          this.notifyError('Higgsfield poll failed: ' + await r.text());
+          return;
+        }
+        const data = await r.json();
+        if (data?.ok === false) {
+          this.notifyError(`Higgsfield poll: ${data.reason}` +
+            (data.looked_for ? ` (looked for "${data.looked_for}")` : ''));
+        } else if ((data?.n_new || 0) > 0) {
+          this.notifyMilestone('Higgsfield inbox',
+            `${data.n_new} new clip${data.n_new === 1 ? '' : 's'} pulled from Drive`,
+            { kind: 'done', tag: 'higgsfield-poll' });
+        }
+        await this.loadHiggsfieldInbox();
+      } finally {
+        this.higgsfieldPolling = false;
+      }
+    },
+
+    async clearHiggsfieldInbox(driveId) {
+      try {
+        await fetch(`/api/higgsfield/inbox/${encodeURIComponent(driveId)}`,
+                    { method: 'DELETE' });
+        await this.loadHiggsfieldInbox();
+      } catch (e) {
+        this.notifyError('Inbox clear failed: ' + e);
+      }
+    },
+
+    async bootstrapHiggsfieldDrive() {
+      this.notify('info', 'A browser tab should open for Google OAuth. Complete it, then we poll Drive automatically.');
+      try {
+        const r = await fetch('/api/higgsfield/drive/bootstrap',
+                              { method: 'POST' });
+        const data = await r.json();
+        if (data?.ok) {
+          this.notifyMilestone('Drive connected',
+            'OAuth complete — watcher will start pulling clips on next poll.',
+            { kind: 'done', tag: 'higgsfield-oauth' });
+          await this.loadHiggsfieldInbox();
+        } else {
+          this.notifyError(
+            'Drive OAuth failed. Ensure `credentials.json` is at ~/character-swap-data/ and try again.',
+          );
+        }
+      } catch (e) {
+        this.notifyError('Bootstrap error: ' + e);
+      }
+    },
+
+    async addOneHiggsfieldInbox(item) {
+      // Fetch the staged file from /files/output/... → Blob → File so it
+      // slots into the same multiClips shape as a normal upload.
+      try {
+        const r = await fetch(item.file_url);
+        if (!r.ok) throw new Error('fetch failed');
+        const blob = await r.blob();
+        const file = new File([blob], item.name,
+                              { type: blob.type || 'video/mp4' });
+        this.addMultiClips([file]);
+      } catch (e) {
+        this.notifyError(`Couldn't add ${item.name}: ${e}`);
+      }
+    },
+
+    async addAllHiggsfieldInbox() {
+      const items = this.higgsfieldInbox?.items || [];
+      for (const it of items) {
+        await this.addOneHiggsfieldInbox(it);
+      }
+      this.notifyMilestone('Higgsfield clips added',
+        `${items.length} clip${items.length === 1 ? '' : 's'} ready for multi-clip auto-edit`,
+        { kind: 'done', tag: 'higgsfield-add-all' });
     },
 
     async submitMultiAutoEdit() {

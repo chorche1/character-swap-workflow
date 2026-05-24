@@ -38,6 +38,18 @@ class Settings(BaseSettings):
     heygen_api_key: str = Field(default="", validation_alias="HEYGEN_API_KEY")        # HeyGen Avatar 5 (talking heads)
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY") # ElevenLabs voice library + TTS + Voice Changer
     fal_api_key: str = Field(default="", validation_alias="FAL_API_KEY")              # fal.ai (hosts VEED Subtitle Styling — auto-captioning)
+    # Higgsfield → Google Drive auto-import. User configures their Higgsfield
+    # Supercomputer account to export outputs to a Drive folder, our server
+    # polls that folder via Drive API every N seconds, downloads new MP4s to
+    # `output/higgsfield-inbox/`, and surfaces them in the Editor multi-clip
+    # tab. Folder can be specified by name (we resolve to ID on first run)
+    # OR directly by Drive folder ID (cheaper at startup).
+    higgsfield_drive_folder_name: str = Field(default="Higgsfield Output",
+                                              validation_alias="HIGGSFIELD_DRIVE_FOLDER_NAME")
+    higgsfield_drive_folder_id: str = Field(default="",
+                                            validation_alias="HIGGSFIELD_DRIVE_FOLDER_ID")
+    higgsfield_drive_poll_secs: int = Field(default=60,
+                                            validation_alias="HIGGSFIELD_DRIVE_POLL_SECS")
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     grok_video_model: str = Field(default="grok-imagine-video", validation_alias="GROK_VIDEO_MODEL")

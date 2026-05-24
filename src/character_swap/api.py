@@ -359,7 +359,24 @@ async def lifespan(app: FastAPI):
     _ensure_dirs()
     for job in store().list_jobs():
         await runner.resume_pending(job.job_id)
-    yield
+    # Higgsfield→Drive watcher: poll the user's configured Drive folder
+    # for new Supercomputer outputs and stage them in the Editor inbox.
+    # Inert if Drive OAuth isn't configured yet — the loop logs "not set
+    # up" and tries again next cycle, so the server still boots fine.
+    from character_swap import runner_drive_watcher
+    _drive_stop = asyncio.Event()
+    _drive_task = asyncio.create_task(
+        runner_drive_watcher.watcher_loop(stop_event=_drive_stop),
+        name="higgsfield-drive-watcher",
+    )
+    try:
+        yield
+    finally:
+        _drive_stop.set()
+        try:
+            await asyncio.wait_for(_drive_task, timeout=5)
+        except (asyncio.TimeoutError, Exception):
+            _drive_task.cancel()
 
 
 app = FastAPI(title="Character Swap Studio", lifespan=lifespan)
@@ -3351,6 +3368,12 @@ async def health() -> dict:
         # Drives the lock state on `veed-*` caption templates in the Editor.
         "fal_key": bool(settings.fal_api_key),
         "remotion_available": _remotion_available(),
+        # Higgsfield → Drive auto-import: whether OAuth is set up enough to
+        # let the watcher poll the user's configured folder.
+        "higgsfield_drive_ready": __import__(
+            "character_swap.clients.google_drive",
+            fromlist=["status"],
+        ).status()["ready"],
     }
 
 
@@ -3433,6 +3456,54 @@ async def chats_turn(chat_id: str, body: ChatTurnBody) -> dict:
         raise HTTPException(404, f"Chat {chat_id!r} not found")
     chat = await chat_mod.run_turn(chat_id, body.message)
     return _chat_to_dict(chat)
+
+
+# --- Higgsfield Drive inbox (auto-import from user's Drive folder) -------------
+
+@app.get("/api/higgsfield/inbox")
+async def higgsfield_inbox() -> dict:
+    """List clips currently staged in the local Higgsfield inbox + the
+    Drive-connection status the UI uses to decide what to render."""
+    from character_swap import runner_drive_watcher
+    from character_swap.clients import google_drive
+    drive_status = google_drive.status()
+    return {
+        "drive": {
+            **drive_status,
+            "folder_name": settings.higgsfield_drive_folder_name,
+            "folder_id": settings.higgsfield_drive_folder_id,
+            "poll_secs": settings.higgsfield_drive_poll_secs,
+        },
+        "items": runner_drive_watcher.list_inbox(),
+    }
+
+
+@app.post("/api/higgsfield/inbox/poll")
+async def higgsfield_inbox_poll() -> dict:
+    """Force an immediate poll cycle (otherwise the watcher runs every
+    `poll_secs`). Useful when the user just finished a Supercomputer
+    render and wants to pull it in NOW instead of waiting up to a minute."""
+    from character_swap import runner_drive_watcher
+    return await runner_drive_watcher.poll_once()
+
+
+@app.delete("/api/higgsfield/inbox/{drive_id}")
+async def higgsfield_inbox_clear(drive_id: str) -> dict:
+    """Remove one inbox item from local disk. The Drive `id` stays in our
+    seen set, so we don't re-download it on the next poll."""
+    from character_swap import runner_drive_watcher
+    removed = runner_drive_watcher.clear_inbox_item(drive_id)
+    return {"removed": removed, "drive_id": drive_id}
+
+
+@app.post("/api/higgsfield/drive/bootstrap")
+async def higgsfield_drive_bootstrap() -> dict:
+    """Kick off the Google OAuth flow for the watcher's `drive.readonly`
+    scope. Opens the user's browser (server-side flow) — must run on the
+    same machine the user is on. Idempotent: a no-op when a valid token
+    already exists."""
+    from character_swap.clients import google_drive
+    return google_drive.bootstrap_oauth()
 
 
 @app.exception_handler(404)

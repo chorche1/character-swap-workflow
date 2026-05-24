@@ -2367,17 +2367,75 @@
                       class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"></textarea>
           </div>
 
+          <!-- Higgsfield Drive inbox — auto-imported Supercomputer clips -->
+          <div x-show="higgsfieldInbox?.items?.length > 0 || higgsfieldInbox?.drive?.ready"
+               x-init="loadHiggsfieldInbox()"
+               class="border border-emerald-200 dark:border-emerald-900 rounded-xl p-3 bg-emerald-50/50 dark:bg-emerald-950/20">
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                🟢 Higgsfield Inbox
+                <span class="text-emerald-600 dark:text-emerald-400 font-normal"
+                      x-text="`(${higgsfieldInbox?.items?.length || 0} new)`"></span>
+              </div>
+              <div class="flex items-center gap-3">
+                <button class="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline"
+                        @click="pollHiggsfieldInbox()"
+                        :disabled="higgsfieldPolling">
+                  <span x-show="!higgsfieldPolling">🔄 poll now</span>
+                  <span x-show="higgsfieldPolling">polling…</span>
+                </button>
+                <button x-show="higgsfieldInbox?.items?.length > 1"
+                        class="text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold hover:underline"
+                        @click="addAllHiggsfieldInbox()">
+                  + add all to clips
+                </button>
+              </div>
+            </div>
+            <div x-show="!higgsfieldInbox?.drive?.ready" class="text-[11px] text-amber-700 dark:text-amber-300">
+              ⚠️ Drive OAuth not set up. Place `credentials.json` in
+              <code>~/character-swap-data/</code>, then
+              <button class="underline ml-1" @click="bootstrapHiggsfieldDrive()">click here to authorize</button>.
+            </div>
+            <div x-show="higgsfieldInbox?.drive?.ready && (higgsfieldInbox?.items?.length || 0) === 0"
+                 class="text-[11px] text-neutral-600 dark:text-neutral-400">
+              Watching Drive folder
+              <code x-text="higgsfieldInbox?.drive?.folder_name"></code>.
+              New Supercomputer outputs land here within
+              <span x-text="higgsfieldInbox?.drive?.poll_secs"></span>s.
+            </div>
+            <div x-show="higgsfieldInbox?.items?.length > 0"
+                 class="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 mt-2">
+              <template x-for="item in (higgsfieldInbox?.items || [])" :key="'inbox-'+item.drive_id">
+                <div class="relative border border-emerald-300 dark:border-emerald-800 rounded-lg overflow-hidden bg-black group">
+                  <video :src="item.file_url" class="w-full h-24 object-cover" muted preload="metadata"></video>
+                  <button class="absolute top-1 right-1 bg-black/70 hover:bg-red-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                          @click="clearHiggsfieldInbox(item.drive_id)"
+                          title="Remove from inbox">✕</button>
+                  <button class="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-emerald-600/40 transition-colors"
+                          @click="addOneHiggsfieldInbox(item)"
+                          title="Add to clips">
+                    <span class="opacity-0 group-hover:opacity-100 text-white text-xs font-semibold bg-emerald-600 rounded px-2 py-1">+ add</span>
+                  </button>
+                  <div class="p-1 text-[9px] text-emerald-100 truncate font-mono"
+                       :title="item.name" x-text="item.name"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <!-- Clips upload -->
           <div>
             <div class="flex items-center justify-between mb-2">
               <label class="text-xs uppercase tracking-wide text-neutral-500">
                 Clips <span class="text-neutral-400" x-text="multiClips.length ? `(${multiClips.length})` : ''"></span>
               </label>
-              <label class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">
-                + add clips
-                <input type="file" class="hidden" accept="video/*" multiple
-                       @change="addMultiClips($event.target.files); $event.target.value=''" />
-              </label>
+              <div class="flex items-center gap-3">
+                <label class="text-xs text-indigo-400 hover:text-indigo-300 cursor-pointer">
+                  + add clips
+                  <input type="file" class="hidden" accept="video/*" multiple
+                         @change="addMultiClips($event.target.files); $event.target.value=''" />
+                </label>
+              </div>
             </div>
             <template x-if="multiClips.length === 0">
               <label class="dropzone block cursor-pointer border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl p-8 text-center text-neutral-500 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800/40"
