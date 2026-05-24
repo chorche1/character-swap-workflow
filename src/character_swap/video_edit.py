@@ -350,6 +350,19 @@ def trim_leading_silence(input_path: Path, output_path: Path, *,
     import shutil as _shutil
     with record(phase="editor_trim_leading", model="ffmpeg-silencedetect",
                 character="editor", job_id=job_id) as entry:
+        # Audio-less clips (Higgsfield Supercomputer) can't have "leading
+        # silence" — there's no audio energy to detect. Pass through.
+        has_audio = _has_audio_stream(input_path)
+        entry["has_audio"] = has_audio
+        if not has_audio:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["leading_silence_secs"] = 0.0
+            entry["trimmed"] = False
+            duration = _probe_duration(input_path)
+            return {"leading_silence_secs": 0.0,
+                    "original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2)}
         silences = _detect_silences(input_path, threshold_db, min_silence_secs)
         duration = _probe_duration(input_path)
         entry["n_silences"] = len(silences)
@@ -441,8 +454,32 @@ class Word:
     end: float
 
 
+def _has_audio_stream(video_path: Path) -> bool:
+    """True if `video_path` contains at least one audio stream.
+
+    Higgsfield-generated clips are video-only (no audio), and ffmpeg fails
+    with "Output file does not contain any stream" when you try to extract
+    audio from them. Callers should probe with this before _extract_audio
+    or any atempo/setpts filter chain that maps `[0:a]`.
+    """
+    try:
+        out = _run([
+            _ffmpeg(), "-hide_banner", "-i", str(video_path),
+            "-f", "null", "-",
+        ])
+    except RuntimeError as e:
+        out = str(e)
+    # ffmpeg's -i probe prints a "Stream #0:N: Audio:" line for every
+    # audio track. No such line → no audio.
+    return "Audio:" in out
+
+
 def _extract_audio(video_path: Path) -> Path:
-    """Pull the audio track out as 16kHz mono wav (Whisper's preferred input)."""
+    """Pull the audio track out as 16kHz mono wav (Whisper's preferred input).
+
+    Raises RuntimeError if the input has no audio stream — callers should
+    probe with `_has_audio_stream` first if they want to handle that case.
+    """
     audio_path = video_path.with_suffix(".audio.wav")
     _run([
         _ffmpeg(), "-y", "-i", str(video_path),
@@ -457,7 +494,14 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None) -> list[Wor
 
     Uses `whisper-1` (current OpenAI Whisper API model) with
     response_format=verbose_json + timestamp_granularities=['word'].
+
+    Returns `[]` (empty word list) for video-only inputs with no audio track
+    — Higgsfield Supercomputer clips are typically silent. Callers that fan
+    out across N clips get `match_clips_by_transcript` to fall back to
+    upload-order placement when transcripts are empty.
     """
+    if not _has_audio_stream(video_path):
+        return []
     audio_path = _extract_audio(video_path)
     client = openai_image._client()  # reuses settings.openai_api_key + auth
     with record(phase="editor_transcribe", model="whisper-1",
@@ -1236,32 +1280,45 @@ def time_stretch(input_path: Path, output_path: Path, *,
             f"speed_factor {speed_factor} outside safe atempo range [0.5, 2.0]"
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    has_audio = _has_audio_stream(input_path)
     with record(phase="editor_time_stretch", model="ffmpeg-atempo",
                 character="editor", job_id=job_id) as entry:
         entry["speed_factor"] = round(speed_factor, 4)
+        entry["has_audio"] = has_audio
         if abs(speed_factor - 1.0) < 1e-3:
             # Passthrough: still re-encode to clean h264/aac so downstream
             # concat sees the same codec as a stretched clip would have.
-            _run([
-                _ffmpeg(), "-y", "-i", str(input_path),
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "192k",
-                str(output_path),
-            ])
+            cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+            if has_audio:
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
+            else:
+                cmd += ["-an"]
+            cmd += [str(output_path)]
+            _run(cmd)
             return output_path
         # `atempo` is pitch-preserving for audio; `setpts=PTS/factor`
         # scales the video time-base by the same factor so the two
-        # streams stay locked.
-        _run([
-            _ffmpeg(), "-y", "-i", str(input_path),
-            "-filter_complex",
-            f"[0:v]setpts=PTS/{speed_factor:.4f}[v];"
-            f"[0:a]atempo={speed_factor:.4f}[a]",
-            "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            str(output_path),
-        ])
+        # streams stay locked. For audio-less inputs (Higgsfield clips),
+        # we skip the [0:a]atempo branch entirely.
+        if has_audio:
+            cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+                   "-filter_complex",
+                   f"[0:v]setpts=PTS/{speed_factor:.4f}[v];"
+                   f"[0:a]atempo={speed_factor:.4f}[a]",
+                   "-map", "[v]", "-map", "[a]",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-c:a", "aac", "-b:a", "192k",
+                   str(output_path)]
+        else:
+            cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+                   "-filter_complex",
+                   f"[0:v]setpts=PTS/{speed_factor:.4f}[v]",
+                   "-map", "[v]",
+                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   "-an",
+                   str(output_path)]
+        _run(cmd)
     return output_path
 
 
@@ -1388,23 +1445,50 @@ def concat_videos(video_paths: list[Path], output_path: Path,
 
     `aspect_ratio` determines the target canvas — clips with different
     aspect ratios get letterboxed/pillarboxed onto the chosen canvas.
+
+    Audio handling:
+      - If ALL inputs have audio: standard concat with audio output.
+      - If NONE have audio (Higgsfield Supercomputer clips are video-only):
+        concat produces a video-only output.
+      - If MIXED: synthesizes silent audio (anullsrc) for the video-only
+        inputs so the concat filter sees a uniform a/v stream layout, then
+        outputs a normal video+audio file. The user can voice-swap or add
+        a voiceover afterwards.
     """
     if not video_paths:
         raise ValueError("concat_videos: no inputs")
+    has_audio_flags = [_has_audio_stream(p) for p in video_paths]
+    any_audio = any(has_audio_flags)
+    all_audio = all(has_audio_flags)
+
     if len(video_paths) == 1:
-        # Just copy through.
-        _run([_ffmpeg(), "-y", "-i", str(video_paths[0]),
-              "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-              "-c:a", "aac", "-b:a", "192k", str(output_path)])
+        # Just copy through; preserve or drop audio based on the single input.
+        cmd = [_ffmpeg(), "-y", "-i", str(video_paths[0]),
+               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+        if has_audio_flags[0]:
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-an"]
+        cmd += [str(output_path)]
+        _run(cmd)
         return output_path
 
     # Use the concat filter (handles different fps / size) with auto-scaling
     # to the chosen target resolution. Landscape sources get letterboxed if
     # we're outputting vertical, vertical sources get pillarboxed if we're
-    # outputting landscape. Audio normalized to 44.1kHz stereo.
+    # outputting landscape. Audio normalized to 44.1kHz stereo when present.
     inputs: list[str] = []
     for p in video_paths:
         inputs += ["-i", str(p)]
+    # When MIXED, append one anullsrc input per video-only clip; the audio
+    # branch in the filter graph maps from those synthetic inputs instead.
+    synth_indices: dict[int, int] = {}  # clip_idx → input_idx in cmd
+    if any_audio and not all_audio:
+        for i, has in enumerate(has_audio_flags):
+            if not has:
+                synth_indices[i] = len(video_paths) + len(synth_indices)
+                inputs += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+
     target_w, target_h = _target_resolution(aspect_ratio)
     parts: list[str] = []
     for i in range(len(video_paths)):
@@ -1412,22 +1496,36 @@ def concat_videos(video_paths: list[Path], output_path: Path,
             f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
             f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v{i}]"
         )
-        parts.append(
-            f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS[a{i}]"
-        )
-    labels = "".join(f"[v{i}][a{i}]" for i in range(len(video_paths)))
-    parts.append(f"{labels}concat=n={len(video_paths)}:v=1:a=1[outv][outa]")
+        if any_audio:
+            # Pick the audio source for this clip: real audio from the clip
+            # itself if it has one, else the synth-silent anullsrc input.
+            audio_src_idx = i if has_audio_flags[i] else synth_indices[i]
+            parts.append(
+                f"[{audio_src_idx}:a]aresample=44100,aformat=channel_layouts=stereo,"
+                f"asetpts=PTS-STARTPTS[a{i}]"
+            )
+
+    if any_audio:
+        labels = "".join(f"[v{i}][a{i}]" for i in range(len(video_paths)))
+        parts.append(f"{labels}concat=n={len(video_paths)}:v=1:a=1[outv][outa]")
+    else:
+        labels = "".join(f"[v{i}]" for i in range(len(video_paths)))
+        parts.append(f"{labels}concat=n={len(video_paths)}:v=1:a=0[outv]")
     filter_complex = ";".join(parts)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    _run([
-        _ffmpeg(), "-y", *inputs,
-        "-filter_complex", filter_complex,
-        "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k",
-        str(output_path),
-    ])
+    cmd = [_ffmpeg(), "-y", *inputs,
+           "-filter_complex", filter_complex,
+           "-map", "[outv]"]
+    if any_audio:
+        cmd += ["-map", "[outa]",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "192k"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-an"]
+    cmd += [str(output_path)]
+    _run(cmd)
     return output_path
 
 
