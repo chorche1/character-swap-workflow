@@ -2368,7 +2368,7 @@
           </div>
 
           <!-- Higgsfield Drive inbox — auto-imported Supercomputer clips -->
-          <div x-show="higgsfieldInbox?.items?.length > 0 || higgsfieldInbox?.drive?.ready"
+          <div x-show="higgsfieldInbox !== null"
                x-init="loadHiggsfieldInbox()"
                class="border border-emerald-200 dark:border-emerald-900 rounded-xl p-3 bg-emerald-50/50 dark:bg-emerald-950/20">
             <div class="flex items-center justify-between mb-2">
@@ -2514,10 +2514,311 @@
               <span class="text-neutral-500" x-show="editor.voiceId">+ voice swap</span>
             </div>
 
-            <div class="text-xs text-neutral-500">
-              Template + trim threshold inherited from Single mode:
-              <span class="font-mono text-neutral-300" x-text="`Template: ${editor.template} · Trim: ${editor.thresholdDb}dB`"></span>
-            </div>
+            <!-- Caption template + style — same propTab UI as single-clip mode.
+                 Collapsible so the multi-clip panel doesn't get cluttered. State
+                 is shared with single-clip (editor.template, editor.overrides,
+                 propTab) so tweaks here are reflected when you switch modes. -->
+            <details class="border border-neutral-200 dark:border-neutral-800 rounded-xl bg-neutral-50 dark:bg-neutral-900/30"
+                     x-init="if (editorTemplates.length === 0) loadEditorTemplates()">
+              <summary class="cursor-pointer px-4 py-2.5 text-sm font-medium text-neutral-700 dark:text-neutral-200 hover:text-neutral-900 dark:hover:text-white list-none flex items-center justify-between gap-3">
+                <span class="flex items-center gap-2">
+                  🎨 Caption template + style
+                </span>
+                <span class="font-mono text-[11px] text-neutral-500 dark:text-neutral-400"
+                      x-text="`Template: ${editor.template} · Trim: ${editor.thresholdDb}dB`"></span>
+              </summary>
+              <div class="border-t border-neutral-200 dark:border-neutral-800">
+                <!-- Tab bar -->
+                <div class="flex border-b border-neutral-200 dark:border-neutral-800">
+                  <template x-for="tab in [
+                    {slug: 'template', label: 'Template'},
+                    {slug: 'style',    label: 'Style'},
+                    {slug: 'voice',    label: 'Voice'},
+                    {slug: 'trim',     label: 'Trim'},
+                  ]" :key="'mc-pt-'+tab.slug">
+                    <button class="flex-1 px-3 py-2.5 text-xs font-medium transition-colors border-b-2"
+                            :class="propTab === tab.slug
+                                      ? 'border-indigo-500 text-indigo-400 bg-indigo-950/20'
+                                      : 'border-transparent text-neutral-400 hover:text-neutral-200'"
+                            @click="propTab = tab.slug; if (tab.slug === 'template' && editorTemplates.length === 0) loadEditorTemplates()"
+                            x-text="tab.label"></button>
+                  </template>
+                </div>
+
+                <!-- Tab content (same shape as single-clip; shares editor.template + editor.overrides state) -->
+                <div class="p-4 max-h-[520px] overflow-y-auto">
+
+                  <!-- TEMPLATE TAB -->
+                  <div x-show="propTab === 'template'">
+                    <template x-if="editorTemplates.length === 0">
+                      <div class="text-center text-xs text-neutral-400 py-8">
+                        <div class="mb-3">Loading templates…</div>
+                        <button class="px-3 py-1.5 rounded border border-neutral-700 hover:border-neutral-500 hover:bg-neutral-800"
+                                @click="loadEditorTemplates()">Reload templates</button>
+                      </div>
+                    </template>
+                    <div x-show="editorTemplates.length > 0" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                      <template x-for="t in editorTemplates" :key="'mc-tpl-'+t.slug">
+                        <button class="border-2 rounded-lg overflow-hidden transition-all text-left relative"
+                                :class="[editor.template === t.slug
+                                          ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 scale-[1.02]'
+                                          : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600',
+                                         t.locked ? 'opacity-60' : '']"
+                                :title="t.locked ? t.locked_reason : t.label"
+                                @click="t.locked ? notifyError(t.locked_reason) : selectEditorTemplate(t.slug)">
+                          <span x-show="t.engine === 'veed'"
+                                class="absolute top-1 left-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-emerald-600/90 text-white z-10">
+                            CLOUD
+                          </span>
+                          <span x-show="t.locked"
+                                class="absolute top-1 right-1 px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-600/90 text-white z-10">
+                            🔒
+                          </span>
+                          <div class="relative bg-gradient-to-br from-neutral-700 to-neutral-900"
+                               style="aspect-ratio: 9 / 16;">
+                            <div :style="previewWrapStyle(t)">
+                              <span :style="previewWordStyle(t, false)"
+                                    x-text="t.all_caps ? 'NEVER' : 'never'"></span>
+                              <span :style="previewWordStyle(t, true)"
+                                    x-text="t.all_caps ? 'BUY' : 'buy'"></span>
+                              <span :style="previewWordStyle(t, false)"
+                                    x-text="t.all_caps ? 'HONEY' : 'honey'"></span>
+                            </div>
+                          </div>
+                          <div class="p-1.5 bg-white dark:bg-neutral-900">
+                            <div class="text-[10px] font-semibold capitalize truncate" x-text="t.label"></div>
+                          </div>
+                        </button>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- STYLE TAB -->
+                  <div x-show="propTab === 'style'" class="space-y-4">
+                    <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-2">
+                      Adjust per-render. Defaults restored via "↺ reset" at the bottom.
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Size</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.size ?? currentTemplate().size}pt`"></span>
+                      </label>
+                      <input type="range" min="30" max="200" step="2"
+                             :value="editor.overrides.size ?? currentTemplate().size"
+                             @input="editor.overrides.size = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Vertical position (from bottom)</span>
+                        <span class="font-mono text-neutral-400" x-text="`${editor.overrides.margin_v ?? currentTemplate().margin_v}px`"></span>
+                      </label>
+                      <input type="range" min="0" max="1700" step="20"
+                             :value="editor.overrides.margin_v ?? currentTemplate().margin_v"
+                             @input="editor.overrides.margin_v = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                    </div>
+                    <div>
+                      <label class="flex items-center justify-between text-xs">
+                        <span class="text-neutral-600 dark:text-neutral-300">Horizontal position (← left / center / right →)</span>
+                        <span class="font-mono text-neutral-400"
+                              x-text="`${editor.overrides.margin_h ?? currentTemplate().margin_h ?? 0}px`"></span>
+                      </label>
+                      <input type="range" min="-540" max="540" step="10"
+                             :value="editor.overrides.margin_h ?? currentTemplate().margin_h ?? 0"
+                             @input="editor.overrides.margin_h = parseInt($event.target.value)"
+                             class="w-full mt-1" />
+                      <button class="mt-1 text-[10px] text-neutral-500 hover:text-indigo-400"
+                              @click="editor.overrides.margin_h = 0">↺ center</button>
+                    </div>
+                    <div>
+                      <label class="text-xs text-neutral-600 dark:text-neutral-300">Horizontal alignment</label>
+                      <div class="mt-1 grid grid-cols-3 gap-1 text-xs">
+                        <template x-for="opt in [
+                          {v: 1, l: '← left'}, {v: 2, l: '◯ center'}, {v: 3, l: '→ right'},
+                        ]" :key="'mc-al-'+opt.v">
+                          <button class="px-2 py-1.5 rounded border"
+                                  :class="(editor.overrides.alignment ?? currentTemplate().alignment ?? 2) === opt.v
+                                            ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300'
+                                            : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800'"
+                                  @click="editor.overrides.alignment = opt.v"
+                                  x-text="opt.l"></button>
+                        </template>
+                      </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Outline</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.overrides.outline ?? currentTemplate().outline}`"></span>
+                        </label>
+                        <input type="range" min="0" max="15" step="1"
+                               :value="editor.overrides.outline ?? currentTemplate().outline"
+                               @input="editor.overrides.outline = parseInt($event.target.value)"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Shadow distance</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow_distance ?? editor.overrides.shadow ?? currentTemplate().shadow ?? 0}px`"></span>
+                        </label>
+                        <input type="range" min="0" max="30" step="1"
+                               :value="editor.overrides.shadow_distance ?? editor.overrides.shadow ?? currentTemplate().shadow ?? 0"
+                               @input="editor.overrides.shadow_distance = parseInt($event.target.value); editor.overrides.shadow = parseInt($event.target.value)"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Shadow blur</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.overrides.shadow_blur ?? Math.max(2 * (currentTemplate().shadow ?? 0), 0)}px`"></span>
+                        </label>
+                        <input type="range" min="0" max="60" step="1"
+                               :value="editor.overrides.shadow_blur ?? Math.max(2 * (currentTemplate().shadow ?? 0), 0)"
+                               @input="editor.overrides.shadow_blur = parseInt($event.target.value)"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Font weight</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.overrides.font_weight ?? 900}`"></span>
+                        </label>
+                        <input type="range" min="100" max="900" step="100"
+                               :value="editor.overrides.font_weight ?? 900"
+                               @input="editor.overrides.font_weight = parseInt($event.target.value)"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Opacity</span>
+                          <span class="font-mono text-neutral-400" x-text="`${Math.round((editor.overrides.opacity ?? 1) * 100)}%`"></span>
+                        </label>
+                        <input type="range" min="0" max="100" step="5"
+                               :value="(editor.overrides.opacity ?? 1) * 100"
+                               @input="editor.overrides.opacity = parseInt($event.target.value) / 100"
+                               class="w-full mt-1" />
+                      </div>
+                    </div>
+
+                    <!-- Highlight color (active-word animation color) -->
+                    <div class="pt-1 border-t border-neutral-200 dark:border-neutral-800">
+                      <label class="flex items-center justify-between text-xs mb-1.5">
+                        <span class="text-neutral-600 dark:text-neutral-300">Highlight color
+                          <span class="text-neutral-500 dark:text-neutral-500">(active word)</span>
+                        </span>
+                        <span class="font-mono text-neutral-400 text-[10px]"
+                              x-text="editor.overrides.highlight_color_hex || _assToHex(editor.overrides.highlight_color ?? currentTemplate().highlight_color)"></span>
+                      </label>
+                      <div class="flex items-center gap-2">
+                        <input type="color"
+                               :value="editor.overrides.highlight_color_hex || _assToHex(editor.overrides.highlight_color ?? currentTemplate().highlight_color)"
+                               @input="editor.overrides.highlight_color_hex = $event.target.value; editor.overrides.highlight_color = _hexToAss($event.target.value)"
+                               class="h-8 w-12 rounded cursor-pointer border border-neutral-300 dark:border-neutral-700 bg-transparent" />
+                        <div class="flex gap-1 flex-wrap">
+                          <template x-for="preset in ['#8B5CF6','#FFD400','#FF3B30','#34C759','#00C7FF','#FF2D92','#FF9500','#FFFFFF']" :key="'mc-hl-'+preset">
+                            <button class="w-6 h-6 rounded border border-neutral-300 dark:border-neutral-700 hover:scale-110 transition-transform"
+                                    :style="`background-color: ${preset}`"
+                                    :title="preset"
+                                    @click="editor.overrides.highlight_color_hex = preset; editor.overrides.highlight_color = _hexToAss(preset)"></button>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- Outline color (stroke around every word) -->
+                    <div>
+                      <label class="flex items-center justify-between text-xs mb-1.5">
+                        <span class="text-neutral-600 dark:text-neutral-300">Outline color
+                          <span class="text-neutral-500 dark:text-neutral-500">(stroke)</span>
+                        </span>
+                        <span class="font-mono text-neutral-400 text-[10px]"
+                              x-text="editor.overrides.outline_color_hex || _assToHex(editor.overrides.outline_color ?? currentTemplate().outline_color)"></span>
+                      </label>
+                      <div class="flex items-center gap-2">
+                        <input type="color"
+                               :value="editor.overrides.outline_color_hex || _assToHex(editor.overrides.outline_color ?? currentTemplate().outline_color)"
+                               @input="editor.overrides.outline_color_hex = $event.target.value; editor.overrides.outline_color = _hexToAss($event.target.value)"
+                               class="h-8 w-12 rounded cursor-pointer border border-neutral-300 dark:border-neutral-700 bg-transparent" />
+                        <div class="flex gap-1 flex-wrap">
+                          <template x-for="preset in ['#000000','#FFFFFF','#8B5CF6','#FFD400','#FF3B30','#34C759','#00C7FF','#FF2D92']" :key="'mc-ol-'+preset">
+                            <button class="w-6 h-6 rounded border border-neutral-300 dark:border-neutral-700 hover:scale-110 transition-transform"
+                                    :style="`background-color: ${preset}`"
+                                    :title="preset"
+                                    @click="editor.overrides.outline_color_hex = preset; editor.overrides.outline_color = _hexToAss(preset)"></button>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label class="flex items-center gap-2 text-xs cursor-pointer">
+                        <input type="checkbox"
+                               :checked="editor.overrides.all_caps ?? currentTemplate().all_caps"
+                               @change="editor.overrides.all_caps = $event.target.checked" />
+                        <span class="text-neutral-600 dark:text-neutral-300">All caps</span>
+                      </label>
+                    </div>
+                    <button class="text-xs text-neutral-500 dark:text-neutral-400 hover:text-red-600 dark:hover:text-red-400"
+                            @click="editor.overrides = { font: null, size: null, primary_color: null, outline_color: null, outline_color_hex: null, words_per_card: null, margin_v: null, margin_h: null, highlight_color: null, highlight_color_hex: null, box: null, all_caps: null, shadow: null, shadow_distance: null, shadow_blur: null, alignment: null, outline: null, font_weight: null, opacity: null }">
+                      ↺ reset to template defaults
+                    </button>
+                  </div>
+
+                  <!-- VOICE TAB -->
+                  <div x-show="propTab === 'voice'" class="space-y-3">
+                    <div class="text-xs text-neutral-500 dark:text-neutral-400">
+                      Optional. Picks one of your ElevenLabs voices and re-renders the speech track.
+                    </div>
+                    <template x-if="!elevenlabsAvailable()">
+                      <div class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-200 border border-amber-200 dark:border-amber-900">
+                        (locked) Add <code>ELEVENLABS_API_KEY</code> to .env to enable voice-swap.
+                      </div>
+                    </template>
+                    <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+                            class="w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+                      <option value="">— keep original voice —</option>
+                      <template x-for="v in elevenlabsVoices" :key="'mc-st-evc-'+v.voice_id">
+                        <option :value="v.voice_id"
+                                x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
+                      </template>
+                    </select>
+                    <button x-show="elevenlabsAvailable()" class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                            @click="loadElevenlabsVoices()">refresh voice list</button>
+                  </div>
+
+                  <!-- TRIM TAB -->
+                  <div x-show="propTab === 'trim'" class="space-y-4">
+                    <div class="text-xs font-semibold text-neutral-700 dark:text-neutral-300">Auto-trim silences</div>
+                    <div class="space-y-3">
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Silence threshold</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.thresholdDb} dB`"></span>
+                        </label>
+                        <input type="range" min="-60" max="-10" step="1" x-model.number="editor.thresholdDb"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Min silence to cut</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.minSilenceSecs.toFixed(2)}s`"></span>
+                        </label>
+                        <input type="range" min="0.1" max="2" step="0.05" x-model.number="editor.minSilenceSecs"
+                               class="w-full mt-1" />
+                      </div>
+                      <div>
+                        <label class="flex items-center justify-between text-xs">
+                          <span class="text-neutral-600 dark:text-neutral-300">Padding around speech</span>
+                          <span class="font-mono text-neutral-400" x-text="`${editor.padSecs.toFixed(2)}s`"></span>
+                        </label>
+                        <input type="range" min="0" max="0.5" step="0.01" x-model.number="editor.padSecs"
+                               class="w-full mt-1" />
+                      </div>
+                    </div>
+                  </div>
+
+                </div>
+              </div>
+            </details>
           </div>
 
           <!-- Render button -->
