@@ -3467,6 +3467,84 @@ async def health() -> dict:
             "character_swap.clients.google_drive",
             fromlist=["status"],
         ).status()["ready"],
+        # Drives the Editor's "☁︎ Export to Drive" button — whether the
+        # drive.file (write) OAuth token has been issued.
+        "drive_write_ready": __import__(
+            "character_swap.clients.google_drive",
+            fromlist=["write_status"],
+        ).write_status()["ready"],
+    }
+
+
+# --- Editor: Drive export (upload captioned MP4 to user's Google Drive) ---
+
+class DriveExportBody(BaseModel):
+    filename: str
+    folder_id: str | None = None
+
+
+@app.post("/api/editor/drive_export/bootstrap")
+async def editor_drive_export_bootstrap() -> dict:
+    """One-time OAuth flow for the drive.file (write) scope. Opens a browser
+    on the server's machine; user clicks through Google consent. Token is
+    persisted at ~/character-swap-data/drive_write_token.json — separate
+    from the read-only token the Higgsfield-inbox watcher uses."""
+    from character_swap.clients import google_drive
+    if not (settings.state_dir.parent / "credentials.json").exists():
+        raise HTTPException(
+            409,
+            "credentials.json not in ~/character-swap-data/. Complete the "
+            "Google Cloud OAuth Desktop-client setup first (same flow as the "
+            "Higgsfield-inbox auth).",
+        )
+    result = await asyncio.to_thread(google_drive.bootstrap_write_oauth)
+    if not result.get("ok"):
+        raise HTTPException(500, f"OAuth flow failed: {result}")
+    return result
+
+
+@app.post("/api/editor/{edit_id}/drive_export")
+async def editor_drive_export(edit_id: str, body: DriveExportBody) -> dict:
+    """Upload the captioned final MP4 of `edit_id` to the user's Drive.
+    Filename comes from the request body — caller picks. `.mp4` is appended
+    if no extension is supplied."""
+    from character_swap.clients import google_drive
+
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {edit_id!r} not found")
+    # Pick the same "final video" the export-to-Resolve flow used: prefers
+    # 04-final.mp4, falls back to captioned.mp4, rerender-NN, or newest mp4.
+    final, _ = _find_editor_videos(edit_dir)
+    if final is None:
+        raise HTTPException(404, f"No rendered video in {edit_id!r}")
+
+    raw = (body.filename or "").strip()
+    if not raw:
+        raise HTTPException(400, "filename is required")
+    # Strip path separators — Drive treats filenames as flat strings.
+    raw = raw.replace("/", "_").replace("\\", "_")
+    if "." not in raw:
+        raw = raw + ".mp4"
+
+    result = await asyncio.to_thread(
+        google_drive.upload_file, final,
+        drive_filename=raw, folder_id=body.folder_id,
+    )
+    if result is None:
+        raise HTTPException(
+            500,
+            "Drive upload failed. Make sure Drive write access is authorized "
+            "(POST /api/editor/drive_export/bootstrap) and the file is "
+            "under Drive's 5TB single-file size cap.",
+        )
+    return {
+        "ok": True,
+        "drive_id": result.get("id"),
+        "name": result.get("name"),
+        "url": result.get("webViewLink"),
+        "size": result.get("size"),
+        "mime_type": result.get("mimeType"),
     }
 
 

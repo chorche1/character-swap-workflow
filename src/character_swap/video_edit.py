@@ -867,9 +867,21 @@ TEMPLATES: dict[str, CaptionStyle] = {
     # violet pill follows the currently-spoken word, no outline, mid-screen.
     # Renders locally via Remotion because VEED's fal.ai API applies
     # background_color to the WHOLE card, not per-active-word.
-    "capcut-purple-pill": CaptionStyle(font="Montserrat", size=115,
-                              highlight_color="&H00F65C8B",   # violet for the in-browser preview
-                              words_per_card=3, margin_v=864,  # 45% from bottom → y=0.55
+    #
+    # Defaults below match the Style-tab settings Hugo dialed in after the
+    # first round of test renders (74pt / margin_v=840 / shadow distance 3px
+    # / shadow blur 20px / font weight 900 / #7800f0 purple). Bake those
+    # into the template so a fresh render produces the look immediately
+    # without anyone touching the overrides panel.
+    "capcut-purple-pill": CaptionStyle(font="Montserrat", size=74,
+                              highlight_color="&H00F00078",   # #7800f0 vivid violet (ASS BGR)
+                              outline_color="&H00000000",     # black stroke
+                              outline=0,
+                              shadow=3,                       # text-shadow OFFSET in px
+                              shadow_blur=20,                 # text-shadow BLUR radius in px
+                              font_weight=900,
+                              opacity=1.0,
+                              words_per_card=3, margin_v=840,
                               all_caps=True,
                               engine="remotion",
                               composition_id="CapCutPurplePill"),

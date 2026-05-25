@@ -151,6 +151,15 @@ function studio() {
       editedWords: [],
       savingCaptionEdits: false,
     },
+    // Drive-export modal state. Lives at the top level (not nested under
+    // editor.*) so the modal can be opened from either single-clip or
+    // multi-clip render results without juggling per-mode flags.
+    driveExport: {
+      open: false,
+      filename: '',
+      uploading: false,
+      lastUrl: '',
+    },
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
@@ -2530,6 +2539,70 @@ function studio() {
       if (this.editor._pipelinePoll) {
         clearInterval(this.editor._pipelinePoll);
         this.editor._pipelinePoll = null;
+      }
+    },
+
+    // --- Editor → Google Drive upload --------------------------------------
+    // Replacement for the old Resolve / Phase-4 path. Click "☁︎ Export to
+    // Drive" → modal lets you name the file → backend uploads via the
+    // drive.file scope. First time: bootstrap kicks off a browser OAuth
+    // consent for write access (separate from the read scope the
+    // Higgsfield inbox watcher uses).
+    openDriveExport() {
+      if (!this.driveExport) {
+        this.driveExport = { open: false, filename: '', uploading: false, lastUrl: '' };
+      }
+      // Suggest a friendly default filename based on prompt + ISO date,
+      // mirroring how downloads are named elsewhere in the app.
+      const slug = this.friendlyName
+        ? this.friendlyName({ prompt: this.editor.lastResult?.prompt, kind: 'editor' }, 'mp4')
+        : (this.editor.lastResult?.edit_id || 'export') + '.mp4';
+      this.driveExport.filename = slug.replace(/\.mp4$/i, '');
+      this.driveExport.open = true;
+      this.driveExport.lastUrl = '';
+    },
+
+    async bootstrapDriveWrite() {
+      try {
+        const r = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
+        if (!r.ok) {
+          this.notifyError('Drive write bootstrap failed: ' + await r.text());
+          return;
+        }
+        await this.loadHealth?.();   // refresh health.drive_write_ready
+        this.notifyMilestone('Drive write authorized', 'You can now upload from Editor.',
+          { kind: 'done', tag: 'drive-write-bootstrap' });
+      } catch (e) {
+        this.notifyError('Bootstrap error: ' + e);
+      }
+    },
+
+    async confirmDriveExport() {
+      const editId = this.editor.lastResult?.edit_id;
+      if (!editId) return;
+      const name = (this.driveExport.filename || '').trim();
+      if (!name) return;
+      this.driveExport.uploading = true;
+      try {
+        const r = await fetch(`/api/editor/${editId}/drive_export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: name }),
+        });
+        if (!r.ok) {
+          const txt = await r.text();
+          this.notifyError('Drive upload failed: ' + txt);
+          return;
+        }
+        const data = await r.json();
+        this.driveExport.lastUrl = data.url || '';
+        this.driveExport.open = false;
+        this.notifyMilestone('Uploaded to Drive', data.name || name,
+          { kind: 'done', tag: `drive-export-${editId}` });
+      } catch (e) {
+        this.notifyError('Upload error: ' + e);
+      } finally {
+        this.driveExport.uploading = false;
       }
     },
 

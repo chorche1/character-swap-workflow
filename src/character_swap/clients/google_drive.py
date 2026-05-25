@@ -30,6 +30,10 @@ from character_swap.config import settings
 
 
 DRIVE_READONLY_SCOPE = ["https://www.googleapis.com/auth/drive.readonly"]
+# `drive.file` lets us create + manage files OUR app uploads (Hugo's
+# captioned MP4s) — but explicitly NOT see anything else in his Drive.
+# This is Google's recommended scope for "upload a file from my app".
+DRIVE_FILE_SCOPE = ["https://www.googleapis.com/auth/drive.file"]
 
 
 def _credentials_path() -> Path:
@@ -44,9 +48,21 @@ def _token_path() -> Path:
     return (settings.state_dir.parent / "drive_read_token.json").resolve()
 
 
-def _load_credentials():
-    """Return google-auth Credentials, refreshing or running the OAuth flow
-    as needed. Returns None if credentials.json is missing or OAuth fails."""
+def _write_token_path() -> Path:
+    """Token cache for the drive.file (upload) scope. Independent of the
+    readonly token so the user can grant one without the other."""
+    return (settings.state_dir.parent / "drive_write_token.json").resolve()
+
+
+def _load_credentials(*, scopes: list[str] | None = None,
+                      token_file: Path | None = None):
+    """Return google-auth Credentials for the requested scope set, refreshing
+    or running the OAuth flow as needed. Returns None if credentials.json is
+    missing or OAuth fails.
+
+    Defaults to the read-only Drive scope (back-compat with the original
+    Higgsfield-inbox watcher). Pass DRIVE_FILE_SCOPE + _write_token_path()
+    for the upload path."""
     try:
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import InstalledAppFlow
@@ -56,8 +72,9 @@ def _load_credentials():
         # Drive watcher just stays inert.
         return None
 
+    scopes = scopes or DRIVE_READONLY_SCOPE
+    token_path = token_file or _token_path()
     creds_path = _credentials_path()
-    token_path = _token_path()
     if not creds_path.exists():
         return None
 
@@ -65,7 +82,7 @@ def _load_credentials():
     if token_path.exists():
         try:
             creds = Credentials.from_authorized_user_file(
-                str(token_path), DRIVE_READONLY_SCOPE,
+                str(token_path), scopes,
             )
         except (ValueError, OSError):
             creds = None
@@ -86,7 +103,7 @@ def _load_credentials():
     # we return None and the user has to run the bootstrap CLI command.
     try:
         flow = InstalledAppFlow.from_client_secrets_file(
-            str(creds_path), DRIVE_READONLY_SCOPE,
+            str(creds_path), scopes,
         )
         creds = flow.run_local_server(port=0, open_browser=True)
         token_path.write_text(creds.to_json())
@@ -95,9 +112,11 @@ def _load_credentials():
         return None
 
 
-def _service():
-    """Build a Drive v3 service handle, or None if auth fails."""
-    creds = _load_credentials()
+def _service(*, scopes: list[str] | None = None,
+             token_file: Path | None = None):
+    """Build a Drive v3 service handle for the requested scope, or None if
+    auth fails."""
+    creds = _load_credentials(scopes=scopes, token_file=token_file)
     if creds is None:
         return None
     try:
@@ -105,6 +124,12 @@ def _service():
         return build("drive", "v3", credentials=creds, cache_discovery=False)
     except Exception:
         return None
+
+
+def _write_service():
+    """Drive service authorized for `drive.file` — can upload but only sees
+    files our app created. Used by the Editor's 'Export to Drive' button."""
+    return _service(scopes=DRIVE_FILE_SCOPE, token_file=_write_token_path())
 
 
 def status() -> dict[str, Any]:
@@ -115,6 +140,68 @@ def status() -> dict[str, Any]:
         "credentials_present": creds_path.exists(),
         "token_present": token_path.exists(),
         "ready": creds_path.exists() and token_path.exists(),
+    }
+
+
+def write_status() -> dict[str, Any]:
+    """Same shape as `status` but for the drive.file (upload) token. Drives
+    the Editor UI's 'Export to Drive — authorize first' nag."""
+    creds_path = _credentials_path()
+    write_token = _write_token_path()
+    return {
+        "credentials_present": creds_path.exists(),
+        "token_present": write_token.exists(),
+        "ready": creds_path.exists() and write_token.exists(),
+    }
+
+
+def upload_file(source: Path, *,
+                drive_filename: str,
+                folder_id: str | None = None) -> dict[str, Any] | None:
+    """Upload `source` to the user's Drive as `drive_filename`. Returns the
+    Drive file resource ({id, name, webViewLink, ...}) on success, None on
+    failure (auth or upload error).
+
+    `folder_id` optionally drops the file in a specific folder; default is
+    My Drive root.
+    """
+    svc = _write_service()
+    if svc is None:
+        return None
+    try:
+        from googleapiclient.http import MediaFileUpload
+        # Guess MIME from extension. Drive's UI handles unknown types fine,
+        # but giving it a real type means thumbnails + previews work.
+        ext = source.suffix.lower()
+        mime_by_ext = {
+            ".mp4": "video/mp4", ".mov": "video/quicktime",
+            ".webm": "video/webm", ".mkv": "video/x-matroska",
+            ".m4v": "video/x-m4v", ".png": "image/png",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav",
+        }
+        mime = mime_by_ext.get(ext, "application/octet-stream")
+        body: dict[str, Any] = {"name": drive_filename}
+        if folder_id:
+            body["parents"] = [folder_id]
+        media = MediaFileUpload(str(source), mimetype=mime, resumable=True)
+        result = svc.files().create(
+            body=body,
+            media_body=media,
+            fields="id, name, webViewLink, webContentLink, size, mimeType",
+        ).execute()
+        return result
+    except Exception:
+        return None
+
+
+def bootstrap_write_oauth() -> dict[str, Any]:
+    """Force the drive.file OAuth flow even when called non-interactively.
+    Returns a status dict suitable for the UI."""
+    svc = _write_service()
+    return {
+        "ok": svc is not None,
+        **write_status(),
     }
 
 
