@@ -258,6 +258,7 @@ def _job_to_dict(job: Job) -> dict:
         "director_plan_summary": _director_plan_summary(job.director_prompts_json),
         "images_per_character": job.images_per_character,
         "videos_per_character": job.videos_per_character,
+        "duration_secs": job.duration_secs,
         "compacted": job.compacted,
         "created_at": job.created_at.isoformat() + "Z",
         "updated_at": job.updated_at.isoformat() + "Z",
@@ -1482,6 +1483,13 @@ class MovementBody(BaseModel):
     # the Step-4 picker in web/index.html sends this field so the user can pick
     # Kling / Veo / Runway / Luma / Pika / etc. for the swap flow too.
     video_model: str = "grok-imagine"
+    # Per-job duration override (seconds). When None, runner falls back to
+    # `settings.video_duration_secs`. The UI's duration dropdown is gated by
+    # each model's `duration_options` registry — so any value here that
+    # reaches the runner has already been validated against the picker, but
+    # we re-validate against the registry server-side to defend against
+    # hand-crafted requests.
+    duration_secs: int | None = Field(default=None, ge=1, le=120)
 
 
 # Pre-check map for video providers — refuses to start a job if the user
@@ -1571,6 +1579,17 @@ async def set_movement(job_id: str, body: MovementBody,
     job.enriched_movement_prompt = None
     job.videos_per_character = body.videos_per_character
     job.video_model = body.video_model or "grok-imagine"
+    # Validate duration against the chosen model's registry options.
+    # Unknown / out-of-range values silently fall back to the model's
+    # default (or env default for unregistered models) rather than 400 —
+    # the picker shouldn't ever produce a bad value, but defenders gonna
+    # defend.
+    if body.duration_secs is not None:
+        spec = runner_media.video_duration_spec(job.video_model)
+        if int(body.duration_secs) in spec["options"]:
+            job.duration_secs = int(body.duration_secs)
+        else:
+            job.duration_secs = spec["default"]
     job.updated_at = datetime.utcnow()
     s.update_job(job)
     await events.publish(job_id, {"kind": "movement.set", "job_id": job_id,
@@ -2025,12 +2044,21 @@ def _models_payload() -> dict:
     """Tell the frontend which models exist + whether their keys are configured."""
     def _entry(slug: str, info: dict) -> dict:
         provider = info["provider"]
-        return {
+        row = {
             "slug": slug,
             "label": info["label"],
             "provider": provider,
             "available": settings.has_provider(provider),
         }
+        # Surface per-video-model duration specs so the Step-4 picker can
+        # render the dropdown gated to each provider's accepted values.
+        # Image/audio/avatar models don't carry this — leave the key out
+        # entirely rather than send null so the frontend can `'duration_options' in m`.
+        if "duration_options" in info:
+            row["duration_options"] = list(info["duration_options"])
+            row["duration_default"] = info.get("duration_default",
+                                               info["duration_options"][0])
+        return row
     return {
         "image":  [_entry(s, i) for s, i in runner_media.IMAGE_MODELS.items()],
         "video":  [_entry(s, i) for s, i in runner_media.VIDEO_MODELS.items()],

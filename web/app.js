@@ -234,6 +234,10 @@ function studio() {
     // back-compat; users can switch to Kling / Veo / Runway / Luma / Pika /
     // Hailuo / Sora / Wan / Seedance / Higgsfield via the picker.
     swapVideoModel: 'grok-imagine',
+    // Per-job clip duration override (seconds). null = use the env default
+    // (settings.video_duration_secs). Picker in Step 4 sets it to one of
+    // the selected model's `duration_options` from /api/generations/models.
+    swapDurationSecs: null,
     swapDefaultPrompt: '',          // effective default (project's if set, else global)
     swapGlobalDefaultPrompt: '',    // always the global pipeline.GENERATION_PROMPT
     swapProjectDefaultPrompt: '',   // current project's override, if any
@@ -738,6 +742,12 @@ function studio() {
         const firstVideo = (this.models.video || []).find(m => m.available);
         if (firstVideo && !this.models.video.find(m => m.slug === this.videoGen.model)?.available) {
           this.videoGen.model = firstVideo.slug;
+        }
+        // Initialize the Step-4 swap-flow duration picker to the selected
+        // model's default. If a job is already loaded with a stored
+        // duration_secs, syncDurationToModel() keeps it (still-valid).
+        if (typeof this.syncDurationToModel === 'function') {
+          this.syncDurationToModel();
         }
       } catch (_) {}
     },
@@ -4158,6 +4168,7 @@ function studio() {
       this.swapPrompt = this.job.prompt || this.swapDefaultPrompt;
       this.swapModel = this.job.image_model || 'gpt-image';
       this.swapVideoModel = this.job.video_model || 'grok-imagine';
+      this.swapDurationSecs = this.job.duration_secs || null;
       this.editingVariant = null;
       this.editingTitle = false;
       this.connectWS(jobId);
@@ -4454,6 +4465,7 @@ function studio() {
           movement_prompts: prompts,
           videos_per_character: this.videosPerChar,
           video_model: this.swapVideoModel || 'grok-imagine',
+          duration_secs: this.swapDurationSecs || null,
         }),
       });
       if (!r.ok) { this.notifyError('Movement submit failed: ' + await r.text()); return; }
@@ -4651,6 +4663,29 @@ function studio() {
       return `${m.label} is locked — add the matching API key in .env to unlock.`;
     },
 
+    // Duration spec for the currently-selected video model. Used by the
+    // Step-4 duration dropdown to gate the user to values their provider
+    // actually accepts. Falls back to a sensible [5] when models haven't
+    // loaded yet (UI still renders).
+    videoDurationSpec() {
+      const m = this._videoModelEntry();
+      if (m.duration_options && m.duration_options.length) {
+        return { options: m.duration_options, default: m.duration_default || m.duration_options[0] };
+      }
+      return { options: [5], default: 5 };
+    },
+
+    // When the model picker changes, snap durationSecs to either the
+    // user's previous pick (if it's still valid for the new model) or
+    // the new model's default. Wired via @change on the model <select>.
+    syncDurationToModel() {
+      const spec = this.videoDurationSpec();
+      if (this.swapDurationSecs && spec.options.includes(this.swapDurationSecs)) {
+        return;  // user's pick is still valid — keep it
+      }
+      this.swapDurationSecs = spec.default;
+    },
+
     openEdit(charId, variantId) {
       this.editingVariant = { char_id: charId, variant_id: variantId };
       this.editPrompt = '';
@@ -4763,6 +4798,7 @@ function studio() {
       this.swapPrompt = this.swapDefaultPrompt;
       this.swapModel = 'gpt-image';
       this.swapVideoModel = 'grok-imagine';
+      this.swapDurationSecs = null;
     },
 
     connectWS(jobId) {

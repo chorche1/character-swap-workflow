@@ -413,6 +413,7 @@ async def _animate_one_video(
             character_name=jc.name,
             job_id=job.job_id,
             model=video_model,
+            duration_secs=job.duration_secs,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR

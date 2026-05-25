@@ -183,6 +183,11 @@ class Job(BaseModel):
     movement_prompts: dict[str, str] = Field(default_factory=dict)
     images_per_character: int = 1
     videos_per_character: int = 1
+    # Per-job video duration override (seconds). None → use the env default
+    # (settings.video_duration_secs). Picker in Step 4 sets this from the
+    # selected video_model's `duration_options` registry. Each per-provider
+    # submit function still defends with its own clamp.
+    duration_secs: int | None = None
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom
     # `prompt` AND the `movement_prompt` are expanded through GPT-4o before

@@ -1011,12 +1011,16 @@
              x-text="`${approvedCount()} approved × ${videosPerChar} = ${approvedCount() * videosPerChar} video${approvedCount() * videosPerChar === 1 ? '' : 's'}`"></div>
       </div>
 
-      <!-- Video provider picker. Disabled once the movement prompt is locked;
-           when locked, falls back to a small read-only badge below. -->
+      <!-- Video provider + clip-duration pickers. Disabled once the movement
+           prompt is locked; when locked, falls back to small read-only
+           badges below. Duration options come from each model's
+           `duration_options` registry entry — switching model auto-snaps
+           to the new model's default if the previous pick isn't valid. -->
       <div class="flex items-center gap-3 mb-3 text-sm flex-wrap"
            x-show="!job?.movement_prompt">
         <label class="text-neutral-500 dark:text-neutral-400">Video model:</label>
         <select x-model="swapVideoModel"
+                @change="syncDurationToModel()"
                 :disabled="job?.movement_prompt"
                 class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
           <template x-for="m in models.video" :key="'svm'+m.slug">
@@ -1024,10 +1028,25 @@
                     x-text="m.label + (m.available ? '' : '  (locked)')"></option>
           </template>
         </select>
+
+        <label class="text-neutral-500 dark:text-neutral-400 ml-2">Duration:</label>
+        <select x-model.number="swapDurationSecs"
+                :disabled="job?.movement_prompt"
+                class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
+          <template x-for="n in videoDurationSpec().options" :key="'dur'+n">
+            <option :value="n" x-text="n + 's'"></option>
+          </template>
+        </select>
+        <span class="text-xs text-neutral-400 dark:text-neutral-500"
+              x-text="videoDurationSpec().options.length === 1
+                        ? `(${videoModelLabel()} only supports ${videoDurationSpec().options[0]}s)`
+                        : ''"></span>
       </div>
       <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mb-3">
         <span class="text-neutral-400 dark:text-neutral-500">Video model:</span>
-        <span x-text="job?.video_model || 'grok-imagine'"></span> · locked
+        <span x-text="job?.video_model || 'grok-imagine'"></span> ·
+        <span class="text-neutral-400 dark:text-neutral-500">Duration:</span>
+        <span x-text="(job?.duration_secs || '—') + 's'"></span> · locked
       </div>
 
       <div x-show="approvedCount() > 0 && !job?.movement_prompt"

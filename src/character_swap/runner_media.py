@@ -58,9 +58,26 @@ AUDIO_MODELS: dict[str, dict] = {
 }
 
 VIDEO_MODELS: dict[str, dict] = {
-    "grok-imagine":         {"label": "Grok Imagine",                    "provider": "xai",        "price_setting": "grok_video_price_usd"},
-    "veo":                  {"label": "Veo 3",                           "provider": "gemini",     "price_setting": "veo_price_usd"},
-    "veo-3-fast":           {"label": "Veo 3 Fast",                      "provider": "gemini",     "price_setting": "veo_price_usd"},
+    # Per-model `duration_options` lists the seconds-values each provider's
+    # API actually accepts (and `duration_default` is what we pre-select in
+    # the Step-4 dropdown). When the user picks a duration, the value flows
+    # through Job.duration_secs → pipeline.submit_video → the provider's
+    # submit function. Sources for the numbers:
+    # - Grok Imagine: xAI accepts an int in [5, 15], we clamp before submit
+    # - Veo 3 / Fast: Gemini's preview accepts 4/6/8
+    # - Kling (all variants): API docs say `duration` is a STRING "5" or "10"
+    # - Runway Gen-4 / Gen-3 Alpha: their REST exposes 5 and 10
+    # - Luma Ray-2: 5 and 9
+    # - Pika 2.2: 5 fixed
+    # - MiniMax Hailuo 01/02: 6 fixed
+    # - Sora 2: 5/10/15/20
+    # - Wan 2.x: 5 fixed
+    # - Seedance: 5 or 10
+    # - Higgsfield Soul (video) / DoP: 5
+    # - Higgsfield Lipsync / Speak: 10/15/20/30 (audio-length-driven)
+    "grok-imagine":         {"label": "Grok Imagine",                    "provider": "xai",        "price_setting": "grok_video_price_usd",   "duration_options": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
+    "veo":                  {"label": "Veo 3",                           "provider": "gemini",     "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
+    "veo-3-fast":           {"label": "Veo 3 Fast",                     "provider": "gemini",     "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
     # Kling — every confirmed model_name string from Kling's official i2v API
     # (Singapore region, May 2026). Slug == API name to keep the mapping
     # trivial in `kling._resolve_model_name`. Legacy aliases (`kling`,
@@ -68,35 +85,47 @@ VIDEO_MODELS: dict[str, dict] = {
     # NB: v3 / v3-omni / o1 are NOT included — Kling's marketing lists them
     # but no public-leaning source confirms the API model_name strings.
     # Add them here once Hugo verifies against the live dev dashboard.
-    "kling-v1":             {"label": "Kling 1.0",                       "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v1-5":           {"label": "Kling 1.5",                       "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v1-6":           {"label": "Kling 1.6",                       "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v2-master":      {"label": "Kling 2.0 Master",                "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v2-1":           {"label": "Kling 2.1",                       "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v1":             {"label": "Kling 1.0",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v1-5":           {"label": "Kling 1.5",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v1-6":           {"label": "Kling 1.6",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v2-master":      {"label": "Kling 2.0 Master",                "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v2-1":           {"label": "Kling 2.1",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     # Legacy slug aliases — Hugo's old jobs reference these strings;
     # `kling.LEGACY_ALIASES` maps them to the new model_names. Kept in
     # the registry so the dropdown still shows a sensible label.
-    "kling":                {"label": "Kling 2.0 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-2.1-pro":        {"label": "Kling 2.1 Pro (legacy alias)",    "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-1.6":            {"label": "Kling 1.6 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd"},
-    "runway-gen4":          {"label": "Runway Gen-4",                    "provider": "runway",     "price_setting": "runway_price_usd"},
-    "runway-gen3-alpha":    {"label": "Runway Gen-3 Alpha",              "provider": "runway",     "price_setting": "runway_price_usd"},
-    "luma-ray2":            {"label": "Luma Ray-2",                      "provider": "luma",       "price_setting": "luma_price_usd"},
-    "pika-2":               {"label": "Pika 2.2",                        "provider": "pika",       "price_setting": "pika_price_usd"},
-    "hailuo-02":            {"label": "MiniMax Hailuo 02",               "provider": "minimax",    "price_setting": "minimax_price_usd"},
-    "hailuo-01":            {"label": "MiniMax Hailuo 01",               "provider": "minimax",    "price_setting": "minimax_price_usd"},
-    "sora-2":               {"label": "Sora 2",                          "provider": "openai",     "price_setting": "sora_price_usd"},
-    "wan-2.2":              {"label": "Wan 2.2",                         "provider": "alibaba",    "price_setting": "wan_price_usd"},
-    "wan-2.1":              {"label": "Wan 2.1",                         "provider": "alibaba",    "price_setting": "wan_price_usd"},
-    "seedance":             {"label": "Seedance",                        "provider": "bytedance",  "price_setting": "seedance_price_usd"},
-    "higgsfield-soul-vid":  {"label": "Higgsfield Soul (video)",         "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
-    "higgsfield-dop":       {"label": "Higgsfield DoP",                  "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
-    "higgsfield-lipsync":   {"label": "Higgsfield Lipsync",              "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
-    "higgsfield-speak":     {"label": "Higgsfield Speak",                "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
+    "kling":                {"label": "Kling 2.0 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-2.1-pro":        {"label": "Kling 2.1 Pro (legacy alias)",    "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-1.6":            {"label": "Kling 1.6 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "runway-gen4":          {"label": "Runway Gen-4",                    "provider": "runway",     "price_setting": "runway_price_usd",       "duration_options": [5, 10], "duration_default": 5},
+    "runway-gen3-alpha":    {"label": "Runway Gen-3 Alpha",              "provider": "runway",     "price_setting": "runway_price_usd",       "duration_options": [5, 10], "duration_default": 5},
+    "luma-ray2":            {"label": "Luma Ray-2",                      "provider": "luma",       "price_setting": "luma_price_usd",         "duration_options": [5, 9],  "duration_default": 5},
+    "pika-2":               {"label": "Pika 2.2",                        "provider": "pika",       "price_setting": "pika_price_usd",         "duration_options": [5],     "duration_default": 5},
+    "hailuo-02":            {"label": "MiniMax Hailuo 02",               "provider": "minimax",    "price_setting": "minimax_price_usd",      "duration_options": [6],     "duration_default": 6},
+    "hailuo-01":            {"label": "MiniMax Hailuo 01",               "provider": "minimax",    "price_setting": "minimax_price_usd",      "duration_options": [6],     "duration_default": 6},
+    "sora-2":               {"label": "Sora 2",                          "provider": "openai",     "price_setting": "sora_price_usd",         "duration_options": [5, 10, 15, 20], "duration_default": 10},
+    "wan-2.2":              {"label": "Wan 2.2",                         "provider": "alibaba",    "price_setting": "wan_price_usd",          "duration_options": [5],     "duration_default": 5},
+    "wan-2.1":              {"label": "Wan 2.1",                         "provider": "alibaba",    "price_setting": "wan_price_usd",          "duration_options": [5],     "duration_default": 5},
+    "seedance":             {"label": "Seedance",                        "provider": "bytedance",  "price_setting": "seedance_price_usd",     "duration_options": [5, 10], "duration_default": 5},
+    "higgsfield-soul-vid":  {"label": "Higgsfield Soul (video)",         "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [5],     "duration_default": 5},
+    "higgsfield-dop":       {"label": "Higgsfield DoP",                  "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [5, 8],  "duration_default": 5},
+    "higgsfield-lipsync":   {"label": "Higgsfield Lipsync",              "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [10, 15, 20, 30], "duration_default": 10},
+    "higgsfield-speak":     {"label": "Higgsfield Speak",                "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [10, 15, 20, 30], "duration_default": 10},
 }
+
+
+def video_duration_spec(model: str) -> dict:
+    """Return the {options, default} spec for a video model. Falls back to
+    a single-value [env-default] spec when the model isn't registered."""
+    info = VIDEO_MODELS.get(model)
+    if not info or "duration_options" not in info:
+        from character_swap.config import settings as _s
+        return {"options": [_s.video_duration_secs],
+                "default": _s.video_duration_secs}
+    return {"options": list(info["duration_options"]),
+            "default": info.get("duration_default", info["duration_options"][0])}
 
 
 def model_info(model: str) -> dict | None:
