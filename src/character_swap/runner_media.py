@@ -61,9 +61,27 @@ VIDEO_MODELS: dict[str, dict] = {
     "grok-imagine":         {"label": "Grok Imagine",                    "provider": "xai",        "price_setting": "grok_video_price_usd"},
     "veo":                  {"label": "Veo 3",                           "provider": "gemini",     "price_setting": "veo_price_usd"},
     "veo-3-fast":           {"label": "Veo 3 Fast",                      "provider": "gemini",     "price_setting": "veo_price_usd"},
-    "kling":                {"label": "Kling 2.0",                       "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-2.1-pro":        {"label": "Kling 2.1 Pro",                   "provider": "kling",      "price_setting": "kling_price_usd"},
-    "kling-1.6":            {"label": "Kling 1.6",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    # Kling — every confirmed model_name string from Kling's official i2v API
+    # (Singapore region, May 2026). Slug == API name to keep the mapping
+    # trivial in `kling._resolve_model_name`. Legacy aliases (`kling`,
+    # `kling-2.1-pro`) still resolve via LEGACY_ALIASES for old jobs.
+    # NB: v3 / v3-omni / o1 are NOT included — Kling's marketing lists them
+    # but no public-leaning source confirms the API model_name strings.
+    # Add them here once Hugo verifies against the live dev dashboard.
+    "kling-v1":             {"label": "Kling 1.0",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v1-5":           {"label": "Kling 1.5",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v1-6":           {"label": "Kling 1.6",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v2-master":      {"label": "Kling 2.0 Master",                "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v2-1":           {"label": "Kling 2.1",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd"},
+    # Legacy slug aliases — Hugo's old jobs reference these strings;
+    # `kling.LEGACY_ALIASES` maps them to the new model_names. Kept in
+    # the registry so the dropdown still shows a sensible label.
+    "kling":                {"label": "Kling 2.0 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-2.1-pro":        {"label": "Kling 2.1 Pro (legacy alias)",    "provider": "kling",      "price_setting": "kling_price_usd"},
+    "kling-1.6":            {"label": "Kling 1.6 (legacy alias)",        "provider": "kling",      "price_setting": "kling_price_usd"},
     "runway-gen4":          {"label": "Runway Gen-4",                    "provider": "runway",     "price_setting": "runway_price_usd"},
     "runway-gen3-alpha":    {"label": "Runway Gen-3 Alpha",              "provider": "runway",     "price_setting": "runway_price_usd"},
     "luma-ray2":            {"label": "Luma Ray-2",                      "provider": "luma",       "price_setting": "luma_price_usd"},
@@ -324,10 +342,15 @@ async def run_video_gen(gen_id: str) -> None:
             )
             _persist(gen, provider_job_id=op_id)
             await asyncio.to_thread(google_genai.wait_for_veo, op_id=op_id, dest=dest)
-        elif gen.model in {"kling", "kling-2.1-pro", "kling-1.6"}:
+        elif (gen.model in kling.KLING_MODELS
+              or gen.model in kling.LEGACY_ALIASES):
+            # Pass the slug through — `submit_kling._resolve_model_name`
+            # maps to the canonical Kling API model_name (handles legacy
+            # aliases + falls back to v2-master for unknown slugs).
             task_id = await asyncio.to_thread(
                 kling.submit_kling,
                 image=image_path, prompt=effective_prompt,
+                model=gen.model,
                 aspect_ratio=gen.aspect_ratio, duration_secs=gen.duration_secs,
                 app_job_id=gen_id,
             )

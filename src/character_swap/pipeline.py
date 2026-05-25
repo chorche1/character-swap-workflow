@@ -186,9 +186,10 @@ def submit_video(
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
         )
-    if model in {"kling", "kling-2.1-pro", "kling-1.6"}:
+    if model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         return kling.submit_kling(
             image=image, prompt=movement_prompt,
+            model=model,
             aspect_ratio=effective_ar,
             duration_secs=settings.video_duration_secs,
             app_job_id=job_id,
@@ -307,7 +308,7 @@ def wait_for_video(
     from character_swap.clients import _stubs, google_genai, kling
     if model in {"veo", "veo-3-fast"}:
         google_genai.wait_for_veo(op_id=job_id, dest=dest)
-    elif model in {"kling", "kling-2.1-pro", "kling-1.6"}:
+    elif model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         kling.wait_for_kling(task_id=job_id, dest=dest)
     elif model in {"runway-gen4", "runway-gen3-alpha"}:
         _stubs.wait_for_runway(task_id=job_id, dest=dest)
