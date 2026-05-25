@@ -997,8 +997,8 @@
 
       <div class="flex items-center gap-3 mb-3 text-sm flex-wrap">
         <span class="text-neutral-500 dark:text-neutral-400">Videos per approved image:</span>
-        <div class="inline-flex rounded-lg border border-neutral-200 dark:border-neutral-700 overflow-hidden">
-          <template x-for="n in [1,2,3,4]" :key="'v'+n">
+        <div class="inline-flex rounded-lg border border-neutral-200 dark:border-neutral-700 overflow-hidden flex-wrap">
+          <template x-for="n in [1,2,3,4,5,6,7,8,9,10]" :key="'v'+n">
             <button class="w-9 py-1.5 text-sm"
                     :class="videosPerChar === n
                       ? 'bg-neutral-900 text-white dark:bg-white dark:text-neutral-900'
@@ -1112,10 +1112,27 @@
       <div class="space-y-6">
         <template x-for="(jc, cid) in (job?.characters || {})" :key="'vchar-'+cid">
           <div x-show="jc.videos && jc.videos.length > 0">
-            <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
               <span class="font-medium" x-text="jc.name"></span>
-              <span class="text-xs text-neutral-500 dark:text-neutral-400"
-                    x-text="jc.videos.filter(v => v.status === 'done').length + ' / ' + jc.videos.length + ' done'"></span>
+              <div class="flex items-center gap-2">
+                <span class="text-xs text-neutral-500 dark:text-neutral-400"
+                      x-text="jc.videos.filter(v => v.status === 'done').length + ' / ' + jc.videos.length + ' done'"></span>
+                <!-- + N more videos: kicks off `generate_more_videos` for this
+                     character. Appends N takes per approved variant, doesn't
+                     touch existing videos. Disabled while previous takes are
+                     still processing to avoid runaway parallel jobs. -->
+                <div class="inline-flex items-center gap-1 text-xs">
+                  <span class="text-neutral-400 dark:text-neutral-500">+ generate</span>
+                  <template x-for="n in [1,2,3,5]" :key="'gm'+cid+n">
+                    <button class="px-2 py-0.5 rounded border border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800 disabled:opacity-30 disabled:cursor-not-allowed"
+                            :disabled="!job?.movement_prompt || generatingMoreFor === cid"
+                            @click="generateMoreVideos(cid, n)"
+                            x-text="n"></button>
+                  </template>
+                  <span class="text-neutral-400 dark:text-neutral-500">more</span>
+                  <span x-show="generatingMoreFor === cid" class="text-amber-500 animate-pulse">…</span>
+                </div>
+              </div>
             </div>
             <div class="video-strip">
               <template x-for="vv in jc.videos" :key="vv.video_id">

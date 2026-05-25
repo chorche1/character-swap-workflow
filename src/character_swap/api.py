@@ -1477,7 +1477,7 @@ class MovementBody(BaseModel):
     # approved variant must have a non-empty entry. Scenes without approvals
     # are skipped (no videos to render for them).
     movement_prompts: dict[str, str] | None = None
-    videos_per_character: int = Field(default=1, ge=1, le=4)
+    videos_per_character: int = Field(default=1, ge=1, le=10)
     # Which video provider to use. Defaults to grok-imagine (legacy behavior);
     # the Step-4 picker in web/index.html sends this field so the user can pick
     # Kling / Veo / Runway / Luma / Pika / etc. for the swap flow too.
@@ -1710,6 +1710,56 @@ class RetryVideoBody(BaseModel):
     # per-scene movement prompt (or any existing override on this video).
     # When set (even to empty string), persists on the new VideoVariant.
     prompt_override: str | None = None
+
+
+class GenerateMoreVideosBody(BaseModel):
+    char_id: str
+    n: int = Field(default=1, ge=1, le=10)
+    source_variant_id: str | None = None
+    prompt_override: str | None = None
+
+
+@app.post("/api/jobs/{job_id}/generate_more_videos")
+async def generate_more_videos(job_id: str, body: GenerateMoreVideosBody,
+                               background: BackgroundTasks) -> dict:
+    """Append N more videos to a character that already finished its initial
+    batch. Strictly additive — doesn't wipe existing videos, doesn't require
+    re-submitting the movement prompt. Use cases:
+
+    - "Generate 3 more takes of the same scene because I want options."
+    - "Generate 1 more take for THIS specific approved variant (source_variant_id
+       passed) with a tweaked prompt_override."
+
+    Defaults: applies to ALL approved variants of the char if source_variant_id
+    is omitted, mirroring how the initial batch fans out.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
+    if key_name:
+        settings.require_keys(key_name)
+    if not job.movement_prompt:
+        raise HTTPException(409, "Job has no movement prompt yet — submit Step 4 first")
+    jc = job.characters.get(body.char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    if not (jc.approved_variant_ids or jc.approved_variant_id):
+        raise HTTPException(409, "Character has no approved variant to animate")
+    if body.source_variant_id is not None:
+        approved = set(jc.approved_variant_ids or [])
+        if jc.approved_variant_id:
+            approved.add(jc.approved_variant_id)
+        if body.source_variant_id not in approved:
+            raise HTTPException(404, "source_variant_id is not an approved variant")
+    background.add_task(
+        _run_async, runner.generate_more_videos,
+        job_id, body.char_id, body.n,
+        source_variant_id=body.source_variant_id,
+        prompt_override=body.prompt_override,
+    )
+    return _job_to_dict(job)
 
 
 @app.post("/api/jobs/{job_id}/retry_video")

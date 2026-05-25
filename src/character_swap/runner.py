@@ -548,6 +548,75 @@ async def _animate_character(
     )
 
 
+async def generate_more_videos(
+    job_id: str, char_id: str, n: int,
+    *,
+    source_variant_id: str | None = None,
+    prompt_override: str | None = None,
+) -> None:
+    """Append N more videos for an approved character — strictly additive
+    (existing videos are left alone). Used by Step 5's "+ N more" button so
+    Hugo can produce extra takes for a (char, scene) without wiping the
+    initial batch or re-submitting the whole movement prompt.
+
+    When `source_variant_id` is None, generates N videos for EACH of the
+    char's approved variants (mirrors the initial-batch fan-out). When
+    specified, generates N videos only for that specific approved variant.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None or not job.movement_prompt:
+        return
+    jc = job.characters.get(char_id)
+    if jc is None:
+        return
+
+    approved_ids = list(jc.approved_variant_ids or [])
+    if not approved_ids and jc.approved_variant_id:
+        approved_ids = [jc.approved_variant_id]
+    if source_variant_id is not None:
+        if source_variant_id not in approved_ids:
+            return
+        approved_ids = [source_variant_id]
+    if not approved_ids:
+        return
+
+    n = max(1, min(10, int(n)))
+    primary_scene = _first_scene_id(job)
+    movement_prompts = dict(job.movement_prompts or {})
+    enriched_prompts = dict(job.enriched_movement_prompts or {})
+    fallback = (job.enriched_movement_prompt or job.movement_prompt or "")
+
+    def prompt_for(scene_id: str | None) -> str:
+        sid = scene_id or primary_scene
+        if sid is None:
+            return fallback
+        return (enriched_prompts.get(sid)
+                or movement_prompts.get(sid)
+                or fallback)
+
+    placeholders: list[tuple[VideoVariant, str]] = []
+    for src_id in approved_ids:
+        variant = next((iv for iv in jc.images if iv.variant_id == src_id), None)
+        scene_id = variant.scene_id if variant else None
+        scene_prompt = prompt_override or prompt_for(scene_id)
+        for _ in range(n):
+            v = VideoVariant(
+                video_id=_short("vd_"),
+                grok_job_id="",
+                status=VideoStatus.PENDING,
+                source_variant_id=src_id,
+                movement_prompt_override=prompt_override,
+            )
+            jc.videos.append(v)
+            placeholders.append((v, scene_prompt))
+    _persist(job, jc, status=CharStatus.ANIMATING)
+
+    await asyncio.gather(
+        *[_animate_one_video(job, jc, v, mp) for v, mp in placeholders]
+    )
+
+
 async def retry_one_video(job_id: str, char_id: str, video_id: str,
                           prompt_override: str | None = None) -> None:
     """Re-submit a single video. Replaces the entry in-place with a fresh
@@ -714,7 +783,7 @@ async def run_video_synthesis(job_id: str) -> None:
             )
             s.update_job(job)
 
-    m = max(1, min(4, job.videos_per_character))
+    m = max(1, min(10, job.videos_per_character))
     targets = [
         jc for jc in job.characters.values()
         if jc.status == CharStatus.APPROVED

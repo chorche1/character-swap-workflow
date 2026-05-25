@@ -34,6 +34,10 @@ function studio() {
     // Same idea for freeform gens: stash previous status keyed by gen_id.
     _lastGenStatus: {},
     videosPerChar: 1,
+    // While a generate_more_videos request is in flight for char X this
+    // holds X — used to disable the "+ N more" buttons + show a spinner
+    // so the user doesn't fire 10 parallel batches with rapid clicks.
+    generatingMoreFor: null,
     job: null,
     jobsList: [],
     projects: [],
@@ -4569,6 +4573,36 @@ function studio() {
       });
       if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
       this.job = await r.json();
+    },
+
+    // "+ N more videos" button per character in Step 5. Appends N takes
+    // PER approved variant (so 2 approved scenes × n=3 = 6 new videos).
+    // Existing videos are untouched. The lock-flag prevents rapid double-
+    // clicks from queueing 30 parallel jobs.
+    async generateMoreVideos(charId, n) {
+      if (!this.job || this.generatingMoreFor) return;
+      this.generatingMoreFor = charId;
+      try {
+        const r = await fetch('/api/jobs/' + this.job.job_id + '/generate_more_videos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ char_id: charId, n }),
+        });
+        if (!r.ok) {
+          this.notifyError('Generate more failed: ' + await r.text());
+          return;
+        }
+        this.job = await r.json();
+        const jc = this.job.characters?.[charId];
+        const variants = (jc?.approved_variant_ids || []).length || 1;
+        this.notifyMilestone('More videos queued',
+          `${n} × ${variants} approved variant${variants === 1 ? '' : 's'} = ${n * variants} new`,
+          { kind: 'info', tag: `gen-more-${charId}` });
+      } catch (e) {
+        this.notifyError('Generate more error: ' + e);
+      } finally {
+        this.generatingMoreFor = null;
+      }
     },
 
     async unlockMovement() {
