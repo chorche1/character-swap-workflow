@@ -542,14 +542,16 @@
             <img :src="s.url" class="w-full h-32 object-cover" />
             <div class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded font-mono"
                  x-text="s.scene_id.slice(0, 10) + '…'"></div>
-            <button x-show="!job"
+            <button x-show="canEditJobScenes()"
                     class="absolute top-1.5 right-1.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center"
                     title="Remove this scene"
                     @click="removeScene(s.scene_id)">✕</button>
           </div>
         </template>
-        <!-- Add-more dropzone — disappears once a job is loaded -->
-        <label x-show="!job"
+        <!-- Add-more dropzone — visible up until the job's runner has started
+             producing variants (then scenes are locked because variants are
+             tied to specific scene_ids). -->
+        <label x-show="canEditJobScenes()"
                class="dropzone card border-2 border-dashed border-neutral-300 dark:border-neutral-700 rounded-xl flex flex-col items-center justify-center cursor-pointer text-neutral-400 dark:text-neutral-500 hover:text-neutral-600 dark:hover:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 transition-colors h-[10.25rem]"
                :class="sceneDropActive ? 'border-indigo-400 bg-indigo-50 dark:bg-indigo-950/30' : ''"
                @dragover="onSceneDragOver($event)"
@@ -562,8 +564,12 @@
         </label>
       </div>
       <p class="text-[11px] text-neutral-500 dark:text-neutral-400 mt-3"
-         x-show="!job">
+         x-show="canEditJobScenes()">
         Drop, click, or paste (Cmd+V) — supports multiple. Each scene becomes a separate reference background; the character gets variants for every scene.
+      </p>
+      <p class="text-[11px] text-amber-600 dark:text-amber-400 mt-3"
+         x-show="job && !canEditJobScenes()">
+        Scenes are locked because variants have been generated. Click <strong>duplicate</strong> in the job header to fork this job with the same chars and add scenes there.
       </p>
     </section>
 
@@ -618,7 +624,7 @@
                 <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
                         @click.stop="closeImagePicker()">✕</button>
               </div>
-              <div class="grid grid-cols-3 gap-1">
+              <div class="grid grid-cols-3 gap-1 max-h-64 overflow-y-auto pr-1">
                 <template x-for="img in (ch.images || [])" :key="'pick-'+ch.char_id+'-'+img.image_id">
                   <button class="relative aspect-square rounded overflow-hidden border-2 transition-all"
                           :class="currentSourceImageId(ch) === img.image_id

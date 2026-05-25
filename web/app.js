@@ -3705,11 +3705,53 @@ function studio() {
           await this.uploadScene(f);
         }
       }
+      // If a job is loaded and hasn't started generating variants yet,
+      // attach the new scene list to that job too — otherwise the upload
+      // is purely client-side and gets discarded when the user clicks the
+      // job in the sidebar again.
+      if (this.job && this.canEditJobScenes()) {
+        await this._syncJobScenes();
+      }
     },
 
     removeScene(scene_id) {
       this.scenes = this.scenes.filter(s => s.scene_id !== scene_id);
       this.scene = this.scenes[0] || null;
+      if (this.job && this.canEditJobScenes()) {
+        this._syncJobScenes();   // fire-and-forget
+      }
+    },
+
+    // True when scenes can still be edited on the active job.
+    // Becomes false the moment the runner has populated `images` for ANY char
+    // (i.e. variant generation has started). Used both to show / hide the
+    // "+ Add another scene" tile and to gate the backend PATCH.
+    canEditJobScenes() {
+      if (!this.job) return true;
+      const chars = this.job.characters || {};
+      for (const cid in chars) {
+        if ((chars[cid].images || []).length > 0) return false;
+      }
+      return true;
+    },
+
+    async _syncJobScenes() {
+      try {
+        const r = await fetch(`/api/jobs/${this.job.job_id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scene_ids: this.scenes.map(s => s.scene_id) }),
+        });
+        if (!r.ok) {
+          // 409 = generation already started; surface the message verbatim.
+          const txt = await r.text();
+          this.notifyError(`Couldn't attach scenes: ${txt}`);
+          return;
+        }
+        this.job = await r.json();
+      } catch (e) {
+        this.notifyError('Sync scenes error: ' + e);
+      }
     },
 
     // --- Step 1 paste + drop handlers (clipboard image → scene upload) ---

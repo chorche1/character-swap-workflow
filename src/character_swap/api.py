@@ -1095,6 +1095,39 @@ async def patch_job(job_id: str, body: dict) -> dict:
         job.image_model = new_model
         changed = True
 
+    # scene_ids: allow extending the scene list pre-generation. The check
+    # against variant existence prevents mid-generation mutation that would
+    # race the runner's per-(char, scene) variant scheduling. The user
+    # then clicks "↻ regenerate all" (or, equivalently, this PATCH triggers
+    # a fresh `run_image_generation` call which `_kick_char`-wipes + re-fans).
+    if "scene_ids" in body:
+        raw_ids = body.get("scene_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise HTTPException(400, "scene_ids must be a non-empty list")
+        any_variants = any(len(jc.images) > 0 for jc in job.characters.values())
+        if any_variants:
+            raise HTTPException(
+                409,
+                "Cannot edit scene_ids after variant generation has started. "
+                "Click `duplicate` in the job header to fork this job with the same chars "
+                "and add scenes there.",
+            )
+        new_paths: list[str] = []
+        for sid in raw_ids:
+            scene = s.get_scene(sid)
+            if scene is None:
+                raise HTTPException(404, f"Scene not found: {sid}")
+            path = settings.scenes_dir / scene.filename
+            if not path.exists():
+                raise HTTPException(500, f"Scene file missing on disk: {path}")
+            new_paths.append(str(path))
+        job.scene_ids = list(raw_ids)
+        job.scene_image_paths = new_paths
+        # Keep legacy single-scene fields pointing at the first entry.
+        job.scene_id = raw_ids[0]
+        job.scene_image_path = new_paths[0]
+        changed = True
+
     if not changed:
         raise HTTPException(400, "No supported fields to update")
 
