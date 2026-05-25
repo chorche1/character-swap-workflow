@@ -211,6 +211,12 @@ function studio() {
     higgsfieldPolling: false,
     swapPrompt: '',
     swapModel: 'gpt-image',
+    // Optional 3rd reference image for the swap flow's image model. Filename
+    // is what we send back to POST /api/jobs; URL is for the inline preview.
+    extraRefFilename: '',
+    extraRefUrl: '',
+    extraRefOriginalName: '',
+    uploadingExtraRef: false,
     // Step-4 video provider for the swap flow. Defaults to grok-imagine for
     // back-compat; users can switch to Kling / Veo / Runway / Luma / Pika /
     // Hailuo / Sora / Wan / Seedance / Higgsfield via the picker.
@@ -3405,6 +3411,40 @@ function studio() {
       this.library = await (await fetch('/api/characters')).json();
     },
 
+    // --- Extra reference image (3rd ref in Swap Step 2) -------------------
+
+    async uploadExtraRef(file) {
+      if (!file) return;
+      if (!file.type?.startsWith('image/')) {
+        this.notifyError('Extra reference must be an image');
+        return;
+      }
+      this.uploadingExtraRef = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch('/api/jobs/extra_ref', { method: 'POST', body: fd });
+        if (!r.ok) {
+          this.notifyError('Upload failed: ' + (await r.text()).slice(0, 200));
+          return;
+        }
+        const data = await r.json();
+        this.extraRefFilename = data.filename;
+        this.extraRefUrl = data.url;
+        this.extraRefOriginalName = data.original_name || data.filename;
+      } catch (e) {
+        this.notifyError('Upload error: ' + e);
+      } finally {
+        this.uploadingExtraRef = false;
+      }
+    },
+
+    clearExtraRef() {
+      this.extraRefFilename = '';
+      this.extraRefUrl = '';
+      this.extraRefOriginalName = '';
+    },
+
     async loadJobsList() {
       try {
         const r = await fetch('/api/jobs?summary=1');
@@ -3933,6 +3973,9 @@ function studio() {
             // enrich; works even when prompt is default since Director uses
             // vision on the reference images. Requires ANTHROPIC_API_KEY.
             use_director: !!this.director.swap && !!this.health.anthropic_key,
+            // Optional 3rd reference image (background/outfit/prop hint).
+            // Lands as ref #3 in the model call after scene + character.
+            extra_reference_filename: this.extraRefFilename || null,
           }),
         });
         if (!r.ok) { this.notifyError('Job creation failed: ' + await r.text()); return; }

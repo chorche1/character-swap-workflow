@@ -133,6 +133,7 @@ def _file_url(path: Path | str | None) -> str | None:
     for prefix, base in (
         ("characters", settings.characters_dir.resolve()),
         ("input/scenes", settings.scenes_dir.resolve()),
+        ("input/extra_refs", (settings.input_dir / "extra_refs").resolve()),
         ("output", settings.output_dir.resolve()),
     ):
         try:
@@ -394,6 +395,13 @@ app.mount("/files/output",
 app.mount("/files/input/scenes",
           StaticFiles(directory=str(settings.scenes_dir)),
           name="files-scenes")
+# Lazily ensure extra_refs/ exists so StaticFiles doesn't fail at startup on
+# fresh installs (the dir is created on first upload, but the mount is
+# constructed at module import).
+(settings.input_dir / "extra_refs").mkdir(parents=True, exist_ok=True)
+app.mount("/files/input/extra_refs",
+          StaticFiles(directory=str(settings.input_dir / "extra_refs")),
+          name="files-extra-refs")
 app.mount("/files/characters",
           StaticFiles(directory=str(settings.characters_dir)),
           name="files-characters")
@@ -418,6 +426,38 @@ async def job_spa(job_id: str) -> FileResponse:
 
 
 # --- scenes --------------------------------------------------------------------------
+
+@app.post("/api/jobs/extra_ref")
+async def upload_extra_reference(file: UploadFile) -> dict:
+    """Upload the optional 3rd reference image used by the swap-image model.
+
+    Saved to `input/extra_refs/xr_<sha256[:10]><ext>` (content-addressed so
+    re-uploading the same file deduplicates). Returns the basename which
+    the client sends back in `POST /api/jobs` as `extra_reference_filename`.
+
+    These files are job-context, not reusable library assets — no DB row,
+    just a path. The basename-only return value lets the create-job handler
+    validate against `..` traversal cheaply.
+    """
+    ext = _safe_ext(file.filename or "")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    digest = hashlib.sha256(data).hexdigest()[:10]
+    filename = f"xr_{digest}{ext}"
+    dest_dir = settings.input_dir / "extra_refs"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / filename
+    if not dest.exists():
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+    return {
+        "filename": filename,
+        "url": _file_url(dest),
+        "original_name": file.filename or filename,
+    }
+
 
 @app.post("/api/scenes")
 async def upload_scene(file: UploadFile) -> dict:
@@ -860,6 +900,11 @@ class CreateJobBody(BaseModel):
     # both can be enabled simultaneously (Director wins where it succeeds,
     # enrich is the fallback).
     use_director: bool = False
+    # Optional third reference image for the image model: scene + character +
+    # this one. Path is relative to `settings.input_dir / 'extra_refs'`, as
+    # returned by `POST /api/jobs/extra_ref`. None when the user didn't
+    # upload one.
+    extra_reference_filename: str | None = None
 
 
 async def _run_async(coro_fn, *args, **kwargs) -> None:
@@ -946,6 +991,20 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         if proj and proj.default_prompt:
             custom_prompt = proj.default_prompt
 
+    # Resolve optional extra reference image (uploaded via /api/jobs/extra_ref).
+    extra_ref_abs: str | None = None
+    if body.extra_reference_filename:
+        candidate = (settings.input_dir / "extra_refs" / body.extra_reference_filename).resolve()
+        extra_refs_root = (settings.input_dir / "extra_refs").resolve()
+        # Defend against `..` traversal — must live under extra_refs/.
+        try:
+            candidate.relative_to(extra_refs_root)
+        except ValueError:
+            raise HTTPException(400, "extra_reference_filename must be a basename")
+        if not candidate.exists():
+            raise HTTPException(404, f"Extra reference file not found: {body.extra_reference_filename}")
+        extra_ref_abs = str(candidate)
+
     job = Job(
         job_id=job_id,
         title=title,
@@ -963,6 +1022,7 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         image_model=image_model,
         enrich_prompt=body.enrich_prompt,
         use_director=body.use_director,
+        extra_reference_path=extra_ref_abs,
     )
     s.add_job(job)
     background.add_task(_run_async, runner.run_image_generation, job_id)

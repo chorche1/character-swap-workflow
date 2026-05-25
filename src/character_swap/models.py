@@ -204,6 +204,12 @@ class Job(BaseModel):
     # to the legacy enrich/raw path on any failure.
     use_director: bool = False
     director_prompts_json: str | None = None
+    # Optional third reference image passed to the image model after
+    # (scene, character) — useful for "match this background" / "use this
+    # outfit" / general visual context. Stored as an absolute path on disk;
+    # None when the user didn't upload one. Image models that don't support
+    # 3+ references (e.g. grok-image is text-only) just ignore it.
+    extra_reference_path: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

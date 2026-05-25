@@ -81,6 +81,11 @@ async def _generate_one_variant(
         await _emit(job.job_id, "variant.started",
                     char_id=jc.char_id, variant_id=variant.variant_id)
         dest = Path(variant.path)
+        extra_ref: Path | None = None
+        if job.extra_reference_path:
+            candidate = Path(job.extra_reference_path)
+            if candidate.exists():
+                extra_ref = candidate
         try:
             await asyncio.to_thread(
                 pipeline.generate_variant,
@@ -91,6 +96,7 @@ async def _generate_one_variant(
                 prompt=variant.prompt,
                 dest=dest,
                 job_id=job.job_id,
+                extra_reference_image=extra_ref,
             )
         except Exception as e:
             variant.status = VariantStatus.FAILED

@@ -36,18 +36,23 @@ def generate_image(
     dest: Path,
     job_id: str | None = None,
     prompt: str | None = None,
+    extra_reference_image: Path | None = None,
 ) -> Path:
     """
     Image-to-image generation using GPT Image (default).
     Scene is reference #1, character is reference #2 — matches the verbatim prompt.
+    If `extra_reference_image` is provided, it lands as reference #3.
     Writes the PNG bytes atomically to `dest` and returns it.
 
     `prompt` overrides `GENERATION_PROMPT` if provided (Swap Step 2 lets the
     user edit it; this is how that custom string reaches the API).
     """
+    refs: list[Path] = [scene_image, character_image]
+    if extra_reference_image is not None:
+        refs.append(extra_reference_image)
     image_bytes = openai_image.generate(
         prompt=prompt or GENERATION_PROMPT,
-        reference_images=[scene_image, character_image],
+        reference_images=refs,
         phase="generate",
         character=character_name,
         job_id=job_id,
@@ -65,19 +70,25 @@ def generate_variant(
     prompt: str,
     dest: Path,
     job_id: str | None = None,
+    extra_reference_image: Path | None = None,
 ) -> Path:
     """
     Dispatch a swap-variant generation to the right model. Used by runner.py
     so it doesn't need to know provider details.
 
-    - gpt-image:        scene + character as refs (image-to-image; weak at
-                        strict spatial preservation — model often drifts to
-                        a generic photo of the character)
-    - grok-image:       text-only (Grok image API doesn't take refs today)
+    - gpt-image:        scene + character (+ optional extra) as refs
+                        (image-to-image; weak at strict spatial preservation
+                        — model often drifts to a generic photo of the character)
+    - grok-image:       text-only (Grok image API doesn't take refs today);
+                        `extra_reference_image` is ignored.
     - nano-banana:      Gemini 2.5 Flash Image — multi-ref edit, faster
     - nano-banana-pro:  Gemini Pro Image — multi-ref edit with strongest
                         scene-preservation. Recommended for swap-into-scene
                         when GPT Image 2 drifts to generic photos.
+
+    When `extra_reference_image` is supplied, models that accept references
+    receive it as ref #3 (after scene, character) — useful for "match this
+    background" or "use this outfit/prop" hints.
     """
     if model == "gpt-image":
         return generate_image(
@@ -87,6 +98,7 @@ def generate_variant(
             dest=dest,
             job_id=job_id,
             prompt=prompt,
+            extra_reference_image=extra_reference_image,
         )
     if model == "grok-image":
         data = grok.generate_image(
@@ -100,9 +112,12 @@ def generate_variant(
         # Pass the slug through — google_genai client maps to the current
         # Google model name internally (nano-banana → gemini-2.5-flash-image,
         # nano-banana-pro → nano-banana-pro-preview).
+        refs: list[Path] = [scene_image, character_image]
+        if extra_reference_image is not None:
+            refs.append(extra_reference_image)
         data = google_genai.generate_nano_banana(
             prompt=prompt,
-            reference_images=[scene_image, character_image],
+            reference_images=refs,
             app_job_id=job_id,
             model=model,
         )
