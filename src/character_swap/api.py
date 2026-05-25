@@ -2352,7 +2352,7 @@ async def editor_trim_silences(
     background: BackgroundTasks,
     file: UploadFile = File(...),
     threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.4),
+    min_silence_secs: float = Form(0.25),
     pad_secs: float = Form(0.05),
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
@@ -2442,10 +2442,10 @@ async def editor_captions(
 async def editor_auto_edit(
     file: UploadFile = File(...),
     threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.4),
+    min_silence_secs: float = Form(0.25),
     pad_secs: float = Form(0.05),
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
-    template: str = Form("popout-yellow"),
+    template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),        # opt-out of auto silence-trim
     enable_captions: bool = Form(True),    # opt-out of caption burn-in
@@ -2611,10 +2611,10 @@ async def editor_multi_auto_edit(
     files: list[UploadFile] = File(...),
     script: str = Form(...),
     threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.4),
+    min_silence_secs: float = Form(0.25),
     pad_secs: float = Form(0.05),
     voice_id: str | None = Form(None),
-    template: str = Form("popout-yellow"),
+    template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),
     enable_captions: bool = Form(True),
@@ -2868,7 +2868,7 @@ async def editor_multi_auto_edit(
 @app.post("/api/editor/rerender")
 async def editor_rerender(
     edit_id: str = Form(...),
-    template: str = Form("popout-yellow"),
+    template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
     trim_start_secs: float = Form(0.0),
     trim_end_secs: float = Form(0.0),   # 0 = until end

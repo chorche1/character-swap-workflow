@@ -98,10 +98,10 @@ function studio() {
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -30,
-      minSilenceSecs: 0.4,
+      minSilenceSecs: 0.25,   // Hugo's preferred multi-clip default (was 0.4)
       padSecs: 0.05,
       trimming: false,
-      template: 'popout-yellow',
+      template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
       captioning: false,
       autoEditing: false,
       voiceId: '',
@@ -117,7 +117,7 @@ function studio() {
       _pipelinePoll: null,            // setInterval handle while polling
       rerendering: false,
       rerenderOpen: false,                    // shows the edit-result panel
-      rerenderTemplate: 'popout-yellow',      // independent of editor.template so you can A/B
+      rerenderTemplate: 'capcut-purple-pill', // independent of editor.template so you can A/B
       rerenderTrimStart: 0,
       rerenderTrimEnd: 0,
       rerenderOverrides: {
