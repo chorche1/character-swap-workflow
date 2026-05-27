@@ -2757,47 +2757,48 @@ async def editor_multi_auto_edit(
             encoding="utf-8",
         )
 
-    # 4.5. Per-clip leading-silence trim — cut each clip to start EXACTLY
-    # on the first transcribed word (Hugo's "exakt på tal" requirement).
-    # Uses Whisper words from step 2, scaled by the WPM speed_factor if
-    # the clip was stretched in step 4. Falls back to silencedetect-based
-    # trim_leading_silence when no words / no first-word timestamp.
-    if enable_trim:
-        leading_trimmed: list[Path] = []
-        for i, p in enumerate(ordered_paths):
-            words_for_clip = list(ordered_transcripts[i])
-            # If we WPM-stretched this clip the file timing is now scaled;
-            # scale the word timestamps accordingly so we trim at the right
-            # post-stretch offset.
-            if wpm_decisions:
-                speed = wpm_decisions[i].get("speed_factor", 1.0)
-                if abs(speed - 1.0) > 1e-3:
-                    words_for_clip = video_edit.scale_word_timestamps(
-                        words_for_clip, speed)
-            cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
-            trimmed_ok = False
-            if words_for_clip:
-                try:
-                    await asyncio.to_thread(
-                        video_edit.trim_to_first_word, p, cut,
-                        words_for_clip, pad_secs=0.0, job_id=edit_id,
-                    )
-                    leading_trimmed.append(cut)
-                    trimmed_ok = True
-                except (RuntimeError, ValueError):
-                    pass
-            if not trimmed_ok:
-                try:
-                    await asyncio.to_thread(
-                        video_edit.trim_leading_silence, p, cut,
-                        threshold_db=threshold_db,
-                        min_silence_secs=0.05,  # very aggressive — exact start
-                        job_id=edit_id,
-                    )
-                    leading_trimmed.append(cut)
-                except (RuntimeError, ValueError):
-                    leading_trimmed.append(p)
-        ordered_paths = leading_trimmed
+    # 4.5. Per-clip leading-silence trim — ALWAYS runs (Hugo's hard
+    # requirement: every clip in a multi-clip concat must start exactly
+    # on the first spoken word, even when the user has un-checked
+    # "Trim silences" for interior silences). Uses Whisper words from
+    # step 2, scaled by the WPM speed_factor if the clip was stretched
+    # in step 4. Falls back to silencedetect-based trim_leading_silence
+    # when no words / no first-word timestamp.
+    leading_trimmed: list[Path] = []
+    for i, p in enumerate(ordered_paths):
+        words_for_clip = list(ordered_transcripts[i])
+        # If we WPM-stretched this clip the file timing is now scaled;
+        # scale the word timestamps accordingly so we trim at the right
+        # post-stretch offset.
+        if wpm_decisions:
+            speed = wpm_decisions[i].get("speed_factor", 1.0)
+            if abs(speed - 1.0) > 1e-3:
+                words_for_clip = video_edit.scale_word_timestamps(
+                    words_for_clip, speed)
+        cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
+        trimmed_ok = False
+        if words_for_clip:
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_to_first_word, p, cut,
+                    words_for_clip, pad_secs=0.0, job_id=edit_id,
+                )
+                leading_trimmed.append(cut)
+                trimmed_ok = True
+            except (RuntimeError, ValueError):
+                pass
+        if not trimmed_ok:
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_leading_silence, p, cut,
+                    threshold_db=threshold_db,
+                    min_silence_secs=0.05,  # very aggressive — exact start
+                    job_id=edit_id,
+                )
+                leading_trimmed.append(cut)
+            except (RuntimeError, ValueError):
+                leading_trimmed.append(p)
+    ordered_paths = leading_trimmed
 
     # 5. Concat in script order.
     concat_out = edit_dir / "01-concat.mp4"
