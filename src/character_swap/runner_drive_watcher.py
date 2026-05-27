@@ -42,6 +42,13 @@ _log = logging.getLogger("higgsfield_drive_watcher")
 # can still re-trigger auto-process if it failed mid-pipeline last cycle.
 _AUTO_PROCESSED_LOG = "higgsfield_drive_auto_processed.json"
 
+# Module-level lock that serializes the Telegram send step across all
+# concurrent auto-process tasks. Hitting Telegram's per-chat rate limit
+# (~1 msg/s for media) causes silent 429 failures, so we let one upload
+# finish before the next begins. Trim+transcribe+caption stages still
+# run fully parallel.
+_TELEGRAM_SEND_LOCK = asyncio.Lock()
+
 
 def _seen_path() -> Path:
     """Persisted set of Drive file IDs we've already downloaded — survives
@@ -213,8 +220,12 @@ async def poll_once() -> dict[str, Any]:
         return {"ok": False, "reason": "folder_not_found",
                 "looked_for": settings.higgsfield_drive_folder_name}
 
+    # Higgsfield organizes exports as `AI INF Videos/<project>/<clip>.zip`,
+    # so we need to walk subfolders. `recursive=True` flattens everything
+    # we care about into one list.
     files = await asyncio.to_thread(
         google_drive.list_processable_in_folder, folder_id,
+        page_size=100, recursive=True,
     )
     seen = _load_seen()
     inbox = _inbox_dir()
@@ -377,28 +388,34 @@ async def _auto_process_one(video_path: Path, *, drive_id: str,
         return
 
     # 5. Deliver via Telegram. Soft-fail if not configured (keep file
-    # around for manual pickup).
+    # around for manual pickup). Serialized via _TELEGRAM_SEND_LOCK so
+    # concurrent auto-process tasks don't trip Telegram's per-chat rate
+    # limit (~1 msg/s for media → silent 429 otherwise).
     if telegram.configured():
-        try:
-            size = final_out.stat().st_size
-            caption = (f"✓ {original_name}\n"
-                       f"{size // 1024 // 1024} MB · "
-                       f"{len(words)} words · capcut-purple-pill")
-            if size <= 50 * 1024 * 1024:
-                await asyncio.to_thread(
-                    telegram.send_video, final_out, caption=caption,
-                )
-            else:
-                # 50 MB sendVideo cap; fall back to document for larger.
-                await asyncio.to_thread(
-                    telegram.send_document, final_out, caption=caption,
-                )
-            _log.info("auto-process Telegram-delivered: %s", original_name)
-        except Exception as e:
-            _log.warning("Telegram delivery failed for %s: %s",
-                         original_name, e)
-            # Don't mark as auto-processed → next poll cycle retries.
-            return
+        size = final_out.stat().st_size
+        caption = (f"✓ {original_name}\n"
+                   f"{size // 1024 // 1024} MB · "
+                   f"{len(words)} words · capcut-purple-pill")
+        async with _TELEGRAM_SEND_LOCK:
+            try:
+                if size <= 50 * 1024 * 1024:
+                    await asyncio.to_thread(
+                        telegram.send_video, final_out, caption=caption,
+                    )
+                else:
+                    # 50 MB sendVideo cap; fall back to document for larger.
+                    await asyncio.to_thread(
+                        telegram.send_document, final_out, caption=caption,
+                    )
+                _log.info("auto-process Telegram-delivered: %s", original_name)
+                # Small inter-send delay — well under Telegram's 1 msg/s
+                # cap but enough to keep them visibly ordered in the chat.
+                await asyncio.sleep(1.2)
+            except Exception as e:
+                _log.warning("Telegram delivery failed for %s: %s",
+                             original_name, e)
+                # Don't mark as auto-processed → next poll cycle retries.
+                return
     else:
         _log.info("Telegram not configured — auto-process skipping delivery "
                   "for %s (file stays in inbox)", original_name)

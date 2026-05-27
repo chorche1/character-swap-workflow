@@ -253,34 +253,47 @@ def list_videos_in_folder(folder_id: str,
 
 
 def list_processable_in_folder(folder_id: str,
-                               *, page_size: int = 100) -> list[dict[str, Any]]:
+                               *, page_size: int = 100,
+                               recursive: bool = False,
+                               _depth: int = 0) -> list[dict[str, Any]]:
     """Like `list_videos_in_folder` but also returns ZIP files. Higgsfield
     Supercomputer's Drive export wraps each clip in a ZIP, so the watcher
     needs to pick those up too. Returns a uniform list with the same shape
-    as `list_videos_in_folder`."""
+    as `list_videos_in_folder`.
+
+    When `recursive=True`, also walks subfolders (Higgsfield's actual
+    export pattern is `AI INF Videos / <project name> / <clip>.zip`).
+    Cycle-protected via `_depth` cap; we never go more than 5 levels deep
+    so a malformed Drive structure can't lock the watcher.
+    """
     svc = _service()
     if svc is None:
         return []
+    if _depth > 5:
+        return []
     try:
         # Either a `video/*` MIME or one of the ZIP-ish MIME types
-        # Higgsfield / browsers use for `.zip`.
+        # Higgsfield / browsers use for `.zip`. Plus folders when we're
+        # walking recursively.
+        mime_clauses = [
+            "mimeType contains 'video/'",
+            "mimeType = 'application/zip'",
+            "mimeType = 'application/x-zip-compressed'",
+            "mimeType = 'application/octet-stream'",
+        ]
+        if recursive:
+            mime_clauses.append("mimeType = 'application/vnd.google-apps.folder'")
+        q = (f"'{folder_id}' in parents "
+             f"and ({' or '.join(mime_clauses)}) "
+             f"and trashed = false")
         results = svc.files().list(
-            q=(f"'{folder_id}' in parents "
-               f"and ("
-               f"  mimeType contains 'video/' "
-               f"  or mimeType = 'application/zip' "
-               f"  or mimeType = 'application/x-zip-compressed' "
-               f"  or mimeType = 'application/octet-stream'"
-               f") "
-               f"and trashed = false"),
+            q=q,
             spaces="drive",
             fields="files(id, name, mimeType, modifiedTime, size, webViewLink)",
             orderBy="modifiedTime desc",
             pageSize=page_size,
         ).execute()
-        # When Drive returns octet-stream, only keep entries whose name
-        # ends in `.zip` — there's no other way to know without downloading.
-        out = []
+        out: list[dict[str, Any]] = []
         for f in results.get("files", []):
             mime = (f.get("mimeType") or "").lower()
             name = (f.get("name") or "").lower()
@@ -290,6 +303,13 @@ def list_processable_in_folder(folder_id: str,
                 out.append(f)
             elif mime == "application/octet-stream" and name.endswith(".zip"):
                 out.append(f)
+            elif (recursive
+                  and mime == "application/vnd.google-apps.folder"):
+                # Recurse into the subfolder, concat its processable files.
+                out.extend(list_processable_in_folder(
+                    f["id"], page_size=page_size,
+                    recursive=True, _depth=_depth + 1,
+                ))
         return out
     except Exception:
         return []
