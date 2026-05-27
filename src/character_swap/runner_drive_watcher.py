@@ -312,12 +312,15 @@ async def _auto_process_one(video_path: Path, *, drive_id: str,
     edit_dir = settings.output_dir / "editor" / edit_id
     edit_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Trim leading + interior silences.
+    # 1. Trim leading + interior silences. Hugo's preferred defaults:
+    # -25 dB threshold, 0.30 s min-silence, 0.07 s padding around speech.
+    # Match the values surfaced in the multi-clip Trim tab so the
+    # automated path produces the same audio shape as a manual render.
     trimmed = edit_dir / "01-trimmed.mp4"
     try:
         await asyncio.to_thread(
             video_edit.trim_silences, video_path, trimmed,
-            threshold_db=-30.0, min_silence_secs=0.25, pad_secs=0.05,
+            threshold_db=-25.0, min_silence_secs=0.30, pad_secs=0.07,
             job_id=edit_id,
         )
         current = trimmed

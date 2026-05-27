@@ -97,9 +97,9 @@ function studio() {
     _brollPollTimer: null,
     editor: {
       sourceVideo: null,           // {file, url, name}
-      thresholdDb: -30,
-      minSilenceSecs: 0.25,   // Hugo's preferred multi-clip default (was 0.4)
-      padSecs: 0.05,
+      thresholdDb: -25,       // Hugo's preferred multi-clip default
+      minSilenceSecs: 0.30,   // Hugo's preferred multi-clip default
+      padSecs: 0.07,          // Hugo's preferred multi-clip default
       trimming: false,
       template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
       captioning: false,

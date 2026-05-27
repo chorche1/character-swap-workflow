@@ -2379,9 +2379,9 @@ async def editor_templates() -> list[dict]:
 async def editor_trim_silences(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.25),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-25.0),
+    min_silence_secs: float = Form(0.30),
+    pad_secs: float = Form(0.07),
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
     `output/editor/<edit_id>/trimmed.mp4` and returns a MediaGeneration-shaped
@@ -2469,9 +2469,9 @@ async def editor_captions(
 @app.post("/api/editor/auto_edit")
 async def editor_auto_edit(
     file: UploadFile = File(...),
-    threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.25),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-25.0),
+    min_silence_secs: float = Form(0.30),
+    pad_secs: float = Form(0.07),
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
@@ -2638,9 +2638,9 @@ async def editor_auto_edit(
 async def editor_multi_auto_edit(
     files: list[UploadFile] = File(...),
     script: str = Form(...),
-    threshold_db: float = Form(-30.0),
-    min_silence_secs: float = Form(0.25),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-25.0),
+    min_silence_secs: float = Form(0.30),
+    pad_secs: float = Form(0.07),
     voice_id: str | None = Form(None),
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
