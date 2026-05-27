@@ -3551,6 +3551,12 @@ async def health() -> dict:
             "character_swap.clients.google_drive",
             fromlist=["write_status"],
         ).write_status()["ready"],
+        # Whether the Higgsfield auto-process pipeline can deliver to
+        # Telegram. False = files land in the inbox but don't get pushed.
+        "telegram_ready": bool(
+            settings.telegram_bot_token and settings.telegram_chat_id
+        ),
+        "higgsfield_auto_process": settings.higgsfield_auto_process,
     }
 
 

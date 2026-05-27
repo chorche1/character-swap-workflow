@@ -252,6 +252,49 @@ def list_videos_in_folder(folder_id: str,
         return []
 
 
+def list_processable_in_folder(folder_id: str,
+                               *, page_size: int = 100) -> list[dict[str, Any]]:
+    """Like `list_videos_in_folder` but also returns ZIP files. Higgsfield
+    Supercomputer's Drive export wraps each clip in a ZIP, so the watcher
+    needs to pick those up too. Returns a uniform list with the same shape
+    as `list_videos_in_folder`."""
+    svc = _service()
+    if svc is None:
+        return []
+    try:
+        # Either a `video/*` MIME or one of the ZIP-ish MIME types
+        # Higgsfield / browsers use for `.zip`.
+        results = svc.files().list(
+            q=(f"'{folder_id}' in parents "
+               f"and ("
+               f"  mimeType contains 'video/' "
+               f"  or mimeType = 'application/zip' "
+               f"  or mimeType = 'application/x-zip-compressed' "
+               f"  or mimeType = 'application/octet-stream'"
+               f") "
+               f"and trashed = false"),
+            spaces="drive",
+            fields="files(id, name, mimeType, modifiedTime, size, webViewLink)",
+            orderBy="modifiedTime desc",
+            pageSize=page_size,
+        ).execute()
+        # When Drive returns octet-stream, only keep entries whose name
+        # ends in `.zip` — there's no other way to know without downloading.
+        out = []
+        for f in results.get("files", []):
+            mime = (f.get("mimeType") or "").lower()
+            name = (f.get("name") or "").lower()
+            if mime.startswith("video/"):
+                out.append(f)
+            elif mime in ("application/zip", "application/x-zip-compressed"):
+                out.append(f)
+            elif mime == "application/octet-stream" and name.endswith(".zip"):
+                out.append(f)
+        return out
+    except Exception:
+        return []
+
+
 def download_file(file_id: str, dest: Path) -> bool:
     """Stream a Drive file to `dest`. Returns True on success."""
     svc = _service()

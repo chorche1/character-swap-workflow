@@ -44,12 +44,23 @@ class Settings(BaseSettings):
     # `output/higgsfield-inbox/`, and surfaces them in the Editor multi-clip
     # tab. Folder can be specified by name (we resolve to ID on first run)
     # OR directly by Drive folder ID (cheaper at startup).
-    higgsfield_drive_folder_name: str = Field(default="Higgsfield Output",
+    higgsfield_drive_folder_name: str = Field(default="AI INF Videos",
                                               validation_alias="HIGGSFIELD_DRIVE_FOLDER_NAME")
     higgsfield_drive_folder_id: str = Field(default="",
                                             validation_alias="HIGGSFIELD_DRIVE_FOLDER_ID")
     higgsfield_drive_poll_secs: int = Field(default=60,
                                             validation_alias="HIGGSFIELD_DRIVE_POLL_SECS")
+    # When True, every video extracted from a Drive-inbox ZIP is auto-fed
+    # through the Editor's single-clip auto-edit (trim+captions only) and
+    # the result is delivered to Telegram. Disable to revert to the
+    # manual workflow where Hugo picks clips from the inbox by hand.
+    higgsfield_auto_process: bool = Field(default=True,
+                                          validation_alias="HIGGSFIELD_AUTO_PROCESS")
+    # Telegram bot for the auto-delivery step. Get a token from @BotFather
+    # and your chat_id by messaging the bot once and curling
+    # https://api.telegram.org/bot<TOKEN>/getUpdates.
+    telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     grok_video_model: str = Field(default="grok-imagine-video", validation_alias="GROK_VIDEO_MODEL")
