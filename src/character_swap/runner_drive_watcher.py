@@ -134,34 +134,96 @@ def _save_auto_processed(ids: set[str]) -> None:
 
 
 def _extract_video_from_zip(zip_path: Path, target_dir: Path) -> Path | None:
-    """Open `zip_path`, pull the first member whose extension matches a
-    known video type, write it to `target_dir` and return the new path.
-    Returns None when the ZIP has no video member.
+    """Legacy single-video extractor. Kept for the case where a ZIP truly
+    only contains one clip; for Hugo's multi-scene Higgsfield exports
+    use `_extract_all_videos_from_zip` instead."""
+    paths = _extract_all_videos_from_zip(zip_path, target_dir)
+    return paths[0] if paths else None
+
+
+def _extract_all_videos_from_zip(zip_path: Path,
+                                  target_dir: Path) -> list[Path]:
+    """Extract EVERY video member from `zip_path` into `target_dir`.
+
+    Higgsfield Supercomputer's project ZIPs (`zhang.zip`, `Copper.zip`,
+    etc.) bundle N scene clips per ZIP — typically named
+    `01_scene-1_<...>.mp4`, `02_scene-2_<...>.mp4` and so on. We pull
+    them ALL out, prefix with the ZIP stem to avoid collisions across
+    ZIPs, and return the list ordered by their original name (the
+    filename prefix encodes intended scene order; the multi-clip
+    pipeline will re-order against the script if needed).
     """
+    extracted: list[Path] = []
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            video_member: zipfile.ZipInfo | None = None
-            for info in zf.infolist():
-                if info.is_dir():
-                    continue
-                name_lower = info.filename.lower()
-                if any(name_lower.endswith(ext) for ext in _VIDEO_EXTS):
-                    video_member = info
-                    break
-            if video_member is None:
-                _log.warning("ZIP %s has no video member; members=%s",
+            members = sorted(
+                (i for i in zf.infolist()
+                 if not i.is_dir()
+                 and any(i.filename.lower().endswith(ext)
+                         for ext in _VIDEO_EXTS)),
+                key=lambda m: m.filename,
+            )
+            if not members:
+                _log.warning("ZIP %s has no video members; first 5 entries=%s",
                              zip_path.name,
                              [i.filename for i in zf.infolist()[:5]])
-                return None
+                return []
             target_dir.mkdir(parents=True, exist_ok=True)
-            # Preserve the original extension; strip any directory path.
-            ext = Path(video_member.filename).suffix
-            out_path = target_dir / f"{zip_path.stem}{ext}"
-            with zf.open(video_member) as src, out_path.open("wb") as dst:
-                shutil.copyfileobj(src, dst)
-            return out_path
+            for idx, member in enumerate(members):
+                # Strip any directory components; preserve extension.
+                member_name = Path(member.filename).name
+                ext = Path(member_name).suffix
+                # Prefix with the ZIP stem + index so 5 ZIPs each with
+                # 5 `01_scene-1_*.mp4` files don't clobber each other.
+                out_path = target_dir / (
+                    f"{zip_path.stem}__{idx:02d}_{Path(member_name).stem}{ext}"
+                )
+                with zf.open(member) as src, out_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                extracted.append(out_path)
+        return extracted
     except (zipfile.BadZipFile, OSError) as e:
         _log.warning("failed to extract %s: %s", zip_path.name, e)
+        return []
+
+
+def _fetch_script_text(parent_folder_id: str) -> str | None:
+    """Look for a `script.txt` (or any `.txt`) sibling of the ZIPs in the
+    given Drive folder and return its contents. Used to drive the
+    multi-clip pipeline's `match_clips_by_transcript` so each ZIP's
+    scene clips concat in the intended narrative order.
+
+    Returns None if no .txt is found OR if Drive auth is broken — caller
+    falls back to filename-order concatenation in that case.
+    """
+    try:
+        svc = google_drive._service()
+        if svc is None:
+            return None
+        r = svc.files().list(
+            q=(f"'{parent_folder_id}' in parents "
+               f"and mimeType = 'text/plain' "
+               f"and trashed = false"),
+            fields="files(id, name)",
+            pageSize=10,
+        ).execute()
+        files = r.get("files", [])
+        if not files:
+            return None
+        # Prefer one literally called `script.txt`; else take the first .txt.
+        target = next((f for f in files
+                       if f["name"].lower() == "script.txt"),
+                      files[0])
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, svc.files().get_media(fileId=target["id"]))
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        return buf.getvalue().decode("utf-8", errors="replace")
+    except Exception as e:
+        _log.warning("failed to fetch script.txt: %s", e)
         return None
 
 
@@ -222,11 +284,57 @@ async def poll_once() -> dict[str, Any]:
 
     # Higgsfield organizes exports as `AI INF Videos/<project>/<clip>.zip`,
     # so we need to walk subfolders. `recursive=True` flattens everything
-    # we care about into one list.
-    files = await asyncio.to_thread(
-        google_drive.list_processable_in_folder, folder_id,
-        page_size=100, recursive=True,
-    )
+    # we care about into one list. We also need the `parents` field so
+    # `_auto_process_zip` can pull the sibling `script.txt` for the
+    # multi-clip script-matching step.
+    def _list_with_parents():
+        svc = google_drive._service()
+        if svc is None:
+            return []
+        return google_drive.list_processable_in_folder(
+            folder_id, page_size=100, recursive=True,
+        )
+    # We need parents — re-list directly so we can request that field.
+    def _list_with_parents_recursive(root_id: str, depth: int = 0) -> list[dict]:
+        svc = google_drive._service()
+        if svc is None:
+            return []
+        if depth > 5:
+            return []
+        try:
+            mime_clauses = [
+                "mimeType contains 'video/'",
+                "mimeType = 'application/zip'",
+                "mimeType = 'application/x-zip-compressed'",
+                "mimeType = 'application/octet-stream'",
+                "mimeType = 'application/vnd.google-apps.folder'",
+            ]
+            q = (f"'{root_id}' in parents "
+                 f"and ({' or '.join(mime_clauses)}) "
+                 f"and trashed = false")
+            results = svc.files().list(
+                q=q, spaces="drive",
+                fields="files(id, name, mimeType, modifiedTime, size, parents)",
+                orderBy="modifiedTime desc",
+                pageSize=100,
+            ).execute()
+            out: list[dict] = []
+            for f in results.get("files", []):
+                mime = (f.get("mimeType") or "").lower()
+                name = (f.get("name") or "").lower()
+                if mime.startswith("video/"):
+                    out.append(f)
+                elif mime in ("application/zip", "application/x-zip-compressed"):
+                    out.append(f)
+                elif mime == "application/octet-stream" and name.endswith(".zip"):
+                    out.append(f)
+                elif mime == "application/vnd.google-apps.folder":
+                    out.extend(_list_with_parents_recursive(f["id"], depth + 1))
+            return out
+        except Exception:
+            return []
+
+    files = await asyncio.to_thread(_list_with_parents_recursive, folder_id)
     seen = _load_seen()
     inbox = _inbox_dir()
     inbox.mkdir(parents=True, exist_ok=True)
@@ -238,8 +346,10 @@ async def poll_once() -> dict[str, Any]:
         mime = (f.get("mimeType") or "").lower()
         original_name = f.get("name") or fid
         ext = _ext_from_mime(mime)
-        # If it's a ZIP we download to a temp dir, extract the video, and
-        # the extracted file becomes the canonical inbox entry.
+        # If it's a ZIP we download to a temp dir, extract EVERY video
+        # member, and fan them out as a multi-clip batch (Higgsfield's
+        # project ZIPs contain N scene clips that should concat into
+        # one stitched video, ordered by the sibling script.txt).
         is_zip = (mime in ("application/zip", "application/x-zip-compressed")
                   or (mime == "application/octet-stream"
                       and original_name.lower().endswith(".zip"))
@@ -252,19 +362,32 @@ async def poll_once() -> dict[str, Any]:
             if not ok:
                 _log.warning("failed to download ZIP %s (%s)", fid, original_name)
                 continue
-            video_path = await asyncio.to_thread(
-                _extract_video_from_zip, zip_path, inbox,
+            video_paths = await asyncio.to_thread(
+                _extract_all_videos_from_zip, zip_path, inbox,
             )
             try:
                 zip_path.unlink()
             except OSError:
                 pass
-            if video_path is None:
-                # Mark seen so we don't keep retrying — broken ZIPs stay
-                # broken. User can manually re-export from Higgsfield.
+            if not video_paths:
+                # Mark seen so we don't keep retrying — broken/empty ZIPs
+                # stay broken. User can re-export from Higgsfield.
                 seen.add(fid)
                 continue
-            dest = video_path
+            seen.add(fid)
+            new_files.append({
+                "drive_id": fid,
+                "name": original_name,
+                "size_bytes": int(f.get("size") or 0),
+                "modified_time": f.get("modifiedTime"),
+                "is_zip": True,
+                "video_paths": [str(p) for p in video_paths],
+                # Parent folder id so we can fetch the sibling script.txt
+                # from Drive for the multi-clip ordering step.
+                "parent_folder_id": (f.get("parents") or [None])[0],
+                # First-extracted path is what the inbox endpoint shows.
+                "local_path": str(video_paths[0]),
+            })
         else:
             dest = inbox / f"{fid}{ext or '.mp4'}"
             ok = await asyncio.to_thread(google_drive.download_file, fid, dest)
@@ -272,29 +395,38 @@ async def poll_once() -> dict[str, Any]:
                 _log.warning("failed to download Drive file %s (%s)",
                              fid, original_name)
                 continue
-
-        seen.add(fid)
-        new_files.append({
-            "drive_id": fid,
-            "name": original_name,
-            "size_bytes": int(f.get("size") or 0),
-            "modified_time": f.get("modifiedTime"),
-            "local_path": str(dest),
-        })
+            seen.add(fid)
+            new_files.append({
+                "drive_id": fid,
+                "name": original_name,
+                "size_bytes": int(f.get("size") or 0),
+                "modified_time": f.get("modifiedTime"),
+                "is_zip": False,
+                "local_path": str(dest),
+            })
 
     if new_files:
         _save_seen(seen)
 
-    # Auto-process step: fire-and-forget background tasks for every fresh
-    # file. Each task runs the Editor's single-clip auto-edit (trim +
-    # captions, no WPM, no voice swap) and Telegrams the result.
+    # Auto-process step: fire-and-forget background tasks per fresh
+    # file. For ZIPs we run the multi-clip pipeline (transcribe each
+    # member, match against the parent folder's script.txt, concat,
+    # caption). For standalone videos we use the single-clip path.
     if settings.higgsfield_auto_process and new_files:
         for nf in new_files:
-            asyncio.create_task(
-                _auto_process_one(Path(nf["local_path"]),
-                                  drive_id=nf["drive_id"],
-                                  original_name=nf["name"])
-            )
+            if nf.get("is_zip"):
+                asyncio.create_task(_auto_process_zip(
+                    [Path(p) for p in nf["video_paths"]],
+                    parent_folder_id=nf.get("parent_folder_id"),
+                    drive_id=nf["drive_id"],
+                    original_name=nf["name"],
+                ))
+            else:
+                asyncio.create_task(_auto_process_one(
+                    Path(nf["local_path"]),
+                    drive_id=nf["drive_id"],
+                    original_name=nf["name"],
+                ))
 
     return {
         "ok": True,
@@ -419,6 +551,209 @@ async def _auto_process_one(video_path: Path, *, drive_id: str,
     else:
         _log.info("Telegram not configured — auto-process skipping delivery "
                   "for %s (file stays in inbox)", original_name)
+
+    processed.add(drive_id)
+    _save_auto_processed(processed)
+
+
+async def _auto_process_zip(video_paths: list[Path], *,
+                             parent_folder_id: str | None,
+                             drive_id: str,
+                             original_name: str) -> None:
+    """Multi-clip auto-edit for one Higgsfield ZIP's video members.
+
+    Mirrors `/api/editor/multi_auto_edit`'s happy path with Hugo's
+    configuration (trim ON, captions ON capcut-purple-pill, WPM OFF,
+    voice swap OFF). Pulls the parent folder's `script.txt` from Drive
+    to drive the script-position matching that orders the clips.
+
+    On success: writes drive_id into the auto-processed set and posts
+    the final stitched MP4 to Telegram. On any irrecoverable failure:
+    logs + Telegram-notifies + returns without marking processed (next
+    poll cycle retries).
+    """
+    processed = _load_auto_processed()
+    if drive_id in processed:
+        return
+    if not video_paths:
+        _log.warning("auto-process-zip called with no videos for %s",
+                     original_name)
+        return
+
+    from character_swap import video_edit
+    from character_swap.clients import telegram
+
+    edit_id = "drvzip_" + secrets.token_hex(5)
+    edit_dir = settings.output_dir / "editor" / edit_id
+    edit_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Fetch script.txt from the parent Drive folder. Without it the
+    # clips concat in filename order (Higgsfield names them
+    # `01_scene-1_…`, `02_scene-2_…` so that's a usable fallback).
+    script_text = ""
+    if parent_folder_id:
+        fetched = await asyncio.to_thread(_fetch_script_text, parent_folder_id)
+        if fetched:
+            script_text = fetched
+    if script_text:
+        (edit_dir / "script.txt").write_text(script_text, encoding="utf-8")
+
+    # 2. Transcribe every clip in parallel.
+    try:
+        transcripts: list[list] = await asyncio.gather(*[
+            asyncio.to_thread(video_edit.transcribe_words, p, job_id=edit_id)
+            for p in video_paths
+        ])
+    except Exception as e:
+        _log.warning("auto-process-zip transcribe failed for %s: %s",
+                     original_name, e)
+        _maybe_telegram_error(
+            f"Auto-process: transcribe failed for {original_name}: {e}"
+        )
+        return
+
+    # 3. Match each clip to a script position and reorder. When script
+    # is empty, the matcher returns clips in upload order (filename
+    # order, which matches Higgsfield's `01_scene-1_…` numbering).
+    plain_transcripts = [" ".join(w.text for w in ws) for ws in transcripts]
+    placements = video_edit.match_clips_by_transcript(
+        plain_transcripts, script_text or " ".join(plain_transcripts),
+    )
+    ordered_paths = [video_paths[p["idx"]] for p in placements]
+    ordered_transcripts = [transcripts[p["idx"]] for p in placements]
+
+    # 4. Per-clip leading-silence trim (always — Hugo's hard rule).
+    leading_trimmed: list[Path] = []
+    for i, p in enumerate(ordered_paths):
+        words_for_clip = list(ordered_transcripts[i])
+        cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
+        trimmed_ok = False
+        if words_for_clip:
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_to_first_word, p, cut,
+                    words_for_clip, pad_secs=0.0, job_id=edit_id,
+                )
+                leading_trimmed.append(cut)
+                trimmed_ok = True
+            except (RuntimeError, ValueError):
+                pass
+        if not trimmed_ok:
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_leading_silence, p, cut,
+                    threshold_db=-25.0, min_silence_secs=0.05,
+                    job_id=edit_id,
+                )
+                leading_trimmed.append(cut)
+            except (RuntimeError, ValueError):
+                leading_trimmed.append(p)
+    ordered_paths = leading_trimmed
+
+    # 5. Concat in script order.
+    concat_out = edit_dir / "01-concat.mp4"
+    try:
+        await asyncio.to_thread(
+            video_edit.concat_videos, ordered_paths, concat_out,
+        )
+    except Exception as e:
+        _log.warning("auto-process-zip concat failed for %s: %s",
+                     original_name, e)
+        _maybe_telegram_error(
+            f"Auto-process: concat failed for {original_name}: {e}"
+        )
+        return
+    current = concat_out
+
+    # 6. Interior silence trim on the concat'd output (Hugo's defaults).
+    trimmed = edit_dir / "02-trimmed.mp4"
+    try:
+        await asyncio.to_thread(
+            video_edit.trim_silences, current, trimmed,
+            threshold_db=-25.0, min_silence_secs=0.30, pad_secs=0.07,
+            job_id=edit_id,
+        )
+        current = trimmed
+    except Exception:
+        # Skip — concat already produced a usable file.
+        pass
+
+    # 7. Re-transcribe the concat'd output for caption rendering.
+    # Word timestamps from the per-clip transcripts don't line up with
+    # the concat timeline after trim+stitch.
+    try:
+        words = await asyncio.to_thread(
+            video_edit.transcribe_words, current, job_id=edit_id,
+        )
+    except Exception as e:
+        _log.warning("auto-process-zip post-concat transcribe failed for %s: %s",
+                     original_name, e)
+        _maybe_telegram_error(
+            f"Auto-process: post-concat transcribe failed for {original_name}: {e}"
+        )
+        return
+
+    # 7b. Whisper-precise leading-silence recut on the concat'd output
+    # so the final MP4 opens exactly on speech.
+    if words and words[0].start > 0.1:
+        recut = edit_dir / "02b-whisper-recut.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.trim_to_first_word, current, recut, words,
+                pad_secs=0.0, job_id=edit_id,
+            )
+            words = video_edit.shift_word_timestamps(words, words[0].start)
+            current = recut
+        except Exception:
+            pass
+
+    # 8. Render capcut-purple-pill captions.
+    final_out = edit_dir / "04-final.mp4"
+    try:
+        style = video_edit.style_from_params("capcut-purple-pill", None)
+        (edit_dir / "words.json").write_text(
+            video_edit.words_to_json(words), encoding="utf-8",
+        )
+        (edit_dir / "pre_caption.txt").write_text(str(current), encoding="utf-8")
+        await asyncio.to_thread(
+            video_edit.render_captions, current, final_out,
+            words=words, style=style, job_id=edit_id,
+        )
+    except Exception as e:
+        _log.warning("auto-process-zip caption render failed for %s: %s",
+                     original_name, e)
+        _maybe_telegram_error(
+            f"Auto-process: caption render failed for {original_name}: {e}"
+        )
+        return
+
+    # 9. Telegram delivery — serialized via the module-level lock.
+    if telegram.configured():
+        size = final_out.stat().st_size
+        caption = (f"✓ {original_name}\n"
+                   f"{size // 1024 // 1024} MB · "
+                   f"{len(video_paths)} clips · {len(words)} words · capcut-purple-pill")
+        async with _TELEGRAM_SEND_LOCK:
+            try:
+                if size <= 50 * 1024 * 1024:
+                    await asyncio.to_thread(
+                        telegram.send_video, final_out, caption=caption,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        telegram.send_document, final_out, caption=caption,
+                    )
+                _log.info("auto-process-zip Telegram-delivered: %s",
+                          original_name)
+                await asyncio.sleep(1.2)
+            except Exception as e:
+                _log.warning("Telegram delivery failed for %s: %s",
+                             original_name, e)
+                return
+    else:
+        _log.info("Telegram not configured — auto-process-zip skipping "
+                  "delivery for %s (file at %s)",
+                  original_name, final_out)
 
     processed.add(drive_id)
     _save_auto_processed(processed)

@@ -45,6 +45,37 @@ def configured() -> bool:
     return bool(settings.telegram_bot_token and settings.telegram_chat_id)
 
 
+def _post_with_retry(url: str, *, data: dict, files: dict | None,
+                     timeout: float, max_attempts: int = 3) -> httpx.Response:
+    """POST that retries up to `max_attempts` on transient TLS / network
+    failures. Telegram's edge occasionally drops connections with
+    SSLV3_ALERT_BAD_RECORD_MAC or similar resets — a single retry with
+    a short backoff usually clears it. Each attempt seeks file handles
+    back to start so the multipart upload re-reads from the beginning."""
+    import time as _time
+    last_err: Exception | None = None
+    for attempt in range(max_attempts):
+        # Rewind any file handles in `files` so the retry sends the
+        # full body (httpx consumes streams on first send).
+        if files:
+            for v in files.values():
+                if isinstance(v, tuple) and len(v) >= 2 and hasattr(v[1], "seek"):
+                    try:
+                        v[1].seek(0)
+                    except OSError:
+                        pass
+        try:
+            return httpx.post(url, data=data, files=files, timeout=timeout)
+        except httpx.HTTPError as e:
+            last_err = e
+            if attempt < max_attempts - 1:
+                _time.sleep(2 ** attempt)  # 1s, 2s, 4s ...
+                continue
+            raise RuntimeError(f"Telegram POST failed (after {max_attempts} attempts): {e}") from e
+    # Unreachable — the raise above handles the last-attempt case.
+    raise RuntimeError(f"Telegram POST failed: {last_err}")
+
+
 def send_video(file_path: Path, *, caption: str = "",
                chat_id: str | None = None, timeout: float = 300.0) -> dict:
     """Upload `file_path` to Telegram as a video message.
@@ -57,7 +88,8 @@ def send_video(file_path: Path, *, caption: str = "",
     attachment.
 
     `timeout` defaults to 5 min — Telegram's API can be slow with large
-    uploads on patchy connections.
+    uploads on patchy connections. Retries up to 3× on transient
+    network/TLS failures via `_post_with_retry`.
     """
     _require_telegram()
     target = chat_id or settings.telegram_chat_id
@@ -83,10 +115,7 @@ def send_video(file_path: Path, *, caption: str = "",
             "caption": caption[:1024],   # Telegram cap
             "supports_streaming": "true",
         }
-        try:
-            r = httpx.post(url, data=data, files=files, timeout=timeout)
-        except httpx.HTTPError as e:
-            raise RuntimeError(f"Telegram POST failed: {e}") from e
+        r = _post_with_retry(url, data=data, files=files, timeout=timeout)
 
     if r.status_code != 200:
         raise RuntimeError(
@@ -115,10 +144,7 @@ def send_document(file_path: Path, *, caption: str = "",
     with file_path.open("rb") as fh:
         files = {"document": (file_path.name, fh, "video/mp4")}
         data = {"chat_id": target, "caption": caption[:1024]}
-        try:
-            r = httpx.post(url, data=data, files=files, timeout=timeout)
-        except httpx.HTTPError as e:
-            raise RuntimeError(f"Telegram POST failed: {e}") from e
+        r = _post_with_retry(url, data=data, files=files, timeout=timeout)
 
     if r.status_code != 200:
         raise RuntimeError(
