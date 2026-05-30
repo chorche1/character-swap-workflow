@@ -10,6 +10,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from character_swap import content_policy
 from character_swap.call_log import record
 from character_swap.config import settings
 from character_swap.images import encode_b64, media_type
@@ -139,15 +140,24 @@ def status(*, job_id: str, character: str,
         return r.json()
 
 
+def generate_image(*, prompt: str, **kwargs) -> bytes:
+    """Free-form image generation, auto-recovering from content-policy
+    rejections by retrying with a minimally softened prompt (see
+    `content_policy`). Thin wrapper around `_generate_image_once`."""
+    return content_policy.generate_with_softening(
+        _generate_image_once, prompt=prompt, **kwargs
+    )
+
+
 @retry(
     retry=retry_if_exception_type(_RETRY_EXCS),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,
 )
-def generate_image(*, prompt: str, character: str = "freeform",
-                   aspect_ratio: str | None = None,
-                   app_job_id: str | None = None) -> bytes:
+def _generate_image_once(*, prompt: str, character: str = "freeform",
+                         aspect_ratio: str | None = None,
+                         app_job_id: str | None = None) -> bytes:
     """Free-form image generation via xAI's images endpoint.
 
     Returns raw PNG bytes. Reference images are not part of the request body

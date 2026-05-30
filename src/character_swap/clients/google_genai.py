@@ -17,6 +17,7 @@ from pathlib import Path
 
 import httpx
 
+from character_swap import content_policy
 from character_swap.call_log import record
 from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
@@ -56,7 +57,16 @@ def _to_inline_part(path: Path) -> dict:
     }
 
 
-def generate_nano_banana(
+def generate_nano_banana(*, prompt: str, **kwargs) -> bytes:
+    """Generate via Gemini, auto-recovering from content-policy / safety
+    rejections by retrying with a minimally softened prompt (see
+    `content_policy`). Thin wrapper around `_generate_nano_banana_once`."""
+    return content_policy.generate_with_softening(
+        _generate_nano_banana_once, prompt=prompt, **kwargs
+    )
+
+
+def _generate_nano_banana_once(
     *,
     prompt: str,
     reference_images: list[Path] | None = None,
@@ -123,6 +133,25 @@ def generate_nano_banana(
             blob = part.get("inline_data") or part.get("inlineData")
             if blob and blob.get("data"):
                 return base64.b64decode(blob["data"])
+
+    # No image part. Gemini signals a moderation/safety block as HTTP 200 with
+    # either a top-level promptFeedback.blockReason or a per-candidate
+    # finishReason of SAFETY / IMAGE_SAFETY / PROHIBITED_CONTENT. Surface that
+    # as a clearly-labeled "content policy" error so the softening retry kicks
+    # in (vs a generic empty-response failure).
+    pf = payload.get("promptFeedback") or payload.get("prompt_feedback") or {}
+    block_reason = str(pf.get("blockReason") or pf.get("block_reason") or "")
+    if not block_reason:
+        for cand in candidates:
+            fr = str(cand.get("finishReason") or cand.get("finish_reason") or "")
+            if fr and fr.upper() not in ("STOP", "MAX_TOKENS"):
+                block_reason = fr
+                break
+    if block_reason:
+        raise RuntimeError(
+            f"Gemini blocked this prompt (content policy / safety, "
+            f"reason: {block_reason}, model={google_model})."
+        )
     raise RuntimeError(
         f"Gemini returned no image data for model={google_model}. "
         f"Response shape: {list(payload.keys())}"

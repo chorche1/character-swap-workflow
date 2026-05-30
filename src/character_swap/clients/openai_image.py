@@ -12,6 +12,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from character_swap import content_policy
 from character_swap.call_log import record
 from character_swap.config import settings
 
@@ -41,13 +42,22 @@ def _b64_to_bytes(b64: str) -> bytes:
     return base64.b64decode(b64)
 
 
+def generate(*, prompt: str, **kwargs) -> bytes:
+    """Generate an image, auto-recovering from content-policy rejections by
+    retrying with a minimally softened prompt (see `content_policy`). Thin
+    wrapper around `_generate_once`; all other kwargs pass straight through."""
+    return content_policy.generate_with_softening(
+        _generate_once, prompt=prompt, **kwargs
+    )
+
+
 @retry(
     retry=retry_if_exception_type(_RETRY_EXCS),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=120),
     reraise=True,
 )
-def generate(
+def _generate_once(
     *,
     prompt: str,
     reference_images: list[Path] | None = None,
