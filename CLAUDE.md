@@ -363,7 +363,7 @@ web/static/remotion-preview.js
 
 Hardcoded in `pipeline.py::GENERATION_PROMPT`. Used for every initial variant unless the job has a custom prompt OR its project has a `default_prompt`. Edits use the user's custom prompt instead.
 
-> "The man from the second picture is in the exact same pose in the exact same position and holding the exact same stuff in the exact same place as the man in the first picture. Remove any text overlays. 9:16 ratio. Change the background but same vibe. No blurry background."
+As of the scene-regeneration-skill port, this is a **structured Option-B enforcement prompt** (not the old one-liner). It locks: full demographic override (zero identity bleed from the original subject), pixel-exact prop/layout preservation (count/color/material/position/physical-state), **background preserved exactly (Option B — no longer "change the background")**, exact framing & pose anchor, brand-label legibility, burnt-in caption/watermark removal, and an inline `AVOID:` negative clause (the image models — GPT Image / Grok / Nano Banana / Nano Banana Pro — have no separate negative-prompt field, so negatives live inline). The **AI Director** system prompt (`prompt_director.py::SWAP_DIRECTOR_SYSTEM`) enforces the same directive set per (character × scene × variant) but can name specific props/demographics/background details because it sees the actual images. Both ported from Hugo's `scene-regeneration-prompt-v4` Higgsfield skill.
 
 Order matters: scene is reference #1, character is reference #2.
 
