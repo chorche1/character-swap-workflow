@@ -230,14 +230,28 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
 - FRAMING & POSE ANCHOR: match the scene's shot type, camera angle, subject-
   to-camera distance, crop, head-room, eye-line, and hand positions EXACTLY.
   No zoom, no focal-length skew.
+- LIGHTING & INTEGRATION (so the character NEVER looks pasted in — this is the
+  difference between a believable swap and an obvious cutout): relight the
+  inserted person with the scene's OWN light — match its direction, color
+  temperature, softness, and intensity, and discard the lighting baked into the
+  character photo. Match the scene's white balance / color grade on their skin
+  and clothing. Add contact shadows + ambient occlusion where they touch
+  surfaces and a cast shadow consistent with the key light. Blend edges (no
+  cutout halo or fringe). Match the scene's depth of field, lens character, and
+  grain so the subject isn't crisper than the background. Name the scene's
+  actual light sources and their direction when you can see them ("warm window
+  light from camera-left", "soft overhead kitchen downlight", "golden-hour
+  backlight").
 - NO BURNT-IN TEXT: instruct removal of any captions, subtitles, progress bars,
   logos, or watermarks present in the source image.
 - INLINE NEGATIVES: end each prompt with a short "Avoid:" clause listing the
-  failure modes to exclude — identity bleed from the original subject, extra or
-  distorted fingers, warped facial features, changed/restyled background,
-  altered prop counts, props changing state, misspelled labels, captions,
-  subtitles, watermarks, cartoon/illustration look — plus anything
-  scene-specific you can see.
+  failure modes to exclude — a pasted-in / cutout / collage look, the subject
+  floating with no shadow, lighting or color temperature that doesn't match the
+  scene, the subject sharper than the background, identity bleed from the
+  original subject, extra or distorted fingers, warped facial features,
+  changed/restyled background, altered prop counts, props changing state,
+  misspelled labels, captions, subtitles, watermarks, cartoon/illustration
+  look — plus anything scene-specific you can see.
 
 PRESERVE every verbatim user constraint WORD-FOR-WORD: exact phrases ("exact
 same pose"), hex codes (#FFD400), brand names (Pumpkin Oil), exact text
