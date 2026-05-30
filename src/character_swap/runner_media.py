@@ -93,6 +93,7 @@ VIDEO_MODELS: dict[str, dict] = {
     "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v3":             {"label": "Kling 3.0",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     # Legacy slug aliases — Hugo's old jobs reference these strings;
     # `kling.LEGACY_ALIASES` maps them to the new model_names. Kept in
     # the registry so the dropdown still shows a sensible label.

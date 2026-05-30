@@ -52,6 +52,11 @@ KLING_MODELS: dict[str, str] = {
     "kling-v2-1-master":  "kling-v2-1-master",
     "kling-v2-5-turbo":   "kling-v2-5-turbo",
     "kling-v2-6":         "kling-v2-6",
+    # Kling 3.0 (released 2026): cinematic visuals, native audio, std/pro via
+    # the `mode` param. Standard model_name per Kling's i2v API; if the API
+    # rejects this exact string it errors loudly (it's mapped here, so no
+    # silent fallback) — adjust the right-hand value if Kling renames it.
+    "kling-v3":           "kling-v3",
 }
 
 # Legacy slug aliases — keep existing IMAGE_MODELS entries working after
