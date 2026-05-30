@@ -302,6 +302,10 @@ function studio() {
     // jobs get one textarea per scene in Step 4; this dict is what posts
     // to /api/jobs/{id}/movement.
     movementPrompts: {},
+    // Per-approved-IMAGE movement prompts + durations (Step 4 per-image rows).
+    // variant_id → prompt / seconds. The granular Higgsfield per-slot model.
+    movementByVariant: {},
+    durationByVariant: {},
     editingVariant: null,    // {char_id, variant_id}
     editPrompt: '',
     editingTitle: false,
@@ -4534,31 +4538,79 @@ function studio() {
 
     async submitMovement() {
       if (!this.job) return;
-      // Build the dict from the per-scene textareas. Trim + drop empties so
-      // the server-side validator (which requires a prompt for every scene
-      // that has approved variants) gets a clean payload.
-      const prompts = {};
-      for (const [sid, raw] of Object.entries(this.movementPrompts || {})) {
-        const t = (raw || '').trim();
-        if (t) prompts[sid] = t;
+      // Per-IMAGE: one prompt + one duration per approved image (Higgsfield
+      // per-slot model). Build the variant-keyed dicts, trim + drop empties.
+      const imgs = this.approvedImagesForMovement();
+      const byVariant = {};
+      const durations = {};
+      const defaultDur = this.videoDurationSpec().default;
+      for (const img of imgs) {
+        const t = (this.movementByVariant[img.variant_id] || '').trim();
+        if (t) byVariant[img.variant_id] = t;
+        durations[img.variant_id] = this.durationByVariant[img.variant_id] || defaultDur;
       }
-      if (Object.keys(prompts).length === 0) {
-        this.notifyError('Add a movement prompt for at least one scene first');
+      const missing = imgs.filter(img => !byVariant[img.variant_id]);
+      if (missing.length) {
+        this.notifyError(`Add a motion prompt for every image (${missing.length} still empty)`);
         return;
       }
       const r = await fetch('/api/jobs/' + this.job.job_id + '/movement', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          movement_prompts: prompts,
+          movement_prompts_by_variant: byVariant,
+          durations_by_variant: durations,
           videos_per_character: this.videosPerChar,
           video_model: this.swapVideoModel || 'grok-imagine',
-          duration_secs: this.swapDurationSecs || null,
         }),
       });
       if (!r.ok) { this.notifyError('Movement submit failed: ' + await r.text()); return; }
       this.job = await r.json();
       this._scheduleSidebarRefresh();
+    },
+
+    // Flat, ordered list of every approved image across all approved
+    // characters — each becomes one Step-4 row (its own prompt + duration).
+    // Order: character order, then job scene order, then image order.
+    approvedImagesForMovement() {
+      if (!this.job) return [];
+      const scenes = this.job.scenes || [];
+      const sceneIndex = {};
+      scenes.forEach((s, i) => { sceneIndex[s.scene_id] = i; });
+      const primaryId = scenes[0]?.scene_id || this.job.scene_id || null;
+      const multiChar = Object.keys(this.job.characters || {}).length > 1;
+      const multiScene = scenes.length > 1;
+      const out = [];
+      for (const jc of Object.values(this.job.characters || {})) {
+        const approved = new Set(jc.approved_variant_ids || []);
+        if (jc.approved_variant_id) approved.add(jc.approved_variant_id);
+        const rows = (jc.images || [])
+          .filter(v => approved.has(v.variant_id))
+          .map(v => ({ v, sIdx: sceneIndex[v.scene_id ?? primaryId] ?? 0 }));
+        rows.sort((a, b) => a.sIdx - b.sIdx);
+        rows.forEach((row, k) => {
+          const parts = [];
+          if (multiChar) parts.push(jc.name);
+          if (multiScene) parts.push('scen ' + (row.sIdx + 1));
+          if (!multiChar && !multiScene) parts.push('#' + (out.length + 1));
+          out.push({ variant_id: row.v.variant_id, url: row.v.url,
+                     label: parts.join(' · ') });
+        });
+      }
+      return out;
+    },
+
+    // Copy the first image's prompt + duration onto every image.
+    applyFirstMovementToAll() {
+      const imgs = this.approvedImagesForMovement();
+      if (!imgs.length) return;
+      const firstId = imgs[0].variant_id;
+      const prompt = this.movementByVariant[firstId] || '';
+      const dur = this.durationByVariant[firstId] || this.videoDurationSpec().default;
+      for (const img of imgs) {
+        this.movementByVariant[img.variant_id] = prompt;
+        this.durationByVariant[img.variant_id] = dur;
+      }
     },
 
     // Which scenes (by scene_id) actually need a movement prompt? A scene
@@ -4584,9 +4636,10 @@ function studio() {
     canSubmitMovement() {
       if (!this.job || this.job.movement_prompt) return false;
       if (!this.videoModelAvailable()) return false;
-      const required = this.scenesNeedingMovementPrompts();
-      if (required.length === 0) return false;
-      return required.every(s => (this.movementPrompts[s.scene_id] || '').trim());
+      const imgs = this.approvedImagesForMovement();
+      if (imgs.length === 0) return false;
+      // Every approved image needs its own non-empty motion prompt.
+      return imgs.every(img => (this.movementByVariant[img.variant_id] || '').trim());
     },
 
     // For the locked summary: rows of {sceneIndex, url, prompt} so the UI

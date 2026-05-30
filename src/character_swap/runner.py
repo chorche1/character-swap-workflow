@@ -386,6 +386,7 @@ async def run_edit_variant(
 
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
+    duration_secs: int | None = None,
 ) -> None:
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
@@ -413,7 +414,7 @@ async def _animate_one_video(
             character_name=jc.name,
             job_id=job.job_id,
             model=video_model,
-            duration_secs=job.duration_secs,
+            duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR
@@ -527,11 +528,17 @@ async def _animate_character(
         return
     _persist(job, jc, status=CharStatus.ANIMATING)
 
-    placeholders: list[tuple[VideoVariant, str]] = []
+    # Per-image overrides win over the per-scene prompt/duration (the
+    # Higgsfield "per-slot" model). Empty/missing → fall back to the scene.
+    by_variant = dict(job.movement_prompts_by_variant or {})
+    dur_by_variant = dict(job.durations_by_variant or {})
+
+    placeholders: list[tuple[VideoVariant, str, int | None]] = []
     for src_variant_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
-        scene_prompt = prompt_for_scene(scene_id)
+        prompt = by_variant.get(src_variant_id) or prompt_for_scene(scene_id)
+        duration = dur_by_variant.get(src_variant_id) or job.duration_secs
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -541,11 +548,11 @@ async def _animate_character(
                 source_variant_id=src_variant_id,
             )
             jc.videos.append(v)
-            placeholders.append((v, scene_prompt))
+            placeholders.append((v, prompt, duration))
     _persist(job, jc)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp) for v, mp in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
     )
 
 
@@ -596,11 +603,15 @@ async def generate_more_videos(
                 or movement_prompts.get(sid)
                 or fallback)
 
-    placeholders: list[tuple[VideoVariant, str]] = []
+    by_variant = dict(job.movement_prompts_by_variant or {})
+    dur_by_variant = dict(job.durations_by_variant or {})
+
+    placeholders: list[tuple[VideoVariant, str, int | None]] = []
     for src_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_id), None)
         scene_id = variant.scene_id if variant else None
-        scene_prompt = prompt_override or prompt_for(scene_id)
+        prompt = prompt_override or by_variant.get(src_id) or prompt_for(scene_id)
+        duration = dur_by_variant.get(src_id) or job.duration_secs
         for _ in range(n):
             v = VideoVariant(
                 video_id=_short("vd_"),
@@ -610,11 +621,11 @@ async def generate_more_videos(
                 movement_prompt_override=prompt_override,
             )
             jc.videos.append(v)
-            placeholders.append((v, scene_prompt))
+            placeholders.append((v, prompt, duration))
     _persist(job, jc, status=CharStatus.ANIMATING)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp) for v, mp in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
     )
 
 
@@ -678,13 +689,15 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
     sid = scene_id or _first_scene_id(job)
     movement_prompt = (
         effective_override
+        or (job.movement_prompts_by_variant or {}).get(source_variant_id)
         or (job.enriched_movement_prompts or {}).get(sid)
         or (job.movement_prompts or {}).get(sid)
         or job.enriched_movement_prompt
         or job.movement_prompt
         or ""
     )
-    await _animate_one_video(job, jc, fresh, movement_prompt)
+    duration = (job.durations_by_variant or {}).get(source_variant_id) or job.duration_secs
+    await _animate_one_video(job, jc, fresh, movement_prompt, duration)
 
 
 async def run_video_synthesis(job_id: str) -> None:
@@ -700,7 +713,10 @@ async def run_video_synthesis(job_id: str) -> None:
     # references + approved variant frames; agent writes a cinematic shot
     # description per scene. Result is merged into enriched_movement_prompts
     # so the per-variant resolver below transparently picks it up.
-    if job.use_director and job.movement_prompts:
+    # Per-image prompts are explicit/verbatim — skip the Director + enrich
+    # layers (they operate per-scene and would be ignored by the per-variant
+    # resolver below anyway).
+    if job.use_director and job.movement_prompts and not job.movement_prompts_by_variant:
         from pathlib import Path
 
         from character_swap import prompt_director
@@ -759,7 +775,7 @@ async def run_video_synthesis(job_id: str) -> None:
     # (e.g. one scene fails enrichment) doesn't re-pay the OpenAI cost
     # on every subsequent run / resume. Skips scenes the Director already
     # filled in (Director output is higher quality).
-    if job.enrich_prompt and job.movement_prompts:
+    if job.enrich_prompt and job.movement_prompts and not job.movement_prompts_by_variant:
         from character_swap import prompt_enrich
         enriched_dict = dict(job.enriched_movement_prompts or {})
         dirty = False

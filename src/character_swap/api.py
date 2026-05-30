@@ -251,6 +251,10 @@ def _job_to_dict(job: Job) -> dict:
         # the singular is the "first" scene's value for old code paths.
         "movement_prompt": job.movement_prompt,
         "movement_prompts": dict(job.movement_prompts or {}),
+        # Per-approved-image overrides (Step 4 per-image rows). Empty in
+        # per-scene / legacy mode.
+        "movement_prompts_by_variant": dict(job.movement_prompts_by_variant or {}),
+        "durations_by_variant": dict(job.durations_by_variant or {}),
         # AI Director: opt-in toggle + a small summary parsed from the
         # cached plan so the UI can show a 🎬 badge ("12 tailored prompts").
         # The plan JSON itself stays on the server (too large for the UI).
@@ -1574,6 +1578,14 @@ class MovementBody(BaseModel):
     # approved variant must have a non-empty entry. Scenes without approvals
     # are skipped (no videos to render for them).
     movement_prompts: dict[str, str] | None = None
+    # Per-approved-IMAGE prompts: variant_id → prompt. The granular path used
+    # by Step 4's per-image rows — each approved image animates with its own
+    # motion. When provided, takes precedence over `movement_prompts`; the
+    # server derives a per-scene `movement_prompts` from it for back-compat +
+    # the Step 6 compile.
+    movement_prompts_by_variant: dict[str, str] | None = None
+    # Per-approved-image duration override: variant_id → seconds.
+    durations_by_variant: dict[str, int] | None = None
     videos_per_character: int = Field(default=1, ge=1, le=10)
     # Which video provider to use. Defaults to grok-imagine (legacy behavior);
     # the Step-4 picker in web/index.html sends this field so the user can pick
@@ -1633,17 +1645,50 @@ async def set_movement(job_id: str, body: MovementBody,
     scene_ids = _effective_scene_ids(job) or [job.scene_id]
     primary_scene = scene_ids[0] if scene_ids else job.scene_id
     scenes_with_approvals: set[str] = set()
+    approved_variant_ids: set[str] = set()
+    variant_to_scene: dict[str, str] = {}
     for jc in approved_chars:
         approved_set = set(jc.approved_variant_ids or [])
         if jc.approved_variant_id:
             approved_set.add(jc.approved_variant_id)
         for v in jc.images:
             if v.variant_id in approved_set:
-                scenes_with_approvals.add(v.scene_id or primary_scene)
+                sid = v.scene_id or primary_scene
+                scenes_with_approvals.add(sid)
+                approved_variant_ids.add(v.variant_id)
+                variant_to_scene[v.variant_id] = sid
 
-    # Build the canonical dict from whichever field the client populated.
-    if body.movement_prompts:
-        # Trim whitespace, drop empty entries.
+    # Per-variant durations are resolved against the chosen model's options.
+    by_variant: dict[str, str] = {}
+    durations_by_variant: dict[str, int] = {}
+
+    # Build the canonical per-scene dict from whichever field the client sent.
+    # Precedence: per-image (most granular) → per-scene → legacy single.
+    if body.movement_prompts_by_variant:
+        # Per-IMAGE mode: each approved image carries its own prompt.
+        by_variant = {vid: (p or "").strip()
+                      for vid, p in body.movement_prompts_by_variant.items()
+                      if (p or "").strip()}
+        missing_v = approved_variant_ids - set(by_variant.keys())
+        if missing_v:
+            raise HTTPException(
+                400,
+                f"Missing movement prompt for {len(missing_v)} approved "
+                f"image(s) — every approved image needs a motion prompt.",
+            )
+        # Derive a per-scene dict (first approved image per scene) so the
+        # legacy lock fields + Step 6 compile + per-scene resolver still work.
+        prompts = {}
+        for vid in approved_variant_ids:
+            prompts.setdefault(variant_to_scene[vid], by_variant[vid])
+        # Optional per-image durations, validated against the model's options.
+        if body.durations_by_variant:
+            spec = runner_media.video_duration_spec(body.video_model or "grok-imagine")
+            for vid, d in body.durations_by_variant.items():
+                if vid in approved_variant_ids and int(d) in spec["options"]:
+                    durations_by_variant[vid] = int(d)
+    elif body.movement_prompts:
+        # Per-scene mode. Trim whitespace, drop empty entries.
         prompts = {sid: (p or "").strip()
                    for sid, p in body.movement_prompts.items()
                    if (p or "").strip()}
@@ -1664,6 +1709,10 @@ async def set_movement(job_id: str, body: MovementBody,
         )
 
     job.movement_prompts = prompts
+    # Per-image overrides (empty in per-scene / legacy mode). The runner
+    # resolves these first, then falls back to the per-scene prompt.
+    job.movement_prompts_by_variant = by_variant
+    job.durations_by_variant = durations_by_variant
     # Keep singular field in sync (first scene with a prompt) so legacy
     # `if job.movement_prompt:` lock checks stay truthy.
     job.movement_prompt = (

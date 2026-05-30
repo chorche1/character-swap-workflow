@@ -181,6 +181,11 @@ class Job(BaseModel):
     # 3-scene reel each scene gets its own "guy pours oil" / "guy waves" /
     # "guy walks away" direction, applied uniformly across characters.
     movement_prompts: dict[str, str] = Field(default_factory=dict)
+    # Per-APPROVED-VARIANT movement prompts (variant_id → prompt). The granular
+    # layer above `movement_prompts`: when set, each approved image animates
+    # with its OWN prompt (the Higgsfield "per-slot prompt" model) instead of
+    # sharing its scene's prompt. Empty/missing → fall back to the scene prompt.
+    movement_prompts_by_variant: dict[str, str] = Field(default_factory=dict)
     images_per_character: int = 1
     videos_per_character: int = 1
     # Per-job video duration override (seconds). None → use the env default
@@ -188,6 +193,11 @@ class Job(BaseModel):
     # selected video_model's `duration_options` registry. Each per-provider
     # submit function still defends with its own clamp.
     duration_secs: int | None = None
+    # Per-APPROVED-VARIANT duration override (variant_id → seconds). Mirrors
+    # movement_prompts_by_variant: each approved image can have its own clip
+    # length (the Higgsfield "per-slot duration" model). Missing → fall back
+    # to `duration_secs`, then the env default.
+    durations_by_variant: dict[str, int] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom
     # `prompt` AND the `movement_prompt` are expanded through GPT-4o before

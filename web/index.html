@@ -1104,19 +1104,9 @@
                     x-text="m.label + (m.available ? '' : '  (locked)')"></option>
           </template>
         </select>
-
-        <label class="text-neutral-500 dark:text-neutral-400 ml-2">Duration:</label>
-        <select x-model.number="swapDurationSecs"
-                :disabled="job?.movement_prompt"
-                class="px-3 py-1.5 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
-          <template x-for="n in videoDurationSpec().options" :key="'dur'+n">
-            <option :value="n" x-text="n + 's'"></option>
-          </template>
-        </select>
-        <span class="text-xs text-neutral-400 dark:text-neutral-500"
-              x-text="videoDurationSpec().options.length === 1
-                        ? `(${videoModelLabel()} only supports ${videoDurationSpec().options[0]}s)`
-                        : ''"></span>
+        <span class="text-xs text-neutral-400 dark:text-neutral-500">
+          Duration is set per image below.
+        </span>
       </div>
       <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mb-3">
         <span class="text-neutral-400 dark:text-neutral-500">Video model:</span>
@@ -1134,29 +1124,52 @@
         <strong x-text="estimatedCost()"></strong>.
       </div>
 
-      <!-- Per-scene movement prompts. One textarea per scene that has at
-           least one approved variant; multi-scene jobs typically show 2–4
-           textareas (one per scene). Single-scene jobs collapse to one. -->
+      <!-- Per-IMAGE movement prompts (Higgsfield per-slot model). One row per
+           approved image — each gets its own motion prompt AND its own clip
+           duration, so every video can be completely different. -->
       <div x-show="!job?.movement_prompt" class="space-y-4">
-        <template x-for="(scene, sIdx) in scenesNeedingMovementPrompts()"
-                  :key="'mp-'+scene.scene_id">
-          <div>
-            <div class="flex items-center gap-2 mb-1.5"
-                 x-show="(job?.scenes?.length || 0) > 1">
-              <img :src="scene.url"
-                   class="w-10 h-10 rounded object-cover border border-neutral-200 dark:border-neutral-800" />
-              <span class="text-xs text-neutral-500 dark:text-neutral-400">
-                Scene <span x-text="sIdx + 1"></span>
-                <span class="text-neutral-400 dark:text-neutral-500 font-mono ml-1"
-                      x-text="(scene.scene_id || '').slice(0, 8)"></span>
-              </span>
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <span class="text-xs text-neutral-500 dark:text-neutral-400"
+                x-text="`${approvedImagesForMovement().length} approved image${approvedImagesForMovement().length === 1 ? '' : 's'} — one motion prompt + duration each`"></span>
+          <button x-show="approvedImagesForMovement().length > 1"
+                  class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+                  @click="applyFirstMovementToAll()"
+                  title="Copy the first image's prompt + duration to every image">
+            ⤓ apply image 1 to all
+          </button>
+        </div>
+
+        <template x-for="(img, iIdx) in approvedImagesForMovement()"
+                  :key="'mpv-'+img.variant_id">
+          <div class="flex gap-3 items-start border border-neutral-200 dark:border-neutral-800 rounded-xl p-3">
+            <div class="shrink-0 flex flex-col items-center gap-1">
+              <img :src="img.url"
+                   class="w-16 h-28 rounded-lg object-cover border border-neutral-200 dark:border-neutral-800" />
+              <span class="text-[10px] text-neutral-400 dark:text-neutral-500"
+                    x-text="img.label"></span>
             </div>
-            <textarea
-              :value="movementPrompts[scene.scene_id] || ''"
-              @input="movementPrompts[scene.scene_id] = $event.target.value"
-              rows="3"
-              class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
-              placeholder="e.g. The man cuts the stem of the banana and says to the camera: 'Did you know…'  Active camera. 10 second video. sound on."></textarea>
+            <div class="flex-1 min-w-0 space-y-2">
+              <textarea
+                :value="movementByVariant[img.variant_id] || ''"
+                @input="movementByVariant[img.variant_id] = $event.target.value"
+                rows="3"
+                class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
+                placeholder="e.g. He pours the mouthwash into the bowl and says to camera: 'Did you know…' Active camera. sound on."></textarea>
+              <div class="flex items-center gap-2 text-xs">
+                <label class="text-neutral-500 dark:text-neutral-400">Duration:</label>
+                <select :value="durationByVariant[img.variant_id] || videoDurationSpec().default"
+                        @change="durationByVariant[img.variant_id] = parseInt($event.target.value)"
+                        class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
+                  <template x-for="n in videoDurationSpec().options" :key="'pvd'+img.variant_id+'-'+n">
+                    <option :value="n" x-text="n + 's'"></option>
+                  </template>
+                </select>
+                <span class="text-neutral-400 dark:text-neutral-500"
+                      x-text="videoDurationSpec().options.length === 1
+                                ? `(${videoModelLabel()} only supports ${videoDurationSpec().options[0]}s)`
+                                : ''"></span>
+              </div>
+            </div>
           </div>
         </template>
 
