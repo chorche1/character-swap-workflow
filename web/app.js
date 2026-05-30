@@ -234,6 +234,14 @@ function studio() {
     // back-compat; users can switch to Kling / Veo / Runway / Luma / Pika /
     // Hailuo / Sora / Wan / Seedance / Higgsfield via the picker.
     swapVideoModel: 'grok-imagine',
+    // --- Animate tab (Step A): build a video job from already-finished images.
+    // seqImages holds staged client-side files (not yet uploaded) in the order
+    // they'll be animated. Each {uid, file, previewUrl, name}. On createSequence()
+    // they POST to /api/jobs/from_images and become a normal pre-approved job.
+    seqImages: [],
+    seqTitle: '',
+    seqVideoModel: 'kling-v2-6',
+    seqCreating: false,
     // Per-job clip duration override (seconds). null = use the env default
     // (settings.video_duration_secs). Picker in Step 4 sets it to one of
     // the selected model's `duration_options` from /api/generations/models.
@@ -3881,6 +3889,86 @@ function studio() {
     onSceneDragLeave(ev) {
       if (!ev.currentTarget.contains(ev.relatedTarget)) {
         this.sceneDropActive = false;
+      }
+    },
+
+    // --- Animate tab (Step A) — stage finished images, then create a job ---
+
+    // Add image File objects to the ordered staging list (from picker, drop,
+    // or paste). We keep the File around for upload and an object-URL for the
+    // thumbnail preview. uid is a monotonic key so Alpine's x-for stays stable
+    // across reorders/removes.
+    addSeqImages(fileList) {
+      const files = Array.from(fileList || []).filter(f => (f.type || '').startsWith('image/'));
+      if (!files.length) return;
+      for (const f of files) {
+        this.seqImages.push({
+          uid: (this._seqUid = (this._seqUid || 0) + 1),
+          file: f,
+          previewUrl: URL.createObjectURL(f),
+          name: f.name || 'image',
+        });
+      }
+    },
+
+    onSeqDrop(ev) {
+      this.addSeqImages(ev.dataTransfer?.files);
+    },
+
+    onSeqPaste(ev) {
+      const files = this._scenesFromClipboard(ev);   // reuse the swap clipboard parser
+      if (!files.length) return;                       // plain text — let it through
+      ev.preventDefault();
+      this.addSeqImages(files);
+      this.notifyInfo(`Added ${files.length} image${files.length > 1 ? 's' : ''} from clipboard`);
+    },
+
+    removeSeqImage(idx) {
+      const [removed] = this.seqImages.splice(idx, 1);
+      if (removed) { try { URL.revokeObjectURL(removed.previewUrl); } catch (_) {} }
+    },
+
+    // Move an image one slot earlier (-1) or later (+1) to reorder the sequence.
+    moveSeqImage(idx, dir) {
+      const j = idx + dir;
+      if (j < 0 || j >= this.seqImages.length) return;
+      const tmp = this.seqImages[idx];
+      this.seqImages[idx] = this.seqImages[j];
+      this.seqImages[j] = tmp;
+    },
+
+    clearSeq() {
+      for (const img of this.seqImages) { try { URL.revokeObjectURL(img.previewUrl); } catch (_) {} }
+      this.seqImages = [];
+      this.seqTitle = '';
+    },
+
+    // POST the staged images (in order) to /api/jobs/from_images. The server
+    // returns a fully pre-approved job; we adopt it exactly like a fresh Swap
+    // job so Steps 4-6 take over, and default the Step 4 video-model picker to
+    // the sequence's model.
+    async createSequence() {
+      if (!this.seqImages.length || this.seqCreating) return;
+      this.seqCreating = true;
+      try {
+        const fd = new FormData();
+        if (this.seqTitle.trim()) fd.append('title', this.seqTitle.trim());
+        fd.append('video_model', this.seqVideoModel || 'kling-v2-6');
+        for (const img of this.seqImages) fd.append('files', img.file, img.name);
+        const r = await fetch('/api/jobs/from_images', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Sequence creation failed: ' + await r.text()); return; }
+        const job = await r.json();
+        this.job = job;
+        // Point the Step 4 picker at the sequence's model so it shows Kling, not
+        // the swap default (grok-imagine).
+        this.swapVideoModel = job.video_model || this.swapVideoModel;
+        this.clearSeq();
+        this.connectWS(job.job_id);
+        await this.loadJobsList();
+      } catch (e) {
+        this.notifyError('Sequence error: ' + e);
+      } finally {
+        this.seqCreating = false;
       }
     },
 

@@ -1030,6 +1030,102 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
     return _job_to_dict(job)
 
 
+# How many images one Animate-tab sequence may contain. Generous — a long
+# reel is ~10-15 scenes; the cap just guards against pathological uploads.
+_MAX_SEQUENCE_IMAGES = 50
+
+
+@app.post("/api/jobs/from_images")
+async def create_job_from_images(
+    files: list[UploadFile] = File(...),
+    title: str | None = Form(None),
+    video_model: str = Form("kling-v2-6"),
+) -> dict:
+    """Create a job straight from finished images — powers the Animate tab.
+
+    Unlike `POST /api/jobs` (the Swap flow), this skips Steps 1-3 entirely
+    (no scene upload, no character pick, no AI image generation, no manual
+    approval). Each uploaded image becomes one scene slot in upload order,
+    carried by a single synthetic character whose variants are pre-marked
+    READY and pre-approved. The job lands in APPROVED status ready for
+    Step 4 (movement) immediately, so the existing video-synthesis +
+    compile pipeline runs unchanged.
+    """
+    if not files:
+        raise HTTPException(400, "Upload at least one image")
+    if len(files) > _MAX_SEQUENCE_IMAGES:
+        raise HTTPException(
+            400,
+            f"Too many images ({len(files)}); cap is {_MAX_SEQUENCE_IMAGES} per sequence.",
+        )
+
+    # Validate the requested video model against the registry. Fall back to
+    # the default if the slug is unknown — the user re-picks in Step 4 anyway,
+    # so this is just the picker's initial value.
+    model = (video_model or "").strip()
+    if model not in runner_media.VIDEO_MODELS:
+        model = "kling-v2-6" if "kling-v2-6" in runner_media.VIDEO_MODELS else "grok-imagine"
+
+    job_id = "j_" + secrets.token_hex(5)
+    char_id = "seq_" + secrets.token_hex(4)
+    out_dir = settings.output_dir / job_id / char_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    images: list[GeneratedImage] = []
+    approved_ids: list[str] = []
+    scene_ids: list[str] = []
+    scene_paths: list[str] = []
+    for idx, file in enumerate(files):
+        ext = _safe_ext(file.filename or "") or ".png"
+        data = await _read_capped(file)
+        if not data:
+            raise HTTPException(400, f"Empty upload: {file.filename or f'image {idx + 1}'}")
+        variant_id = "v_" + secrets.token_hex(5)
+        scene_id = f"seq_{idx}"
+        dest = out_dir / f"variant_{variant_id}{ext}"
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(dest)
+        images.append(GeneratedImage(
+            variant_id=variant_id,
+            path=str(dest),
+            prompt="(uploaded image)",
+            scene_id=scene_id,
+            status=VariantStatus.READY,
+        ))
+        approved_ids.append(variant_id)
+        scene_ids.append(scene_id)
+        scene_paths.append(str(dest))
+
+    name = (title or "").strip() or "Sequence"
+    jc = JobCharacter(
+        char_id=char_id,
+        name=name,
+        # The first uploaded image stands in as the character's reference
+        # thumbnail; it's never used to generate anything.
+        source_image_path=scene_paths[0],
+        status=CharStatus.APPROVED,
+        images=images,
+        approved_variant_ids=list(approved_ids),
+        approved_variant_id=approved_ids[0],
+    )
+    job = Job(
+        job_id=job_id,
+        title=(title or "").strip() or _auto_title([name]),
+        # Legacy single-scene fields point at the first slot.
+        scene_id=scene_ids[0],
+        scene_image_path=scene_paths[0],
+        # Canonical ordered scene slots — one per uploaded image.
+        scene_ids=scene_ids,
+        scene_image_paths=scene_paths,
+        characters={char_id: jc},
+        images_per_character=1,
+        video_model=model,
+    )
+    store().add_job(job)
+    return _job_to_dict(job)
+
+
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
     job = store().get_job(job_id)

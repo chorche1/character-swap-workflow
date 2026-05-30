@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "character-swap",
+      "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
+      "runtimeArgs": ["run", "character-swap", "serve", "--no-open"],
+      "port": 8000
+    }
+  ]
+}
