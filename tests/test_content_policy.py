@@ -57,14 +57,12 @@ def test_soften_appends_minimal_clause_first():
     assert len(out) > len("a man on a beach")
 
 
-def test_soften_escalates_with_attempt():
+def test_soften_uses_the_single_hypothetical_clause():
+    # Only one softener clause exists; every attempt reuses it.
     a1 = cp.soften("x", 1)
-    a2 = cp.soften("x", 2)
-    a3 = cp.soften("x", 3)
-    assert a1 != a2 != a3
-    # All keep the original prompt as a prefix.
-    for o in (a1, a2, a3):
-        assert o.startswith("x")
+    assert a1.startswith("x")
+    assert "hypothetical" in a1.lower()
+    assert cp.soften("x", 2) == a1
 
 
 def test_soften_past_last_reuses_strongest():
