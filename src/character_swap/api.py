@@ -1586,6 +1586,9 @@ class MovementBody(BaseModel):
     movement_prompts_by_variant: dict[str, str] | None = None
     # Per-approved-image duration override: variant_id → seconds.
     durations_by_variant: dict[str, int] | None = None
+    # Per-scene duration: scene_id → seconds. The granularity the Step 4 UI
+    # uses (one duration per scene, shared by that scene's images).
+    durations_by_scene: dict[str, int] | None = None
     videos_per_character: int = Field(default=1, ge=1, le=10)
     # Which video provider to use. Defaults to grok-imagine (legacy behavior);
     # the Step-4 picker in web/index.html sends this field so the user can pick
@@ -1708,11 +1711,21 @@ async def set_movement(job_id: str, body: MovementBody,
             f"that have approved images: {sorted(missing)}",
         )
 
+    # Per-scene durations (scene_id → secs), validated against the model's
+    # options. Scenes without approvals are ignored.
+    durations_by_scene: dict[str, int] = {}
+    if body.durations_by_scene:
+        spec = runner_media.video_duration_spec(body.video_model or "grok-imagine")
+        for sid, d in body.durations_by_scene.items():
+            if sid in scenes_with_approvals and int(d) in spec["options"]:
+                durations_by_scene[sid] = int(d)
+
     job.movement_prompts = prompts
     # Per-image overrides (empty in per-scene / legacy mode). The runner
-    # resolves these first, then falls back to the per-scene prompt.
+    # resolves these first, then falls back to the per-scene prompt/duration.
     job.movement_prompts_by_variant = by_variant
     job.durations_by_variant = durations_by_variant
+    job.durations_by_scene = durations_by_scene
     # Keep singular field in sync (first scene with a prompt) so legacy
     # `if job.movement_prompt:` lock checks stay truthy.
     job.movement_prompt = (
@@ -1743,6 +1756,163 @@ async def set_movement(job_id: str, body: MovementBody,
                                   "video_model": job.video_model,
                                   "videos_per_character": body.videos_per_character})
     background.add_task(_run_async, runner.run_video_synthesis, job_id)
+    return _job_to_dict(job)
+
+
+# --- Scene sequencing (between Step 3 and Step 4) -----------------------------
+# Duplicate / reorder / delete scene "slots" so the user can build a video
+# sequence from approved images — multiple clips from one image (duplicate),
+# custom order (reorder), or drop a slot (delete). All are locked once the
+# movement prompt is submitted (videos may already reference the slots).
+
+def _movement_locked(job: Job) -> bool:
+    return bool(job.movement_prompt or job.movement_prompts)
+
+
+def _belongs_to_scene(variant: GeneratedImage, scene_id: str, primary: str) -> bool:
+    """A variant belongs to `scene_id` if its scene_id matches, OR it's a
+    legacy variant (scene_id=None) and `scene_id` is the job's primary scene."""
+    return (variant.scene_id or primary) == scene_id
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/duplicate")
+async def duplicate_scene(job_id: str, scene_id: str) -> dict:
+    """Clone a scene slot: a new scene_id is inserted right after the source,
+    reusing the same background image, and every character's APPROVED variant
+    for that scene is cloned (same file on disk, new variant_id) and
+    pre-approved under the new scene. The duplicate gets its own movement
+    prompt + duration in Step 4 — the Higgsfield "duplicate slot" model."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; scenes are locked")
+
+    scene_ids = _effective_scene_ids(job)
+    scene_paths = _effective_scene_paths(job)
+    if scene_id not in scene_ids:
+        raise HTTPException(404, f"Scene not in job: {scene_id}")
+    primary = scene_ids[0] if scene_ids else job.scene_id
+    idx = scene_ids.index(scene_id)
+    src_path = scene_paths[idx] if idx < len(scene_paths) else (scene_paths[0] if scene_paths else job.scene_image_path)
+
+    new_sid = f"{scene_id}__dup{secrets.token_hex(3)}"
+    scene_ids.insert(idx + 1, new_sid)
+    scene_paths.insert(idx + 1, src_path)
+
+    # Clone each character's approved variant(s) for the source scene.
+    for jc in job.characters.values():
+        approved = set(jc.approved_variant_ids or [])
+        if jc.approved_variant_id:
+            approved.add(jc.approved_variant_id)
+        clones: list[GeneratedImage] = []
+        for v in jc.images:
+            if v.variant_id in approved and _belongs_to_scene(v, scene_id, primary):
+                clones.append(GeneratedImage(
+                    variant_id="v_" + secrets.token_hex(5),
+                    path=v.path,                 # same file on disk
+                    prompt=v.prompt,
+                    parent_variant_id=v.variant_id,
+                    scene_id=new_sid,
+                    status=VariantStatus.READY,
+                ))
+        for c in clones:
+            jc.images.append(c)
+            jc.approved_variant_ids = list(jc.approved_variant_ids or []) + [c.variant_id]
+        if clones:
+            jc.updated_at = datetime.utcnow()
+
+    job.scene_ids = scene_ids
+    job.scene_image_paths = scene_paths
+    job.scene_id = scene_ids[0]
+    job.scene_image_path = scene_paths[0]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.duplicated", "job_id": job_id,
+                                  "scene_id": scene_id, "new_scene_id": new_sid})
+    return _job_to_dict(job)
+
+
+class SceneOrderBody(BaseModel):
+    scene_ids: list[str]
+
+
+@app.patch("/api/jobs/{job_id}/scene_order")
+async def reorder_scenes(job_id: str, body: SceneOrderBody) -> dict:
+    """Reorder the job's scene slots. Body `scene_ids` must be a permutation of
+    the current scene list. scene_image_paths are reordered in lockstep so the
+    Step 6 compile concatenates in the new order."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; scene order is locked")
+
+    cur_ids = _effective_scene_ids(job)
+    cur_paths = _effective_scene_paths(job)
+    if sorted(body.scene_ids) != sorted(cur_ids):
+        raise HTTPException(400, "scene_ids must be a permutation of the job's scenes")
+
+    path_by_id = {sid: (cur_paths[i] if i < len(cur_paths) else cur_paths[0])
+                  for i, sid in enumerate(cur_ids)}
+    job.scene_ids = list(body.scene_ids)
+    job.scene_image_paths = [path_by_id[sid] for sid in body.scene_ids]
+    job.scene_id = job.scene_ids[0]
+    job.scene_image_path = job.scene_image_paths[0]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.reordered", "job_id": job_id,
+                                  "scene_ids": job.scene_ids})
+    return _job_to_dict(job)
+
+
+@app.delete("/api/jobs/{job_id}/scenes/{scene_id}")
+async def delete_scene(job_id: str, scene_id: str) -> dict:
+    """Drop a scene slot and every variant that belongs to it. Blocked when
+    it's the last remaining scene. Files on disk are left in place (a
+    duplicate may share the same path)."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; scenes are locked")
+
+    scene_ids = _effective_scene_ids(job)
+    scene_paths = _effective_scene_paths(job)
+    if scene_id not in scene_ids:
+        raise HTTPException(404, f"Scene not in job: {scene_id}")
+    if len(scene_ids) <= 1:
+        raise HTTPException(409, "Can't delete the only scene")
+    primary = scene_ids[0]
+    idx = scene_ids.index(scene_id)
+
+    # Drop variants belonging to this scene from every character.
+    for jc in job.characters.values():
+        keep = [v for v in jc.images if not _belongs_to_scene(v, scene_id, primary)]
+        removed_ids = {v.variant_id for v in jc.images} - {v.variant_id for v in keep}
+        if removed_ids:
+            jc.images = keep
+            jc.approved_variant_ids = [vid for vid in (jc.approved_variant_ids or [])
+                                       if vid not in removed_ids]
+            if jc.approved_variant_id in removed_ids:
+                jc.approved_variant_id = (jc.approved_variant_ids[0]
+                                          if jc.approved_variant_ids else None)
+            jc.updated_at = datetime.utcnow()
+
+    del scene_ids[idx]
+    if idx < len(scene_paths):
+        del scene_paths[idx]
+    job.scene_ids = scene_ids
+    job.scene_image_paths = scene_paths
+    job.scene_id = scene_ids[0]
+    job.scene_image_path = scene_paths[0] if scene_paths else job.scene_image_path
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.deleted", "job_id": job_id,
+                                  "scene_id": scene_id})
     return _job_to_dict(job)
 
 

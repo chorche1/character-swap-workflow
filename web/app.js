@@ -302,10 +302,11 @@ function studio() {
     // jobs get one textarea per scene in Step 4; this dict is what posts
     // to /api/jobs/{id}/movement.
     movementPrompts: {},
-    // Per-approved-IMAGE movement prompts + durations (Step 4 per-image rows).
-    // variant_id → prompt / seconds. The granular Higgsfield per-slot model.
-    movementByVariant: {},
-    durationByVariant: {},
+    // Per-SCENE movement prompts + durations (Step 4 rows). scene_id → prompt /
+    // seconds. One prompt+duration per scene, shared by all that scene's images.
+    // For multiple clips from one image, duplicate the scene (Arrange panel).
+    movementByScene: {},
+    durationByScene: {},
     editingVariant: null,    // {char_id, variant_id}
     editPrompt: '',
     editingTitle: false,
@@ -4538,28 +4539,28 @@ function studio() {
 
     async submitMovement() {
       if (!this.job) return;
-      // Per-IMAGE: one prompt + one duration per approved image (Higgsfield
-      // per-slot model). Build the variant-keyed dicts, trim + drop empties.
-      const imgs = this.approvedImagesForMovement();
-      const byVariant = {};
-      const durations = {};
+      // Per-SCENE: one prompt + one duration per scene, shared by all that
+      // scene's approved images. Build scene-keyed dicts, trim + drop empties.
+      const scenes = this.scenesNeedingMovementPrompts();
+      const prompts = {};
+      const durationsByScene = {};
       const defaultDur = this.videoDurationSpec().default;
-      for (const img of imgs) {
-        const t = (this.movementByVariant[img.variant_id] || '').trim();
-        if (t) byVariant[img.variant_id] = t;
-        durations[img.variant_id] = this.durationByVariant[img.variant_id] || defaultDur;
+      for (const sc of scenes) {
+        const t = (this.movementByScene[sc.scene_id] || '').trim();
+        if (t) prompts[sc.scene_id] = t;
+        durationsByScene[sc.scene_id] = this.durationByScene[sc.scene_id] || defaultDur;
       }
-      const missing = imgs.filter(img => !byVariant[img.variant_id]);
+      const missing = scenes.filter(sc => !prompts[sc.scene_id]);
       if (missing.length) {
-        this.notifyError(`Add a motion prompt for every image (${missing.length} still empty)`);
+        this.notifyError(`Add a motion prompt for every scene (${missing.length} still empty)`);
         return;
       }
       const r = await fetch('/api/jobs/' + this.job.job_id + '/movement', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          movement_prompts_by_variant: byVariant,
-          durations_by_variant: durations,
+          movement_prompts: prompts,
+          durations_by_scene: durationsByScene,
           videos_per_character: this.videosPerChar,
           video_model: this.swapVideoModel || 'grok-imagine',
         }),
@@ -4569,47 +4570,32 @@ function studio() {
       this._scheduleSidebarRefresh();
     },
 
-    // Flat, ordered list of every approved image across all approved
-    // characters — each becomes one Step-4 row (its own prompt + duration).
-    // Order: character order, then job scene order, then image order.
-    approvedImagesForMovement() {
-      if (!this.job) return [];
-      const scenes = this.job.scenes || [];
-      const sceneIndex = {};
-      scenes.forEach((s, i) => { sceneIndex[s.scene_id] = i; });
-      const primaryId = scenes[0]?.scene_id || this.job.scene_id || null;
-      const multiChar = Object.keys(this.job.characters || {}).length > 1;
-      const multiScene = scenes.length > 1;
-      const out = [];
+    // First approved image (any character) for a scene — the row thumbnail.
+    firstApprovedImageForScene(sceneId) {
+      if (!this.job) return null;
+      const primaryId = (this.job.scenes || [])[0]?.scene_id || this.job.scene_id || null;
       for (const jc of Object.values(this.job.characters || {})) {
         const approved = new Set(jc.approved_variant_ids || []);
         if (jc.approved_variant_id) approved.add(jc.approved_variant_id);
-        const rows = (jc.images || [])
-          .filter(v => approved.has(v.variant_id))
-          .map(v => ({ v, sIdx: sceneIndex[v.scene_id ?? primaryId] ?? 0 }));
-        rows.sort((a, b) => a.sIdx - b.sIdx);
-        rows.forEach((row, k) => {
-          const parts = [];
-          if (multiChar) parts.push(jc.name);
-          if (multiScene) parts.push('scen ' + (row.sIdx + 1));
-          if (!multiChar && !multiScene) parts.push('#' + (out.length + 1));
-          out.push({ variant_id: row.v.variant_id, url: row.v.url,
-                     label: parts.join(' · ') });
-        });
+        for (const v of (jc.images || [])) {
+          if (approved.has(v.variant_id) && (v.scene_id || primaryId) === sceneId) {
+            return v.url;
+          }
+        }
       }
-      return out;
+      return null;
     },
 
-    // Copy the first image's prompt + duration onto every image.
+    // Copy scene 1's prompt + duration onto every scene.
     applyFirstMovementToAll() {
-      const imgs = this.approvedImagesForMovement();
-      if (!imgs.length) return;
-      const firstId = imgs[0].variant_id;
-      const prompt = this.movementByVariant[firstId] || '';
-      const dur = this.durationByVariant[firstId] || this.videoDurationSpec().default;
-      for (const img of imgs) {
-        this.movementByVariant[img.variant_id] = prompt;
-        this.durationByVariant[img.variant_id] = dur;
+      const scenes = this.scenesNeedingMovementPrompts();
+      if (!scenes.length) return;
+      const first = scenes[0].scene_id;
+      const prompt = this.movementByScene[first] || '';
+      const dur = this.durationByScene[first] || this.videoDurationSpec().default;
+      for (const sc of scenes) {
+        this.movementByScene[sc.scene_id] = prompt;
+        this.durationByScene[sc.scene_id] = dur;
       }
     },
 
@@ -4636,10 +4622,56 @@ function studio() {
     canSubmitMovement() {
       if (!this.job || this.job.movement_prompt) return false;
       if (!this.videoModelAvailable()) return false;
-      const imgs = this.approvedImagesForMovement();
-      if (imgs.length === 0) return false;
-      // Every approved image needs its own non-empty motion prompt.
-      return imgs.every(img => (this.movementByVariant[img.variant_id] || '').trim());
+      const scenes = this.scenesNeedingMovementPrompts();
+      if (scenes.length === 0) return false;
+      // Every scene with approvals needs a non-empty motion prompt.
+      return scenes.every(sc => (this.movementByScene[sc.scene_id] || '').trim());
+    },
+
+    // --- Arrange scenes (between Step 3 and Step 4) ---
+    // Whether the arrange/duplicate/reorder panel is usable: a job is loaded,
+    // it has approved variants, and movement hasn't been submitted yet.
+    canArrangeScenes() {
+      return !!this.job && !this.job.movement_prompt && this.hasApprovedChar()
+             && (this.job.scenes || []).length > 0;
+    },
+
+    async duplicateScene(sceneId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/duplicate`,
+                            { method: 'POST' });
+      if (!r.ok) { this.notifyError('Duplicate failed: ' + await r.text()); return; }
+      this.job = await r.json();
+      this._scheduleSidebarRefresh();
+    },
+
+    async deleteScene(sceneId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}`,
+                            { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Delete scene failed: ' + await r.text()); return; }
+      // Drop any staged prompt/duration for the removed scene.
+      delete this.movementByScene[sceneId];
+      delete this.durationByScene[sceneId];
+      this.job = await r.json();
+      this._scheduleSidebarRefresh();
+    },
+
+    // Move a scene one slot earlier (-1) or later (+1), then PATCH the new order.
+    async moveScene(sceneId, dir) {
+      if (!this.job) return;
+      const ids = (this.job.scenes || []).map(s => s.scene_id);
+      const i = ids.indexOf(sceneId);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scene_order`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scene_ids: ids }),
+      });
+      if (!r.ok) { this.notifyError('Reorder failed: ' + await r.text()); return; }
+      this.job = await r.json();
     },
 
     // For the locked summary: rows of {sceneIndex, url, prompt} so the UI

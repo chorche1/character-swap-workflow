@@ -1066,6 +1066,52 @@
 
     </div><!-- /steps 1-3 (swap-only) -->
 
+    <!-- ARRANGE SCENES (between Step 3 and Step 4). Build the video sequence:
+         duplicate a scene to make multiple clips from the same image, reorder
+         scenes, or drop one. Locked once movement is submitted. -->
+    <section x-show="canArrangeScenes()" x-transition
+             class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6">
+      <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+        <h2 class="text-lg font-semibold"><span class="step-num">⇅</span> <span class="ml-2">Arrange scenes</span></h2>
+        <span class="text-xs text-neutral-400 dark:text-neutral-500"
+              x-text="`${(job?.scenes||[]).length} scene${(job?.scenes||[]).length === 1 ? '' : 's'} → ${(job?.scenes||[]).length} clip${(job?.scenes||[]).length === 1 ? '' : 's'} per character`"></span>
+      </div>
+      <p class="text-sm text-neutral-500 dark:text-neutral-400 mb-4">
+        Each scene becomes one clip per character (in this order). Duplicate a
+        scene to make another clip from the same image with its own motion
+        prompt, reorder to set the final sequence, or remove one.
+      </p>
+      <div class="flex gap-3 overflow-x-auto pb-2">
+        <template x-for="(scene, sIdx) in (job?.scenes || [])" :key="'arr-'+scene.scene_id">
+          <div class="shrink-0 w-32 rounded-xl border border-neutral-200 dark:border-neutral-800 overflow-hidden bg-neutral-50 dark:bg-neutral-950">
+            <div class="relative">
+              <img :src="firstApprovedImageForScene(scene.scene_id) || scene.url"
+                   class="w-full aspect-[9/16] object-cover" />
+              <div class="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded-full"
+                   x-text="'scene ' + (sIdx + 1)"></div>
+              <div class="absolute top-1 right-1 flex gap-1">
+                <button @click="duplicateScene(scene.scene_id)"
+                        class="bg-black/60 hover:bg-indigo-600 text-white text-xs w-6 h-6 rounded flex items-center justify-center"
+                        title="Duplicate this scene (another clip from the same image)">⧉</button>
+                <button x-show="(job?.scenes||[]).length > 1"
+                        @click="deleteScene(scene.scene_id)"
+                        class="bg-black/60 hover:bg-rose-600 text-white text-xs w-6 h-6 rounded flex items-center justify-center"
+                        title="Remove this scene">✕</button>
+              </div>
+            </div>
+            <div class="flex justify-between p-1.5">
+              <button @click="moveScene(scene.scene_id, -1)" :disabled="sIdx === 0"
+                      class="text-xs px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30"
+                      title="Move earlier">←</button>
+              <button @click="moveScene(scene.scene_id, 1)" :disabled="sIdx === (job?.scenes||[]).length - 1"
+                      class="text-xs px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30"
+                      title="Move later">→</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
     <!-- STEP 4 — Movement prompt -->
     <section class="bg-white dark:bg-neutral-900 rounded-2xl shadow-sm border border-neutral-200 dark:border-neutral-800 p-6"
              x-show="job && hasApprovedChar()" x-transition>
@@ -1124,43 +1170,44 @@
         <strong x-text="estimatedCost()"></strong>.
       </div>
 
-      <!-- Per-IMAGE movement prompts (Higgsfield per-slot model). One row per
-           approved image — each gets its own motion prompt AND its own clip
-           duration, so every video can be completely different. -->
+      <!-- Per-SCENE movement prompts. One row per scene — that scene's prompt
+           + duration drives every approved image in the scene (all characters).
+           For multiple clips from one image, duplicate the scene in the
+           "Arrange scenes" panel above (Higgsfield per-slot model). -->
       <div x-show="!job?.movement_prompt" class="space-y-4">
         <div class="flex items-center justify-between flex-wrap gap-2">
           <span class="text-xs text-neutral-500 dark:text-neutral-400"
-                x-text="`${approvedImagesForMovement().length} approved image${approvedImagesForMovement().length === 1 ? '' : 's'} — one motion prompt + duration each`"></span>
-          <button x-show="approvedImagesForMovement().length > 1"
+                x-text="`${scenesNeedingMovementPrompts().length} scene${scenesNeedingMovementPrompts().length === 1 ? '' : 's'} — one motion prompt + duration each, shared by all images in the scene`"></span>
+          <button x-show="scenesNeedingMovementPrompts().length > 1"
                   class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
                   @click="applyFirstMovementToAll()"
-                  title="Copy the first image's prompt + duration to every image">
-            ⤓ apply image 1 to all
+                  title="Copy scene 1's prompt + duration to every scene">
+            ⤓ apply scene 1 to all
           </button>
         </div>
 
-        <template x-for="(img, iIdx) in approvedImagesForMovement()"
-                  :key="'mpv-'+img.variant_id">
+        <template x-for="(scene, sIdx) in scenesNeedingMovementPrompts()"
+                  :key="'mps-'+scene.scene_id">
           <div class="flex gap-3 items-start border border-neutral-200 dark:border-neutral-800 rounded-xl p-3">
             <div class="shrink-0 flex flex-col items-center gap-1">
-              <img :src="img.url"
+              <img :src="firstApprovedImageForScene(scene.scene_id) || scene.url"
                    class="w-16 h-28 rounded-lg object-cover border border-neutral-200 dark:border-neutral-800" />
               <span class="text-[10px] text-neutral-400 dark:text-neutral-500"
-                    x-text="img.label"></span>
+                    x-text="'scene ' + (sIdx + 1)"></span>
             </div>
             <div class="flex-1 min-w-0 space-y-2">
               <textarea
-                :value="movementByVariant[img.variant_id] || ''"
-                @input="movementByVariant[img.variant_id] = $event.target.value"
+                :value="movementByScene[scene.scene_id] || ''"
+                @input="movementByScene[scene.scene_id] = $event.target.value"
                 rows="3"
                 class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
                 placeholder="e.g. He pours the mouthwash into the bowl and says to camera: 'Did you know…' Active camera. sound on."></textarea>
               <div class="flex items-center gap-2 text-xs">
                 <label class="text-neutral-500 dark:text-neutral-400">Duration:</label>
-                <select :value="durationByVariant[img.variant_id] || videoDurationSpec().default"
-                        @change="durationByVariant[img.variant_id] = parseInt($event.target.value)"
+                <select :value="durationByScene[scene.scene_id] || videoDurationSpec().default"
+                        @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
                         class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
-                  <template x-for="n in videoDurationSpec().options" :key="'pvd'+img.variant_id+'-'+n">
+                  <template x-for="n in videoDurationSpec().options" :key="'psd'+scene.scene_id+'-'+n">
                     <option :value="n" x-text="n + 's'"></option>
                   </template>
                 </select>

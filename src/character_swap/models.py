@@ -198,6 +198,11 @@ class Job(BaseModel):
     # length (the Higgsfield "per-slot duration" model). Missing → fall back
     # to `duration_secs`, then the env default.
     durations_by_variant: dict[str, int] = Field(default_factory=dict)
+    # Per-SCENE duration override (scene_id → seconds). The granularity the
+    # Step 4 UI actually uses: one duration per scene, shared by all that
+    # scene's approved images. Resolution order in the runner:
+    # per-variant → per-scene → `duration_secs` → env default.
+    durations_by_scene: dict[str, int] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom
     # `prompt` AND the `movement_prompt` are expanded through GPT-4o before

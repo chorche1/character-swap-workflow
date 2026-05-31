@@ -532,13 +532,16 @@ async def _animate_character(
     # Higgsfield "per-slot" model). Empty/missing → fall back to the scene.
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
+    dur_by_scene = dict(job.durations_by_scene or {})
 
     placeholders: list[tuple[VideoVariant, str, int | None]] = []
     for src_variant_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
         prompt = by_variant.get(src_variant_id) or prompt_for_scene(scene_id)
-        duration = dur_by_variant.get(src_variant_id) or job.duration_secs
+        duration = (dur_by_variant.get(src_variant_id)
+                    or dur_by_scene.get(scene_id)
+                    or job.duration_secs)
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -605,13 +608,16 @@ async def generate_more_videos(
 
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
+    dur_by_scene = dict(job.durations_by_scene or {})
 
     placeholders: list[tuple[VideoVariant, str, int | None]] = []
     for src_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_id), None)
         scene_id = variant.scene_id if variant else None
         prompt = prompt_override or by_variant.get(src_id) or prompt_for(scene_id)
-        duration = dur_by_variant.get(src_id) or job.duration_secs
+        duration = (dur_by_variant.get(src_id)
+                    or dur_by_scene.get(scene_id)
+                    or job.duration_secs)
         for _ in range(n):
             v = VideoVariant(
                 video_id=_short("vd_"),
@@ -696,7 +702,11 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
         or job.movement_prompt
         or ""
     )
-    duration = (job.durations_by_variant or {}).get(source_variant_id) or job.duration_secs
+    duration = (
+        (job.durations_by_variant or {}).get(source_variant_id)
+        or (job.durations_by_scene or {}).get(sid)
+        or job.duration_secs
+    )
     await _animate_one_video(job, jc, fresh, movement_prompt, duration)
 
 
