@@ -93,7 +93,7 @@ VIDEO_MODELS: dict[str, dict] = {
     "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
-    "kling-v3":             {"label": "Kling 3.0",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
+    "kling-v3":             {"label": "Kling 3.0",                       "provider": "fal",        "price_setting": "kling_price_usd",        "duration_options": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
     # Legacy slug aliases — Hugo's old jobs reference these strings;
     # `kling.LEGACY_ALIASES` maps them to the new model_names. Kept in
     # the registry so the dropdown still shows a sensible label.
@@ -372,6 +372,17 @@ async def run_video_gen(gen_id: str) -> None:
             )
             _persist(gen, provider_job_id=op_id)
             await asyncio.to_thread(google_genai.wait_for_veo, op_id=op_id, dest=dest)
+        elif gen.model == "kling-v3":
+            # Kling 3.0 → fal.ai (official Kling API caps at 5/10s; fal's
+            # Kling v3 does 3–15s).
+            from character_swap.clients import fal_kling
+            req_id = await asyncio.to_thread(
+                fal_kling.submit_image_to_video,
+                image=image_path, prompt=effective_prompt,
+                duration_secs=gen.duration_secs, app_job_id=gen_id,
+            )
+            _persist(gen, provider_job_id=req_id)
+            await asyncio.to_thread(fal_kling.wait_for_video, request_id=req_id, dest=dest, app_job_id=gen_id)
         elif (gen.model in kling.KLING_MODELS
               or gen.model in kling.LEGACY_ALIASES):
             # Pass the slug through — `submit_kling._resolve_model_name`

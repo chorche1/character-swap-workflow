@@ -52,11 +52,10 @@ KLING_MODELS: dict[str, str] = {
     "kling-v2-1-master":  "kling-v2-1-master",
     "kling-v2-5-turbo":   "kling-v2-5-turbo",
     "kling-v2-6":         "kling-v2-6",
-    # Kling 3.0 (released 2026): cinematic visuals, native audio, std/pro via
-    # the `mode` param. Standard model_name per Kling's i2v API; if the API
-    # rejects this exact string it errors loudly (it's mapped here, so no
-    # silent fallback) — adjust the right-hand value if Kling renames it.
-    "kling-v3":           "kling-v3",
+    # NOTE: Kling 3.0 (`kling-v3`) is NOT here — the official Kling API only
+    # generates 5s/10s. `kling-v3` is routed through fal.ai instead
+    # (clients/fal_kling.py) because fal's Kling v3 accepts 3–15s durations.
+    # See pipeline.submit_video / wait_for_video for the routing.
 }
 
 # Legacy slug aliases — keep existing IMAGE_MODELS entries working after

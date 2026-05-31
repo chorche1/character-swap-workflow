@@ -290,6 +290,14 @@ def submit_video(
     # Lazy imports so older keyless installs don't pay the import cost for
     # providers they'll never use.
     from character_swap.clients import _stubs, google_genai, kling
+    if model == "kling-v3":
+        # Kling 3.0 routes through fal.ai (the official API caps at 5/10s;
+        # fal's Kling v3 accepts 3–15s).
+        from character_swap.clients import fal_kling
+        return fal_kling.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur, app_job_id=job_id,
+        )
     if model in {"veo", "veo-3-fast"}:
         return google_genai.submit_veo(
             image=image, prompt=movement_prompt,
@@ -417,7 +425,10 @@ def wait_for_video(
     if on_progress is not None:
         on_progress("processing", None)
     from character_swap.clients import _stubs, google_genai, kling
-    if model in {"veo", "veo-3-fast"}:
+    if model == "kling-v3":
+        from character_swap.clients import fal_kling
+        fal_kling.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
+    elif model in {"veo", "veo-3-fast"}:
         google_genai.wait_for_veo(op_id=job_id, dest=dest)
     elif model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         kling.wait_for_kling(task_id=job_id, dest=dest)

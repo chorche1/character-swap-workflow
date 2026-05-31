@@ -1614,6 +1614,7 @@ _VIDEO_MODEL_KEYS: dict[str, str] = {
     "kling": "kling",
     "kling-2.1-pro": "kling",
     "kling-1.6": "kling",
+    "kling-v3": "fal",   # Kling 3.0 routes through fal.ai, not the official Kling API
 }
 
 
