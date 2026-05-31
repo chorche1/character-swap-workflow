@@ -109,6 +109,7 @@ function studio() {
       enableCaptions: true,
       enableNormalizeWpm: true,       // default-on; time-stretch each clip to target_wpm
       targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
+      playbackSpeed: 1,               // global speed-up of the final stitched video (1 = none)
       // Auto-fire the Resolve pipeline (Phase 4) after a successful render.
       // Persisted to localStorage so the toggle survives reloads.
       autoExportResolve: (typeof localStorage !== 'undefined'
@@ -2444,6 +2445,7 @@ function studio() {
         fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
         fd.append('enable_wpm_normalize', this.editor.enableNormalizeWpm ? 'true' : 'false');
         fd.append('target_wpm', String(this.editor.targetWpm || 190));
+        fd.append('playback_speed', String(this.editor.playbackSpeed || 1));
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/multi_auto_edit', { method: 'POST', body: fd });

@@ -2722,6 +2722,16 @@
                 <span class="text-neutral-300">WPM</span>
               </label>
               <label class="flex items-center gap-1.5 cursor-pointer"
+                     title="Speed up (or slow down) the whole stitched video. Pitch-preserving — voices stay natural. Applied on top of pace normalization. Captions stay in sync.">
+                <span class="text-neutral-300">Speed</span>
+                <select x-model.number="editor.playbackSpeed" @click.stop
+                        class="px-1.5 py-0.5 text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
+                  <template x-for="s in [0.75, 1, 1.25, 1.5, 1.75, 2]" :key="'spd'+s">
+                    <option :value="s" x-text="s === 1 ? '1× (normal)' : s + '×'"></option>
+                  </template>
+                </select>
+              </label>
+              <label class="flex items-center gap-1.5 cursor-pointer"
                      title="When the render finishes, package as a DaVinci Resolve project and auto-run automate.py (Resolve renders + optional Drive upload). Requires Resolve installed and running.">
                 <input type="checkbox" x-model="editor.autoExportResolve"
                        @change="localStorage.setItem('editor.autoExportResolve', editor.autoExportResolve ? '1' : '0')" />

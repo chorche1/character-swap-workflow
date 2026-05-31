@@ -2963,6 +2963,11 @@ async def editor_multi_auto_edit(
     enable_captions: bool = Form(True),
     enable_wpm_normalize: bool = Form(True),
     target_wpm: float = Form(190.0),
+    # Global playback-speed multiplier applied to the FINAL stitched video
+    # (pitch-preserving). 1.0 = no change, 1.5 = 50% faster, etc. Distinct
+    # from WPM normalize (which equalizes per-clip pace) — this is a
+    # deliberate overall speed-up of the whole reel. Clamped to [0.5, 2.0].
+    playback_speed: float = Form(1.0),
 ) -> dict:
     """Multi-clip auto-edit:
       1. Save each uploaded clip.
@@ -3168,6 +3173,24 @@ async def editor_multi_auto_edit(
         except Exception as e:
             raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
 
+    # 6.5. Global speed-up (pitch-preserving). Applied to the stitched result
+    # BEFORE captions so the caption transcription below runs on the sped-up
+    # audio and stays perfectly in sync — and the cached pre-caption video
+    # (used by rerender) is already at the target speed.
+    speed_info: dict | None = None
+    speed = max(0.5, min(2.0, float(playback_speed or 1.0)))
+    if abs(speed - 1.0) > 1e-3:
+        sped = edit_dir / "035-speed.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.time_stretch, current, sped,
+                speed_factor=speed, job_id=edit_id,
+            )
+            current = sped
+            speed_info = {"playback_speed": round(speed, 3)}
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(500, f"Speed-up failed: {e}")
+
     # 7. Captions (optional)
     cap_info: dict | None = None
     if enable_captions:
@@ -3204,6 +3227,7 @@ async def editor_multi_auto_edit(
                           if wpm_decisions else None),
         "trim": trim_summary,
         "voice_swap": swap_summary,
+        "speed": speed_info,
         "captions": cap_info,
         "rerender_available": bool(enable_captions),
     }
