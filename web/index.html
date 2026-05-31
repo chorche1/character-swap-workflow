@@ -1132,6 +1132,12 @@
         <div class="text-xs text-neutral-400 dark:text-neutral-500"
              x-text="`${approvedCount()} approved × ${videosPerChar} = ${approvedCount() * videosPerChar} video${approvedCount() * videosPerChar === 1 ? '' : 's'}`"></div>
       </div>
+      <p class="text-xs text-neutral-400 dark:text-neutral-500 mb-3 max-w-2xl -mt-1">
+        This makes N <em>identical</em> takes of each scene's prompt (to pick the best one).
+        <span class="text-neutral-600 dark:text-neutral-300">Want different clips with different motion?</span>
+        Duplicate the scene in <strong>Arrange scenes</strong> above — each scene gets its own
+        motion prompt (applied to every character), and they stitch together in order.
+      </p>
 
       <!-- Video provider + clip-duration pickers. Disabled once the movement
            prompt is locked; when locked, falls back to small read-only
