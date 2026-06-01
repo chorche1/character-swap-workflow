@@ -127,6 +127,11 @@ class JobCharacter(BaseModel):
     approved_variant_id: str | None = None
     videos: list[VideoVariant] = Field(default_factory=list)
     error: str | None = None
+    # Generated END FRAMES per scene (scene_id → path) — this character swapped
+    # into that scene's uploaded end-pose ref (Job.end_frames_by_scene). Filled
+    # during Step 3 generation when a scene has an end pose; used as the Kling
+    # 3.0 end frame at animate time. Empty when no end poses were given.
+    end_frame_paths: dict[str, str] = Field(default_factory=dict)
     # Step 6 (Compile) per-character output. When the user clicks "Compile
     # final videos" in Step 6, runner_compile concatenates every scene's
     # approved-variant video for this character and runs them through the

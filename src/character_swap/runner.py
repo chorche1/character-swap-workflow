@@ -205,6 +205,24 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
     )
 
+    # End frames: for each scene that has an uploaded end-pose ref, swap THIS
+    # character into the pose so the scene's Kling 3.0 end frame features the
+    # same person. Generated here (Step 3) so the user sees it before
+    # approving. Best-effort + per-scene; failures just skip that end frame.
+    end_poses = dict(job.end_frames_by_scene or {})
+    if end_poses:
+        async def _gen_end(sid: str, pose: str):
+            async with sem:
+                out = await asyncio.to_thread(
+                    _ensure_end_frame_swap, job, jc, sid, pose)
+            if out:
+                jc.end_frame_paths[sid] = str(out)
+        await asyncio.gather(*[
+            _gen_end(sid, pose) for sid, pose in end_poses.items()
+            if pose and Path(pose).exists()
+        ])
+        _persist(job, jc)
+
 
 async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> None:
     """Re-run image gen for ONE specific (already-failed) variant slot.
@@ -544,15 +562,19 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
-        # Optional per-scene END FRAME: swap this character into the uploaded
-        # end-pose ref so the end frame matches the character, then hand it to
-        # Kling 3.0 as end_image (only kling-v3 supports it). Cached per scene.
+        # Optional per-scene END FRAME (Kling 3.0 only): prefer the frame we
+        # already generated in Step 3 (character swapped into the scene's end
+        # pose); fall back to swapping now if it's missing for any reason.
         end_image = None
-        end_pose = end_by_scene.get(scene_id)
-        if (end_pose and job.video_model == "kling-v3"
-                and Path(end_pose).exists()):
-            end_image = await asyncio.to_thread(
-                _ensure_end_frame_swap, job, jc, scene_id, end_pose)
+        if job.video_model == "kling-v3":
+            pre = (jc.end_frame_paths or {}).get(scene_id)
+            if pre and Path(pre).exists():
+                end_image = Path(pre)
+            else:
+                end_pose = end_by_scene.get(scene_id)
+                if end_pose and Path(end_pose).exists():
+                    end_image = await asyncio.to_thread(
+                        _ensure_end_frame_swap, job, jc, scene_id, end_pose)
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
