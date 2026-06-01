@@ -2258,6 +2258,10 @@ class CompileVideosBody(BaseModel):
     min_silence_secs: float = Field(default=0.4, ge=0.05, le=5.0)
     pad_secs: float = Field(default=0.05, ge=0.0, le=1.0)
     voice_override: str | None = None
+    # When False, keep the original generated/Kling audio — skip the ElevenLabs
+    # voice swap entirely, ignoring both `voice_override` and each character's
+    # library preset voice. The Step-6 "Voice swap" checkbox drives this.
+    enable_voice_swap: bool = True
     # Optional filter — when present, only compile these char_ids. Used by
     # the per-character retry button when ONE character's compile failed.
     char_ids: list[str] | None = None
@@ -2311,7 +2315,8 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
         enable_wpm_normalize=body.enable_wpm_normalize,
         target_wpm=body.target_wpm, threshold_db=body.threshold_db,
         min_silence_secs=body.min_silence_secs, pad_secs=body.pad_secs,
-        voice_override=body.voice_override, char_ids=body.char_ids,
+        voice_override=body.voice_override,
+        enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
     )
     return _job_to_dict(job)
 

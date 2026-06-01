@@ -168,14 +168,26 @@ function studio() {
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
-    compileSettings: {
-      template: (typeof localStorage !== 'undefined' && localStorage.getItem('compile.template')) || 'submagic-pro',
-      enableTrim: true,
-      enableCaptions: true,
-      enableWpmNormalize: true,
-      targetWpm: parseFloat((typeof localStorage !== 'undefined' && localStorage.getItem('compile.targetWpm')) || '190') || 190,
-      voiceOverride: '',
-    },
+    // Step 6 defaults: capcut-purple-pill + trim + captions, with WPM normalize
+    // and voice swap OFF ("nothing else from the multiclip editor"). Persisted
+    // as ONE versioned JSON blob so every choice — not just template/WPM —
+    // survives reloads; the v2 key cleanly supersedes the old split keys + the
+    // previous submagic-pro default.
+    compileSettings: (() => {
+      const defaults = {
+        template: 'capcut-purple-pill',
+        enableTrim: true,
+        enableCaptions: true,
+        enableWpmNormalize: false,
+        enableVoiceSwap: false,
+        targetWpm: 190,
+        voiceOverride: '',
+      };
+      try {
+        const saved = JSON.parse(localStorage.getItem('compile.settings.v2') || '{}');
+        return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+      } catch (_) { return defaults; }
+    })(),
     compiling: false,
     pipelineRunning: false,         // true while the 🚀 Run-full-pipeline orchestrator is running
     // --- Visual scrubbing timeline state (kept at top level for Alpine
@@ -1763,10 +1775,9 @@ function studio() {
       const forResolve = !!opts?.forResolve;
       this.compiling = true;
       try {
-        // Persist common settings so they survive page reloads.
+        // Persist all settings (one versioned blob) so they survive reloads.
         try {
-          localStorage.setItem('compile.template', this.compileSettings.template);
-          localStorage.setItem('compile.targetWpm', String(this.compileSettings.targetWpm));
+          localStorage.setItem('compile.settings.v2', JSON.stringify(this.compileSettings));
         } catch (_) { /* private window etc. */ }
 
         const body = {
@@ -1776,6 +1787,7 @@ function studio() {
           enable_wpm_normalize: !!this.compileSettings.enableWpmNormalize,
           target_wpm: Number(this.compileSettings.targetWpm) || 190,
           voice_override: this.compileSettings.voiceOverride || null,
+          enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
           method: 'POST',
@@ -1826,6 +1838,7 @@ function studio() {
         enable_wpm_normalize: !!this.compileSettings.enableWpmNormalize,
         target_wpm: Number(this.compileSettings.targetWpm) || 190,
         voice_override: this.compileSettings.voiceOverride || null,
+        enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
         char_ids: [charId],
       };
       const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {

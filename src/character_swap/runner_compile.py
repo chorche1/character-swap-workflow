@@ -89,6 +89,22 @@ def _persist_jc(job: Job, jc: JobCharacter, **fields) -> JobCharacter:
     return jc
 
 
+def _resolve_compile_voice(voice_override: str | None, char_asset,
+                           enable_voice_swap: bool) -> str | None:
+    """Decide which ElevenLabs voice (if any) the compile should swap to.
+
+    Returns None — i.e. KEEP the original generated/Kling audio — when voice
+    swap is disabled (Step-6 "Voice swap" unchecked). Otherwise the batch
+    `voice_override` wins over the character's library preset voice; an
+    empty / absent value means no swap."""
+    if not enable_voice_swap:
+        return None
+    vid = (voice_override or "").strip() or None
+    if not vid and char_asset and getattr(char_asset, "voice_id", None):
+        vid = (char_asset.voice_id or "").strip() or None
+    return vid
+
+
 async def _compile_one_character(
     job_id: str, char_id: str,
     *,
@@ -102,6 +118,7 @@ async def _compile_one_character(
     min_silence_secs: float,
     pad_secs: float,
     voice_override: str | None,
+    enable_voice_swap: bool = True,
     enable_transcribe: bool = True,
 ) -> None:
     """Compile one character's per-scene videos into a single final MP4.
@@ -109,7 +126,8 @@ async def _compile_one_character(
     Mirrors the steps of /api/editor/auto_edit but with an in-memory
     concatenation step prepended. Each step is opt-out via the boolean
     flags; voice swap auto-applies the character's preset voice (or
-    `voice_override` if given).
+    `voice_override` if given) UNLESS `enable_voice_swap` is False, in which
+    case the original generated/Kling audio is kept untouched.
     """
     s = store()
     job = s.get_job(job_id)
@@ -121,10 +139,12 @@ async def _compile_one_character(
 
     # Find the character's preset voice (Phase B). voice_override (batch UI
     # setting) wins over per-character preset. Empty string → no voice swap.
+    # When voice swap is disabled (Step-6 "Voice swap" unchecked) we keep the
+    # original generated/Kling audio — ignore BOTH the batch override and the
+    # character's library preset voice.
     char_asset = s.get_character(char_id)
-    effective_voice_id: str | None = (voice_override or "").strip() or None
-    if not effective_voice_id and char_asset and char_asset.voice_id:
-        effective_voice_id = char_asset.voice_id.strip() or None
+    effective_voice_id = _resolve_compile_voice(
+        voice_override, char_asset, enable_voice_swap)
 
     # Working dirs: one per-compile editor edit_id (so the result also shows
     # up in the Editor tab's history), plus a tidy `output/<job>/compiled/`
@@ -352,6 +372,7 @@ async def compile_job_videos(
     min_silence_secs: float = 0.4,
     pad_secs: float = 0.05,
     voice_override: str | None = None,
+    enable_voice_swap: bool = True,
     char_ids: list[str] | None = None,
     enable_transcribe: bool = True,
 ) -> None:
@@ -399,6 +420,7 @@ async def compile_job_videos(
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
             pad_secs=pad_secs, voice_override=voice_override,
+            enable_voice_swap=enable_voice_swap,
             enable_transcribe=enable_transcribe,
         )
         for cid in targets

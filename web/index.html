@@ -1437,11 +1437,14 @@
             <label class="flex items-center gap-1">
               <input type="checkbox" x-model="compileSettings.enableWpmNormalize" class="accent-indigo-500"> Normalize WPM
             </label>
+            <label class="flex items-center gap-1">
+              <input type="checkbox" x-model="compileSettings.enableVoiceSwap" class="accent-indigo-500"> Voice swap
+            </label>
           </div>
-          <label class="block">
+          <label class="block" :class="compileSettings.enableVoiceSwap ? '' : 'opacity-40'">
             Voice override (batch-wide)
             <select x-model="compileSettings.voiceOverride"
-                    :disabled="!elevenlabsAvailable()"
+                    :disabled="!compileSettings.enableVoiceSwap || !elevenlabsAvailable()"
                     class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
               <option value="">— use each character's preset voice —</option>
               <template x-for="v in elevenlabsVoices" :key="'cv-ov-'+v.voice_id">
@@ -1450,7 +1453,7 @@
               </template>
             </select>
             <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-0.5">
-              Override every character with this voice. Leave blank to use each character's library preset.
+              Only applies when <strong>Voice swap</strong> is on. Override every character with this voice, or leave blank to use each character's library preset.
             </p>
           </label>
         </div>
