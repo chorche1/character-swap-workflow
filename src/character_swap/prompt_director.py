@@ -242,11 +242,10 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   actual light sources and their direction when you can see them ("warm window
   light from camera-left", "soft overhead kitchen downlight", "golden-hour
   backlight"). Make the environment ACT ON them: wrap a subtle rim / edge light
-  from the background around their silhouette, bounce nearby surface colors onto
-  their skin and clothing (color spill), match the scene's exposure, and render
-  them as if shot on the SAME camera and lens as the scene — same focal length,
-  perspective, sensor noise, ISO, and compression — so subject and background
-  share one photographic fingerprint.
+  from the background around their silhouette, and bounce nearby surface colors
+  onto their skin and clothing (color spill). The lighting must look organic and
+  real, and EVERYTHING must look like the same scene — not like the person was
+  pasted onto the background.
 - NO BURNT-IN TEXT: instruct removal of any captions, subtitles, progress bars,
   logos, or watermarks present in the source image.
 - INLINE NEGATIVES: end each prompt with a short "Avoid:" clause listing the
