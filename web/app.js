@@ -4676,6 +4676,25 @@ function studio() {
       this.job = await r.json();
     },
 
+    // Optional per-scene end frame (Kling 3.0 only) — start→end interpolation.
+    async uploadSceneEndFrame(sceneId, file) {
+      if (!this.job || !file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/end_frame`,
+                            { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('End frame upload failed: ' + await r.text()); return; }
+      this.job = await r.json();
+    },
+
+    async clearSceneEndFrame(sceneId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/end_frame`,
+                            { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Clear end frame failed: ' + await r.text()); return; }
+      this.job = await r.json();
+    },
+
     // For the locked summary: rows of {sceneIndex, url, prompt} so the UI
     // can show what was submitted scene by scene.
     movementPromptRows() {

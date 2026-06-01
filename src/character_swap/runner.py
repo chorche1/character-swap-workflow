@@ -386,7 +386,7 @@ async def run_edit_variant(
 
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
-    duration_secs: int | None = None,
+    duration_secs: int | None = None, end_image: Path | None = None,
 ) -> None:
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
@@ -415,6 +415,7 @@ async def _animate_one_video(
             job_id=job.job_id,
             model=video_model,
             duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
+            end_image=end_image,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR
@@ -533,8 +534,9 @@ async def _animate_character(
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
     dur_by_scene = dict(job.durations_by_scene or {})
+    end_by_scene = dict(job.end_frames_by_scene or {})
 
-    placeholders: list[tuple[VideoVariant, str, int | None]] = []
+    placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
     for src_variant_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
@@ -542,6 +544,9 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
+        # Optional per-scene end frame (only honored by kling-v3 in submit_video).
+        end_path = end_by_scene.get(scene_id)
+        end_image = Path(end_path) if end_path and Path(end_path).exists() else None
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -551,11 +556,12 @@ async def _animate_character(
                 source_variant_id=src_variant_id,
             )
             jc.videos.append(v)
-            placeholders.append((v, prompt, duration))
+            placeholders.append((v, prompt, duration, end_image))
     _persist(job, jc)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur, end_img)
+          for v, mp, dur, end_img in placeholders]
     )
 
 

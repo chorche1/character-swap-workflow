@@ -241,7 +241,8 @@ def _job_to_dict(job: Job) -> dict:
         # New multi-scene fields: parallel lists [{scene_id, url}] for the
         # frontend.
         "scenes": [
-            {"scene_id": sid, "url": _file_url(p)}
+            {"scene_id": sid, "url": _file_url(p),
+             "end_frame_url": _file_url((job.end_frames_by_scene or {}).get(sid))}
             for sid, p in zip(eff_ids, eff_paths)
         ],
         "prompt": job.prompt,
@@ -1913,6 +1914,60 @@ async def delete_scene(job_id: str, scene_id: str) -> dict:
     job.updated_at = datetime.utcnow()
     s.update_job(job)
     await events.publish(job_id, {"kind": "scene.deleted", "job_id": job_id,
+                                  "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/end_frame")
+async def set_scene_end_frame(job_id: str, scene_id: str,
+                              file: UploadFile = File(...)) -> dict:
+    """Attach an optional END FRAME image to a scene. That scene's video then
+    interpolates from the approved image (start) to this frame (end). Only
+    Kling 3.0 honors it — other models ignore the end frame. Locked once
+    movement is submitted."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; end frames are locked")
+    if scene_id not in _effective_scene_ids(job):
+        raise HTTPException(404, f"Scene not in job: {scene_id}")
+    ext = _safe_ext(file.filename or "")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    dest = settings.output_dir / job_id / "end_frames" / f"{scene_id}{ext}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    job.end_frames_by_scene = {**(job.end_frames_by_scene or {}), scene_id: str(dest)}
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.end_frame_set", "job_id": job_id,
+                                  "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
+@app.delete("/api/jobs/{job_id}/scenes/{scene_id}/end_frame")
+async def clear_scene_end_frame(job_id: str, scene_id: str) -> dict:
+    """Remove a scene's end frame (revert to start-frame-only animation)."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; end frames are locked")
+    frames = dict(job.end_frames_by_scene or {})
+    old = frames.pop(scene_id, None)
+    if old:
+        with contextlib.suppress(OSError):
+            Path(old).unlink(missing_ok=True)
+    job.end_frames_by_scene = frames
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.end_frame_cleared", "job_id": job_id,
                                   "scene_id": scene_id})
     return _job_to_dict(job)
 

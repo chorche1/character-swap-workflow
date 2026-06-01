@@ -261,6 +261,7 @@ def submit_video(
     model: str = "grok-imagine",
     aspect_ratio: str | None = None,
     duration_secs: int | None = None,
+    end_image: Path | None = None,
 ) -> str:
     """Submit a video job to the chosen provider. Returns the provider's job/task id.
 
@@ -292,11 +293,11 @@ def submit_video(
     from character_swap.clients import _stubs, google_genai, kling
     if model == "kling-v3":
         # Kling 3.0 routes through fal.ai (the official API caps at 5/10s;
-        # fal's Kling v3 accepts 3–15s).
+        # fal's Kling v3 accepts 3–15s + an optional end frame).
         from character_swap.clients import fal_kling
         return fal_kling.submit_image_to_video(
             image=image, prompt=movement_prompt,
-            duration_secs=effective_dur, app_job_id=job_id,
+            duration_secs=effective_dur, end_image=end_image, app_job_id=job_id,
         )
     if model in {"veo", "veo-3-fast"}:
         return google_genai.submit_veo(
