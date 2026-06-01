@@ -917,6 +917,12 @@ class CreateJobBody(BaseModel):
     # returned by `POST /api/jobs/extra_ref`. None when the user didn't
     # upload one.
     extra_reference_filename: str | None = None
+    # Optional per-scene END-POSE reference: owner scene_id → scene_id of an
+    # uploaded pose image (uploaded via POST /api/scenes like any scene). In
+    # Step 3 the runner swaps each character into the pose so the scene's Kling
+    # 3.0 end frame features the same character (start→end interpolation).
+    # Resolved to file paths → Job.end_frames_by_scene at creation.
+    end_poses: dict[str, str] | None = None
 
 
 async def _run_async(coro_fn, *args, **kwargs) -> None:

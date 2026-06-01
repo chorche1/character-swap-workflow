@@ -33,6 +33,33 @@ def _short(prefix: str = "") -> str:
     return prefix + secrets.token_hex(3)
 
 
+def _ensure_end_frame_swap(job, jc, scene_id, pose_path):
+    """Swap this character into the uploaded END-POSE reference so a scene's
+    Kling end frame features the SAME character. The swapped frame is cached on
+    disk per (char, scene) so all of that scene's videos reuse it. Returns the
+    Path, or None on failure (the clip then animates from the start frame only,
+    no end frame)."""
+    safe_scene = str(scene_id or "scene").replace("/", "_")
+    out_dir = _output_dir(job.job_id, jc.char_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"endframe_{safe_scene}.png"
+    if dest.exists():
+        return dest
+    try:
+        pipeline.generate_variant(
+            model=job.image_model or "gpt-image",
+            scene_image=Path(pose_path),
+            character_image=Path(jc.source_image_path),
+            character_name=jc.name,
+            prompt=job.prompt or pipeline.GENERATION_PROMPT,
+            dest=dest,
+            job_id=job.job_id,
+        )
+        return dest if dest.exists() else None
+    except Exception:  # noqa: BLE001 — best-effort; clip survives without it
+        return None
+
+
 def _persist(job: Job, jc: JobCharacter, *, status: CharStatus | None = None,
              **fields) -> JobCharacter:
     if status is not None:

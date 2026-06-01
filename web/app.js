@@ -3801,6 +3801,24 @@ function studio() {
       this.scene = this.scenes[0] || null;   // legacy mirror
     },
 
+    // Optional per-scene end poses, staged client-side before job creation.
+    // endPoses[ownerSceneId] = {scene_id, url} of an uploaded pose image
+    // (uploaded via /api/scenes like any scene). Sent as end_poses on createJob.
+    endPoses: {},
+
+    async uploadEndPose(ownerSceneId, file) {
+      if (!file) return;
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch('/api/scenes', { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('End pose upload failed: ' + await r.text()); return; }
+      const pose = await r.json();
+      this.endPoses[ownerSceneId] = { scene_id: pose.scene_id, url: pose.url };
+    },
+
+    removeEndPose(ownerSceneId) {
+      delete this.endPoses[ownerSceneId];
+    },
+
     async uploadScenes(files) {
       for (const f of files) {
         if (f && f.type && f.type.startsWith('image/')) {
@@ -3819,6 +3837,7 @@ function studio() {
     removeScene(scene_id) {
       this.scenes = this.scenes.filter(s => s.scene_id !== scene_id);
       this.scene = this.scenes[0] || null;
+      delete this.endPoses[scene_id];   // drop its staged end pose too
       if (this.job && this.canEditJobScenes()) {
         this._syncJobScenes();   // fire-and-forget
       }
@@ -4179,6 +4198,13 @@ function studio() {
             character_ids: this.selectedCharacters,
             images_per_character: this.imagesPerChar,
             project_id: this.currentProjectId,
+            // Optional per-scene end poses: owner scene_id → pose scene_id.
+            // The runner swaps each character into the pose to make a matching
+            // end frame (Kling 3.0 start→end). Only scenes that still exist.
+            end_poses: Object.fromEntries(
+              Object.entries(this.endPoses)
+                .filter(([sid]) => this.scenes.some(s => s.scene_id === sid))
+                .map(([sid, p]) => [sid, p.scene_id])),
             // Only send `prompt` as a CUSTOM override when it differs from
             // the default — otherwise the backend treats unchanged default
             // text as a user-customised prompt and (with enrich on) runs it
@@ -4979,6 +5005,7 @@ function studio() {
       this.job = null;
       this.scenes = [];
       this.scene = null;
+      this.endPoses = {};
       // Default: all library characters checked. startNewJobInProject() will
       // override this with the project's preset if there is one.
       this.selectedCharacters = (this.library || []).map(c => c.char_id);
