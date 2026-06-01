@@ -203,10 +203,13 @@ class Job(BaseModel):
     # scene's approved images. Resolution order in the runner:
     # per-variant → per-scene → `duration_secs` → env default.
     durations_by_scene: dict[str, int] = Field(default_factory=dict)
-    # Optional per-scene END FRAME (scene_id → image path on disk). When set,
-    # that scene's video animates from the approved image (start) to this end
-    # frame — first/last-frame interpolation. Only Kling 3.0 (kling-v3, via
-    # fal's end_image_url) honors it today; other models ignore it.
+    # Optional per-scene END-POSE reference (scene_id → uploaded image path).
+    # Set in the Arrange-scenes panel. At animate time the runner SWAPS this
+    # character into the pose (so the end frame features the same character)
+    # and hands the result to Kling 3.0 as the end frame — first/last-frame
+    # interpolation. Keyed by scene_id, so a duplicated scene can carry a
+    # DIFFERENT end pose (same start, different end → different clip). Only
+    # kling-v3 honors it; other models ignore it.
     end_frames_by_scene: dict[str, str] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom

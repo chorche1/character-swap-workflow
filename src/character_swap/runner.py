@@ -544,9 +544,15 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
-        # Optional per-scene end frame (only honored by kling-v3 in submit_video).
-        end_path = end_by_scene.get(scene_id)
-        end_image = Path(end_path) if end_path and Path(end_path).exists() else None
+        # Optional per-scene END FRAME: swap this character into the uploaded
+        # end-pose ref so the end frame matches the character, then hand it to
+        # Kling 3.0 as end_image (only kling-v3 supports it). Cached per scene.
+        end_image = None
+        end_pose = end_by_scene.get(scene_id)
+        if (end_pose and job.video_model == "kling-v3"
+                and Path(end_pose).exists()):
+            end_image = await asyncio.to_thread(
+                _ensure_end_frame_swap, job, jc, scene_id, end_pose)
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
