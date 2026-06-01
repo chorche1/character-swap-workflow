@@ -241,13 +241,19 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   grain so the subject isn't crisper than the background. Name the scene's
   actual light sources and their direction when you can see them ("warm window
   light from camera-left", "soft overhead kitchen downlight", "golden-hour
-  backlight").
+  backlight"). Make the environment ACT ON them: wrap a subtle rim / edge light
+  from the background around their silhouette, bounce nearby surface colors onto
+  their skin and clothing (color spill), match the scene's exposure, and render
+  them as if shot on the SAME camera and lens as the scene — same focal length,
+  perspective, sensor noise, ISO, and compression — so subject and background
+  share one photographic fingerprint.
 - NO BURNT-IN TEXT: instruct removal of any captions, subtitles, progress bars,
   logos, or watermarks present in the source image.
 - INLINE NEGATIVES: end each prompt with a short "Avoid:" clause listing the
   failure modes to exclude — a pasted-in / cutout / collage look, the subject
   floating with no shadow, lighting or color temperature that doesn't match the
-  scene, the subject sharper than the background, identity bleed from the
+  scene, the subject sharper than the background, an edge with no light wrap, a
+  subject untouched by the scene's bounce light or grain, identity bleed from the
   original subject, extra or distorted fingers, warped facial features,
   changed/restyled background, altered prop counts, props changing state,
   misspelled labels, captions, subtitles, watermarks, cartoon/illustration
