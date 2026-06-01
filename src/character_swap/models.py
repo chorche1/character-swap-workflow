@@ -127,6 +127,18 @@ class JobCharacter(BaseModel):
     approved_variant_id: str | None = None
     videos: list[VideoVariant] = Field(default_factory=list)
     error: str | None = None
+    # Generated END FRAMES per scene (scene_id → path) — this character swapped
+    # into that scene's uploaded end-pose ref (Job.end_frames_by_scene). Filled
+    # during Step 3 generation (same time as the variants) when a scene has an
+    # end pose; used as the Kling 3.0 end frame at animate time. Empty when no
+    # end poses were given.
+    end_frame_paths: dict[str, str] = Field(default_factory=dict)
+    # Per-scene END-FRAME GENERATION ERRORS (scene_id → message). Set when the
+    # swap-into-pose failed (e.g. a content-policy block that survived the
+    # Nano-Banana-Pro fallback). Surfaced in Step 3 so failures are visible
+    # instead of silently swallowed — that bare-except swallow was why the
+    # first version of this feature was reverted.
+    end_frame_errors: dict[str, str] = Field(default_factory=dict)
     # Step 6 (Compile) per-character output. When the user clicks "Compile
     # final videos" in Step 6, runner_compile concatenates every scene's
     # approved-variant video for this character and runs them through the
@@ -203,6 +215,14 @@ class Job(BaseModel):
     # scene's approved images. Resolution order in the runner:
     # per-variant → per-scene → `duration_secs` → env default.
     durations_by_scene: dict[str, int] = Field(default_factory=dict)
+    # Optional per-scene END-POSE reference (scene_id → uploaded image path).
+    # Set on a scene in Step 1. During Step 3 the runner SWAPS each character
+    # into the pose (so the end frame features the same person) and hands the
+    # result to Kling 3.0 as the end frame — first/last-frame interpolation.
+    # Keyed by scene_id, so a duplicated scene can carry a DIFFERENT end pose
+    # (same start, different end → different clip). Only kling-v3 honors it;
+    # other models ignore it.
+    end_frames_by_scene: dict[str, str] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom
     # `prompt` AND the `movement_prompt` are expanded through GPT-4o before

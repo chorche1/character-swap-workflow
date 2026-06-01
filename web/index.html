@@ -620,6 +620,32 @@
                     class="absolute top-1.5 right-1.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center"
                     title="Remove this scene"
                     @click="removeScene(s.scene_id)">✕</button>
+            <!-- Optional END POSE (Kling 3.0): a second reference. In Step 3 the
+                 character is swapped into THIS pose too, giving a matching end
+                 frame so the clip interpolates start→end. Persistent — visible
+                 before AND after the job is created. -->
+            <div class="absolute bottom-1.5 right-1.5">
+              <template x-if="hasEndPose(s.scene_id)">
+                <div class="relative">
+                  <img :src="endPoseUrl(s.scene_id)"
+                       class="w-10 h-16 object-cover rounded border-2 border-indigo-400 shadow-lg"
+                       title="End pose (Kling 3.0) — the clip animates from the scene to this pose, with the same character swapped in." />
+                  <button x-show="canEditJobScenes()"
+                          class="absolute -top-1.5 -right-1.5 bg-neutral-900/80 hover:bg-rose-600 text-white text-[9px] rounded-full w-4 h-4 flex items-center justify-center"
+                          title="Remove end pose"
+                          @click="removeEndPoseAny(s.scene_id)">✕</button>
+                  <div class="absolute bottom-0 inset-x-0 bg-indigo-600/80 text-white text-[8px] text-center">end</div>
+                </div>
+              </template>
+              <template x-if="!hasEndPose(s.scene_id) && canEditJobScenes()">
+                <label class="w-10 h-16 rounded border border-dashed border-white/60 bg-neutral-900/50 hover:bg-indigo-600/60 text-white text-[8px] leading-tight flex items-center justify-center text-center cursor-pointer"
+                       title="Optional end pose (Kling 3.0): the clip animates from the scene to this pose, with the same character swapped in.">
+                  + end<br>pose
+                  <input type="file" accept="image/*" class="hidden"
+                         @change="addEndPose(s.scene_id, $event.target.files[0]); $event.target.value=''" />
+                </label>
+              </template>
+            </div>
           </div>
         </template>
         <!-- Add-more dropzone — visible up until the job's runner has started
@@ -973,6 +999,22 @@
                       <span class="ml-1" x-text="`· ${g.variants.length} variant${g.variants.length === 1 ? '' : 's'}`"></span>
                     </span>
                   </div>
+                  <!-- Generated END FRAME for this (character, scene): the
+                       character swapped into the scene's end pose — the Kling
+                       3.0 interpolation target. Thumbnail on success, red chip
+                       on failure (surfaced, never silently swallowed). -->
+                  <template x-if="(jc.end_frame_urls || {})[g.scene?.scene_id]">
+                    <div class="flex items-center gap-1 mb-1.5 text-[10px] text-indigo-500 dark:text-indigo-400"
+                         title="End frame (Kling 3.0): clip animates start → this">
+                      <span class="text-neutral-400 dark:text-neutral-600">→ end frame</span>
+                      <img :src="jc.end_frame_urls[g.scene?.scene_id]"
+                           class="w-8 h-8 rounded object-cover border-2 border-indigo-400" />
+                    </div>
+                  </template>
+                  <template x-if="(jc.end_frame_errors || {})[g.scene?.scene_id]">
+                    <div class="mb-1.5 text-[10px] px-2 py-1 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900"
+                         x-text="'End-frame swap failed: ' + jc.end_frame_errors[g.scene?.scene_id]"></div>
+                  </template>
                   <div class="variant-strip">
                     <template x-for="v in g.variants" :key="v.variant_id">
                       <div class="card border rounded-xl overflow-hidden flex flex-col"
@@ -1159,6 +1201,15 @@
         <span class="text-xs text-neutral-400 dark:text-neutral-500">
           Duration is set per image below.
         </span>
+      </div>
+      <!-- End-frame / Kling-3.0 guard: end poses only animate with Kling 3.0.
+           Warn (non-blocking) + one-click switch when a different model is
+           picked while end poses are set. -->
+      <div x-show="anyEndPoseSet() && swapVideoModel !== 'kling-v3' && !job?.movement_prompt"
+           class="mb-3 text-xs px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-900 flex items-center gap-2 flex-wrap">
+        <span>⚠ You set an <strong>end pose</strong>, but only <strong>Kling 3.0</strong> interpolates start→end. Other models ignore it.</span>
+        <button class="px-2 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-medium"
+                @click="swapVideoModel = 'kling-v3'; syncDurationToModel()">Switch to Kling 3.0</button>
       </div>
       <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mb-3">
         <span class="text-neutral-400 dark:text-neutral-500">Video model:</span>

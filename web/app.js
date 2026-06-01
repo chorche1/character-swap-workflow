@@ -3801,6 +3801,73 @@ function studio() {
       this.scene = this.scenes[0] || null;   // legacy mirror
     },
 
+    // --- Optional per-scene END POSE (Kling 3.0 start→end interpolation) ------
+    // Before the job exists these are staged client-side (endPoses[sid] =
+    // {scene_id, url}) and sent as `end_poses` on createJob; after the job
+    // exists they live on job.scenes[].end_frame_url and are managed via the
+    // set/clear endpoints. The dispatch helpers below pick the right path so
+    // the Step-1 template stays simple, and the slot stays visible the whole
+    // time (the old version hid it with x-show="!job" → looked deleted).
+    endPoses: {},
+
+    hasEndPose(sid) {
+      if (this.job) {
+        const sc = (this.job.scenes || []).find(s => s.scene_id === sid);
+        return !!(sc && sc.end_frame_url);
+      }
+      return !!this.endPoses[sid];
+    },
+
+    endPoseUrl(sid) {
+      if (this.job) {
+        const sc = (this.job.scenes || []).find(s => s.scene_id === sid);
+        return sc ? sc.end_frame_url : null;
+      }
+      return this.endPoses[sid] ? this.endPoses[sid].url : null;
+    },
+
+    // True when ANY scene has an end pose — gates the Step-4 Kling-3.0 warning.
+    anyEndPoseSet() {
+      if (this.job) return (this.job.scenes || []).some(s => s.end_frame_url);
+      return Object.keys(this.endPoses || {}).length > 0;
+    },
+
+    // Add/replace an end pose for scene sid (dispatches by job existence).
+    async addEndPose(sid, file) {
+      if (!file) return;
+      if (this.job) { await this.uploadSceneEndFrame(sid, file); return; }
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch('/api/scenes', { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('End pose upload failed: ' + await r.text()); return; }
+      const pose = await r.json();
+      this.endPoses[sid] = { scene_id: pose.scene_id, url: pose.url };
+    },
+
+    // Remove an end pose for scene sid (dispatches by job existence).
+    async removeEndPoseAny(sid) {
+      if (this.job) { await this.clearSceneEndFrame(sid); return; }
+      delete this.endPoses[sid];
+    },
+
+    // Post-creation set/clear via the job endpoints. The server regenerates the
+    // swapped end frame when Step-3 variants already exist.
+    async uploadSceneEndFrame(sceneId, file) {
+      if (!this.job || !file) return;
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/end_frame`,
+                            { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('End frame upload failed: ' + await r.text()); return; }
+      this.job = await r.json();
+    },
+
+    async clearSceneEndFrame(sceneId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/end_frame`,
+                            { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Clear end frame failed: ' + await r.text()); return; }
+      this.job = await r.json();
+    },
+
 
     async uploadScenes(files) {
       for (const f of files) {
@@ -3820,6 +3887,7 @@ function studio() {
     removeScene(scene_id) {
       this.scenes = this.scenes.filter(s => s.scene_id !== scene_id);
       this.scene = this.scenes[0] || null;
+      delete this.endPoses[scene_id];   // drop its staged end pose too
       if (this.job && this.canEditJobScenes()) {
         this._syncJobScenes();   // fire-and-forget
       }
@@ -4180,6 +4248,13 @@ function studio() {
             character_ids: this.selectedCharacters,
             images_per_character: this.imagesPerChar,
             project_id: this.currentProjectId,
+            // Optional per-scene end poses: owner scene_id → pose scene_id.
+            // The runner swaps each character into the pose to make a matching
+            // end frame (Kling 3.0 start→end). Only scenes that still exist.
+            end_poses: Object.fromEntries(
+              Object.entries(this.endPoses)
+                .filter(([sid]) => this.scenes.some(s => s.scene_id === sid))
+                .map(([sid, p]) => [sid, p.scene_id])),
             // Only send `prompt` as a CUSTOM override when it differs from
             // the default — otherwise the backend treats unchanged default
             // text as a user-customised prompt and (with enrich on) runs it
@@ -4961,6 +5036,7 @@ function studio() {
       this.job = null;
       this.scenes = [];
       this.scene = null;
+      this.endPoses = {};
       // Default: all library characters checked. startNewJobInProject() will
       // override this with the project's preset if there is one.
       this.selectedCharacters = (this.library || []).map(c => c.char_id);

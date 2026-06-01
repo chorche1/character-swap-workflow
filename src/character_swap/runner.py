@@ -53,6 +53,40 @@ async def _emit(job_id: str, kind: str, char_id: str | None = None, **data) -> N
     await events.publish(job_id, payload)
 
 
+def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
+                           *, force: bool = False) -> Path:
+    """Swap this character into the uploaded END-POSE reference so a scene's
+    Kling end frame features the SAME character. The swapped frame is cached on
+    disk per (char, scene) so all of that scene's videos reuse it. Returns the
+    Path on success.
+
+    RAISES on failure — the caller records the message on
+    `JobCharacter.end_frame_errors[scene_id]` and surfaces it via an event. We
+    NEVER swallow end-frame errors here: a bare `except: return None` swallow
+    (zero user feedback on a content-policy block) is exactly why the first
+    version of this feature was reverted. `pipeline.generate_variant` already
+    retries a rejection with a softened prompt AND a Nano-Banana-Pro fallback,
+    so by the time this raises the swap is genuinely unrecoverable."""
+    safe_scene = str(scene_id or "scene").replace("/", "_")
+    out_dir = _output_dir(job.job_id, jc.char_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"endframe_{safe_scene}.png"
+    if dest.exists() and not force:
+        return dest
+    pipeline.generate_variant(
+        model=job.image_model or "gpt-image",
+        scene_image=Path(pose_path),
+        character_image=Path(jc.source_image_path),
+        character_name=jc.name,
+        prompt=job.prompt or pipeline.GENERATION_PROMPT,
+        dest=dest,
+        job_id=job.job_id,
+    )
+    if not dest.exists():
+        raise RuntimeError("end-frame swap produced no output file")
+    return dest
+
+
 # --- image generation -----------------------------------------------------------------
 
 def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:
@@ -204,6 +238,80 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
     )
+
+    # End frames: for each scene with an uploaded end-pose ref, swap THIS
+    # character into the pose so the scene's Kling 3.0 end frame features the
+    # same person. Generated here (Step 3, alongside the variants — per Hugo)
+    # so the user sees it before approving. Per-scene + best-effort: a failure
+    # is RECORDED on `end_frame_errors` and emitted (never swallowed), and just
+    # skips that one end frame.
+    end_poses = {
+        sid: pose for sid, pose in (job.end_frames_by_scene or {}).items()
+        if pose and Path(pose).exists()
+    }
+    if end_poses:
+        jc.end_frame_paths = dict(jc.end_frame_paths or {})
+        jc.end_frame_errors = dict(jc.end_frame_errors or {})
+
+        async def _gen_end(sid: str, pose: str) -> None:
+            await _emit(job.job_id, "char.end_frame_started",
+                        char_id=jc.char_id, scene_id=sid)
+            try:
+                async with sem:
+                    out = await asyncio.to_thread(
+                        _ensure_end_frame_swap, job, jc, sid, pose)
+                jc.end_frame_paths[sid] = str(out)
+                jc.end_frame_errors.pop(sid, None)
+                await _emit(job.job_id, "char.end_frame_done",
+                            char_id=jc.char_id, scene_id=sid)
+            except Exception as e:  # noqa: BLE001 — surfaced, never swallowed
+                jc.end_frame_errors[sid] = str(e)
+                jc.end_frame_paths.pop(sid, None)
+                await _emit(job.job_id, "char.end_frame_failed",
+                            char_id=jc.char_id, scene_id=sid, error=str(e))
+
+        await asyncio.gather(*[_gen_end(sid, pose)
+                               for sid, pose in end_poses.items()])
+        _persist(job, jc)
+
+
+async def regen_scene_end_frames(job_id: str, scene_id: str) -> None:
+    """Regenerate the END-FRAME swap for ONE scene across every character that
+    already has variants. Used when the user sets/replaces a scene's end pose
+    AFTER Step 3 has run (via the set-end-frame endpoint), so the preview end
+    frame matches the new pose. `force=True` overwrites the cached swap. Errors
+    are surfaced on `end_frame_errors` (never swallowed), same as Step 3."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        return
+    pose = (job.end_frames_by_scene or {}).get(scene_id)
+    if not pose or not Path(pose).exists():
+        return
+    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    targets = [jc for jc in job.characters.values() if jc.images]
+
+    async def _one(jc: JobCharacter) -> None:
+        jc.end_frame_paths = dict(jc.end_frame_paths or {})
+        jc.end_frame_errors = dict(jc.end_frame_errors or {})
+        await _emit(job_id, "char.end_frame_started",
+                    char_id=jc.char_id, scene_id=scene_id)
+        try:
+            async with sem:
+                out = await asyncio.to_thread(
+                    _ensure_end_frame_swap, job, jc, scene_id, pose, force=True)
+            jc.end_frame_paths[scene_id] = str(out)
+            jc.end_frame_errors.pop(scene_id, None)
+            await _emit(job_id, "char.end_frame_done",
+                        char_id=jc.char_id, scene_id=scene_id)
+        except Exception as e:  # noqa: BLE001 — surfaced, never swallowed
+            jc.end_frame_errors[scene_id] = str(e)
+            jc.end_frame_paths.pop(scene_id, None)
+            await _emit(job_id, "char.end_frame_failed",
+                        char_id=jc.char_id, scene_id=scene_id, error=str(e))
+        _persist(job, jc)
+
+    await asyncio.gather(*[_one(jc) for jc in targets])
 
 
 async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> None:
@@ -386,7 +494,7 @@ async def run_edit_variant(
 
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
-    duration_secs: int | None = None,
+    duration_secs: int | None = None, end_image: Path | None = None,
 ) -> None:
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
@@ -415,6 +523,7 @@ async def _animate_one_video(
             job_id=job.job_id,
             model=video_model,
             duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
+            end_image=end_image,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR
@@ -533,8 +642,9 @@ async def _animate_character(
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
     dur_by_scene = dict(job.durations_by_scene or {})
+    end_by_scene = dict(job.end_frames_by_scene or {})
 
-    placeholders: list[tuple[VideoVariant, str, int | None]] = []
+    placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
     for src_variant_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
@@ -542,6 +652,27 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
+        # Optional per-scene END FRAME (Kling 3.0 only): prefer the frame we
+        # already generated in Step 3 (character swapped into the scene's end
+        # pose); fall back to swapping now if it's missing. Errors are surfaced
+        # on `end_frame_errors` + an event, never swallowed.
+        end_image: Path | None = None
+        if job.video_model == "kling-v3":
+            pre = (jc.end_frame_paths or {}).get(scene_id)
+            if pre and Path(pre).exists():
+                end_image = Path(pre)
+            else:
+                end_pose = end_by_scene.get(scene_id)
+                if end_pose and Path(end_pose).exists():
+                    try:
+                        end_image = await asyncio.to_thread(
+                            _ensure_end_frame_swap, job, jc, scene_id, end_pose)
+                    except Exception as e:  # noqa: BLE001 — surfaced, not swallowed
+                        jc.end_frame_errors = dict(jc.end_frame_errors or {})
+                        jc.end_frame_errors[scene_id] = str(e)
+                        await _emit(job.job_id, "char.end_frame_failed",
+                                    char_id=jc.char_id, scene_id=scene_id, error=str(e))
+                        end_image = None
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -551,11 +682,12 @@ async def _animate_character(
                 source_variant_id=src_variant_id,
             )
             jc.videos.append(v)
-            placeholders.append((v, prompt, duration))
+            placeholders.append((v, prompt, duration, end_image))
     _persist(job, jc)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur, end_img)
+          for v, mp, dur, end_img in placeholders]
     )
 
 
