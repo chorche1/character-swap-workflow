@@ -70,14 +70,10 @@ def submit_image_to_video(
     prompt: str,
     duration_secs: int | None = 5,
     generate_audio: bool = True,
-    end_image: Path | None = None,
     app_job_id: str | None = None,
 ) -> str:
     """Upload the start frame, submit a Kling v3 i2v job, return the fal
-    `request_id` for polling in `wait_for_video`.
-
-    `end_image` (optional) is uploaded as `end_image_url` so the clip
-    interpolates from the start frame to this final frame."""
+    `request_id` for polling in `wait_for_video`."""
     fal = _client()
     dur = clamp_duration(duration_secs)
     with call_log.record(
@@ -96,13 +92,6 @@ def submit_image_to_video(
             "duration": str(dur),           # fal expects the enum as a string
             "generate_audio": generate_audio,
         }
-        if end_image is not None:
-            try:
-                end_url = fal.upload_file(str(end_image))
-            except Exception as e:
-                raise RuntimeError(f"fal.upload_file (end frame) failed: {e}") from e
-            arguments["end_image_url"] = end_url
-            payload["end_upload_url"] = end_url
         try:
             handler = fal.submit(ENDPOINT, arguments=arguments)
         except Exception as e:

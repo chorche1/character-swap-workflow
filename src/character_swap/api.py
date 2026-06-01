@@ -241,8 +241,7 @@ def _job_to_dict(job: Job) -> dict:
         # New multi-scene fields: parallel lists [{scene_id, url}] for the
         # frontend.
         "scenes": [
-            {"scene_id": sid, "url": _file_url(p),
-             "end_frame_url": _file_url((job.end_frames_by_scene or {}).get(sid))}
+            {"scene_id": sid, "url": _file_url(p)}
             for sid, p in zip(eff_ids, eff_paths)
         ],
         "prompt": job.prompt,
@@ -293,12 +292,6 @@ def _job_to_dict(job: Job) -> dict:
                 "pipeline_status": jc.pipeline_status,
                 "pipeline_error": jc.pipeline_error,
                 "pipeline_drive_link": jc.pipeline_drive_link,
-                # Generated end frames per scene (this character swapped into the
-                # scene's end pose). scene_id → URL. Empty when no end poses set.
-                "end_frame_urls": {
-                    sid: _file_url(p)
-                    for sid, p in (jc.end_frame_paths or {}).items()
-                },
                 "images": [
                     {
                         "variant_id": v.variant_id,
@@ -917,12 +910,6 @@ class CreateJobBody(BaseModel):
     # returned by `POST /api/jobs/extra_ref`. None when the user didn't
     # upload one.
     extra_reference_filename: str | None = None
-    # Optional per-scene END-POSE reference: owner scene_id → scene_id of an
-    # uploaded pose image (uploaded via POST /api/scenes like any scene). In
-    # Step 3 the runner swaps each character into the pose so the scene's Kling
-    # 3.0 end frame features the same character (start→end interpolation).
-    # Resolved to file paths → Job.end_frames_by_scene at creation.
-    end_poses: dict[str, str] | None = None
 
 
 async def _run_async(coro_fn, *args, **kwargs) -> None:
@@ -952,20 +939,6 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         if not path.exists():
             raise HTTPException(500, f"Scene file missing on disk: {path}")
         scene_paths.append(path)
-
-    # Optional per-scene end-pose references: scene_id → pose scene_id. Each
-    # pose was uploaded via POST /api/scenes (its own scene_id). Resolve to a
-    # file path keyed by the OWNING scene_id; unknown poses are skipped.
-    end_frames_by_scene: dict[str, str] = {}
-    for owner_sid, pose_sid in (body.end_poses or {}).items():
-        if owner_sid not in raw_scene_ids or not pose_sid:
-            continue
-        pose_scene = s.get_scene(pose_sid)
-        if pose_scene is None:
-            continue
-        pose_path = settings.scenes_dir / pose_scene.filename
-        if pose_path.exists():
-            end_frames_by_scene[owner_sid] = str(pose_path)
 
     if not body.character_ids:
         raise HTTPException(400, "At least one character_id required")
@@ -1055,7 +1028,6 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         enrich_prompt=body.enrich_prompt,
         use_director=body.use_director,
         extra_reference_path=extra_ref_abs,
-        end_frames_by_scene=end_frames_by_scene,
     )
     s.add_job(job)
     background.add_task(_run_async, runner.run_image_generation, job_id)
@@ -1851,14 +1823,6 @@ async def duplicate_scene(job_id: str, scene_id: str) -> dict:
             jc.approved_variant_ids = list(jc.approved_variant_ids or []) + [c.variant_id]
         if clones:
             jc.updated_at = datetime.utcnow()
-        # Carry the already-generated end frame to the duplicated scene so the
-        # copy starts with the same end pose (the user can still change it).
-        if (jc.end_frame_paths or {}).get(scene_id):
-            jc.end_frame_paths[new_sid] = jc.end_frame_paths[scene_id]
-
-    # Carry the scene's end-pose reference to the duplicate too.
-    if (job.end_frames_by_scene or {}).get(scene_id):
-        job.end_frames_by_scene[new_sid] = job.end_frames_by_scene[scene_id]
 
     job.scene_ids = scene_ids
     job.scene_image_paths = scene_paths
@@ -1949,60 +1913,6 @@ async def delete_scene(job_id: str, scene_id: str) -> dict:
     job.updated_at = datetime.utcnow()
     s.update_job(job)
     await events.publish(job_id, {"kind": "scene.deleted", "job_id": job_id,
-                                  "scene_id": scene_id})
-    return _job_to_dict(job)
-
-
-@app.post("/api/jobs/{job_id}/scenes/{scene_id}/end_frame")
-async def set_scene_end_frame(job_id: str, scene_id: str,
-                              file: UploadFile = File(...)) -> dict:
-    """Attach an optional END FRAME image to a scene. That scene's video then
-    interpolates from the approved image (start) to this frame (end). Only
-    Kling 3.0 honors it — other models ignore the end frame. Locked once
-    movement is submitted."""
-    s = store()
-    job = s.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
-        raise HTTPException(409, "Movement already submitted; end frames are locked")
-    if scene_id not in _effective_scene_ids(job):
-        raise HTTPException(404, f"Scene not in job: {scene_id}")
-    ext = _safe_ext(file.filename or "")
-    data = await _read_capped(file)
-    if not data:
-        raise HTTPException(400, "Empty upload")
-    dest = settings.output_dir / job_id / "end_frames" / f"{scene_id}{ext}"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(dest)
-    job.end_frames_by_scene = {**(job.end_frames_by_scene or {}), scene_id: str(dest)}
-    job.updated_at = datetime.utcnow()
-    s.update_job(job)
-    await events.publish(job_id, {"kind": "scene.end_frame_set", "job_id": job_id,
-                                  "scene_id": scene_id})
-    return _job_to_dict(job)
-
-
-@app.delete("/api/jobs/{job_id}/scenes/{scene_id}/end_frame")
-async def clear_scene_end_frame(job_id: str, scene_id: str) -> dict:
-    """Remove a scene's end frame (revert to start-frame-only animation)."""
-    s = store()
-    job = s.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
-        raise HTTPException(409, "Movement already submitted; end frames are locked")
-    frames = dict(job.end_frames_by_scene or {})
-    old = frames.pop(scene_id, None)
-    if old:
-        with contextlib.suppress(OSError):
-            Path(old).unlink(missing_ok=True)
-    job.end_frames_by_scene = frames
-    job.updated_at = datetime.utcnow()
-    s.update_job(job)
-    await events.publish(job_id, {"kind": "scene.end_frame_cleared", "job_id": job_id,
                                   "scene_id": scene_id})
     return _job_to_dict(job)
 

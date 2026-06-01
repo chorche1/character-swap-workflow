@@ -33,33 +33,6 @@ def _short(prefix: str = "") -> str:
     return prefix + secrets.token_hex(3)
 
 
-def _ensure_end_frame_swap(job, jc, scene_id, pose_path):
-    """Swap this character into the uploaded END-POSE reference so a scene's
-    Kling end frame features the SAME character. The swapped frame is cached on
-    disk per (char, scene) so all of that scene's videos reuse it. Returns the
-    Path, or None on failure (the clip then animates from the start frame only,
-    no end frame)."""
-    safe_scene = str(scene_id or "scene").replace("/", "_")
-    out_dir = _output_dir(job.job_id, jc.char_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    dest = out_dir / f"endframe_{safe_scene}.png"
-    if dest.exists():
-        return dest
-    try:
-        pipeline.generate_variant(
-            model=job.image_model or "gpt-image",
-            scene_image=Path(pose_path),
-            character_image=Path(jc.source_image_path),
-            character_name=jc.name,
-            prompt=job.prompt or pipeline.GENERATION_PROMPT,
-            dest=dest,
-            job_id=job.job_id,
-        )
-        return dest if dest.exists() else None
-    except Exception:  # noqa: BLE001 — best-effort; clip survives without it
-        return None
-
-
 def _persist(job: Job, jc: JobCharacter, *, status: CharStatus | None = None,
              **fields) -> JobCharacter:
     if status is not None:
@@ -231,24 +204,6 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
     )
-
-    # End frames: for each scene that has an uploaded end-pose ref, swap THIS
-    # character into the pose so the scene's Kling 3.0 end frame features the
-    # same person. Generated here (Step 3) so the user sees it before
-    # approving. Best-effort + per-scene; failures just skip that end frame.
-    end_poses = dict(job.end_frames_by_scene or {})
-    if end_poses:
-        async def _gen_end(sid: str, pose: str):
-            async with sem:
-                out = await asyncio.to_thread(
-                    _ensure_end_frame_swap, job, jc, sid, pose)
-            if out:
-                jc.end_frame_paths[sid] = str(out)
-        await asyncio.gather(*[
-            _gen_end(sid, pose) for sid, pose in end_poses.items()
-            if pose and Path(pose).exists()
-        ])
-        _persist(job, jc)
 
 
 async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> None:
@@ -431,7 +386,7 @@ async def run_edit_variant(
 
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
-    duration_secs: int | None = None, end_image: Path | None = None,
+    duration_secs: int | None = None,
 ) -> None:
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
@@ -460,7 +415,6 @@ async def _animate_one_video(
             job_id=job.job_id,
             model=video_model,
             duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
-            end_image=end_image,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR
@@ -579,9 +533,8 @@ async def _animate_character(
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
     dur_by_scene = dict(job.durations_by_scene or {})
-    end_by_scene = dict(job.end_frames_by_scene or {})
 
-    placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
+    placeholders: list[tuple[VideoVariant, str, int | None]] = []
     for src_variant_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
@@ -589,19 +542,6 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
-        # Optional per-scene END FRAME (Kling 3.0 only): prefer the frame we
-        # already generated in Step 3 (character swapped into the scene's end
-        # pose); fall back to swapping now if it's missing for any reason.
-        end_image = None
-        if job.video_model == "kling-v3":
-            pre = (jc.end_frame_paths or {}).get(scene_id)
-            if pre and Path(pre).exists():
-                end_image = Path(pre)
-            else:
-                end_pose = end_by_scene.get(scene_id)
-                if end_pose and Path(end_pose).exists():
-                    end_image = await asyncio.to_thread(
-                        _ensure_end_frame_swap, job, jc, scene_id, end_pose)
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -611,12 +551,11 @@ async def _animate_character(
                 source_variant_id=src_variant_id,
             )
             jc.videos.append(v)
-            placeholders.append((v, prompt, duration, end_image))
+            placeholders.append((v, prompt, duration))
     _persist(job, jc)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp, dur, end_img)
-          for v, mp, dur, end_img in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
     )
 
 
