@@ -24,3 +24,8 @@ uv.lock
 remotion/node_modules/
 web/static/remotion-preview.js
 web/static/remotion-preview.js.map
+
+# generated guide artifacts (keep the .md source)
+WORKFLOWS_GUIDE.pdf
+WORKFLOWS_GUIDE.html
+.claude/scheduled_tasks.lock
