@@ -180,6 +180,9 @@ function studio() {
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
+        thresholdDb: -30,
+        minSilenceSecs: 0.4,
+        padSecs: 0.05,
         targetWpm: 190,
         voiceOverride: '',
       };
@@ -1788,6 +1791,9 @@ function studio() {
           target_wpm: Number(this.compileSettings.targetWpm) || 190,
           voice_override: this.compileSettings.voiceOverride || null,
           enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
+          threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -30,
+          min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.4,
+          pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
           method: 'POST',
@@ -1839,6 +1845,9 @@ function studio() {
         target_wpm: Number(this.compileSettings.targetWpm) || 190,
         voice_override: this.compileSettings.voiceOverride || null,
         enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
+        threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -30,
+        min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.4,
+        pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
         char_ids: [charId],
       };
       const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
