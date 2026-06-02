@@ -76,8 +76,9 @@ def _generate_once(
     additional references). Otherwise call the create endpoint with text only.
 
     `quality` maps to OpenAI's `quality` param: "low" | "medium" | "high" | "auto".
-    Default `None` lets OpenAI pick (currently "auto"). Pass "high" when you want
-    sharper/more-detailed output (~1.5× cost on gpt-image-2).
+    Default `None` falls back to `settings.openai_image_quality` (OPENAI_IMAGE_QUALITY,
+    "high" by default) so Swap variants render at full detail; pass an explicit
+    value to override per-call, or set the env to "" to let OpenAI pick.
 
     Returns raw PNG bytes.
     """
@@ -86,9 +87,13 @@ def _generate_once(
     model = model_override or settings.openai_image_model
     refs = reference_images or []
 
+    # None → configured default ("high"); an explicit value (incl. "auto" or "")
+    # passed by a caller still wins. Empty string → omit the param entirely so
+    # OpenAI applies its own default.
+    effective_quality = quality if quality is not None else settings.openai_image_quality
     extra: dict = {}
-    if quality is not None:
-        extra["quality"] = quality
+    if effective_quality:
+        extra["quality"] = effective_quality
 
     try:
         with record(
@@ -99,7 +104,7 @@ def _generate_once(
             mode="edit" if refs else "create",
             n_references=len(refs),
             size=size,
-            quality=quality,
+            quality=effective_quality,
         ) as entry:
             if refs:
                 with ExitStack() as stack:

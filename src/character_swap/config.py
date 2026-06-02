@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
+    # OpenAI image `quality`: "low" | "medium" | "high" | "auto". Defaults to
+    # "high" so every Swap variant renders at full detail (~1.5× cost vs auto).
+    # Set OPENAI_IMAGE_QUALITY="" to let OpenAI pick, or "medium"/"low" for cheap
+    # test runs.
+    openai_image_quality: str = Field(default="high", validation_alias="OPENAI_IMAGE_QUALITY")
     grok_video_model: str = Field(default="grok-imagine-video", validation_alias="GROK_VIDEO_MODEL")
     grok_image_model: str = Field(default="grok-imagine-image", validation_alias="GROK_IMAGE_MODEL")
     grok_base_url: str = Field(default="https://api.x.ai/v1", validation_alias="XAI_BASE_URL")
