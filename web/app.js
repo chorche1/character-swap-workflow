@@ -97,9 +97,9 @@ function studio() {
     _brollPollTimer: null,
     editor: {
       sourceVideo: null,           // {file, url, name}
-      thresholdDb: -25,       // Hugo's preferred multi-clip default
-      minSilenceSecs: 0.30,   // Hugo's preferred multi-clip default
-      padSecs: 0.07,          // Hugo's preferred multi-clip default
+      thresholdDb: -30,       // Hugo's preset
+      minSilenceSecs: 0.30,   // Hugo's preset
+      padSecs: 0.03,          // Hugo's preset
       trimming: false,
       template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
       captioning: false,
@@ -107,9 +107,9 @@ function studio() {
       voiceId: '',
       enableTrim: true,
       enableCaptions: true,
-      enableNormalizeWpm: true,       // default-on; time-stretch each clip to target_wpm
+      enableNormalizeWpm: false,      // Hugo's preset: WPM normalize OFF
       targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
-      playbackSpeed: 1,               // global speed-up of the final stitched video (1 = none)
+      playbackSpeed: 1.1,             // Hugo's preset: 10% global speed-up
       // Auto-fire the Resolve pipeline (Phase 4) after a successful render.
       // Persisted to localStorage so the toggle survives reloads.
       autoExportResolve: (typeof localStorage !== 'undefined'
@@ -180,9 +180,9 @@ function studio() {
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
-        thresholdDb: -30,
-        minSilenceSecs: 0.4,
-        padSecs: 0.05,
+        thresholdDb: -30,       // Hugo's preset
+        minSilenceSecs: 0.30,   // Hugo's preset
+        padSecs: 0.03,          // Hugo's preset
         targetWpm: 190,
         voiceOverride: '',
       };

@@ -2258,8 +2258,8 @@ class CompileVideosBody(BaseModel):
     enable_wpm_normalize: bool = True
     target_wpm: float = Field(default=190.0, ge=80, le=400)
     threshold_db: float = -30.0
-    min_silence_secs: float = Field(default=0.4, ge=0.05, le=5.0)
-    pad_secs: float = Field(default=0.05, ge=0.0, le=1.0)
+    min_silence_secs: float = Field(default=0.30, ge=0.05, le=5.0)
+    pad_secs: float = Field(default=0.03, ge=0.0, le=1.0)
     voice_override: str | None = None
     # When False, keep the original generated/Kling audio — skip the ElevenLabs
     # voice swap entirely, ignoring both `voice_override` and each character's
