@@ -82,7 +82,10 @@ class Settings(BaseSettings):
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
     video_aspect_ratio: str = Field(default="9:16", validation_alias="VIDEO_ASPECT_RATIO")
     video_resolution: str = Field(default="720p", validation_alias="VIDEO_RESOLUTION")
-    image_size: str = Field(default="1024x1792", validation_alias="IMAGE_SIZE")
+    # TRUE 9:16 (0.5625). The old 1024x1792 was 0.5714 — wider than 9:16 — which
+    # letterboxed (black bars) once the seed fed a 9:16 video / the 1080x1920
+    # caption canvas. 1080x1920 keeps the whole Swap pipeline on one aspect.
+    image_size: str = Field(default="1080x1920", validation_alias="IMAGE_SIZE")
 
     host: str = Field(default="127.0.0.1", validation_alias="HOST")
     port: int = Field(default=8000, validation_alias="PORT")

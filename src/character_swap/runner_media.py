@@ -286,8 +286,8 @@ def _openai_size_for(aspect: str | None) -> str:
         return settings.image_size
     return {
         "1:1":  "1024x1024",
-        "9:16": "1024x1792",
-        "16:9": "1792x1024",
+        "9:16": "1080x1920",   # TRUE 9:16 (was 1024x1792 = 0.5714 → letterbox bars)
+        "16:9": "1920x1080",   # TRUE 16:9 (was 1792x1024 = 1.75)
         "4:5":  "1024x1280",
     }.get(aspect, settings.image_size)
 
