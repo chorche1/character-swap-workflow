@@ -163,12 +163,15 @@ def _variant_download_name(jc: JobCharacter, variant: GeneratedImage) -> str:
 
 
 def _video_download_name(jc: JobCharacter, video: VideoVariant) -> str:
+    """Step-5 clip download name. ALL of a character's clips share ONE name —
+    just the character name — so they group together when organizing files;
+    different characters get different names. (The browser de-dupes repeats on
+    download: chang.mp4, chang (1).mp4, ….)"""
     stem = _safe_filename_stem(jc.name)
-    idx = jc.videos.index(video) + 1 if video in jc.videos else 1
     ext = ".mp4"
     if video.final_video_path:
         ext = Path(video.final_video_path).suffix or ".mp4"
-    return f"{stem}-video-{idx}{ext}"
+    return f"{stem}{ext}"
 
 
 def _auto_title(char_names: list[str]) -> str:
