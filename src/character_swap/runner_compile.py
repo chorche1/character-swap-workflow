@@ -362,7 +362,7 @@ async def _compile_one_character(
 async def compile_job_videos(
     job_id: str,
     *,
-    template: str = "submagic-pro",
+    template: str = "capcut-purple-pill",   # matches the UI default; was submagic-pro
     overrides: dict | None = None,
     enable_trim: bool = True,
     enable_captions: bool = True,
