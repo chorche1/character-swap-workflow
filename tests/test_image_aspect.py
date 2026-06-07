@@ -15,6 +15,17 @@ def _ratio(size: str) -> float:
     return round(w / h, 4)
 
 
+def test_all_image_sizes_divisible_by_16():
+    # gpt-image rejects any size whose W or H isn't divisible by 16 with a 400
+    # ("Width and height must both be divisible by 16" — e.g. 1080 is not).
+    sizes = [settings.image_size] + [
+        runner_media._openai_size_for(a) for a in ("1:1", "9:16", "16:9", "4:5")
+    ]
+    for s in sizes:
+        w, h = (int(x) for x in s.lower().split("x"))
+        assert w % 16 == 0 and h % 16 == 0, f"{s}: W and H must both be ÷16"
+
+
 def test_swap_image_size_is_true_9_16():
     # The Swap default seed must be exactly 9:16 so nothing downstream letterboxes.
     assert _ratio(settings.image_size) == round(9 / 16, 4)   # 0.5625
