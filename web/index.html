@@ -613,39 +613,45 @@
       <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
         <template x-for="s in scenes" :key="'scene-'+s.scene_id">
           <div class="relative card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden group">
-            <img :src="s.url" class="w-full h-32 object-cover" />
-            <div class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded font-mono"
-                 x-text="s.scene_id.slice(0, 10) + '…'"></div>
-            <button x-show="canEditJobScenes()"
-                    class="absolute top-1.5 right-1.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center"
-                    title="Remove this scene"
-                    @click="removeScene(s.scene_id)">✕</button>
-            <!-- Optional END POSE (Kling 3.0): a second reference. In Step 3 the
-                 character is swapped into THIS pose too, giving a matching end
-                 frame so the clip interpolates start→end. Persistent — visible
-                 before AND after the job is created. -->
-            <div class="absolute bottom-1.5 right-1.5">
+            <div class="relative">
+              <img :src="s.url" class="w-full h-32 object-cover" />
+              <div class="absolute top-1.5 left-1.5 bg-neutral-900/70 text-white text-[10px] px-1.5 py-0.5 rounded font-mono"
+                   x-text="s.scene_id.slice(0, 10) + '…'"></div>
+              <button x-show="canEditJobScenes()"
+                      class="absolute top-1.5 right-1.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center"
+                      title="Remove this scene"
+                      @click="removeScene(s.scene_id)">✕</button>
+              <!-- When an end pose is set, preview it over the scene's lower-right. -->
               <template x-if="hasEndPose(s.scene_id)">
-                <div class="relative">
+                <div class="absolute bottom-1 right-1">
                   <img :src="endPoseUrl(s.scene_id)"
-                       class="w-10 h-16 object-cover rounded border-2 border-indigo-400 shadow-lg"
-                       title="End pose (Kling 3.0) — the clip animates from the scene to this pose, with the same character swapped in." />
-                  <button x-show="canEditJobScenes()"
-                          class="absolute -top-1.5 -right-1.5 bg-neutral-900/80 hover:bg-rose-600 text-white text-[9px] rounded-full w-4 h-4 flex items-center justify-center"
-                          title="Remove end pose"
-                          @click="removeEndPoseAny(s.scene_id)">✕</button>
-                  <div class="absolute bottom-0 inset-x-0 bg-indigo-600/80 text-white text-[8px] text-center">end</div>
+                       class="w-9 h-14 object-cover rounded border-2 border-indigo-400 shadow-lg"
+                       title="End pose (Kling 3.0) — the clip animates from the scene to this pose, same character swapped in." />
+                  <div class="absolute bottom-0 inset-x-0 bg-indigo-600/85 text-white text-[8px] text-center font-medium">end</div>
                 </div>
               </template>
-              <template x-if="!hasEndPose(s.scene_id) && canEditJobScenes()">
-                <label class="w-10 h-16 rounded border border-dashed border-white/60 bg-neutral-900/50 hover:bg-indigo-600/60 text-white text-[8px] leading-tight flex items-center justify-center text-center cursor-pointer"
-                       title="Optional end pose (Kling 3.0): the clip animates from the scene to this pose, with the same character swapped in.">
-                  + end<br>pose
-                  <input type="file" accept="image/*" class="hidden"
-                         @change="addEndPose(s.scene_id, $event.target.files[0]); $event.target.value=''" />
-                </label>
-              </template>
             </div>
+            <!-- Optional END POSE (Kling 3.0): a clear full-width action strip
+                 UNDER the scene so it's easy to find. In Step 3 the character is
+                 swapped into this pose → start→end interpolation (Kling 3.0). -->
+            <template x-if="!hasEndPose(s.scene_id) && canEditJobScenes()">
+              <label class="flex items-center justify-center gap-1.5 py-2 text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 border-t border-indigo-200 dark:border-indigo-800 cursor-pointer transition-colors"
+                     title="Optional end pose (Kling 3.0): the clip animates from the scene to this pose, with the same character swapped in.">
+                <span class="text-base leading-none">＋</span>
+                <span>End pose</span>
+                <span class="text-[10px] font-normal text-indigo-500 dark:text-indigo-400">(Kling 3.0)</span>
+                <input type="file" accept="image/*" class="hidden"
+                       @change="addEndPose(s.scene_id, $event.target.files[0]); $event.target.value=''" />
+              </label>
+            </template>
+            <template x-if="hasEndPose(s.scene_id)">
+              <div class="flex items-center justify-between gap-1 py-2 px-2.5 text-xs font-semibold text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/50 border-t border-indigo-200 dark:border-indigo-800">
+                <span>✓ End pose set</span>
+                <button x-show="canEditJobScenes()"
+                        class="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 hover:text-rose-500"
+                        @click="removeEndPoseAny(s.scene_id)">✕ Remove</button>
+              </div>
+            </template>
           </div>
         </template>
         <!-- Add-more dropzone — visible up until the job's runner has started
