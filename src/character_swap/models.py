@@ -89,6 +89,10 @@ class GeneratedImage(BaseModel):
     scene_id: str | None = None              # which Job.scene_ids[i] this variant was generated against
     status: VariantStatus = VariantStatus.READY
     error: str | None = None
+    # True when the image was UPLOADED by the user (not generated here) via the
+    # Step-3 "Import" action — e.g. when the app can't generate it (content
+    # policy). Surfaced as an "imported" badge in the UI.
+    imported: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

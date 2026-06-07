@@ -315,6 +315,7 @@ def _job_to_dict(job: Job) -> dict:
                         "scene_id": v.scene_id,
                         "status": v.status,
                         "error": v.error,
+                        "imported": v.imported,
                         "download_name": _variant_download_name(jc, v),
                     }
                     for v in jc.images
@@ -1526,6 +1527,48 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
     background.add_task(_run_async, runner.retry_single_variant,
                         job_id, char_id, variant_id,
                         (body.prompt if body else None))
+    return _job_to_dict(job)
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/replace")
+async def replace_variant(job_id: str, char_id: str, variant_id: str,
+                          file: UploadFile = File(...)) -> dict:
+    """Replace a variant's image with an UPLOADED one (not generated here) — e.g.
+    when the app can't produce it (content-policy block). The slot becomes READY
+    + `imported` so it can be approved like any variant. Locked after movement."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; variants are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    target = next((v for v in jc.images if v.variant_id == variant_id), None)
+    if target is None:
+        raise HTTPException(404, "Variant not found on this character")
+    ext = _safe_ext(file.filename or "")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    out_dir = settings.output_dir / job_id / char_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"imported_{variant_id}{ext}"
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    target.path = str(dest)
+    target.status = VariantStatus.READY
+    target.error = None
+    target.imported = True
+    # A previously failed / still-generating character becomes approvable again.
+    if jc.status in {CharStatus.FAILED, CharStatus.GENERATING}:
+        jc.status = CharStatus.AWAITING_APPROVAL
+    jc.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "variant.ready", "job_id": job_id,
+                                  "char_id": char_id, "variant_id": variant_id})
     return _job_to_dict(job)
 
 

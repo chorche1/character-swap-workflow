@@ -4499,6 +4499,18 @@ function studio() {
       this.editPrompt = prompt || '';
     },
 
+    // Replace a variant's image with an UPLOADED file (not generated here) —
+    // e.g. when the app can't produce it (content policy). Slot → ready+imported.
+    async replaceVariant(charId, variantId, file) {
+      if (!this.job || !file) return;
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch(`/api/jobs/${this.job.job_id}/characters/${charId}/variants/${variantId}/replace`,
+                            { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('Import failed: ' + await r.text()); return; }
+      this.job = await r.json();
+      this.notifyInfo('Imported your image into this slot');
+    },
+
     // --- Step 2: per-character source-image picker ------------------------
 
     // What URL should the character card show in Step 2? When a job is
