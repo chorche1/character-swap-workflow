@@ -1493,9 +1493,17 @@ async def set_character_source_image(job_id: str, char_id: str,
     return _job_to_dict(job)
 
 
+class RetryVariantBody(BaseModel):
+    # Optional edited prompt — regenerate the failed slot with a NEW prompt
+    # (the UI pre-fills it with the prompt that failed so the user can tweak it).
+    # None / empty → retry with the slot's existing prompt.
+    prompt: str | None = None
+
+
 @app.post("/api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/retry")
 async def retry_variant(job_id: str, char_id: str, variant_id: str,
-                        background: BackgroundTasks) -> dict:
+                        background: BackgroundTasks,
+                        body: RetryVariantBody | None = None) -> dict:
     """Re-run image gen for one specific failed variant — keeps the other
     variants on this character intact and only re-attempts the failed slot.
     Refuses if movement_prompt is set (gen flow is locked) or if the variant
@@ -1515,7 +1523,9 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
     if target.status != VariantStatus.FAILED:
         raise HTTPException(409,
             f"Variant status is '{target.status}', not 'failed' — nothing to retry")
-    background.add_task(_run_async, runner.retry_single_variant, job_id, char_id, variant_id)
+    background.add_task(_run_async, runner.retry_single_variant,
+                        job_id, char_id, variant_id,
+                        (body.prompt if body else None))
     return _job_to_dict(job)
 
 

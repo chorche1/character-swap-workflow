@@ -4476,14 +4476,27 @@ function studio() {
       this.job = await r.json();
     },
 
-    async retryVariant(charId, variantId) {
+    // Retry one failed variant. `prompt` (optional) regenerates the slot with an
+    // EDITED prompt; omit it to retry with the slot's existing prompt.
+    async retryVariant(charId, variantId, prompt) {
       if (!this.job) return;
       const r = await fetch(`/api/jobs/${this.job.job_id}/characters/${charId}/variants/${variantId}/retry`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prompt != null ? { prompt } : {}),
       });
       if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
       this.job = await r.json();
-      this.notifyInfo('Retrying just this variant — others are untouched');
+      this.notifyInfo(prompt != null
+        ? 'Regenerating this variant with the edited prompt…'
+        : 'Retrying just this variant — others are untouched');
+    },
+
+    // Open the inline editor on a FAILED variant, pre-filled with the prompt
+    // that failed so the user can tweak it and regenerate in place.
+    openRetryEdit(charId, variantId, prompt) {
+      this.editingVariant = { char_id: charId, variant_id: variantId, mode: 'retry' };
+      this.editPrompt = prompt || '';
     },
 
     // --- Step 2: per-character source-image picker ------------------------
@@ -4970,7 +4983,8 @@ function studio() {
     },
 
     openEdit(charId, variantId) {
-      this.editingVariant = { char_id: charId, variant_id: variantId };
+      // 'edit' mode (ready variant) → spawns a NEW variant from a change prompt.
+      this.editingVariant = { char_id: charId, variant_id: variantId, mode: 'edit' };
       this.editPrompt = '';
     },
 
@@ -4981,7 +4995,15 @@ function studio() {
 
     async submitEdit() {
       if (!this.job || !this.editingVariant || !this.editPrompt.trim()) return;
-      const { char_id, variant_id } = this.editingVariant;
+      const { char_id, variant_id, mode } = this.editingVariant;
+      // 'retry' mode (failed variant) → regenerate this slot in place with the
+      // edited prompt. 'edit' mode (ready variant) → spawn a new comparison
+      // variant via edit_variant.
+      if (mode === 'retry') {
+        await this.retryVariant(char_id, variant_id, this.editPrompt.trim());
+        this.closeEdit();
+        return;
+      }
       const r = await fetch('/api/jobs/' + this.job.job_id + '/edit_variant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

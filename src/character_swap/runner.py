@@ -314,13 +314,17 @@ async def regen_scene_end_frames(job_id: str, scene_id: str) -> None:
     await asyncio.gather(*[_one(jc) for jc in targets])
 
 
-async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> None:
+async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
+                               prompt: str | None = None) -> None:
     """Re-run image gen for ONE specific (already-failed) variant slot.
 
     Unlike `run_image_generation` which wipes all variants for the
     character, this keeps the other (possibly successful) variants intact
     and only re-attempts the failed slot. The variant_id is preserved so
     the UI swaps it in place without losing scroll position.
+
+    `prompt` (optional) overrides the slot's stored prompt before retrying —
+    lets the user edit the prompt that failed and regenerate in place.
     """
     s = store()
     job = s.get_job(job_id)
@@ -332,6 +336,9 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str) -> No
     target = next((v for v in jc.images if v.variant_id == variant_id), None)
     if target is None:
         return
+    # Optional edited prompt → use it for this retry (and keep it on the slot).
+    if prompt and prompt.strip():
+        target.prompt = prompt.strip()
     # Reset the slot to GENERATING + clear any prior error
     target.status = VariantStatus.GENERATING
     target.error = None

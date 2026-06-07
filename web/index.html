@@ -1100,8 +1100,11 @@
                     </div>
                     <div class="flex gap-1" x-show="v.status === 'failed' && !job.movement_prompt">
                       <button class="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950 rounded px-2 py-1 text-sm"
-                              title="Retry just this variant (keeps the other variants intact)"
+                              title="Retry just this variant with the same prompt"
                               @click="retryVariant(cid, v.variant_id)">↻</button>
+                      <button class="text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded px-2 py-1 text-sm"
+                              title="Edit the prompt and regenerate this variant"
+                              @click="openRetryEdit(cid, v.variant_id, v.prompt)">✎</button>
                       <button class="text-red-500 hover:bg-red-50 dark:hover:bg-red-950 rounded px-2 py-1 text-sm"
                               title="Remove this failed entry"
                               @click="deleteVariant(cid, v.variant_id)">✕</button>
@@ -1110,14 +1113,18 @@
 
                   <div class="p-2 border-t border-neutral-200 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-950"
                        x-show="editingVariant && editingVariant.char_id === cid && editingVariant.variant_id === v.variant_id">
+                    <p x-show="editingVariant?.mode === 'retry'" class="text-[10px] text-neutral-500 dark:text-neutral-400 mb-1">
+                      This is the prompt that failed — edit it and regenerate this slot in place.
+                    </p>
                     <textarea x-model="editPrompt" rows="3"
                               class="w-full text-xs border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-900 rounded p-2 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900"
-                              placeholder="e.g. make the lighting cooler, add a slight smile, shift camera left…"></textarea>
+                              :placeholder="editingVariant?.mode === 'retry' ? 'Edit the prompt that failed…' : 'e.g. make the lighting cooler, add a slight smile, shift camera left…'"></textarea>
                     <div class="flex justify-end gap-2 mt-2">
                       <button class="text-xs text-neutral-500 hover:underline" @click="closeEdit()">cancel</button>
                       <button class="text-xs px-3 py-1 rounded bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 disabled:opacity-40"
                               :disabled="!editPrompt.trim()"
-                              @click="submitEdit()">Submit edit</button>
+                              @click="submitEdit()"
+                              x-text="editingVariant?.mode === 'retry' ? '↻ Regenerate' : 'Submit edit'"></button>
                     </div>
                   </div>
                 </div>
