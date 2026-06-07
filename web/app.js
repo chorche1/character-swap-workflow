@@ -3890,6 +3890,16 @@ function studio() {
       this.job = await r.json();
     },
 
+    // Retry the end-frame swap for one scene using the EXISTING pose (e.g. after
+    // a content-policy block). WS events update the result live.
+    async retryEndFrame(sceneId) {
+      if (!this.job || !sceneId) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}/regen_end_frame`,
+                            { method: 'POST' });
+      if (!r.ok) { this.notifyError('End-frame retry failed: ' + await r.text()); return; }
+      this.job = await r.json();
+    },
+
 
     async uploadScenes(files) {
       for (const f of files) {

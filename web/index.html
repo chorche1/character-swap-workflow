@@ -1018,8 +1018,20 @@
                     </div>
                   </template>
                   <template x-if="(jc.end_frame_errors || {})[g.scene?.scene_id]">
-                    <div class="mb-1.5 text-[10px] px-2 py-1 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900"
-                         x-text="'End-frame swap failed: ' + jc.end_frame_errors[g.scene?.scene_id]"></div>
+                    <div class="mb-1.5 text-[10px] px-2 py-1.5 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-900">
+                      <div x-text="'End-frame swap failed: ' + jc.end_frame_errors[g.scene?.scene_id]"></div>
+                      <div class="flex items-center gap-3 mt-1.5">
+                        <button class="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline"
+                                title="Re-run the swap with the same end pose"
+                                @click="retryEndFrame(g.scene?.scene_id)">↻ Retry</button>
+                        <label class="font-semibold text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer"
+                               title="Upload a different end pose (recommended when blocked on content policy)">
+                          ⇪ Replace pose
+                          <input type="file" accept="image/*" class="hidden"
+                                 @change="uploadSceneEndFrame(g.scene?.scene_id, $event.target.files[0]); $event.target.value=''" />
+                        </label>
+                      </div>
+                    </div>
                   </template>
                   <div class="variant-strip">
                     <template x-for="v in g.variants" :key="v.variant_id">

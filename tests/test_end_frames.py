@@ -129,6 +129,28 @@ def test_end_frame_locked_after_movement(monkeypatch):
     assert ei.value.status_code == 409
 
 
+def test_regen_end_frame_clears_error_and_schedules(monkeypatch):
+    job = _job()
+    job.end_frames_by_scene = {"s1": "/pose.png"}
+    job.characters["cA"].end_frame_errors = {"s1": "content_policy: blocked"}
+    store = _FakeStore(job)
+    monkeypatch.setattr(api, "store", lambda: store)
+    bg = _FakeBG()
+    _run(api.regen_scene_end_frame("j_ef", "s1", bg))
+    # The stale error is cleared and a regen task was scheduled for the scene.
+    assert "s1" not in store.get_job("j_ef").characters["cA"].end_frame_errors
+    scheduled = [args for (_fn, args, _kw) in bg.tasks]
+    assert any(runner.regen_scene_end_frames in args for args in scheduled)
+
+
+def test_regen_end_frame_409_when_no_pose(monkeypatch):
+    monkeypatch.setattr(api, "store", lambda: _FakeStore(_job()))  # no end pose set
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.regen_scene_end_frame("j_ef", "s1", _FakeBG()))
+    assert ei.value.status_code == 409
+
+
 # --- end_image plumbing: submit_video → fal Kling client ------------------
 
 def test_submit_video_forwards_end_image_to_fal_kling(monkeypatch, tmp_path):

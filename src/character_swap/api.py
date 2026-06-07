@@ -2032,6 +2032,32 @@ async def clear_scene_end_frame(job_id: str, scene_id: str) -> dict:
     return _job_to_dict(job)
 
 
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/regen_end_frame")
+async def regen_scene_end_frame(job_id: str, scene_id: str,
+                                background: BackgroundTasks) -> dict:
+    """Re-run the end-frame swap for ONE scene using its EXISTING end pose
+    (e.g. after a content-policy block) — without re-running the variants.
+    Clears the prior error so the UI shows it retrying. Requires an end pose to
+    be set; locked once movement is submitted."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; end frames are locked")
+    if not (job.end_frames_by_scene or {}).get(scene_id):
+        raise HTTPException(409, "No end pose set for this scene")
+    # Clear the stale error so the UI reflects the in-flight retry.
+    for jc in job.characters.values():
+        jc.end_frame_errors.pop(scene_id, None)
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    background.add_task(_run_async, runner.regen_scene_end_frames, job_id, scene_id)
+    await events.publish(job_id, {"kind": "scene.end_frame_regen", "job_id": job_id,
+                                  "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
 @app.post("/api/jobs/{job_id}/compact")
 async def compact_job(job_id: str) -> dict:
     s = store()
