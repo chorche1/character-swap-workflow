@@ -1010,11 +1010,18 @@
                        3.0 interpolation target. Thumbnail on success, red chip
                        on failure (surfaced, never silently swallowed). -->
                   <template x-if="(jc.end_frame_urls || {})[g.scene?.scene_id]">
-                    <div class="flex items-center gap-1 mb-1.5 text-[10px] text-indigo-500 dark:text-indigo-400"
-                         title="End frame (Kling 3.0): clip animates start → this">
-                      <span class="text-neutral-400 dark:text-neutral-600">→ end frame</span>
-                      <img :src="jc.end_frame_urls[g.scene?.scene_id]"
-                           class="w-8 h-8 rounded object-cover border-2 border-indigo-400" />
+                    <div class="flex items-center gap-3 mb-2 p-2 rounded-lg bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-900">
+                      <a :href="jc.end_frame_urls[g.scene?.scene_id]" target="_blank"
+                         title="Open the generated end frame full-size">
+                        <img :src="jc.end_frame_urls[g.scene?.scene_id]"
+                             class="w-20 h-36 rounded object-cover border-2 border-indigo-400 hover:ring-2 hover:ring-indigo-300 cursor-zoom-in" />
+                      </a>
+                      <div class="text-[11px] leading-snug">
+                        <div class="font-semibold text-indigo-700 dark:text-indigo-300">✓ End frame ready</div>
+                        <div class="text-neutral-500 dark:text-neutral-400 mt-0.5">Kling 3.0 animates the approved image → this frame.</div>
+                        <a :href="jc.end_frame_urls[g.scene?.scene_id]" target="_blank"
+                           class="inline-block mt-1 text-indigo-600 dark:text-indigo-400 hover:underline font-medium">↗ Open full size</a>
+                      </div>
                     </div>
                   </template>
                   <template x-if="(jc.end_frame_errors || {})[g.scene?.scene_id]">
