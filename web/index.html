@@ -1018,9 +1018,20 @@
                       </a>
                       <div class="text-[11px] leading-snug">
                         <div class="font-semibold text-indigo-700 dark:text-indigo-300">✓ End frame ready</div>
-                        <div class="text-neutral-500 dark:text-neutral-400 mt-0.5">Kling 3.0 animates the approved image → this frame.</div>
-                        <a :href="jc.end_frame_urls[g.scene?.scene_id]" target="_blank"
-                           class="inline-block mt-1 text-indigo-600 dark:text-indigo-400 hover:underline font-medium">↗ Open full size</a>
+                        <div class="text-neutral-500 dark:text-neutral-400 mt-0.5">Kling 3.0 animates the approved image → this frame. Check the outfit matches the start frame.</div>
+                        <div class="flex flex-wrap items-center gap-3 mt-1.5">
+                          <a :href="jc.end_frame_urls[g.scene?.scene_id]" target="_blank"
+                             class="text-indigo-600 dark:text-indigo-400 hover:underline font-medium">↗ Open full size</a>
+                          <button class="text-indigo-600 dark:text-indigo-400 hover:underline font-medium"
+                                  title="Re-run the end-frame swap with the same pose (fresh attempt)"
+                                  @click="retryEndFrame(g.scene?.scene_id)">↻ Regenerate</button>
+                          <label class="text-indigo-600 dark:text-indigo-400 hover:underline font-medium cursor-pointer"
+                                 title="Upload a different end pose — e.g. one whose outfit matches the start frame">
+                            ⇪ Replace pose
+                            <input type="file" accept="image/*" class="hidden"
+                                   @change="uploadSceneEndFrame(g.scene?.scene_id, $event.target.files[0]); $event.target.value=''" />
+                          </label>
+                        </div>
                       </div>
                     </div>
                   </template>
