@@ -249,7 +249,7 @@ function studio() {
     // Step-4 video provider for the swap flow. Defaults to grok-imagine for
     // back-compat; users can switch to Kling / Veo / Runway / Luma / Pika /
     // Hailuo / Sora / Wan / Seedance / Higgsfield via the picker.
-    swapVideoModel: 'grok-imagine',
+    swapVideoModel: 'kling-v3',   // Hugo's preset default video model
     // --- Animate tab (Step A): build a video job from already-finished images.
     // seqImages holds staged client-side files (not yet uploaded) in the order
     // they'll be animated. Each {uid, file, previewUrl, name}. On createSequence()
@@ -4370,7 +4370,7 @@ function studio() {
       }
       this.swapPrompt = this.job.prompt || this.swapDefaultPrompt;
       this.swapModel = this.job.image_model || 'gpt-image';
-      this.swapVideoModel = this.job.video_model || 'grok-imagine';
+      this.swapVideoModel = this.job.video_model || 'kling-v3';
       this.swapDurationSecs = this.job.duration_secs || null;
       this.editingVariant = null;
       this.editingTitle = false;
@@ -4697,7 +4697,7 @@ function studio() {
           movement_prompts: prompts,
           durations_by_scene: durationsByScene,
           videos_per_character: this.videosPerChar,
-          video_model: this.swapVideoModel || 'grok-imagine',
+          video_model: this.swapVideoModel || 'kling-v3',
         }),
       });
       if (!r.ok) { this.notifyError('Movement submit failed: ' + await r.text()); return; }
@@ -4951,7 +4951,7 @@ function studio() {
     // a minimal stub so the UI still renders before /api/generations/models
     // has loaded.
     _videoModelEntry() {
-      const slug = this.swapVideoModel || 'grok-imagine';
+      const slug = this.swapVideoModel || 'kling-v3';
       return (this.models.video || []).find(m => m.slug === slug)
         || { slug, label: slug, available: true };
     },
@@ -5115,7 +5115,7 @@ function studio() {
       this.jobCost = null;
       this.swapPrompt = this.swapDefaultPrompt;
       this.swapModel = 'gpt-image';
-      this.swapVideoModel = 'grok-imagine';
+      this.swapVideoModel = 'kling-v3';
       this.swapDurationSecs = null;
     },
 
