@@ -224,9 +224,13 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   concretely and lock it in a standalone clause — keep room, surfaces,
   furniture, fixtures, decor, and lighting EXACTLY. Only deviate if the user
   EXPLICITLY asked to change or replace the background.
-- CLOTHING: describe the character's garments precisely and keep them
-  consistent across all of that character's scenes (unless the user asked to
-  match the scene's original outfit instead).
+- CLOTHING — KEEP THE SCENE'S OUTFIT: the swapped person must wear EXACTLY the
+  same outfit as the original person already in the scene. Describe the scene
+  subject's garments concretely (clothing items, colors, patterns, fit,
+  accessories, gloves) and lock them in place. Do NOT transfer the character's
+  own clothing — take only the character's identity (face, hairstyle, skin
+  tone), never their wardrobe. (Only deviate if the user EXPLICITLY asked to
+  dress the character in their own clothes instead.)
 - FRAMING & POSE ANCHOR: match the scene's shot type, camera angle, subject-
   to-camera distance, crop, head-room, eye-line, and hand positions EXACTLY.
   No zoom, no focal-length skew.
