@@ -304,7 +304,8 @@ def submit_video(
         from character_swap.clients import fal_kling
         return fal_kling.submit_image_to_video(
             image=image, prompt=movement_prompt,
-            duration_secs=effective_dur, end_image=end_image, app_job_id=job_id,
+            duration_secs=effective_dur, end_image=end_image,
+            generate_audio=settings.kling_generate_audio, app_job_id=job_id,
         )
     if model in {"veo", "veo-3-fast"}:
         return google_genai.submit_veo(

@@ -214,3 +214,30 @@ def test_submit_image_to_video_uploads_end_image_url(monkeypatch, tmp_path):
     assert rid == "rid_1"
     assert seen["arguments"]["start_image_url"].endswith("start.png")
     assert seen["arguments"]["end_image_url"].endswith("end.png")
+
+
+def test_submit_video_kling_audio_off_by_default(monkeypatch, tmp_path):
+    """Kling native audio (which improvises wrong dialogue) is OFF by default;
+    settings.kling_generate_audio controls it and is forwarded to fal_kling."""
+    from character_swap import pipeline
+    from character_swap.clients import fal_kling
+
+    captured: dict = {}
+
+    def fake_submit(*, image, prompt, duration_secs=5, end_image=None,
+                    generate_audio=True, app_job_id=None, **kw):
+        captured["generate_audio"] = generate_audio
+        return "rid"
+
+    monkeypatch.setattr(fal_kling, "submit_image_to_video", fake_submit)
+    img = tmp_path / "s.png"; img.write_bytes(b"s")
+
+    monkeypatch.setattr(pipeline.settings, "kling_generate_audio", False)
+    pipeline.submit_video(image=img, movement_prompt="m", character_name="A",
+                          model="kling-v3")
+    assert captured["generate_audio"] is False
+
+    monkeypatch.setattr(pipeline.settings, "kling_generate_audio", True)
+    pipeline.submit_video(image=img, movement_prompt="m", character_name="A",
+                          model="kling-v3")
+    assert captured["generate_audio"] is True
