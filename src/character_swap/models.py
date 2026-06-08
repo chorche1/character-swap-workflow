@@ -182,7 +182,7 @@ class Job(BaseModel):
     scene_image_paths: list[str] = Field(default_factory=list)
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
-    image_model: str = "gpt-image"           # which adapter generates the variants
+    image_model: str = "nano-banana-pro"     # which adapter generates the variants
     # Video provider used in Step 4 to animate every approved variant. Defaults
     # to Grok Imagine for back-compat; the Step-4 UI lets the user switch to
     # Kling / Veo / Runway / etc. before submitting the movement prompt.

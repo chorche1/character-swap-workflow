@@ -239,7 +239,7 @@ function studio() {
     higgsfieldInbox: null,
     higgsfieldPolling: false,
     swapPrompt: '',
-    swapModel: 'gpt-image',
+    swapModel: 'nano-banana-pro',
     // Optional 3rd reference image for the swap flow's image model. Filename
     // is what we send back to POST /api/jobs; URL is for the inline preview.
     extraRefFilename: '',
@@ -5114,7 +5114,7 @@ function studio() {
       this.draftTitle = '';
       this.jobCost = null;
       this.swapPrompt = this.swapDefaultPrompt;
-      this.swapModel = 'gpt-image';
+      this.swapModel = 'nano-banana-pro';
       this.swapVideoModel = 'kling-v3';
       this.swapDurationSecs = null;
     },
