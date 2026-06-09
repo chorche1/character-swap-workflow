@@ -234,33 +234,44 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
 - FRAMING & POSE ANCHOR: match the scene's shot type, camera angle, subject-
   to-camera distance, crop, head-room, eye-line, and hand positions EXACTLY.
   No zoom, no focal-length skew.
-- LIGHTING & INTEGRATION (so the character NEVER looks pasted in — this is the
-  difference between a believable swap and an obvious cutout): relight the
-  inserted person with the scene's OWN light — match its direction, color
-  temperature, softness, and intensity, and discard the lighting baked into the
-  character photo. Match the scene's white balance / color grade on their skin
-  and clothing. Add contact shadows + ambient occlusion where they touch
-  surfaces and a cast shadow consistent with the key light. Blend edges (no
-  cutout halo or fringe). Match the scene's depth of field, lens character, and
-  grain so the subject isn't crisper than the background. Name the scene's
-  actual light sources and their direction when you can see them ("warm window
-  light from camera-left", "soft overhead kitchen downlight", "golden-hour
-  backlight"). Make the environment ACT ON them: wrap a subtle rim / edge light
-  from the background around their silhouette, and bounce nearby surface colors
-  onto their skin and clothing (color spill). The lighting must look organic and
-  real, and EVERYTHING must look like the same scene — not like the person was
-  pasted onto the background.
+- OVERALL LOOK — ORDINARY UNEDITED PHONE PHOTO: every prompt MUST specify that
+  the final image looks like a completely ordinary, unedited iPhone photo taken
+  quickly by another person — NOT staged, composed, retouched, filtered, color
+  corrected, or professionally lit. Plain, slightly dull phone-camera colors,
+  neutral white balance, no warm tint. Mundane natural daylight with slightly
+  uneven exposure, mild softness, subtle sensor noise, ordinary shadows, and
+  small background distractions. Do not beautify, and do not perfectly center
+  or symmetrize. It should look like a normal photo from someone's camera roll,
+  not an advertisement or a professionally edited social-media image. Explicitly
+  forbid: golden tones, cinematic contrast, dramatic shadows, rich saturation,
+  glossy highlights, crisp commercial sharpness, HDR, enhanced clarity, and
+  polished skin.
+- INTEGRATION (so the character NEVER looks pasted in — this is the difference
+  between a believable swap and an obvious cutout): relight the inserted person
+  with the scene's OWN plain ambient daylight — match its direction, softness,
+  and intensity, and discard the lighting baked into the character photo. Match
+  the scene's plain, neutral white balance on their skin and clothing. Add
+  ordinary contact shadows + ambient occlusion where they touch surfaces. Blend
+  edges (no cutout halo or fringe). Match the scene's softness, sensor noise,
+  and grain so the subject isn't crisper or cleaner than the background. Keep
+  the lighting unremarkable and consistent with the rest of the frame —
+  EVERYTHING must look like the same ordinary snapshot, not like the person was
+  pasted in. Do NOT add rim / edge lights, glamour lighting, color grading, or
+  any cinematic relighting.
 - NO BURNT-IN TEXT: instruct removal of any captions, subtitles, progress bars,
   logos, or watermarks present in the source image.
 - INLINE NEGATIVES: end each prompt with a short "Avoid:" clause listing the
   failure modes to exclude — a pasted-in / cutout / collage look, the subject
-  floating with no shadow, lighting or color temperature that doesn't match the
-  scene, the subject sharper than the background, an edge with no light wrap, a
-  subject untouched by the scene's bounce light or grain, identity bleed from the
-  original subject, extra or distorted fingers, warped facial features,
-  changed/restyled background, altered prop counts, props changing state,
-  misspelled labels, captions, subtitles, watermarks, cartoon/illustration
-  look — plus anything scene-specific you can see.
+  floating with no shadow, lighting that doesn't match the scene, the subject
+  sharper or cleaner than the background, professional / studio / glamour
+  lighting, cinematic contrast, dramatic shadows, HDR, color grading, warm or
+  golden tint, oversaturation, glossy highlights, crisp commercial sharpness,
+  enhanced clarity, retouching, beautification, polished skin, shallow depth of
+  field / portrait-mode blur, identity bleed from the original subject, extra or
+  distorted fingers, warped facial features, changed/restyled background, altered
+  prop counts, props changing state, misspelled labels, captions, subtitles,
+  watermarks, cartoon/illustration look — plus anything scene-specific you can
+  see.
 
 PRESERVE every verbatim user constraint WORD-FOR-WORD: exact phrases ("exact
 same pose"), hex codes (#FFD400), brand names (Pumpkin Oil), exact text
