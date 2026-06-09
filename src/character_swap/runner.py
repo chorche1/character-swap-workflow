@@ -65,8 +65,8 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
     NEVER swallow end-frame errors here: a bare `except: return None` swallow
     (zero user feedback on a content-policy block) is exactly why the first
     version of this feature was reverted. `pipeline.generate_variant` already
-    retries a rejection with a softened prompt AND a Nano-Banana-Pro fallback,
-    so by the time this raises the swap is genuinely unrecoverable."""
+    retries a rejection with a softened prompt on the chosen model, so by the
+    time this raises the swap is genuinely unrecoverable."""
     safe_scene = str(scene_id or "scene").replace("/", "_")
     out_dir = _output_dir(job.job_id, jc.char_id)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -74,7 +74,7 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
     if dest.exists() and not force:
         return dest
     pipeline.generate_variant(
-        model=job.image_model or "gpt-image",
+        model=_swap_image_model(job),
         scene_image=Path(pose_path),
         character_image=Path(jc.source_image_path),
         character_name=jc.name,
@@ -88,6 +88,31 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
 
 
 # --- image generation -----------------------------------------------------------------
+
+def _is_gemini_image_model(slug: str) -> bool:
+    """True if `slug` is a Google/Gemini image model (Nano Banana family).
+    Looked up from the model registry so it stays correct if Google adds more.
+    Lazy import to avoid an import cycle with runner_media."""
+    try:
+        from character_swap.runner_media import IMAGE_MODELS
+        info = IMAGE_MODELS.get((slug or "").strip())
+        return bool(info and info.get("provider") == "gemini")
+    except Exception:
+        # Fallback to the known Google slugs if the registry can't be read.
+        return (slug or "").strip() in {"nano-banana", "nano-banana-pro"}
+
+
+def _swap_image_model(job: Job) -> str:
+    """Effective image model for SWAP generation.
+
+    Google/Gemini models were removed from the Swap picker, so Swap must never
+    generate with one — even for jobs created BEFORE the removal that still
+    carry `image_model="nano-banana-pro"`. Any such model is coerced to the
+    default `gpt-image`. (Removing the cross-provider NSFW fallback earlier
+    closed the other route to Gemini; this closes the stored-model route.)"""
+    m = (job.image_model or "gpt-image").strip()
+    return "gpt-image" if _is_gemini_image_model(m) else m
+
 
 def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:
     """Look up the scene image path for this variant. Variants carry
@@ -123,7 +148,7 @@ async def _generate_one_variant(
         try:
             await asyncio.to_thread(
                 pipeline.generate_variant,
-                model=job.image_model,
+                model=_swap_image_model(job),
                 scene_image=_scene_path_for_variant(job, variant),
                 character_image=Path(jc.source_image_path),
                 character_name=jc.name,
@@ -471,6 +496,14 @@ async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -
     if job.movement_prompt:
         # Approvals locked after movement submission; refuse to disrupt.
         return
+
+    # Coerce away any Google/Gemini model left on an older job (Swap no longer
+    # offers them) and PERSIST it, so the Step-2 dropdown reflects the switch
+    # and every downstream run uses the corrected model.
+    coerced = _swap_image_model(job)
+    if coerced != (job.image_model or ""):
+        job.image_model = coerced
+        s.update_job(job)
 
     # AI Director runs FIRST when enabled — its per-variant prompts override
     # both enrich and raw. Runs once per job; cached on the Job thereafter.
