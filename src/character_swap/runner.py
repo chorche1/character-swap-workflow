@@ -351,6 +351,73 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
     await _generate_one_variant(job, jc, target, sem)
 
 
+async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
+                               prompt: str | None = None) -> None:
+    """Generate N fresh variants for ONE (character, scene) pair, ADDING them
+    to the character without wiping its other scenes' variants.
+
+    This is the per-scene equivalent of `_kick_char`, but additive and scoped
+    to a single scene — used to rebuild a scene whose variants were all
+    deleted (or that produced none, e.g. a scene showing "0 variants"). It
+    never touches the character's other scenes or its existing approvals.
+
+    `n` follows `job.images_per_character`. Prompt precedence matches
+    `_kick_char`: caller override → per-variant Director plan → enriched →
+    `job.prompt` → `GENERATION_PROMPT`. Refuses once movement is submitted.
+    """
+    s = store()
+    job = s.get_job(job_id)
+    if job is None or job.movement_prompt:
+        return
+    jc = job.characters.get(char_id)
+    if jc is None:
+        return
+    # The scene must belong to this job.
+    scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+    if scene_id not in scene_ids:
+        return
+
+    n = max(1, min(4, job.images_per_character))
+    override = prompt.strip() if (prompt and prompt.strip()) else None
+    fallback_prompt = (override
+                       or job.enriched_image_prompt
+                       or job.prompt
+                       or pipeline.GENERATION_PROMPT)
+    director_plan = _parse_director_plan(job)
+    director_variant_prompts = (
+        director_plan.lookup(char_id, scene_id) if director_plan else []
+    )
+
+    placeholders: list[GeneratedImage] = []
+    for i in range(n):
+        variant_id = _short("v_")
+        path = _output_dir(job.job_id, jc.char_id) / f"variant_{variant_id}.png"
+        # A caller override wins; otherwise use the Director's per-variant
+        # prompt for this scene when present, else the shared fallback.
+        tailored = (director_variant_prompts[i]
+                    if (override is None and i < len(director_variant_prompts))
+                    else None)
+        v = GeneratedImage(
+            variant_id=variant_id,
+            path=str(path),
+            prompt=tailored or fallback_prompt,
+            scene_id=scene_id,
+            status=VariantStatus.GENERATING,
+        )
+        placeholders.append(v)
+        jc.images.append(v)
+
+    jc.error = None
+    _persist(job, jc, status=CharStatus.GENERATING)
+    await _emit(job_id, "char.queued", char_id=char_id,
+                images_per_character=n, n_scenes=1, scene_id=scene_id)
+
+    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    await asyncio.gather(
+        *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
+    )
+
+
 async def _maybe_run_director_swap(job: Job, s) -> None:
     """If `use_director=True` and the plan isn't cached yet, run a ONE-shot
     Claude Opus call to plan per-(char, scene, variant) prompts and cache

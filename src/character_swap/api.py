@@ -1530,6 +1530,41 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
     return _job_to_dict(job)
 
 
+class RegenSceneBody(BaseModel):
+    # Optional prompt override for this scene's fresh variants. None / empty →
+    # use the same precedence as initial generation (Director → enriched →
+    # job.prompt → GENERATION_PROMPT).
+    prompt: str | None = None
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/scenes/{scene_id}/regenerate")
+async def regenerate_scene(job_id: str, char_id: str, scene_id: str,
+                           background: BackgroundTasks,
+                           body: RegenSceneBody | None = None) -> dict:
+    """Generate fresh variants for ONE (character, scene) pair — additively,
+    without wiping the character's other scenes or approvals.
+
+    Primary use: rebuild a scene whose variants were all deleted (it shows
+    "0 variants" in the UI) so the user can recover it with one click instead
+    of regenerating every scene. Refuses once the movement prompt is set."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.movement_prompt:
+        raise HTTPException(409, "Movement prompt already submitted; variants are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+    if scene_id not in scene_ids:
+        raise HTTPException(404, "Scene not in job")
+    background.add_task(_run_async, runner.regen_scene_variants,
+                        job_id, char_id, scene_id,
+                        (body.prompt if body else None))
+    return _job_to_dict(job)
+
+
 @app.post("/api/jobs/{job_id}/characters/{char_id}/variants/{variant_id}/replace")
 async def replace_variant(job_id: str, char_id: str, variant_id: str,
                           file: UploadFile = File(...)) -> dict:

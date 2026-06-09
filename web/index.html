@@ -1051,6 +1051,20 @@
                       </div>
                     </div>
                   </template>
+                  <!-- Empty-state: this scene has no variants (all deleted, or
+                       it produced none). Offer a one-click per-scene regen that
+                       rebuilds JUST this scene without touching the others.
+                       Hidden once the movement prompt locks the gen flow. -->
+                  <div x-show="g.variants.length === 0"
+                       class="flex items-center gap-3 p-3 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900/40">
+                    <span class="text-xs text-neutral-500 dark:text-neutral-400">No image for this scene.</span>
+                    <button x-show="!job?.movement_prompt"
+                            class="text-sm px-3 py-1 rounded bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 hover:opacity-90"
+                            title="Generate a fresh image for this scene only — other scenes stay as they are"
+                            @click="regenScene(cid, g.scene?.scene_id)">↻ Regenerate this scene</button>
+                    <span x-show="job?.movement_prompt"
+                          class="text-xs text-neutral-400 dark:text-neutral-500">Locked — movement prompt already submitted.</span>
+                  </div>
                   <div class="variant-strip">
                     <template x-for="v in g.variants" :key="v.variant_id">
                       <div class="card border rounded-xl overflow-hidden flex flex-col"

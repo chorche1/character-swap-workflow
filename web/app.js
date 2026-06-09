@@ -4492,6 +4492,21 @@ function studio() {
         : 'Retrying just this variant — others are untouched');
     },
 
+    // Regenerate fresh variants for ONE (character, scene) pair — additive,
+    // leaves the character's other scenes + approvals untouched. Used to
+    // recover a scene whose variants were all deleted (shows "0 variants").
+    async regenScene(charId, sceneId) {
+      if (!this.job) return;
+      const r = await fetch(`/api/jobs/${this.job.job_id}/characters/${charId}/scenes/${sceneId}/regenerate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) { this.notifyError('Regenerate failed: ' + await r.text()); return; }
+      this.job = await r.json();
+      this.notifyInfo('Regenerating this scene — other scenes are untouched');
+    },
+
     // Open the inline editor on a FAILED variant, pre-filled with the prompt
     // that failed so the user can tweak it and regenerate in place.
     openRetryEdit(charId, variantId, prompt) {
