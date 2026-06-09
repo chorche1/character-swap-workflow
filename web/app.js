@@ -1357,6 +1357,14 @@ function studio() {
       tick();
     },
 
+    // Image models offered in the SWAP flow. Google/Gemini models (Nano
+    // Banana, Nano Banana Pro) are intentionally EXCLUDED from Swap — they
+    // remain available in the standalone Image tab.
+    swapImageModels() {
+      return ((this.models && this.models.image) || [])
+        .filter(m => m.provider !== 'gemini');
+    },
+
     // --- Video Editor (silence-trim + captions) -----------------------------
 
     _restorePerTabPrefs() {
