@@ -16,19 +16,11 @@ import logging
 import time
 from pathlib import Path
 
-from character_swap import content_policy
 from character_swap.clients import google_genai, grok, openai_image
 from character_swap.config import settings
 from character_swap.images import atomic_write_bytes
 
 _log = logging.getLogger("pipeline")
-
-# Last-resort model for the swap when the chosen model keeps refusing a prompt
-# on content-policy grounds even after per-model prompt softening. Nano Banana
-# Pro is a different moderation backend (Google) than GPT Image (OpenAI) /
-# Grok (xAI), so a provider-specific false positive often clears — and it uses
-# the scene+character references, so swap quality stays high.
-_NSFW_FALLBACK_MODEL = "nano-banana-pro"
 
 # Verbatim user-specified prompt. Do not paraphrase.
 GENERATION_PROMPT = (
@@ -123,43 +115,24 @@ def generate_variant(
     job_id: str | None = None,
     extra_reference_image: Path | None = None,
 ) -> Path:
-    """Swap-variant generation with a content-policy fallback.
+    """Swap-variant generation on the chosen model only.
 
-    Three-stage NSFW recovery (the first two live inside each client):
+    Two-stage NSFW recovery, both inside each client:
       1. the chosen model with the prompt as-is,
       2. the chosen model retried with a minimally softened prompt
-         (`content_policy`), and — added here —
-      3. if it STILL refuses, re-run on Nano Banana Pro (a different
-         moderation backend) when Gemini is configured and we're not already
-         on it. Provider-specific false positives (e.g. "shirtless person")
-         usually clear, and NBP uses the same references so the swap quality
-         holds. The output may look slightly different from sibling variants
-         made by the original model — logged so it's traceable.
+         (`content_policy`).
 
-    Non-content errors propagate unchanged.
+    There is intentionally NO cross-provider fallback: if the chosen model
+    (e.g. GPT Image) still refuses on content-policy grounds, the variant
+    fails and the real refusal surfaces to the user — we never silently switch
+    to a different model/provider than the one selected. All errors propagate
+    unchanged.
     """
-    try:
-        return _dispatch_variant(
-            model=model, scene_image=scene_image, character_image=character_image,
-            character_name=character_name, prompt=prompt, dest=dest, job_id=job_id,
-            extra_reference_image=extra_reference_image,
-        )
-    except Exception as e:
-        if (content_policy.is_content_rejection(e)
-                and model != _NSFW_FALLBACK_MODEL
-                and settings.has_provider("gemini")):
-            _log.warning(
-                "content rejection on '%s' after softening; falling back to '%s' "
-                "for this variant (job=%s). Output style may differ from siblings.",
-                model, _NSFW_FALLBACK_MODEL, job_id,
-            )
-            return _dispatch_variant(
-                model=_NSFW_FALLBACK_MODEL, scene_image=scene_image,
-                character_image=character_image, character_name=character_name,
-                prompt=prompt, dest=dest, job_id=job_id,
-                extra_reference_image=extra_reference_image,
-            )
-        raise
+    return _dispatch_variant(
+        model=model, scene_image=scene_image, character_image=character_image,
+        character_name=character_name, prompt=prompt, dest=dest, job_id=job_id,
+        extra_reference_image=extra_reference_image,
+    )
 
 
 def _dispatch_variant(

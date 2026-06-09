@@ -1,11 +1,11 @@
-"""Tests for the swap variant's third-stage NSFW recovery: when the chosen
-image model keeps refusing a prompt on content-policy grounds (after the
-client's own prompt-softening), `generate_variant` re-runs the variant on
-Nano Banana Pro — a different moderation backend — provided Gemini is
-configured and we're not already on it.
+"""Tests for swap-variant generation: the cross-provider NSFW fallback has been
+intentionally REMOVED. `generate_variant` now runs ONLY on the chosen model —
+if it refuses on content-policy grounds, that refusal propagates and the variant
+fails; the app never silently switches to a different model/provider than the
+one the user selected.
 
 We monkeypatch `_dispatch_variant` (the per-model dispatch) so no real API is
-hit; the fallback orchestration is what's under test.
+hit; the no-fallback behavior is what's under test.
 """
 from __future__ import annotations
 
@@ -30,48 +30,23 @@ def _args(model: str) -> dict:
     )
 
 
-def test_falls_back_to_nano_banana_pro_on_persistent_rejection(monkeypatch):
-    calls = []
-    def fake(*, model, **kw):
-        calls.append(model)
-        if model == "gpt-image":
-            raise _PolicyError()
-        return Path("/out.png")   # NBP succeeds
-    monkeypatch.setattr(pipeline, "_dispatch_variant", fake)
-    monkeypatch.setattr(type(pipeline.settings), "has_provider", lambda self, p: p == "gemini")
-
-    out = pipeline.generate_variant(**_args("gpt-image"))
-    assert out == Path("/out.png")
-    assert calls == ["gpt-image", "nano-banana-pro"]   # tried original, then fell back
-
-
-def test_no_fallback_when_already_nano_banana_pro(monkeypatch):
+def test_content_rejection_propagates_no_cross_provider_switch(monkeypatch):
+    """GPT Image refusing on policy grounds must NOT fall back to Gemini/NBP —
+    the real refusal surfaces and the variant fails on the chosen model."""
     calls = []
     def fake(*, model, **kw):
         calls.append(model)
         raise _PolicyError()
     monkeypatch.setattr(pipeline, "_dispatch_variant", fake)
+    # Even with Gemini configured, there must be no model switch.
     monkeypatch.setattr(type(pipeline.settings), "has_provider", lambda self, p: True)
 
     with pytest.raises(_PolicyError):
-        pipeline.generate_variant(**_args("nano-banana-pro"))
-    assert calls == ["nano-banana-pro"]   # no recursion onto itself
-
-
-def test_no_fallback_when_gemini_not_configured(monkeypatch):
-    calls = []
-    def fake(*, model, **kw):
-        calls.append(model)
-        raise _PolicyError()
-    monkeypatch.setattr(pipeline, "_dispatch_variant", fake)
-    monkeypatch.setattr(type(pipeline.settings), "has_provider", lambda self, p: False)
-
-    with pytest.raises(_PolicyError):
         pipeline.generate_variant(**_args("gpt-image"))
-    assert calls == ["gpt-image"]   # couldn't fall back — Gemini key missing
+    assert calls == ["gpt-image"]   # chosen model only — never nano-banana-pro
 
 
-def test_non_content_error_propagates_without_fallback(monkeypatch):
+def test_non_content_error_propagates(monkeypatch):
     calls = []
     def fake(*, model, **kw):
         calls.append(model)
@@ -81,10 +56,10 @@ def test_non_content_error_propagates_without_fallback(monkeypatch):
 
     with pytest.raises(RuntimeError, match="connection reset"):
         pipeline.generate_variant(**_args("gpt-image"))
-    assert calls == ["gpt-image"]   # network error ≠ content block → no model switch
+    assert calls == ["gpt-image"]
 
 
-def test_happy_path_no_rejection_uses_chosen_model_only(monkeypatch):
+def test_happy_path_uses_chosen_model_only(monkeypatch):
     calls = []
     def fake(*, model, **kw):
         calls.append(model)
@@ -94,4 +69,4 @@ def test_happy_path_no_rejection_uses_chosen_model_only(monkeypatch):
 
     out = pipeline.generate_variant(**_args("gpt-image"))
     assert out == Path("/out.png")
-    assert calls == ["gpt-image"]   # accepted first try — no fallback
+    assert calls == ["gpt-image"]
