@@ -1013,7 +1013,7 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
 
     title = (body.title or "").strip() or _auto_title(char_names)
 
-    image_model = (body.image_model or "nano-banana-pro").strip()
+    image_model = (body.image_model or "gpt-image").strip()
     if image_model not in runner_media.IMAGE_MODELS:
         raise HTTPException(400, f"Unknown image_model '{image_model}'")
     if not settings.has_provider(runner_media.IMAGE_MODELS[image_model]["provider"]):
@@ -2644,7 +2644,7 @@ async def get_swap_defaults(project_id: str | None = None) -> dict:
         "prompt": project_prompt or global_prompt,
         "global_prompt": global_prompt,
         "project_prompt": project_prompt,
-        "image_model": "nano-banana-pro",
+        "image_model": "gpt-image",
         "image_models": _models_payload()["image"],
     }
 
