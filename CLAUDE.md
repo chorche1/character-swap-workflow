@@ -157,6 +157,12 @@ MINIMAX_API_KEY=...               # MiniMax Hailuo 02 + Hailuo 01
 BYTEDANCE_API_KEY=...             # Seedream 3.0 + SeedEdit + Seedance (Volcano ARK)
 ALIBABA_API_KEY=...               # Wan 2.1 + 2.2 (DashScope)
 HIGGSFIELD_API_KEY=...            # Higgsfield Soul (image+video) / DoP / Lipsync / Speak
+HIGGSFIELD_API_SECRET=...         # Required WITH the key for the official REST API
+                                  # (Authorization: Key {key}:{secret}; create both at
+                                  # cloud.higgsfield.ai/api-keys — distinct from the
+                                  # CLI/MCP device-login). Unlocks the Swap "Higgsfield
+                                  # Character Swap" model (clients/higgsfield.py): uploads
+                                  # scene+character → custom-reference → /v1/text2image/soul.
 HEYGEN_API_KEY=...                # HeyGen Avatar 5 — talking-head videos (Avatar tab)
 ELEVENLABS_API_KEY=...            # ElevenLabs voice library (Audio tab + Editor voice swap +
                                   # optional voice source for HeyGen avatars)
@@ -291,8 +297,16 @@ src/character_swap/
                             `generateContent` endpoint (httpx, no SDK dep). Veo still
                             a stub. Locked until GEMINI_API_KEY.
     ├── kling.py          — stub (locked until KLING_*_KEY)
+    ├── higgsfield.py     — Higgsfield official REST API (platform.higgsfield.ai,
+                            Authorization: Key {key}:{secret}). generate_swap():
+                            upload scene+character → /v1/custom-references (cached
+                            per char sha256 in state/higgsfield_refs.json) →
+                            /v1/text2image/soul (custom_reference_id + scene
+                            image_reference) → poll job-set → download. Powers the
+                            Swap "higgsfield-swap" model. Locked until
+                            HIGGSFIELD_API_KEY + HIGGSFIELD_API_SECRET.
     └── _stubs.py         — collected stubs for FLUX/Ideogram/Recraft/Stability
-                            + Runway/Luma/Pika/MiniMax/Sora/Wan/Seedance/Higgsfield.
+                            + Runway/Luma/Pika/MiniMax/Sora/Wan/Seedance/Higgsfield(soul/DoP/etc).
 
 remotion/                  — React + Remotion project for the caption engine.
 ├── package.json           — remotion 4.0.247, @remotion/player, @remotion/google-fonts, react 19

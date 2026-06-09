@@ -45,6 +45,7 @@ IMAGE_MODELS: dict[str, dict] = {
     "seedream-3":           {"label": "Seedream 3.0",                    "provider": "bytedance",  "price_setting": "seedream_price_usd"},
     "seededit":             {"label": "SeedEdit",                        "provider": "bytedance",  "price_setting": "seedream_price_usd"},
     "higgsfield-soul-img":  {"label": "Higgsfield Soul (image)",         "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
+    "higgsfield-swap":      {"label": "Higgsfield Character Swap",        "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
 }
 
 AVATAR_MODELS: dict[str, dict] = {
@@ -258,6 +259,19 @@ async def run_image_gen(gen_id: str) -> None:
                 _stubs.generate_higgsfield_soul_img,
                 prompt=effective_prompt, reference_images=refs,
                 aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+            )
+        elif gen.model == "higgsfield-swap":
+            # Character swap needs two refs: scene (1st) + character (2nd).
+            if len(refs) < 2:
+                raise ValueError(
+                    "Higgsfield Character Swap needs two reference images: "
+                    "the scene (first) and the character (second)."
+                )
+            from character_swap.clients import higgsfield
+            data = await asyncio.to_thread(
+                higgsfield.generate_swap,
+                scene_image=refs[0], character_image=refs[1],
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
         else:
             raise ValueError(f"Unknown image model: {gen.model}")

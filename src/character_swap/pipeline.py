@@ -212,6 +212,20 @@ def _dispatch_variant(
         )
         atomic_write_bytes(dest, data)
         return dest
+    if model == "higgsfield-swap":
+        # Higgsfield Character Swap (official REST API): the character is turned
+        # into a custom-reference and composited into the scene via Soul.
+        # scene = the scene to preserve, character = the person to insert.
+        from character_swap.clients import higgsfield
+        data = higgsfield.generate_swap(
+            scene_image=scene_image,
+            character_image=character_image,
+            prompt=prompt,
+            aspect_ratio="9:16",
+            app_job_id=job_id,
+        )
+        atomic_write_bytes(dest, data)
+        return dest
     raise ValueError(f"Unknown image model for swap variant: {model}")
 
 

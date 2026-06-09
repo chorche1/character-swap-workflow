@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     bytedance_api_key: str = Field(default="", validation_alias="BYTEDANCE_API_KEY")  # Seedream/SeedEdit/SeedDance (Volcano ARK)
     alibaba_api_key: str = Field(default="", validation_alias="ALIBABA_API_KEY")      # Wan 2.x (DashScope)
     higgsfield_api_key: str = Field(default="", validation_alias="HIGGSFIELD_API_KEY")
+    # Higgsfield official REST API uses a key + SECRET pair (Authorization: Key
+    # {key}:{secret}). Distinct from the CLI/MCP device-login. Create at
+    # cloud.higgsfield.ai/api-keys. Powers the Swap "Higgsfield Character Swap" model.
+    higgsfield_api_secret: str = Field(default="", validation_alias="HIGGSFIELD_API_SECRET")
+    higgsfield_base_url: str = Field(default="https://platform.higgsfield.ai",
+                                     validation_alias="HIGGSFIELD_BASE_URL")
+    # Field name carrying the scene image on POST /v1/text2image/soul. The
+    # community MCP uses "image_reference"; override to "input_images" if a live
+    # probe shows that's what the account's API expects.
+    higgsfield_scene_field: str = Field(default="image_reference",
+                                        validation_alias="HIGGSFIELD_SCENE_FIELD")
     heygen_api_key: str = Field(default="", validation_alias="HEYGEN_API_KEY")        # HeyGen Avatar 5 (talking heads)
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY") # ElevenLabs voice library + TTS + Voice Changer
     fal_api_key: str = Field(default="", validation_alias="FAL_API_KEY")              # fal.ai (hosts VEED Subtitle Styling — auto-captioning)
@@ -200,7 +211,7 @@ class Settings(BaseSettings):
             "minimax":    bool(self.minimax_api_key),
             "bytedance":  bool(self.bytedance_api_key),
             "alibaba":    bool(self.alibaba_api_key),
-            "higgsfield": bool(self.higgsfield_api_key),
+            "higgsfield": bool(self.higgsfield_api_key and self.higgsfield_api_secret),
             "heygen":     bool(self.heygen_api_key),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal":        bool(self.fal_api_key),
