@@ -89,6 +89,25 @@ class QCVerdict:
     corrective_hint: str
 
 
+def repair_prompt(hint: str) -> str:
+    """Minimal-change repair instruction for a QC-failed image.
+
+    The first QC retry does NOT re-roll from the scene — it feeds the failed
+    image itself back through the edit engine with this prompt, so everything
+    that was already right is preserved and only the flagged flaw changes
+    (Hugo: "bilden ska ändras så lite som möjligt")."""
+    fix = hint.strip() or "the person's face must match the identity reference exactly"
+    return (
+        "Image 1 is an almost-correct generated photo that needs ONE repair. "
+        "Image 2 is the identity reference for the person who must appear. "
+        f"Fix only this: {fix} "
+        "Keep absolutely everything else in Image 1 unchanged — identical "
+        "framing, crop, pose, body position, clothing, objects, background, "
+        "lighting, colors and photographic style. Change as little of the "
+        "image as possible."
+    )
+
+
 def inspect_variant(
     *,
     scene_image: Path,

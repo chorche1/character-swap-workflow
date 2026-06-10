@@ -1839,16 +1839,28 @@
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-v-'+sc.idx+'-'+cid">
                       <template x-for="v in (jc.images || []).filter(v => v.scene_id === sc.scene_id)" :key="v.variant_id">
                         <div class="relative">
-                          <img x-show="v.url" :src="v.url"
+                          <!-- Only render the <img> once the file exists (status
+                               ready) — while generating the URL 404s and the
+                               browser shows a broken-image "?" icon. -->
+                          <img x-show="v.status === 'ready' && v.url" :src="v.url"
                                class="w-14 rounded object-cover border-2 cursor-pointer"
                                :class="(jc.approved_variant_ids || []).includes(v.variant_id)
                                          ? 'border-emerald-500' : 'border-neutral-200 dark:border-neutral-800'"
-                               :title="jc.name + (v.status === 'ready' ? ' — click to approve/unapprove' : ' — ' + v.status)"
+                               :title="jc.name + ' — click to approve/unapprove' + (v.qc_status === 'failed' ? ' · QC: ' + (v.qc_reason || '') : '')"
                                @click="reengineerApprove(r, cid, v.variant_id)" />
-                          <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded"></div>
-                          <div x-show="v.status === 'failed'" class="w-14 text-[9px] text-rose-500">✕ failed</div>
+                          <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded"
+                               :title="jc.name + ' — generating…'"></div>
+                          <div x-show="v.status === 'failed'" class="w-14 text-center">
+                            <div class="text-[9px] text-rose-500" :title="v.error || 'generation failed'">✕ failed</div>
+                            <button class="text-[10px] text-indigo-500 hover:underline"
+                                    title="Retry this image"
+                                    @click="reengineerRetryVariant(r, cid, v.variant_id)">↻ retry</button>
+                          </div>
                           <span x-show="(jc.approved_variant_ids || []).includes(v.variant_id)"
                                 class="absolute top-0.5 right-0.5 bg-emerald-500 text-white text-[9px] px-1 rounded">✓</span>
+                          <span x-show="v.qc_status === 'failed' && v.status === 'ready'"
+                                class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded cursor-help"
+                                :title="'QC: ' + (v.qc_reason || '')">⚠</span>
                         </div>
                       </template>
                     </template>

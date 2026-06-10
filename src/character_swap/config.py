@@ -166,6 +166,14 @@ class Settings(BaseSettings):
                                validation_alias="SWAP_QC_MODEL")
     swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
     swap_qc_price_usd: float = Field(default=0.01, validation_alias="SWAP_QC_PRICE_USD")
+    # QC on generated video CLIPS: Whisper-vs-expected-dialogue (catches
+    # garbled TTS like "baking goda") + frame-sampled vision check for
+    # impossible motion/anatomy. Auto-resubmits the clip on failure — video is
+    # the expensive step, so only 1 retry by default. VIDEO_QC=0 disables.
+    video_qc_enabled: bool = Field(default=True, validation_alias="VIDEO_QC")
+    video_qc_max_retries: int = Field(default=1, validation_alias="VIDEO_QC_MAX_RETRIES")
+    video_qc_speech_threshold: float = Field(default=0.7,
+                                             validation_alias="VIDEO_QC_SPEECH_THRESHOLD")
 
     # Opt-in SQLite state backend. Default off — JSON file remains canonical
     # until the user runs `character-swap migrate` + flips this on. Once stable

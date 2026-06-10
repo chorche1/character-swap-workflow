@@ -79,8 +79,10 @@ def test_qc_fail_then_pass_regenerates_with_hint(monkeypatch, tmp_path):
     assert v.qc_attempts == 2
     assert len(prompts) == 2
     assert prompts[0] == "BASE PROMPT"
+    # First retry = minimal-change REPAIR mode: fix-only-this prompt built
+    # from the judge's hint (scene-input swap covered in test_video_qc.py).
     assert "Match the character's face exactly." in prompts[1]
-    assert prompts[1].startswith("BASE PROMPT")
+    assert "as little" in prompts[1].lower()
     assert v.prompt == "BASE PROMPT"          # base prompt never mutated
 
 

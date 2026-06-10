@@ -40,8 +40,8 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     # Reengineer's scene analyst is the same one-Claude-call shape.
     if phase in {"director_swap", "director_movement", "reengineer_analyze"}:
         return settings.claude_opus_price_usd
-    # Vision QC — one cheap Haiku call per generated swap variant.
-    if phase == "swap_qc":
+    # Vision QC — one cheap Haiku call per generated swap variant / video clip.
+    if phase in {"swap_qc", "video_qc"}:
         return settings.swap_qc_price_usd
     # Chat tab — each agent-loop iteration is one Opus call (vision + tool use).
     if phase == "chat":

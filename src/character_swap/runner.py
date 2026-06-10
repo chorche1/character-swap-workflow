@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import events, pipeline, swap_qc
+from character_swap import events, pipeline, swap_qc, video_qc
 from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
@@ -166,6 +166,13 @@ async def _generate_one_variant(
         scene_path = _scene_path_for_variant(job, variant)
         char_path = Path(jc.source_image_path)
         max_attempts = 1 + max(0, settings.swap_qc_max_retries)
+        # Per-attempt inputs. After a QC failure the FIRST retry runs in
+        # repair mode: the failed image itself becomes the scene input with a
+        # fix-only-this instruction, so the result changes as little as
+        # possible. A second failure falls back to a fresh re-roll from the
+        # original scene with the judge's hint appended. (grok-image is
+        # text-only — repair mode would be ignored, so it re-rolls directly.)
+        attempt_scene = scene_path
         prompt = variant.prompt
         verdict = None
         try:
@@ -174,7 +181,7 @@ async def _generate_one_variant(
                 await asyncio.to_thread(
                     pipeline.generate_variant,
                     model=_swap_image_model(job),
-                    scene_image=scene_path,
+                    scene_image=attempt_scene,
                     character_image=char_path,
                     character_name=jc.name,
                     prompt=prompt,
@@ -207,9 +214,18 @@ async def _generate_one_variant(
                                 char_id=jc.char_id, variant_id=variant.variant_id,
                                 attempt=attempt, reason=verdict.reason)
                     hint = (verdict.corrective_hint or verdict.reason or "").strip()
-                    prompt = variant.prompt + (
-                        f"\nIMPORTANT — the previous attempt was rejected by "
-                        f"quality control: {hint}" if hint else "")
+                    if attempt == 1 and _swap_image_model(job) != "grok-image":
+                        # Repair mode: minimal-change edit of the failed image.
+                        failed_copy = dest.with_name(dest.stem + ".qcfail.png")
+                        failed_copy.write_bytes(dest.read_bytes())
+                        attempt_scene = failed_copy
+                        prompt = swap_qc.repair_prompt(hint)
+                    else:
+                        # Fresh re-roll from the original scene + hint.
+                        attempt_scene = scene_path
+                        prompt = variant.prompt + (
+                            f"\nIMPORTANT — the previous attempt was rejected by "
+                            f"quality control: {hint}" if hint else "")
         except Exception as e:
             variant.status = VariantStatus.FAILED
             variant.error = f"{type(e).__name__}: {e}"
@@ -664,44 +680,22 @@ async def _animate_one_video(
     # the same VideoStatus.ERROR path so the UI doesn't need per-provider
     # handling.
     video_model = job.video_model or "grok-imagine"
-    try:
-        # Each VideoVariant remembers WHICH approved variant it animates via
-        # `source_variant_id` — so multi-scene jobs (with multiple approved
-        # variants per char) animate every approval in parallel and keep
-        # their per-frame source mapping correct.
-        target_variant_id = video.source_variant_id or jc.approved_variant_id
-        approved = next(
-            (v for v in jc.images if v.variant_id == target_variant_id), None
-        )
-        if approved is None:
-            raise grok.GrokError("approved variant missing on disk")
-        provider_job_id = await asyncio.to_thread(
-            pipeline.submit_video,
-            image=Path(approved.path),
-            movement_prompt=movement_prompt,
-            character_name=jc.name,
-            job_id=job.job_id,
-            model=video_model,
-            duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
-            end_image=end_image,
-            generate_audio=job.video_audio,
-        )
-    except Exception as e:
+    # Each VideoVariant remembers WHICH approved variant it animates via
+    # `source_variant_id` — so multi-scene jobs (with multiple approved
+    # variants per char) animate every approval in parallel and keep
+    # their per-frame source mapping correct.
+    target_variant_id = video.source_variant_id or jc.approved_variant_id
+    approved = next(
+        (v for v in jc.images if v.variant_id == target_variant_id), None
+    )
+    if approved is None:
         video.status = VideoStatus.ERROR
-        video.error = f"submit: {e}"
+        video.error = "submit: approved variant missing on disk"
         _replace_video(job, jc, video)
         await _emit(job.job_id, "video.failed",
-                    char_id=jc.char_id, video_id=video.video_id, error=str(e))
+                    char_id=jc.char_id, video_id=video.video_id, error=video.error)
         _maybe_complete_char(job, jc)
         return
-
-    # `grok_job_id` is misnamed for non-grok providers but kept for DB
-    # back-compat (the column is the provider's external job/task id either
-    # way; the column name is historical).
-    video.grok_job_id = provider_job_id
-    _replace_video(job, jc, video)
-    await _emit(job.job_id, "video.submitted",
-                char_id=jc.char_id, video_id=video.video_id, grok_job_id=provider_job_id)
 
     loop = asyncio.get_running_loop()
     dest = _output_dir(job.job_id, jc.char_id) / f"video_{video.video_id}.mp4"
@@ -725,19 +719,77 @@ async def _animate_one_video(
              "ts": datetime.utcnow().isoformat() + "Z"},
         )
 
+    # Generate → clip-QC → resubmit-with-corrective-hint loop. QC transcribes
+    # the clip and compares against the prompt's expected dialogue (catches
+    # garbled TTS like "baking goda") and vision-checks sampled frames for
+    # impossible motion/anatomy. Video is the EXPENSIVE step → 1 retry by
+    # default; QC unavailable → single attempt, qc_status="skipped"; exhausted
+    # retries keep the last clip with qc_status="failed" (⚠ in UI).
+    max_attempts = 1 + (max(0, settings.video_qc_max_retries)
+                        if settings.video_qc_enabled else 0)
+    prompt_text = movement_prompt
+    phase = "submit"
     try:
-        await asyncio.to_thread(
-            pipeline.wait_for_video,
-            job_id=provider_job_id,
-            character_name=jc.name,
-            dest=dest,
-            on_progress=_progress,
-            app_job_id=job.job_id,
-            model=video_model,
-        )
+        for attempt in range(1, max_attempts + 1):
+            video.qc_attempts = attempt
+            phase = "submit"
+            provider_job_id = await asyncio.to_thread(
+                pipeline.submit_video,
+                image=Path(approved.path),
+                movement_prompt=prompt_text,
+                character_name=jc.name,
+                job_id=job.job_id,
+                model=video_model,
+                duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
+                end_image=end_image,
+                generate_audio=job.video_audio,
+            )
+            # `grok_job_id` is misnamed for non-grok providers but kept for DB
+            # back-compat (it's the provider's external job/task id either way).
+            video.grok_job_id = provider_job_id
+            _replace_video(job, jc, video)
+            await _emit(job.job_id, "video.submitted",
+                        char_id=jc.char_id, video_id=video.video_id,
+                        grok_job_id=provider_job_id)
+
+            phase = "wait"
+            await asyncio.to_thread(
+                pipeline.wait_for_video,
+                job_id=provider_job_id,
+                character_name=jc.name,
+                dest=dest,
+                on_progress=_progress,
+                app_job_id=job.job_id,
+                model=video_model,
+            )
+
+            verdict = await asyncio.to_thread(
+                video_qc.inspect_clip, dest,
+                movement_prompt=prompt_text, app_job_id=job.job_id,
+            )
+            if verdict is None:
+                video.qc_status = "skipped"
+                video.qc_reason = None
+                break
+            if verdict.passed:
+                video.qc_status = "passed"
+                video.qc_reason = None
+                break
+            video.qc_status = "failed"
+            video.qc_reason = verdict.reason
+            if attempt < max_attempts:
+                await _emit(job.job_id, "video.qc_retry",
+                            char_id=jc.char_id, video_id=video.video_id,
+                            attempt=attempt, reason=verdict.reason)
+                hint = (verdict.corrective_hint or verdict.reason or "").strip()
+                prompt_text = movement_prompt + (
+                    f" IMPORTANT — the previous take was rejected by quality "
+                    f"control: {hint}" if hint else "")
+                video.status = VideoStatus.PROCESSING
+                _replace_video(job, jc, video)
     except Exception as e:
         video.status = VideoStatus.ERROR
-        video.error = str(e)
+        video.error = f"submit: {e}" if phase == "submit" else str(e)
         _replace_video(job, jc, video)
         await _emit(job.job_id, "video.failed",
                     char_id=jc.char_id, video_id=video.video_id, error=str(e))

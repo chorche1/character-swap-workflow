@@ -308,13 +308,18 @@ def _clamp_kling(secs: float) -> int:
 
 
 def _with_accent(prompt: str) -> str:
-    """Kling synthesizes the voice from the prompt — enforce the accent
-    centrally so every clip speaks American English even if a scene's
-    agent-written prompt forgot to say so (Hugo, 2026-06-11)."""
-    if "american" in prompt.lower():
-        return prompt
-    return (prompt.rstrip() + " The person speaks fluent American English "
-            "with a natural American accent.")
+    """Kling synthesizes the voice from the prompt — enforce accent AND clear
+    pronunciation centrally so every clip speaks American English with each
+    word pronounced correctly, even if a scene's agent-written prompt forgot
+    to say so (Hugo, 2026-06-11; garbled words like "baking goda" observed)."""
+    out = prompt
+    if "american" not in out.lower():
+        out = (out.rstrip() + " The person speaks fluent American English "
+               "with a natural American accent.")
+    if "pronounc" not in out.lower():
+        out = (out.rstrip() + " Every word is pronounced clearly, correctly "
+               "and distinctly.")
+    return out
 
 
 async def _do_animate(re_id: str, state: dict) -> None:

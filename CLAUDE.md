@@ -63,7 +63,7 @@ The Swap flow (6 steps): persistent left sidebar of past jobs + main panel:
 
 **Dark mode is forced** (no toggle). Light mode classes still in DOM but never applied.
 
-No Claude calls. No automatic QC. Quality is gated by human approval before any Grok video is kicked off (Grok is the expensive step).
+Quality is double-gated: (1) automatic vision-QC — every generated swap IMAGE is inspected by a cheap Claude call (swap_qc.py: right person? broken/cutout?) and auto-regenerated on failure (first retry = minimal-change REPAIR of the failed image, then fresh re-roll + hint; SWAP_QC=0 disables), and every generated video CLIP is checked (video_qc.py: Whisper transcript vs expected dialogue — catches garbled TTS like 'baking goda' — + frame-sampled anatomy check; 1 retry, VIDEO_QC=0 disables); (2) human approval before any video is kicked off (video is the expensive step). QC never blocks: unavailable → skipped; exhausted retries keep the last output with a ⚠ qc_status chip.
 
 Resumable across browser closes AND server restarts: in-flight Grok jobs resume polling automatically on startup. Stale image generations from a killed server are marked `failed` so the user can click ↻ to retry.
 

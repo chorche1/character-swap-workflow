@@ -135,6 +135,11 @@ class VideoVariant(BaseModel):
     # regen of the same video pre-fills the modal with the LAST override
     # the user iterated on instead of going back to the original.
     movement_prompt_override: str | None = None
+    # Clip-QC outcome (video_qc.py): dialogue transcript match + frame-sampled
+    # anatomy check. Same semantics as GeneratedImage.qc_*.
+    qc_status: str | None = None
+    qc_reason: str | None = None
+    qc_attempts: int = 0
 
 
 class JobCharacter(BaseModel):

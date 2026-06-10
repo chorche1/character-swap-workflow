@@ -1360,6 +1360,20 @@ function studio() {
       await this.refreshReengineer(run.re_id);
     },
 
+    // Retry one failed slot in a reengineer run — same endpoint as the Swap
+    // tab's per-variant ↻ (keeps the slot in place, regenerates only it).
+    async reengineerRetryVariant(run, charId, variantId) {
+      if (!run.job_id) return;
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/characters/${charId}/variants/${variantId}/retry`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}) });
+      if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
+      this.notifyInfo('Regenerating the failed image…');
+      this._startReengineerPolling();
+      await this.refreshReengineer(run.re_id);
+    },
+
     async reengineerApproveAll(run) {
       if (!run.job_id) return;
       const r = await fetch(`/api/jobs/${run.job_id}/approve_all`, { method: 'POST' });

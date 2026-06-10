@@ -210,7 +210,8 @@ For EVERY scene, write:
    replaced); refer to them as "the person". If the scene has dialogue,
    include it VERBATIM as: The person says: "<dialogue>" — with natural
    lip-sync and a casual, conversational delivery in fluent American
-   English with a natural American accent.
+   English with a natural American accent, pronouncing every word clearly
+   and correctly.
 2. speech — the dialogue line alone (empty string if the scene has no speech).
 3. summary — one short line describing the scene for a UI list.
 
@@ -304,7 +305,8 @@ def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[
         spoken = words_in_span(words, a, b)
         speech = (f' The person says: "{spoken}" with natural lip-sync and a casual, '
                   'conversational delivery in fluent American English with a natural '
-                  'American accent.') if spoken else ""
+                  'American accent, pronouncing every word clearly and correctly.'
+                  ) if spoken else ""
         out.append(ScenePlan(
             idx=i,
             motion_prompt=("Ordinary hand-held UGC phone footage: the person continues the "
