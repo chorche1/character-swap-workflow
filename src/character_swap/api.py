@@ -425,6 +425,14 @@ app.mount("/files/input/extra_refs",
 app.mount("/files/characters",
           StaticFiles(directory=str(settings.characters_dir)),
           name="files-characters")
+# Frontend static assets (the esbuild Remotion preview bundle). index.html
+# references /files/web/static/remotion-preview.js — without this mount the
+# in-browser @remotion/player preview 404s silently and the visual caption
+# editor's live preview never mounts.
+(settings.web_dir / "static").mkdir(parents=True, exist_ok=True)
+app.mount("/files/web/static",
+          StaticFiles(directory=str(settings.web_dir / "static")),
+          name="files-web-static")
 
 
 @app.get("/")

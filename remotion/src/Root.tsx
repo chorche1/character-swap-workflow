@@ -6,6 +6,8 @@ import { MrBeastBold } from "./compositions/MrBeastBold";
 import { CapCutGlow } from "./compositions/CapCutGlow";
 import { SubmagicPro } from "./compositions/SubmagicPro";
 import { CapCutPurplePill } from "./compositions/CapCutPurplePill";
+import { CapCutYellowKaraoke } from "./compositions/CapCutYellowKaraoke";
+import { CapCutBlueBox } from "./compositions/CapCutBlueBox";
 
 const FPS = 30;
 
@@ -71,6 +73,48 @@ export const Root: React.FC = () => {
           fontFamily: "Montserrat",
           wordsPerCard: 3,
           allCaps: true,
+        }}
+        calculateMetadata={({ props }) => ({
+          durationInFrames: durationInFrames(props),
+          width: props.videoWidth,
+          height: props.videoHeight,
+        })}
+      />
+      <Composition
+        id="CapCutYellowKaraoke"
+        component={CapCutYellowKaraoke}
+        fps={FPS}
+        width={DEFAULT_CAPTION_PROPS.videoWidth}
+        height={DEFAULT_CAPTION_PROPS.videoHeight}
+        durationInFrames={durationInFrames(DEFAULT_CAPTION_PROPS)}
+        defaultProps={{
+          ...DEFAULT_CAPTION_PROPS,
+          accent: "#F8F800",            // yellow sampled from silas ears 11.mov
+          fontFamily: "Poppins",
+          wordsPerCard: 4,
+          allCaps: true,
+          positionPct: { x: 0.5, y: 0.52 },
+        }}
+        calculateMetadata={({ props }) => ({
+          durationInFrames: durationInFrames(props),
+          width: props.videoWidth,
+          height: props.videoHeight,
+        })}
+      />
+      <Composition
+        id="CapCutBlueBox"
+        component={CapCutBlueBox}
+        fps={FPS}
+        width={DEFAULT_CAPTION_PROPS.videoWidth}
+        height={DEFAULT_CAPTION_PROPS.videoHeight}
+        durationInFrames={durationInFrames(DEFAULT_CAPTION_PROPS)}
+        defaultProps={{
+          ...DEFAULT_CAPTION_PROPS,
+          accent: "#0070F8",            // blue sampled from Silas ears 10.mov
+          fontFamily: "Poppins",
+          wordsPerCard: 4,
+          allCaps: true,
+          positionPct: { x: 0.5, y: 0.52 },
         }}
         calculateMetadata={({ props }) => ({
           durationInFrames: durationInFrames(props),

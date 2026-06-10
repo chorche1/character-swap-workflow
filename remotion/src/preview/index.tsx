@@ -6,16 +6,24 @@ import { SubmagicPop } from "../compositions/SubmagicPop";
 import { MrBeastBold } from "../compositions/MrBeastBold";
 import { CapCutGlow } from "../compositions/CapCutGlow";
 import { SubmagicPro } from "../compositions/SubmagicPro";
+import { CapCutPurplePill } from "../compositions/CapCutPurplePill";
+import { CapCutYellowKaraoke } from "../compositions/CapCutYellowKaraoke";
+import { CapCutBlueBox } from "../compositions/CapCutBlueBox";
 
 const FPS = 30;
 
-type CompId = "SubmagicPop" | "MrBeastBold" | "CapCutGlow" | "SubmagicPro";
+type CompId =
+  | "SubmagicPop" | "MrBeastBold" | "CapCutGlow" | "SubmagicPro"
+  | "CapCutPurplePill" | "CapCutYellowKaraoke" | "CapCutBlueBox";
 
 const COMPONENTS: Record<CompId, React.ComponentType<BaseCaptionProps>> = {
   SubmagicPop,
   MrBeastBold,
   CapCutGlow,
   SubmagicPro,
+  CapCutPurplePill,
+  CapCutYellowKaraoke,
+  CapCutBlueBox,
 };
 
 const ROOTS = new Map<string, Root>();

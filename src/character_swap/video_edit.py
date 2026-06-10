@@ -873,6 +873,38 @@ TEMPLATES: dict[str, CaptionStyle] = {
     # / shadow blur 20px / font weight 900 / #7800f0 purple). Bake those
     # into the template so a fresh render produces the look immediately
     # without anyone touching the overrides panel.
+    # CapCut "yellow karaoke" — exact replica of Hugo's reference video
+    # "silas ears 11.mov" (frame-decoded 2026-06-10). Poppins Black ALLCAPS,
+    # near-white text with THICK black outline + soft shadow; the currently
+    # spoken word's FILL turns yellow (#F8F800, sampled) — instant karaoke
+    # hop, no entrance animation, mid-screen cards of ~4 words.
+    "capcut-yellow":  CaptionStyle(font="Poppins", size=85,
+                              highlight_color="&H0000F8F8",   # #F8F800 yellow (ASS BGR)
+                              outline_color="&H00000000",
+                              outline=0,                      # 0 → comp default (~9.5% of font)
+                              shadow=0,                       # 0 → comp default soft shadow
+                              font_weight=900,
+                              words_per_card=4, margin_v=920, # ≈52% down on 1920
+                              all_caps=True,
+                              engine="remotion",
+                              composition_id="CapCutYellowKaraoke"),
+
+    # CapCut "blue box" — exact replica of Hugo's reference video
+    # "Silas ears 10.mov" (frame-decoded 2026-06-10). Same Poppins Black
+    # ALLCAPS base with a thinner outline; the spoken word gets a vivid blue
+    # (#0070F8, sampled) rounded box behind it, hopping word-to-word
+    # instantly. No entrance animation, mid-screen.
+    "capcut-bluebox": CaptionStyle(font="Poppins", size=85,
+                              highlight_color="&H00F87000",   # #0070F8 blue (ASS BGR)
+                              outline_color="&H00000000",
+                              outline=0,
+                              shadow=0,
+                              font_weight=900,
+                              words_per_card=4, margin_v=920,
+                              all_caps=True,
+                              engine="remotion",
+                              composition_id="CapCutBlueBox"),
+
     "capcut-purple-pill": CaptionStyle(font="Montserrat", size=74,
                               highlight_color="&H00F00078",   # #7800f0 vivid violet (ASS BGR)
                               outline_color="&H00000000",     # black stroke
