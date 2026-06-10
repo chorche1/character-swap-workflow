@@ -108,8 +108,10 @@ function studio() {
       sceneSensitivity: 'high',      // normal | high | max cut detection
       background: null,              // optional File: replacement environment
       backgroundUrl: '',             // object URL for the thumbnail
+      sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
+    reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
     editor: {
@@ -1226,6 +1228,30 @@ function studio() {
       this.reengineerGen.backgroundUrl = URL.createObjectURL(file);
     },
 
+    // Thumbnail for a character chip: the picked reference image (outfit
+    // choice) when overridden, else the primary.
+    reengineerCharThumb(ch) {
+      const picked = this.reengineerGen.sourceOverrides[ch.char_id];
+      if (picked) {
+        const img = (ch.images || []).find(i => i.image_id === picked);
+        if (img) return img.url;
+      }
+      return ch.url;
+    },
+
+    pickReengineerSource(charId, imageId) {
+      const ch = this.library.find(c => c.char_id === charId);
+      if (ch && imageId === ch.primary_image_id) {
+        const next = { ...this.reengineerGen.sourceOverrides };
+        delete next[charId];
+        this.reengineerGen.sourceOverrides = next;
+      } else {
+        this.reengineerGen.sourceOverrides = {
+          ...this.reengineerGen.sourceOverrides, [charId]: imageId };
+      }
+      this.reengineerPickerChar = null;
+    },
+
     toggleReengineerChar(cid) {
       const ids = this.reengineerGen.charIds;
       const i = ids.indexOf(cid);
@@ -1250,6 +1276,13 @@ function studio() {
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
         if (g.background) fd.append('background_file', g.background);
+        const pickedOverrides = {};
+        for (const cid of g.charIds) {
+          if (g.sourceOverrides[cid]) pickedOverrides[cid] = g.sourceOverrides[cid];
+        }
+        if (Object.keys(pickedOverrides).length) {
+          fd.append('character_source_image_ids', JSON.stringify(pickedOverrides));
+        }
         const r = await fetch('/api/reengineer', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Reengineer failed: ' + await r.text()); return; }
         const state = await r.json();

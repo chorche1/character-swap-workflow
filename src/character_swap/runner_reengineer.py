@@ -159,11 +159,15 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
 
     chars: dict[str, JobCharacter] = {}
     names: list[str] = []
+    source_overrides = state.get("character_source_image_ids") or {}
     for cid in state["character_ids"]:
         ch = s.get_character(cid)
         if ch is None:
             raise ValueError(f"Character not found: {cid}")
-        src = settings.characters_dir / ch.filename
+        # Per-character reference-image pick (e.g. a specific outfit) — same
+        # resolution as POST /api/jobs.
+        src = settings.characters_dir / ch.resolve_source_filename(
+            source_overrides.get(cid))
         if not src.exists():
             raise RuntimeError(f"Character file missing on disk: {src}")
         chars[cid] = JobCharacter(char_id=cid, name=ch.name,
@@ -303,6 +307,16 @@ def _clamp_kling(secs: float) -> int:
     return max(3, min(15, round(secs)))
 
 
+def _with_accent(prompt: str) -> str:
+    """Kling synthesizes the voice from the prompt — enforce the accent
+    centrally so every clip speaks American English even if a scene's
+    agent-written prompt forgot to say so (Hugo, 2026-06-11)."""
+    if "american" in prompt.lower():
+        return prompt
+    return (prompt.rstrip() + " The person speaks fluent American English "
+            "with a natural American accent.")
+
+
 async def _do_animate(re_id: str, state: dict) -> None:
     s = store()
     job = s.get_job(state["job_id"])
@@ -313,7 +327,8 @@ async def _do_animate(re_id: str, state: dict) -> None:
     if not approved_any:
         raise RuntimeError("no approved variants — approve images first")
 
-    movement_prompts = {e["scene_id"]: e["motion_prompt"] for e in state["scenes"]}
+    movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"])
+                        for e in state["scenes"]}
     durations = {e["scene_id"]: _clamp_kling(e["duration"]) for e in state["scenes"]}
 
     job.movement_prompts = movement_prompts

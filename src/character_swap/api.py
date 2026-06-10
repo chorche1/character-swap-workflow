@@ -997,18 +997,7 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         ch = s.get_character(cid)
         if ch is None:
             raise HTTPException(404, f"Character not found: {cid}")
-        # Resolve the reference image: per-character override (if supplied and
-        # valid) wins over the character's primary filename. Unknown image_ids
-        # fall back to the primary silently — the user picked from a list the
-        # server populated, so a mismatch likely means the character was edited
-        # between when the picker opened and submit.
-        filename = ch.filename
-        override_image_id = overrides.get(cid)
-        if override_image_id:
-            picked = next((img for img in ch.images if img.image_id == override_image_id), None)
-            if picked is not None:
-                filename = picked.filename
-        src = settings.characters_dir / filename
+        src = settings.characters_dir / ch.resolve_source_filename(overrides.get(cid))
         if not src.exists():
             raise HTTPException(500, f"Character file missing on disk: {src}")
         chars[cid] = JobCharacter(
@@ -4075,6 +4064,10 @@ async def reengineer_create(
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
+    # Optional JSON dict {char_id: image_id}: which of the character's gallery
+    # images to use as the identity reference (e.g. a specific outfit). Falls
+    # back to the character's primary image.
+    character_source_image_ids: str = Form(""),
 ) -> dict:
     """Upload a reference video and start the Reengineer pipeline. Returns the
     initial state immediately; poll GET /api/reengineer/{re_id}."""
@@ -4104,6 +4097,14 @@ async def reengineer_create(
         raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
     if scene_sensitivity not in reengineer_mod.SENSITIVITY_THRESHOLDS:
         raise HTTPException(400, f"Unknown scene_sensitivity '{scene_sensitivity}'")
+    source_overrides: dict[str, str] = {}
+    if character_source_image_ids.strip():
+        try:
+            parsed = json.loads(character_source_image_ids)
+            if isinstance(parsed, dict):
+                source_overrides = {str(k): str(v) for k, v in parsed.items() if v}
+        except json.JSONDecodeError:
+            raise HTTPException(400, "character_source_image_ids must be a JSON dict")
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in _REENGINEER_VIDEO_EXTS:
@@ -4151,6 +4152,7 @@ async def reengineer_create(
         "outfit_text": outfit_text.strip(),
         "scene_sensitivity": scene_sensitivity,
         "background_path": background_path,
+        "character_source_image_ids": source_overrides,
         "scenes": [],
         "job_id": None,
         "finals": {},

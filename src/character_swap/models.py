@@ -64,6 +64,21 @@ class CharacterAsset(BaseModel):
     voice_provider: str | None = None  # "elevenlabs" (default when voice_id set)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+    def resolve_source_filename(self, image_id: str | None = None) -> str:
+        """Filename to use as this character's reference image.
+
+        A valid `image_id` (a per-job gallery pick, e.g. a specific outfit)
+        beats the primary; unknown/None falls back to the primary silently —
+        the user picked from a server-populated list, so a mismatch likely
+        means the character was edited between picker-open and submit.
+        """
+        if image_id:
+            picked = next((img for img in self.images
+                           if img.image_id == image_id), None)
+            if picked is not None:
+                return picked.filename
+        return self.filename
+
 
 class ProjectAsset(BaseModel):
     project_id: str

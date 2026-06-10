@@ -1694,15 +1694,36 @@
           <div class="text-sm font-medium mb-2">Characters <span class="text-neutral-400 font-normal">— one final video each</span></div>
           <div class="flex flex-wrap gap-2">
             <template x-for="ch in library" :key="'re-ch-'+ch.char_id">
-              <button class="flex items-center gap-2 border rounded-lg px-2 py-1.5 text-sm"
-                      :class="reengineerGen.charIds.includes(ch.char_id)
-                                ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 bg-indigo-50 dark:bg-indigo-950'
-                                : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400'"
-                      @click="toggleReengineerChar(ch.char_id)">
-                <img :src="ch.url" class="w-8 h-8 rounded object-cover" />
-                <span x-text="ch.name"></span>
-                <span x-show="reengineerGen.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
-              </button>
+              <div class="relative">
+                <button class="flex items-center gap-2 border rounded-lg px-2 py-1.5 text-sm"
+                        :class="reengineerGen.charIds.includes(ch.char_id)
+                                  ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 bg-indigo-50 dark:bg-indigo-950'
+                                  : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400'"
+                        @click="toggleReengineerChar(ch.char_id)">
+                  <img :src="reengineerCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
+                  <span x-text="ch.name"></span>
+                  <span x-show="reengineerGen.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
+                </button>
+                <!-- Reference-image pick: which gallery image (= outfit) this
+                     character is swapped FROM. Only shown when there's a choice. -->
+                <button x-show="(ch.images || []).length > 1 && reengineerGen.charIds.includes(ch.char_id)"
+                        class="absolute -top-1.5 -right-1.5 bg-indigo-600 text-white text-[10px] px-1.5 py-0.5 rounded-full shadow"
+                        :title="`Choose which of ${ch.name}'s ${ch.images.length} images to use as the reference (e.g. a specific outfit)`"
+                        @click.stop="reengineerPickerChar = (reengineerPickerChar === ch.char_id ? null : ch.char_id)"
+                        x-text="(ch.images || []).length + ' ↕'"></button>
+                <div x-show="reengineerPickerChar === ch.char_id" @click.outside="reengineerPickerChar = null"
+                     class="absolute z-30 top-full mt-1 left-0 p-2 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-xl flex gap-2">
+                  <template x-for="img in (ch.images || [])" :key="'re-src-'+img.image_id">
+                    <button class="relative" @click.stop="pickReengineerSource(ch.char_id, img.image_id)">
+                      <img :src="img.url" class="w-14 h-20 rounded object-cover border-2"
+                           :class="(reengineerGen.sourceOverrides[ch.char_id] || ch.primary_image_id) === img.image_id
+                                     ? 'border-indigo-500' : 'border-transparent hover:border-neutral-400'" />
+                      <span x-show="(reengineerGen.sourceOverrides[ch.char_id] || ch.primary_image_id) === img.image_id"
+                            class="absolute top-0.5 right-0.5 bg-indigo-600 text-white text-[9px] px-1 rounded">✓</span>
+                    </button>
+                  </template>
+                </div>
+              </div>
             </template>
           </div>
         </div>

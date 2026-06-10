@@ -225,3 +225,33 @@ def test_dispatch_threads_extra_reference_to_fal(monkeypatch, tmp_path):
         prompt="custom", dest=tmp_path / "o.png", job_id=None,
         extra_reference_image=bg)
     assert seen["extra_reference_image"] == bg
+
+
+def test_with_accent_appends_once():
+    from character_swap.runner_reengineer import _with_accent
+    p = _with_accent("The person pours oil on their foot.")
+    assert "American accent" in p
+    # idempotent — never doubles up (agent prompts already carry it)
+    assert _with_accent(p) == p
+
+
+def test_fallback_plans_speak_american():
+    words = [Word("drink", 0.2, 0.5), Word("this", 0.5, 0.9)]
+    plans = reengineer.fallback_plans([(0.0, 2.0)], words)
+    assert "American accent" in plans[0].motion_prompt
+
+
+def test_analyst_system_demands_american_accent():
+    assert "American accent" in reengineer.REENGINEER_ANALYST_SYSTEM
+
+
+def test_resolve_source_filename():
+    from character_swap.models import CharacterAsset, CharacterImage
+    ch = CharacterAsset(
+        char_id="c1", name="N", filename="primary.png",
+        primary_image_id="im_a",
+        images=[CharacterImage(image_id="im_a", filename="primary.png"),
+                CharacterImage(image_id="im_b", filename="outfit2.png")])
+    assert ch.resolve_source_filename(None) == "primary.png"
+    assert ch.resolve_source_filename("im_b") == "outfit2.png"   # outfit pick
+    assert ch.resolve_source_filename("im_gone") == "primary.png"  # stale id

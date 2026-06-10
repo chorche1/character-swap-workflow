@@ -209,7 +209,8 @@ For EVERY scene, write:
    cinematic. Do not describe the person's appearance (they are being
    replaced); refer to them as "the person". If the scene has dialogue,
    include it VERBATIM as: The person says: "<dialogue>" — with natural
-   lip-sync and a casual, conversational delivery.
+   lip-sync and a casual, conversational delivery in fluent American
+   English with a natural American accent.
 2. speech — the dialogue line alone (empty string if the scene has no speech).
 3. summary — one short line describing the scene for a UI list.
 
@@ -301,7 +302,9 @@ def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[
     out: list[ScenePlan] = []
     for i, (a, b) in enumerate(spans):
         spoken = words_in_span(words, a, b)
-        speech = f' The person says: "{spoken}" with natural lip-sync and a casual, conversational delivery.' if spoken else ""
+        speech = (f' The person says: "{spoken}" with natural lip-sync and a casual, '
+                  'conversational delivery in fluent American English with a natural '
+                  'American accent.') if spoken else ""
         out.append(ScenePlan(
             idx=i,
             motion_prompt=("Ordinary hand-held UGC phone footage: the person continues the "
