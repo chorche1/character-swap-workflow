@@ -188,6 +188,8 @@ async def _generate_one_variant(
                     dest=dest,
                     job_id=job.job_id,
                     extra_reference_image=extra_ref,
+                    outfit_mode=job.outfit_mode or "scene",
+                    outfit_text=job.outfit_text,
                 )
                 verdict = await asyncio.to_thread(
                     swap_qc.inspect_variant,

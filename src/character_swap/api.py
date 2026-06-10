@@ -383,6 +383,12 @@ async def lifespan(app: FastAPI):
     _ensure_dirs()
     for job in store().list_jobs():
         await runner.resume_pending(job.job_id)
+    # Re-attach reengineer runs orphaned by the restart (their phase watchers
+    # are in-process tasks) + auto-retry restart-interrupted swap slots. Must
+    # run AFTER resume_pending, which marks those slots failed. Fire-and-
+    # forget: watchers run for as long as the runs do.
+    from character_swap import runner_reengineer
+    runner_reengineer._spawn(runner_reengineer.resume_all(), "reengineer-resume")
     # Higgsfield→Drive watcher: poll the user's configured Drive folder
     # for new Supercomputer outputs and stage them in the Editor inbox.
     # Inert if Drive OAuth isn't configured yet — the loop logs "not set

@@ -59,6 +59,12 @@ IMAGE_MODELS: dict[str, dict] = {
     # censorship blackouts). Their dispatch branches remain so OLD jobs keep
     # working, but the slugs are no longer offered in the picker.
     "nbp-swap":             {"label": "Nano Banana Pro Swap (Google via fal)", "provider": "fal",   "price_setting": "fal_swap_price_usd"},
+    # GPT Image 2 identity-first swap: FLIPPED reference order ([char, scene])
+    # — GPT preserves the FIRST input's face with extra richness — plus a
+    # compact prompt with the organic phone-photo styling. The identity-
+    # strongest option for hard cases (background swap + custom outfit);
+    # OpenAI moderation still refuses some skin-heavy scenes.
+    "gpt2-id-swap":         {"label": "GPT Image 2 — Identity First",          "provider": "openai", "price_setting": "openai_image_price_usd"},
     "nb2-swap":             {"label": "Nano Banana 2 Swap (Google via fal)",   "provider": "fal",   "price_setting": "fal_swap_price_usd"},
     "seedream-edit-swap":   {"label": "Seedream 4.5 Edit Swap (fal)",          "provider": "fal",   "price_setting": "fal_swap_price_usd"},
 }
@@ -287,6 +293,23 @@ async def run_image_gen(gen_id: str) -> None:
                 higgsfield.generate_swap,
                 scene_image=refs[0], character_image=refs[1],
                 prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+            )
+        elif gen.model == "gpt2-id-swap":
+            # Identity-first GPT swap: refs flipped internally (character
+            # first). Freeform contract stays scene-first like the other
+            # swap engines; the prompt passes through verbatim.
+            if len(refs) < 2:
+                raise ValueError(
+                    "GPT Image 2 — Identity First needs two reference images: "
+                    "the scene (first) and the character (second)."
+                )
+            from character_swap.clients import openai_image
+            data = await asyncio.to_thread(
+                openai_image.generate,
+                prompt=effective_prompt,
+                reference_images=[refs[1], refs[0], *refs[2:]],
+                phase="generate",
+                job_id=gen_id,
             )
         elif gen.model in {"nbp-swap", "nb2-swap", "seedream-edit-swap",
                            "qwen-edit-swap", "kontext-max-swap"}:

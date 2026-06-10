@@ -61,12 +61,84 @@ def _now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
+# Strong references to fire-and-forget resume tasks (bare create_task results
+# can be garbage-collected mid-flight).
+_RESUME_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> None:
+    task = asyncio.create_task(coro, name=name)
+    _RESUME_TASKS.add(task)
+    task.add_done_callback(_RESUME_TASKS.discard)
+
+
 def _update(re_id: str, **changes) -> dict:
     state = reengineer.load_state(re_id) or {"re_id": re_id}
     state.update(changes)
     state["updated_at"] = _now()
     reengineer.save_state(state)
     return state
+
+
+# --------------------------------------------------------------------------- crash resume
+
+_TERMINAL_RUN_STATES = {"done", "partial_success", "failed"}
+
+
+async def resume_all() -> None:
+    """Re-attach every non-terminal reengineer run after a server restart.
+
+    The phase watchers are in-process asyncio tasks — a restart kills them and
+    a run would otherwise sit in swapping/animating forever (and variants the
+    restart interrupted would stay failed until manually retried; an entire
+    character lost 9/9 slots this way on 2026-06-11). Called from the FastAPI
+    lifespan AFTER runner.resume_pending has run for all jobs (it marks stale
+    GENERATING images as failed with an "interrupted (server restart)" error,
+    which is what we auto-retry here).
+    """
+    for state in reengineer.list_states():
+        re_id = state.get("re_id")
+        status = state.get("status")
+        if not re_id or status in _TERMINAL_RUN_STATES:
+            continue
+        if status == "awaiting_approval":
+            continue                       # user gate — nothing to re-attach
+        _log.info("resuming reengineer %s from status=%r", re_id, status)
+        if status in {"queued", "analyzing"}:
+            # Analysis died mid-flight — safe to redo from the source video.
+            _spawn(run_reengineer(re_id), f"reengineer-resume-{re_id}")
+        elif status == "swapping":
+            _spawn(_resume_swapping(re_id, state), f"reengineer-resume-{re_id}")
+        elif status == "animating":
+            _spawn(_resume_animating(re_id, state), f"reengineer-resume-{re_id}")
+        elif status == "assembling":
+            _spawn(assemble(re_id), f"reengineer-resume-{re_id}")
+
+
+async def _resume_swapping(re_id: str, state: dict) -> None:
+    job_id = state.get("job_id")
+    job = store().get_job(job_id) if job_id else None
+    if job is None:
+        _update(re_id, status="failed", error="underlying job lost across restart")
+        return
+    # Auto-retry the slots the restart killed (marked failed by resume_pending).
+    for cid, jc in job.characters.items():
+        for v in jc.images:
+            if (v.status == VariantStatus.FAILED
+                    and "interrupted" in (v.error or "")):
+                _spawn(runner.retry_single_variant(job_id, cid, v.variant_id),
+                       f"reengineer-retry-{v.variant_id}")
+    await _watch_swap_phase(re_id, job_id)
+
+
+async def _resume_animating(re_id: str, state: dict) -> None:
+    # Video polling itself is already resumed by runner.resume_pending in the
+    # lifespan; we only need to re-attach the watcher that assembles at the end.
+    job_id = state.get("job_id")
+    if not job_id or store().get_job(job_id) is None:
+        _update(re_id, status="failed", error="underlying job lost across restart")
+        return
+    await _watch_video_phase(re_id, job_id)
 
 
 # --------------------------------------------------------------------------- phase 1: analyze + create job
@@ -219,6 +291,8 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
         extra_reference_path=background_path,
         video_model=state.get("video_model") or "kling-v3",
         video_audio=True,
+        outfit_mode=state.get("outfit_mode") or "scene",
+        outfit_text=state.get("outfit_text") or None,
         origin=f"reengineer:{re_id}",
     )
     s.add_job(job)

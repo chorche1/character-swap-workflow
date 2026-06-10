@@ -210,6 +210,11 @@ class Job(BaseModel):
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants
+    # Outfit choice carried from Reengineer (or future Swap UI): drives stock
+    # prompt construction per engine — incl. gpt2-id-swap's flipped-role
+    # rebuild. "scene" (original person's clothes) | "character" | "custom".
+    outfit_mode: str = "scene"
+    outfit_text: str | None = None
     # Video provider used in Step 4 to animate every approved variant. Defaults
     # to Grok Imagine for back-compat; the Step-4 UI lets the user switch to
     # Kling / Veo / Runway / etc. before submitting the movement prompt.

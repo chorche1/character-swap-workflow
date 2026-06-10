@@ -237,7 +237,11 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
         + preserve
         + "Replace the person in Image 1 with the person from Image 2, as if they "
         "had been standing there when the photo was taken — as if part of the "
-        "same photo. " + outfit_clause + " The replacement person looks "
+        "same photo. The face must be a clear, recognizable likeness of the "
+        "person in Image 2 — unmistakably the same individual, with Image 2's "
+        "facial structure, features, apparent age and skin tone reproduced "
+        "faithfully. Getting this identity match right is the single most "
+        "important requirement of the task. " + outfit_clause + " The replacement person looks "
         "directly into the camera lens with a natural, composed expression, even "
         "if the original person was not.\n"
         + integration
@@ -261,6 +265,92 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
 
 
 EDIT_SWAP_PROMPT = build_edit_swap_prompt("scene")
+
+
+# GPT Image 2 identity-first swap ("gpt2-id-swap"). Two research-backed,
+# GPT-specific differences from the fal engines:
+#   1. FLIPPED reference order — [character, scene(, background)]. OpenAI's
+#      docs: the FIRST input image's face is preserved with extra richness;
+#      the app's normal [scene, char] order was costing identity.
+#   2. COMPACT prompt — the overnight bake-off showed GPT scores 6.95 with a
+#      short imperative prompt vs 6.00 (fatal pasted-on) with the long
+#      constraints-block prose that the fal engines prefer.
+# The style paragraph pulls GPT away from its glossy "produced" default look
+# toward the organic phone-photo look of the NBP outputs.
+
+_GPT_OUTFIT_CLAUSES = {
+    # flipped roles: Image 1 = identity reference, Image 2 = scene
+    "scene": ("Take only the face, hairstyle, hair color and skin tone from "
+              "Image 1. The person keeps the original pose, hand placement and "
+              "interaction with objects, and wears exactly the outfit from "
+              "Image 2 — do not take any clothing from Image 1."),
+    "character": ("Take the face, hairstyle, hair color, skin tone AND "
+                  "clothing from Image 1 — the person wears their own outfit "
+                  "from Image 1, fitted naturally to the original pose; do not "
+                  "keep the original person's clothing from Image 2."),
+    "custom": ("Take only the face, hairstyle, hair color and skin tone from "
+               "Image 1. The person keeps the original pose, hand placement "
+               "and interaction with objects, and wears: {outfit}. Do not "
+               "take any clothing from Image 1 and do not keep the original "
+               "person's clothing from Image 2 unless it matches."),
+}
+
+
+def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
+                             outfit_text: str | None = None,
+                             background: bool = False) -> str:
+    """Compact identity-first prompt for gpt2-id-swap (flipped roles:
+    Image 1 = character/identity, Image 2 = scene, Image 3 = new environment)."""
+    if outfit_mode not in _GPT_OUTFIT_CLAUSES:
+        raise ValueError(f"Unknown outfit_mode '{outfit_mode}'")
+    if outfit_mode == "custom" and not (outfit_text or "").strip():
+        raise ValueError("outfit_mode 'custom' requires outfit_text")
+    outfit = _GPT_OUTFIT_CLAUSES[outfit_mode]
+    if outfit_mode == "custom":
+        outfit = outfit.format(outfit=outfit_text.strip())
+
+    roles = ("Image 1 is only the identity reference for the replacement "
+             "person. Image 2 is the fixed master scene and ground truth.")
+    scene_keep = ("Recreate Image 2 exactly — same framing, crop, camera "
+                  "angle, perspective, subject scale, pose, background and "
+                  "every object in its exact position and state; keep all "
+                  "text and brand labels legible and unchanged.")
+    bg_part = ""
+    if background:
+        roles += (" Image 3 is the NEW ENVIRONMENT: the finished photo takes "
+                  "place in Image 3's location.")
+        scene_keep = ("Recreate Image 2's framing, crop, camera angle, "
+                      "perspective, subject scale, pose and every object the "
+                      "person touches — exact positions and states, brand "
+                      "labels legible.")
+        bg_part = (" Replace the surroundings with Image 3's environment and "
+                   "relight the person and the kept objects entirely with "
+                   "Image 3's light — matching its direction, color "
+                   "temperature, shadows, white balance and grain so "
+                   "everything reads as one photo taken there.")
+    return (
+        f"{roles}\n{scene_keep}{bg_part}\n"
+        "Replace the person in Image 2 with the person from Image 1. The face "
+        "must be a clear, recognizable likeness of the person in Image 1 — "
+        "unmistakably the same individual; this identity match is the single "
+        "most important requirement. " + outfit + " They look directly into "
+        "the camera with a natural, composed expression.\n"
+        "Style: a completely ordinary, unedited iPhone photo — plain, "
+        "slightly dull phone-camera colors, neutral white balance, mundane "
+        "ambient daylight, slightly uneven exposure, mild softness, subtle "
+        "sensor noise, natural non-polished skin with visible pores. Not "
+        "staged, not professional: no studio lighting, no cinematic grading, "
+        "no glossy highlights, no retouching, no portrait-mode blur."
+    )
+
+
+def _flip_image_roles(prompt: str) -> str:
+    """Swap 'Image 1' <-> 'Image 2' references in a custom prompt so it stays
+    correct when gpt2-id-swap reverses the reference order ('Image 3' — the
+    optional background — keeps its slot)."""
+    return (prompt.replace("Image 1", "\x00")
+                  .replace("Image 2", "Image 1")
+                  .replace("\x00", "Image 2"))
 
 
 def generate_image(
@@ -306,6 +396,8 @@ def generate_variant(
     dest: Path,
     job_id: str | None = None,
     extra_reference_image: Path | None = None,
+    outfit_mode: str = "scene",
+    outfit_text: str | None = None,
 ) -> Path:
     """Swap-variant generation on the chosen model only.
 
@@ -324,6 +416,7 @@ def generate_variant(
         model=model, scene_image=scene_image, character_image=character_image,
         character_name=character_name, prompt=prompt, dest=dest, job_id=job_id,
         extra_reference_image=extra_reference_image,
+        outfit_mode=outfit_mode, outfit_text=outfit_text,
     )
 
 
@@ -337,6 +430,8 @@ def _dispatch_variant(
     dest: Path,
     job_id: str | None = None,
     extra_reference_image: Path | None = None,
+    outfit_mode: str = "scene",
+    outfit_text: str | None = None,
 ) -> Path:
     """
     Dispatch a swap-variant generation to the right model. Used by runner.py
@@ -409,6 +504,37 @@ def _dispatch_variant(
             extra_reference_image=extra_reference_image,
         )
         atomic_write_bytes(dest, data)
+        return dest
+    if model == "gpt2-id-swap":
+        # GPT Image 2, identity-first: FLIPPED reference order ([character,
+        # scene(, background)]) because GPT preserves the FIRST input's face
+        # with extra richness, + a compact prompt (the long constraints block
+        # measurably hurts GPT). Stock prompts are rebuilt in flipped-role
+        # form; custom prompts get their Image 1/2 references swapped
+        # mechanically so they stay correct.
+        background = extra_reference_image is not None
+        stock = {GENERATION_PROMPT, EDIT_SWAP_PROMPT}
+        try:
+            stock.add(build_edit_swap_prompt(outfit_mode, outfit_text,
+                                             background=background))
+            stock.add(build_edit_swap_prompt(outfit_mode, outfit_text,
+                                             background=False))
+        except ValueError:
+            pass
+        effective = (build_gpt_id_swap_prompt(outfit_mode, outfit_text,
+                                              background=background)
+                     if prompt in stock else _flip_image_roles(prompt))
+        refs: list[Path] = [character_image, scene_image]
+        if extra_reference_image is not None:
+            refs.append(extra_reference_image)
+        image_bytes = openai_image.generate(
+            prompt=effective,
+            reference_images=refs,
+            phase="generate",
+            character=character_name,
+            job_id=job_id,
+        )
+        atomic_write_bytes(dest, image_bytes)
         return dest
     if model == "higgsfield-swap":
         # Higgsfield Character Swap (official REST API): the character is turned
