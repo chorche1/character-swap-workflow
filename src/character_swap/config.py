@@ -93,11 +93,13 @@ class Settings(BaseSettings):
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
     video_aspect_ratio: str = Field(default="9:16", validation_alias="VIDEO_ASPECT_RATIO")
     video_resolution: str = Field(default="720p", validation_alias="VIDEO_RESOLUTION")
-    # Kling 3.0 (fal) generates its OWN native speech/audio and IMPROVISES the
-    # words from the motion prompt — so characters "say" random/wrong lines.
-    # Off by default so swap clips come out clean; you add your own voice/captions
-    # downstream (Step 6 / Editor). Set KLING_GENERATE_AUDIO=1 to let Kling speak.
-    kling_generate_audio: bool = Field(default=False, validation_alias="KLING_GENERATE_AUDIO")
+    # Kling 3.0 (fal) native speech/audio. ON by default (Hugo, 2026-06-10):
+    # every Swap/Reengineer video comes out with sound — the character speaks
+    # with Kling's own voice. To make it say specific lines, put the dialogue
+    # in the motion prompt (e.g. The person says: "...") — without it Kling
+    # improvises from the prompt. Set KLING_GENERATE_AUDIO=0 for silent clips
+    # (the pre-2026-06-10 behavior, when audio was added downstream instead).
+    kling_generate_audio: bool = Field(default=True, validation_alias="KLING_GENERATE_AUDIO")
     # TRUE 9:16 (0.5625) AND both dims divisible by 16 — gpt-image rejects sizes
     # that aren't (400 "must both be divisible by 16"; 1080 is NOT ÷16). 1008x1792
     # = exactly 9:16 (1008=16×63, 1792=16×112). The old 1024x1792 was ÷16 but

@@ -118,3 +118,24 @@ def test_video_audio_override_threads_to_fal_kling(monkeypatch, tmp_path):
     pipeline.submit_video(image=img, movement_prompt="p", character_name="X",
                           model="kling-v3", duration_secs=5)
     assert seen["generate_audio"] is False
+
+
+def test_kling_audio_on_by_default(monkeypatch, tmp_path):
+    """2026-06-10 decision: ALL videos (Swap Step 4 included) generate with
+    sound. Job.video_audio=None must resolve to generate_audio=True via the
+    global default — no per-job opt-in needed."""
+    from character_swap import pipeline
+    from character_swap.clients import fal_kling
+    from character_swap.config import Settings
+
+    assert Settings.model_fields["kling_generate_audio"].default is True
+
+    seen = {}
+    monkeypatch.setattr(fal_kling, "submit_image_to_video",
+                        lambda **kw: seen.update(kw) or "req-1")
+    img = tmp_path / "f.png"
+    img.write_bytes(b"x")
+    # No generate_audio kwarg (a plain Swap job, video_audio=None).
+    pipeline.submit_video(image=img, movement_prompt="p", character_name="X",
+                          model="kling-v3", duration_secs=5)
+    assert seen["generate_audio"] is True
