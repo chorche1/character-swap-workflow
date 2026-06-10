@@ -641,6 +641,7 @@ async def _animate_one_video(
             model=video_model,
             duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
             end_image=end_image,
+            generate_audio=job.video_audio,
         )
     except Exception as e:
         video.status = VideoStatus.ERROR

@@ -4024,6 +4024,169 @@ async def broll_delete(broll_id: str) -> dict:
     return {"ok": True, "broll_id": broll_id}
 
 
+# ---------------------------------------------------------------------------
+# Reengineer — rebuild an uploaded reference video with different characters.
+# Pipeline: scene detection → frame per scene → vision agent writes motion+
+# speech prompts → underlying Swap job (variants → approval → Kling v3 clips
+# with native audio) → trim to original scene durations → concat per character.
+# ---------------------------------------------------------------------------
+
+_REENGINEER_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+
+
+def _reengineer_view(state: dict) -> dict:
+    """State + URL fields the frontend can render directly. Embeds a full
+    job dict (variants for the approval strip, videos for progress) when the
+    underlying Swap job exists."""
+    out = dict(state)
+    if state.get("source_path"):
+        out["source_url"] = _file_url(Path(state["source_path"]))
+    for e in out.get("scenes", []):
+        sid = e.get("scene_id")
+        if sid:
+            scene = store().get_scene(sid)
+            if scene:
+                e["frame_url"] = _file_url(settings.scenes_dir / scene.filename)
+    finals = out.get("finals") or {}
+    for cid, f in finals.items():
+        if f.get("final_path"):
+            f["final_url"] = _file_url(Path(f["final_path"]))
+    if state.get("job_id"):
+        job = store().get_job(state["job_id"])
+        if job is not None:
+            out["job"] = _job_to_dict(job)
+    return out
+
+
+@app.post("/api/reengineer")
+async def reengineer_create(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    character_ids: str = Form(...),          # JSON array of char ids
+    image_model: str = Form("nbp-swap"),
+    video_model: str = Form("kling-v3"),
+    auto_mode: bool = Form(False),
+) -> dict:
+    """Upload a reference video and start the Reengineer pipeline. Returns the
+    initial state immediately; poll GET /api/reengineer/{re_id}."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+
+    if not settings.openai_api_key:
+        raise HTTPException(503, "OpenAI API key required (Whisper transcription)")
+    try:
+        char_ids = [c for c in json.loads(character_ids) if c]
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "character_ids must be a JSON array of ids")
+    if not char_ids:
+        raise HTTPException(400, "Pick at least one character")
+    for cid in char_ids:
+        if store().get_character(cid) is None:
+            raise HTTPException(404, f"Character not found: {cid}")
+    info = runner_media.IMAGE_MODELS.get(image_model)
+    if info is None:
+        raise HTTPException(400, f"Unknown image_model '{image_model}'")
+    if not settings.has_provider(info["provider"]):
+        raise HTTPException(503, f"{info['label']} is not configured. Add the API key to .env.")
+    if video_model not in runner_media.VIDEO_MODELS:
+        raise HTTPException(400, f"Unknown video_model '{video_model}'")
+
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in _REENGINEER_VIDEO_EXTS:
+        raise HTTPException(400, f"Unsupported video type '{ext}'. "
+                                 f"Allowed: {sorted(_REENGINEER_VIDEO_EXTS)}")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    re_id = "re_" + secrets.token_hex(5)
+    work = reengineer_mod.reengineer_dir(re_id)
+    source_path = work / f"source{ext}"
+    tmp = source_path.with_suffix(source_path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(source_path)
+
+    initial_state = {
+        "re_id": re_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "queued",
+        "error": None,
+        "source_path": str(source_path),
+        "source_name": file.filename or source_path.name,
+        "character_ids": char_ids,
+        "image_model": image_model,
+        "video_model": video_model,
+        "auto_mode": bool(auto_mode),
+        "scenes": [],
+        "job_id": None,
+        "finals": {},
+    }
+    reengineer_mod.save_state(initial_state)
+    background_tasks.add_task(_run_async, runner_reengineer.run_reengineer, re_id)
+    return _reengineer_view(initial_state)
+
+
+@app.get("/api/reengineer")
+async def reengineer_list() -> list[dict]:
+    from character_swap import reengineer as reengineer_mod
+    # List view stays light: no embedded job dicts (the detail view has them).
+    out = []
+    for state in reengineer_mod.list_states():
+        row = dict(state)
+        row.pop("scenes", None)
+        out.append(row)
+    return out
+
+
+@app.get("/api/reengineer/{re_id}")
+async def reengineer_get(re_id: str) -> dict:
+    from character_swap import reengineer as reengineer_mod
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    return _reengineer_view(state)
+
+
+@app.post("/api/reengineer/{re_id}/animate")
+async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks) -> dict:
+    """Continue after manual image approval: submit movement (agent prompts +
+    matched durations) and generate the Kling clips."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    if state.get("status") not in {"awaiting_approval", "failed", "animating"}:
+        raise HTTPException(409, f"cannot animate from status '{state.get('status')}'")
+    background_tasks.add_task(_run_async, runner_reengineer.animate, re_id)
+    return {"ok": True, "re_id": re_id}
+
+
+@app.post("/api/reengineer/{re_id}/assemble")
+async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks) -> dict:
+    """(Re-)run final assembly — e.g. after retrying a failed video in the
+    underlying job, or after a server restart mid-assembly."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
+    return {"ok": True, "re_id": re_id}
+
+
+@app.delete("/api/reengineer/{re_id}")
+async def reengineer_delete(re_id: str) -> dict:
+    from character_swap import reengineer as reengineer_mod
+    work = settings.output_dir / "reengineer" / re_id
+    if not work.exists():
+        raise HTTPException(404, "re_id not found")
+    shutil.rmtree(work, ignore_errors=True)
+    return {"ok": True, "re_id": re_id}
+
+
 @app.post("/api/broll/{broll_id}/regenerate_clip")
 async def broll_regenerate_clip(
     broll_id: str,

@@ -337,6 +337,7 @@ def submit_video(
     aspect_ratio: str | None = None,
     duration_secs: int | None = None,
     end_image: Path | None = None,
+    generate_audio: bool | None = None,
 ) -> str:
     """Submit a video job to the chosen provider. Returns the provider's job/task id.
 
@@ -369,11 +370,16 @@ def submit_video(
     if model == "kling-v3":
         # Kling 3.0 routes through fal.ai (the official API caps at 5/10s;
         # fal's Kling v3 accepts 3–15s + an optional end frame).
+        # `generate_audio` per-call override (Reengineer jobs set True so the
+        # swapped character speaks with Kling's native voice); None falls back
+        # to the global setting (default OFF).
         from character_swap.clients import fal_kling
+        audio = (generate_audio if generate_audio is not None
+                 else settings.kling_generate_audio)
         return fal_kling.submit_image_to_video(
             image=image, prompt=movement_prompt,
             duration_secs=effective_dur, end_image=end_image,
-            generate_audio=settings.kling_generate_audio, app_job_id=job_id,
+            generate_audio=audio, app_job_id=job_id,
         )
     if model in {"veo", "veo-3-fast"}:
         return google_genai.submit_veo(

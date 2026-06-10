@@ -95,6 +95,18 @@ function studio() {
     },
     brollHistory: [],                 // [{broll_id, status, clips, ...}]
     _brollPollTimer: null,
+    // Reengineer: reference video → scenes → swap → Kling clips (native
+    // audio) → reassembled final per character.
+    reengineerGen: {
+      file: null,                    // File object
+      name: '',
+      charIds: [],                   // selected character ids
+      imageModel: 'nbp-swap',        // bake-off winner default
+      autoMode: false,               // skip the image-approval gate
+      submitting: false,
+    },
+    reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
+    _reengineerPollTimer: null,
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -30,       // Hugo's preset
@@ -339,7 +351,12 @@ function studio() {
 
     async init() {
       this._loadCollapsed();
-      this.activeTab = localStorage.getItem('active_tab') || 'swap';
+      // Validate the stored tab against the tabs that still exist — users
+      // who last sat on a removed tab (image/video/avatar/audio/broll)
+      // would otherwise land on a blank page.
+      const _validTabs = ['chat', 'swap', 'animate', 'reengineer', 'editor'];
+      const _storedTab = localStorage.getItem('active_tab');
+      this.activeTab = _validTabs.includes(_storedTab) ? _storedTab : 'swap';
       this.showCharLib = localStorage.getItem('char_lib_open') === '1';
       await this.loadHealth();
       await this.loadLibrary();
@@ -356,6 +373,7 @@ function studio() {
       this.loadEditorTemplates();
       await this.loadGenerations();
       await this.loadSwapDefaults();
+      this.loadReengineerHistory();
       // Restore last-used picks per-tab so the model/voice/aspect we used
       // before is still selected next session. Falls back to existing
       // defaults if no saved value exists.
@@ -768,6 +786,16 @@ function studio() {
         if (firstImage && !this.models.image.find(m => m.slug === this.imageGen.model)?.available) {
           this.imageGen.model = firstImage.slug;
         }
+        // Re-assert the Reengineer default AFTER models load. The <select>
+        // renders before its options exist, so the browser auto-selects the
+        // first option in the DOM without telling Alpine; setting state to
+        // the SAME value wouldn't trigger a re-sync — bounce it through ''
+        // so the change is observable and Alpine re-applies it to the DOM.
+        const reDefault = this.models.image?.find(m => m.slug === 'nbp-swap');
+        const reTarget = (reDefault?.available) ? 'nbp-swap'
+          : (firstImage ? firstImage.slug : this.reengineerGen.imageModel);
+        this.reengineerGen.imageModel = '';
+        this.$nextTick(() => { this.reengineerGen.imageModel = reTarget; });
         const firstVideo = (this.models.video || []).find(m => m.available);
         if (firstVideo && !this.models.video.find(m => m.slug === this.videoGen.model)?.available) {
           this.videoGen.model = firstVideo.slug;
@@ -945,40 +973,19 @@ function studio() {
     // persistent status toast at the bottom-right. Each entry has:
     //   {kind, label, status, tab, navigate(): switch to its tab}
     get activeJobs() {
+      // (Image/Video/Audio/Avatar/B-roll tabs were removed 2026-06-10 —
+      // their histories are no longer aggregated here.)
       const out = [];
-      const transient = ['pending', 'running'];
-      for (const kind of ['image', 'video', 'audio', 'avatar']) {
-        const arr = this._historyForKind(kind);
-        for (const g of arr) {
-          if (!transient.includes(g.status)) continue;
-          out.push({
-            id: g.gen_id, kind, tab: kind,
-            label: (g.prompt || g.model || g.gen_id).slice(0, 50),
-            status: g.status, model: g.model,
-            created_at: g.created_at,
-          });
-        }
-      }
-      // B-roll has a richer state machine. Anything not in the resting
-      // states is "in flight" for toast purposes.
-      const brollResting = ['done', 'failed', 'partial_success'];
-      for (const b of this.brollHistory) {
-        const stillRolling = !brollResting.includes(b.status)
-          || (b.clips || []).some(c => ['pending', 'image_running', 'image_done', 'video_running'].includes(c.status));
-        if (!stillRolling) continue;
-        const nDone = (b.clips || []).filter(c => c.status === 'done').length;
-        const nTotal = (b.clips || []).length;
+      for (const r of this.reengineerHistory) {
+        if (!this._reengineerIsActive(r) && r.status !== 'awaiting_approval') continue;
         out.push({
-          id: b.broll_id, kind: 'broll', tab: 'broll',
-          label: (b.transcript || b.broll_id).slice(0, 50),
-          status: b.status,
-          progress: nTotal ? `${nDone}/${nTotal} clips` : '',
-          created_at: b.created_at,
+          id: r.re_id, kind: 'reengineer', tab: 'reengineer',
+          label: (r.source_name || r.re_id).slice(0, 50),
+          status: r.status,
+          progress: r.n_scenes ? `${r.n_scenes} scenes` : '',
+          created_at: r.created_at,
         });
       }
-      // Swap-flow video animations are not currently aggregated here
-      // (they live in the project sidebar and have their own progress).
-      // Easy to add later if needed.
       return out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
     },
 
@@ -987,45 +994,19 @@ function studio() {
     // Includes Image, Video, Audio, Avatar, and B-roll final outputs.
     // Sorted newest-first, capped to 50 for performance.
     get recentMedia() {
+      // Only kinds whose tabs still exist are aggregated (the Image/Video/
+      // Audio/Avatar/B-roll tabs were removed 2026-06-10 — a thumbnail that
+      // jumps to a nonexistent tab would land on a blank page).
       const out = [];
-      for (const g of this.imageHistory) {
-        if (g.output_url) out.push({
-          kind: 'image', id: g.gen_id, tab: 'image',
-          thumb: g.output_url, label: g.prompt || g.model,
-          created_at: g.completed_at || g.created_at,
-        });
-      }
-      for (const g of this.videoHistory) {
-        if (g.output_url) out.push({
-          kind: 'video', id: g.gen_id, tab: 'video',
-          thumb: g.output_url, label: g.prompt || g.model,
-          created_at: g.completed_at || g.created_at,
-        });
-      }
-      for (const g of this.audioHistory) {
-        if (g.output_url) out.push({
-          kind: 'audio', id: g.gen_id, tab: 'audio',
-          // Audio outputs that came from video VC are mp4; use them as thumb.
-          // Pure-audio (mp3) has no thumb — fall back to null.
-          thumb: /\.mp4($|\?)/i.test(g.output_url) ? g.output_url : null,
-          label: g.prompt || g.model,
-          created_at: g.completed_at || g.created_at,
-        });
-      }
-      for (const g of this.avatarHistory) {
-        if (g.output_url) out.push({
-          kind: 'avatar', id: g.gen_id, tab: 'avatar',
-          thumb: g.output_url, label: g.prompt || g.model,
-          created_at: g.completed_at || g.created_at,
-        });
-      }
-      for (const b of this.brollHistory) {
-        if (b.final_video_url) out.push({
-          kind: 'broll', id: b.broll_id, tab: 'broll',
-          thumb: b.final_video_url,
-          label: (b.transcript || b.broll_id).slice(0, 40),
-          created_at: b.completed_at || b.created_at,
-        });
+      for (const r of this.reengineerHistory) {
+        for (const [cid, f] of Object.entries(r.finals || {})) {
+          if (f.final_url) out.push({
+            kind: 'reengineer', id: r.re_id, tab: 'reengineer',
+            thumb: f.final_url,
+            label: (r.source_name || r.re_id).slice(0, 40),
+            created_at: r.completed_at || r.created_at,
+          });
+        }
       }
       out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       return out.slice(0, 50);
@@ -1223,6 +1204,136 @@ function studio() {
           this._startBrollPolling();
         }
       } catch (_) {}
+    },
+
+    // --- Reengineer: video → scenes → swap → Kling clips → final ------------
+
+    setReengineerSource(file) {
+      if (!file) return;
+      this.reengineerGen.file = file;
+      this.reengineerGen.name = file.name;
+    },
+
+    toggleReengineerChar(cid) {
+      const ids = this.reengineerGen.charIds;
+      const i = ids.indexOf(cid);
+      if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+    },
+
+    async submitReengineer() {
+      const g = this.reengineerGen;
+      if (!g.file || !g.charIds.length || g.submitting) return;
+      g.submitting = true;
+      try {
+        const fd = new FormData();
+        fd.append('file', g.file);
+        fd.append('character_ids', JSON.stringify(g.charIds));
+        fd.append('image_model', g.imageModel);
+        fd.append('auto_mode', g.autoMode ? 'true' : 'false');
+        const r = await fetch('/api/reengineer', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Reengineer failed: ' + await r.text()); return; }
+        const state = await r.json();
+        this.reengineerHistory = [state, ...this.reengineerHistory.filter(x => x.re_id !== state.re_id)];
+        this.notifyInfo('Reengineering started — analyzing scenes…');
+        this._startReengineerPolling();
+        // Keep the form: Hugo iterates. Only the file is consumed.
+        g.file = null; g.name = '';
+      } finally {
+        g.submitting = false;
+      }
+    },
+
+    async loadReengineerHistory() {
+      try {
+        const r = await fetch('/api/reengineer');
+        if (!r.ok) return;
+        const list = await r.json();
+        // The list view is light (no scenes/job) — fetch details for visible runs.
+        this.reengineerHistory = list;
+        for (const row of list.slice(0, 8)) this.refreshReengineer(row.re_id);
+        if (list.some(x => this._reengineerIsActive(x))) this._startReengineerPolling();
+      } catch (_) {}
+    },
+
+    _reengineerIsActive(r) {
+      return ['queued', 'analyzing', 'swapping', 'animating', 'assembling'].includes(r.status);
+    },
+
+    async refreshReengineer(reId) {
+      try {
+        const r = await fetch('/api/reengineer/' + reId);
+        if (!r.ok) return;
+        const fresh = await r.json();
+        const i = this.reengineerHistory.findIndex(x => x.re_id === reId);
+        const prev = i >= 0 ? this.reengineerHistory[i] : null;
+        if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
+        else this.reengineerHistory.unshift(fresh);
+        if (prev && prev.status !== fresh.status) {
+          if (fresh.status === 'awaiting_approval') {
+            this.notifyMilestone('Reengineer — review swapped images',
+              (fresh.source_name || reId) + ' is ready for approval',
+              { kind: 'approval', tag: 're-approve-' + reId });
+          } else if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
+            this.notifyMilestone('Reengineer ' + fresh.status,
+              fresh.source_name || reId, { tag: 're-done-' + reId });
+          }
+        }
+      } catch (_) {}
+    },
+
+    _startReengineerPolling() {
+      if (this._reengineerPollTimer) return;
+      this._reengineerPollTimer = setInterval(async () => {
+        const active = this.reengineerHistory.filter(x => this._reengineerIsActive(x));
+        if (!active.length) {
+          clearInterval(this._reengineerPollTimer);
+          this._reengineerPollTimer = null;
+          return;
+        }
+        for (const x of active) await this.refreshReengineer(x.re_id);
+      }, 5000);
+    },
+
+    // Approve/unapprove a swapped variant on the underlying Swap job (same
+    // endpoint the Swap tab uses), then refresh the run so the ✓ updates.
+    async reengineerApprove(run, charId, variantId) {
+      if (!run.job_id) return;
+      const r = await fetch(`/api/jobs/${run.job_id}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ char_id: charId, action: 'approve', variant_id: variantId }),
+      });
+      if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
+      await this.refreshReengineer(run.re_id);
+    },
+
+    async reengineerApproveAll(run) {
+      if (!run.job_id) return;
+      const r = await fetch(`/api/jobs/${run.job_id}/approve_all`, { method: 'POST' });
+      if (!r.ok) { this.notifyError('Approve all failed: ' + await r.text()); return; }
+      await this.refreshReengineer(run.re_id);
+    },
+
+    async reengineerAnimate(run) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/animate`, { method: 'POST' });
+      if (!r.ok) { this.notifyError('Animate failed: ' + await r.text()); return; }
+      this.notifyInfo('Generating Kling clips with native audio…');
+      run.status = 'animating';
+      this._startReengineerPolling();
+    },
+
+    async reengineerAssemble(run) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, { method: 'POST' });
+      if (!r.ok) { this.notifyError('Assemble failed: ' + await r.text()); return; }
+      run.status = 'assembling';
+      this._startReengineerPolling();
+    },
+
+    async deleteReengineer(run) {
+      if (!confirm('Delete this reengineer run (files + state)?')) return;
+      const r = await fetch('/api/reengineer/' + run.re_id, { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
+      this.reengineerHistory = this.reengineerHistory.filter(x => x.re_id !== run.re_id);
     },
 
     // A broll is "active" (i.e. we should keep polling it) if the job

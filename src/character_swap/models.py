@@ -187,6 +187,14 @@ class Job(BaseModel):
     # to Grok Imagine for back-compat; the Step-4 UI lets the user switch to
     # Kling / Veo / Runway / etc. before submitting the movement prompt.
     video_model: str = "grok-imagine"
+    # Per-job native-audio override for video generation (Kling v3 via fal).
+    # None → fall back to settings.kling_generate_audio (global default OFF).
+    # Reengineer jobs set True: the swapped character's voice comes from the
+    # video model itself, not ElevenLabs.
+    video_audio: bool | None = None
+    # Provenance tag: "reengineer:<re_id>" when this job was created by the
+    # Reengineer pipeline (video → scenes → swap). None for normal Swap jobs.
+    origin: str | None = None
     # Legacy single movement prompt. Kept in sync with the FIRST scene's
     # entry in `movement_prompts` so all "is the job in movement state?"
     # checks (`if job.movement_prompt:`) still work for callers that haven't
