@@ -1089,6 +1089,15 @@
                         ⇪ imported
                       </div>
                     </template>
+                    <!-- Vision-QC verdict: the agent inspected this image and
+                         rejected it even after auto-retries (kept anyway so
+                         the user judges — regenerate via ✎ or ↻ if they agree). -->
+                    <template x-if="v.qc_status === 'failed'">
+                      <div class="absolute bottom-1.5 left-1.5 bg-amber-500/90 text-white text-[10px] px-1.5 py-0.5 rounded cursor-help"
+                           :title="'Quality control rejected this image after ' + (v.qc_attempts || 1) + ' attempts: ' + (v.qc_reason || 'unknown reason')">
+                        ⚠ QC
+                      </div>
+                    </template>
                     <template x-if="isApproved(jc, v)">
                       <div class="absolute top-1.5 right-1.5 bg-emerald-500 text-white text-[10px] px-1.5 py-0.5 rounded">
                         ✓ approved

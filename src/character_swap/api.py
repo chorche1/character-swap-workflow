@@ -316,6 +316,9 @@ def _job_to_dict(job: Job) -> dict:
                         "status": v.status,
                         "error": v.error,
                         "imported": v.imported,
+                        "qc_status": v.qc_status,
+                        "qc_reason": v.qc_reason,
+                        "qc_attempts": v.qc_attempts,
                         "download_name": _variant_download_name(jc, v),
                     }
                     for v in jc.images

@@ -157,6 +157,15 @@ class Settings(BaseSettings):
     # request with vision); recorded in calls.jsonl via call_log._cost_usd.
     claude_opus_model: str = Field(default="claude-opus-4-5", validation_alias="CLAUDE_OPUS_MODEL")
     claude_opus_price_usd: float = Field(default=0.05, validation_alias="CLAUDE_OPUS_PRICE_USD")
+    # Vision QC on every generated swap variant (Swap + Reengineer): a cheap
+    # Claude call checks identity (right person?) + obvious defects and the
+    # runner regenerates failed slots with a corrective hint. SWAP_QC=0
+    # disables. Haiku is vision-capable and ~5x cheaper than Opus.
+    swap_qc_enabled: bool = Field(default=True, validation_alias="SWAP_QC")
+    swap_qc_model: str = Field(default="claude-haiku-4-5-20251001",
+                               validation_alias="SWAP_QC_MODEL")
+    swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
+    swap_qc_price_usd: float = Field(default=0.01, validation_alias="SWAP_QC_PRICE_USD")
 
     # Opt-in SQLite state backend. Default off — JSON file remains canonical
     # until the user runs `character-swap migrate` + flips this on. Once stable

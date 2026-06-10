@@ -1,0 +1,139 @@
+"""Vision QC for swap variants (Swap flow + Reengineer).
+
+After every variant generates, a cheap Claude vision call inspects the result
+against the scene + character references. If the WRONG PERSON is in the image
+(the original subject survived the swap, or a third face appeared) or the
+image is otherwise broken (censorship blackout, deformed anatomy, burnt-in
+text, obvious cutout look), the runner regenerates the slot — with the QC
+verdict appended to the prompt as a corrective hint — up to
+`settings.swap_qc_max_retries` times.
+
+Philosophy: QC must never block the pipeline. No API key / SDK / timeout /
+malformed response → verdict None → the variant ships as-is with
+qc_status="skipped". After exhausted retries the LAST image is kept (not
+failed) with qc_status="failed" + the reason, surfaced as a ⚠ chip in the UI
+— a false-positive judge must never destroy a usable image.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+QC_SYSTEM = """\
+You are a strict quality inspector for a character-swap image pipeline.
+
+You receive three images:
+1. SCENE — the original photo whose person is being replaced.
+2. CHARACTER — the reference for the person who must now appear.
+3. RESULT — the generated swap output you are inspecting.
+
+The RESULT is supposed to show the CHARACTER's person (same face, same
+perceived identity) in the SCENE's setting and pose. Judge ONLY hard
+failures; minor style drift is acceptable. FAIL the result if ANY of these
+hold:
+
+- WRONG PERSON: the face in RESULT does not read as the same person as
+  CHARACTER — e.g. the SCENE's original person is still there, the face is a
+  blend of the two, or a third, different person appears. This is the most
+  important check. Compare facial identity, not clothing or hair styling.
+- MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
+  SCENE nor CHARACTER.
+- BROKEN IMAGE: fully or mostly black/blank/censored output, heavy
+  corruption, or the image is just the unmodified SCENE or CHARACTER.
+- SEVERE ARTIFACTS: grossly deformed face or hands (extra/missing fingers
+  clearly visible), duplicated limbs, garbled brand text on key products.
+- OBVIOUS CUTOUT: the person is clearly pasted in — hard halo edges or
+  lighting that contradicts the environment so strongly it looks like a
+  collage.
+
+Context flags you may receive:
+- background_replaced=true: the RESULT's environment is SUPPOSED to differ
+  from SCENE (a replacement background was requested). Do NOT fail for a
+  changed background; still require the pose/props from SCENE and identity
+  from CHARACTER, and lighting consistent with the NEW environment.
+- outfit_from_character=true: the RESULT's clothing is SUPPOSED to come from
+  CHARACTER, not SCENE. Do not fail for changed clothing.
+
+Be decisive. Borderline-acceptable images PASS — only clear failures fail.
+When you fail, give a short concrete reason AND a one-sentence corrective
+instruction for the image model (e.g. "Make the face match the character
+reference exactly — do not retain the original person's facial features.").
+"""
+
+QC_TOOL: dict = {
+    "name": "submit_inspection",
+    "description": "Submit the QC verdict for the generated swap image.",
+    "input_schema": {
+        "type": "object",
+        "required": ["passed", "reason", "corrective_hint"],
+        "properties": {
+            "passed": {"type": "boolean"},
+            "reason": {
+                "type": "string",
+                "description": "Short reason. Empty string when passed.",
+            },
+            "corrective_hint": {
+                "type": "string",
+                "description": "One sentence for the image model on what to fix. "
+                               "Empty string when passed.",
+            },
+        },
+    },
+}
+
+
+@dataclass
+class QCVerdict:
+    passed: bool
+    reason: str
+    corrective_hint: str
+
+
+def inspect_variant(
+    *,
+    scene_image: Path,
+    character_image: Path,
+    result_image: Path,
+    background_replaced: bool = False,
+    outfit_from_character: bool = False,
+    job_id: str | None = None,
+) -> QCVerdict | None:
+    """ONE cheap vision call: does the generated swap pass? None when QC is
+    unavailable (no key / SDK / API error / bad response) — callers treat
+    None as 'skip QC', never as a failure."""
+    from character_swap.config import settings
+    if not settings.swap_qc_enabled or not settings.anthropic_api_key:
+        return None
+    try:
+        from character_swap.clients import anthropic_client
+        flags = (f"background_replaced={'true' if background_replaced else 'false'}, "
+                 f"outfit_from_character={'true' if outfit_from_character else 'false'}")
+        content = [
+            {"type": "text", "text": f"Context flags: {flags}\nSCENE:"},
+            anthropic_client._file_to_image_block(scene_image),
+            {"type": "text", "text": "CHARACTER:"},
+            anthropic_client._file_to_image_block(character_image),
+            {"type": "text", "text": "RESULT (inspect this):"},
+            anthropic_client._file_to_image_block(result_image),
+        ]
+        resp = anthropic_client.messages_with_tools(
+            system=QC_SYSTEM,
+            messages=[{"role": "user", "content": content}],
+            tools=[QC_TOOL],
+            tool_choice={"type": "tool", "name": "submit_inspection"},
+            max_tokens=400,
+            temperature=0.0,
+            model=settings.swap_qc_model,
+            job_id=job_id,
+            phase="swap_qc",
+        )
+        data = anthropic_client.extract_tool_call(resp, "submit_inspection")
+        if data is None or "passed" not in data:
+            return None
+        return QCVerdict(
+            passed=bool(data["passed"]),
+            reason=str(data.get("reason") or ""),
+            corrective_hint=str(data.get("corrective_hint") or ""),
+        )
+    except Exception:
+        return None

@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import events, pipeline
+from character_swap import events, pipeline, swap_qc
 from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
@@ -155,18 +155,61 @@ async def _generate_one_variant(
             candidate = Path(job.extra_reference_path)
             if candidate.exists():
                 extra_ref = candidate
+
+        # Generate → vision-QC → regenerate-with-corrective-hint loop. QC
+        # checks identity (right person?) + obvious defects; a failed verdict
+        # re-runs the slot with the judge's hint appended, up to
+        # swap_qc_max_retries extra attempts. QC unavailable → single attempt,
+        # qc_status="skipped". Exhausted retries KEEP the last image (a
+        # false-positive judge must not destroy a usable variant) with a ⚠
+        # qc_status="failed" for the UI.
+        scene_path = _scene_path_for_variant(job, variant)
+        char_path = Path(jc.source_image_path)
+        max_attempts = 1 + max(0, settings.swap_qc_max_retries)
+        prompt = variant.prompt
+        verdict = None
         try:
-            await asyncio.to_thread(
-                pipeline.generate_variant,
-                model=_swap_image_model(job),
-                scene_image=_scene_path_for_variant(job, variant),
-                character_image=Path(jc.source_image_path),
-                character_name=jc.name,
-                prompt=variant.prompt,
-                dest=dest,
-                job_id=job.job_id,
-                extra_reference_image=extra_ref,
-            )
+            for attempt in range(1, max_attempts + 1):
+                variant.qc_attempts = attempt
+                await asyncio.to_thread(
+                    pipeline.generate_variant,
+                    model=_swap_image_model(job),
+                    scene_image=scene_path,
+                    character_image=char_path,
+                    character_name=jc.name,
+                    prompt=prompt,
+                    dest=dest,
+                    job_id=job.job_id,
+                    extra_reference_image=extra_ref,
+                )
+                verdict = await asyncio.to_thread(
+                    swap_qc.inspect_variant,
+                    scene_image=scene_path,
+                    character_image=char_path,
+                    result_image=dest,
+                    background_replaced=extra_ref is not None,
+                    outfit_from_character=bool(job.prompt and
+                                               "own outfit from Image 2" in job.prompt),
+                    job_id=job.job_id,
+                )
+                if verdict is None:
+                    variant.qc_status = "skipped"
+                    variant.qc_reason = None
+                    break
+                if verdict.passed:
+                    variant.qc_status = "passed"
+                    variant.qc_reason = None
+                    break
+                variant.qc_status = "failed"
+                variant.qc_reason = verdict.reason
+                if attempt < max_attempts:
+                    await _emit(job.job_id, "variant.qc_retry",
+                                char_id=jc.char_id, variant_id=variant.variant_id,
+                                attempt=attempt, reason=verdict.reason)
+                    hint = (verdict.corrective_hint or verdict.reason or "").strip()
+                    prompt = variant.prompt + (
+                        f"\nIMPORTANT — the previous attempt was rejected by "
+                        f"quality control: {hint}" if hint else "")
         except Exception as e:
             variant.status = VariantStatus.FAILED
             variant.error = f"{type(e).__name__}: {e}"

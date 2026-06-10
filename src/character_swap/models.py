@@ -108,6 +108,13 @@ class GeneratedImage(BaseModel):
     # Step-3 "Import" action — e.g. when the app can't generate it (content
     # policy). Surfaced as an "imported" badge in the UI.
     imported: bool = False
+    # Vision-QC outcome (swap_qc.py): every generated variant is inspected by
+    # a cheap Claude vision call. "passed" | "failed" (kept after exhausted
+    # auto-retries — ⚠ chip in UI) | "skipped" (QC unavailable) | None
+    # (pre-QC variants / imports).
+    qc_status: str | None = None
+    qc_reason: str | None = None
+    qc_attempts: int = 0                     # total generation attempts incl. QC retries
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
