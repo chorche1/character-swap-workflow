@@ -4066,6 +4066,12 @@ async def reengineer_create(
     image_model: str = Form("nbp-swap"),
     video_model: str = Form("kling-v3"),
     auto_mode: bool = Form(False),
+    # Outfit ("Kläder"): scene = wear the original video person's clothes;
+    # character = the character reference's own clothes; custom = outfit_text.
+    outfit_mode: str = Form("scene"),
+    outfit_text: str = Form(""),
+    # Cut sensitivity: normal/high/max -> ffmpeg scene-score thresholds.
+    scene_sensitivity: str = Form("high"),
 ) -> dict:
     """Upload a reference video and start the Reengineer pipeline. Returns the
     initial state immediately; poll GET /api/reengineer/{re_id}."""
@@ -4089,6 +4095,12 @@ async def reengineer_create(
         raise HTTPException(503, f"{info['label']} is not configured. Add the API key to .env.")
     if video_model not in runner_media.VIDEO_MODELS:
         raise HTTPException(400, f"Unknown video_model '{video_model}'")
+    if outfit_mode not in ("scene", "character", "custom"):
+        raise HTTPException(400, f"Unknown outfit_mode '{outfit_mode}'")
+    if outfit_mode == "custom" and not outfit_text.strip():
+        raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
+    if scene_sensitivity not in reengineer_mod.SENSITIVITY_THRESHOLDS:
+        raise HTTPException(400, f"Unknown scene_sensitivity '{scene_sensitivity}'")
 
     ext = Path(file.filename or "").suffix.lower()
     if ext not in _REENGINEER_VIDEO_EXTS:
@@ -4117,6 +4129,9 @@ async def reengineer_create(
         "image_model": image_model,
         "video_model": video_model,
         "auto_mode": bool(auto_mode),
+        "outfit_mode": outfit_mode,
+        "outfit_text": outfit_text.strip(),
+        "scene_sensitivity": scene_sensitivity,
         "scenes": [],
         "job_id": None,
         "finals": {},

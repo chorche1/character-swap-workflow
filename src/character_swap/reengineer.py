@@ -30,14 +30,19 @@ from pathlib import Path
 from character_swap.config import settings
 from character_swap.video_edit import Word, _probe_duration
 
-# Scene-detection knobs. UGC reference videos are usually a handful of hard
-# cuts; threshold 0.30 on ffmpeg's scene score catches those without firing
-# on hand-held wobble. Scenes are then normalized to Kling v3's 3–15s window:
-# shorter neighbors merge, longer scenes subdivide evenly.
-SCENE_THRESHOLD = 0.30
-MIN_SCENE_SECS = 1.5
+# Scene-detection knobs. UGC reference videos cut between SIMILAR-looking
+# shots (same person, same room — only the grip/pose/prop changes), which
+# scores low on ffmpeg's scene metric. 0.30 missed most of those cuts (Hugo,
+# 2026-06-10: "every cut where anything changed must become a scene"), so the
+# default is 0.12; the per-run sensitivity option maps normal/high/max →
+# 0.20/0.12/0.06. Scenes are then normalized: fragments under MIN_SCENE_SECS
+# merge into a neighbor (0.8s — fast UGC cuts are real scenes; Kling clips
+# get trimmed back to the original length at assembly, so short is fine).
+SCENE_THRESHOLD = 0.12
+SENSITIVITY_THRESHOLDS = {"normal": 0.20, "high": 0.12, "max": 0.06}
+MIN_SCENE_SECS = 0.8
 MAX_SCENE_SECS = 15.0      # fal Kling v3 upper bound
-MAX_SCENES = 12            # wallet guard — videos beyond this get coarser splits
+MAX_SCENES = 20            # wallet guard — shortest neighbors merge beyond this
 
 
 # --------------------------------------------------------------------------- state
@@ -144,9 +149,22 @@ def detect_scenes(
         for i in range(n):
             sized.append((a + i * step, a + (i + 1) * step))
 
-    if len(sized) > max_scenes:
-        step = total / max_scenes
-        sized = [(i * step, (i + 1) * step) for i in range(max_scenes)]
+    # Wallet guard: above max_scenes, repeatedly merge the SHORTEST scene into
+    # its shorter neighbor. Unlike an even re-split this PRESERVES the real cut
+    # boundaries of the scenes that survive.
+    while len(sized) > max_scenes:
+        i = min(range(len(sized)), key=lambda k: sized[k][1] - sized[k][0])
+        if i == 0:
+            sized[0] = (sized[0][0], sized[1][1]); del sized[1]
+        elif i == len(sized) - 1:
+            sized[-2] = (sized[-2][0], sized[-1][1]); del sized[-1]
+        else:
+            left_span = sized[i - 1][1] - sized[i - 1][0]
+            right_span = sized[i + 1][1] - sized[i + 1][0]
+            if left_span <= right_span:
+                sized[i - 1] = (sized[i - 1][0], sized[i][1]); del sized[i]
+            else:
+                sized[i] = (sized[i][0], sized[i + 1][1]); del sized[i + 1]
     return sized
 
 

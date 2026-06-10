@@ -110,7 +110,10 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
 
     # --- scene detection + frames ---------------------------------------
     _update(re_id, status="analyzing")
-    spans = await asyncio.to_thread(reengineer.detect_scenes, source)
+    threshold = reengineer.SENSITIVITY_THRESHOLDS.get(
+        state.get("scene_sensitivity") or "high", reengineer.SCENE_THRESHOLD)
+    spans = await asyncio.to_thread(reengineer.detect_scenes, source,
+                                    threshold=threshold)
     frames: list[Path] = []
     for i, (a, b) in enumerate(spans):
         dest = run_dir / "scenes" / f"scene-{i:02d}.png"
@@ -182,6 +185,16 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
         uniq_ids.append(sid)
         uniq_paths.append(sp)
 
+    # Outfit choice ("Kläder" in the upload form): scene = wear the original
+    # person's clothes (default — job.prompt stays None so the validated
+    # default prompt chain applies); character/custom get an explicit prompt.
+    outfit_mode = state.get("outfit_mode") or "scene"
+    swap_prompt: str | None = None
+    if outfit_mode != "scene":
+        from character_swap import pipeline
+        swap_prompt = pipeline.build_edit_swap_prompt(
+            outfit_mode, state.get("outfit_text"))
+
     job = Job(
         job_id="j_" + secrets.token_hex(5),
         title=f"Reengineer {state.get('source_name') or re_id} — {', '.join(names)}",
@@ -192,6 +205,7 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
         characters=chars,
         images_per_character=1,
         image_model=image_model,
+        prompt=swap_prompt,
         video_model=state.get("video_model") or "kling-v3",
         video_audio=True,
         origin=f"reengineer:{re_id}",

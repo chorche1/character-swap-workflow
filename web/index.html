@@ -1720,6 +1720,30 @@
             </select>
           </label>
           <span class="text-sm text-neutral-500 dark:text-neutral-400">Video: Kling 3.0 <span class="text-emerald-600 dark:text-emerald-400">🔊 native audio</span></span>
+          <label class="text-sm flex items-center gap-2"
+                 title="What the swapped characters wear in every scene">
+            <span class="text-neutral-500 dark:text-neutral-400">Outfit:</span>
+            <select x-model="reengineerGen.outfitMode"
+                    class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+              <option value="scene">Same as original video</option>
+              <option value="character">Character's own clothes</option>
+              <option value="custom">Custom…</option>
+            </select>
+          </label>
+          <input x-show="reengineerGen.outfitMode === 'custom'" type="text"
+                 x-model="reengineerGen.outfitText"
+                 placeholder="e.g. a plain white t-shirt and dark jeans"
+                 class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 w-72" />
+          <label class="text-sm flex items-center gap-2"
+                 title="How aggressively cuts are detected. High catches cuts between similar-looking shots (same room, new grip/pose). Max splits on the smallest visual change.">
+            <span class="text-neutral-500 dark:text-neutral-400">Cut detection:</span>
+            <select x-model="reengineerGen.sceneSensitivity"
+                    class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+              <option value="normal">Normal</option>
+              <option value="high">High (default)</option>
+              <option value="max">Max</option>
+            </select>
+          </label>
           <label class="text-sm flex items-center gap-1.5 cursor-pointer"
                  title="Skip the image-approval gate: first ready swap per scene is approved automatically and videos start immediately. Costs run unattended!">
             <input type="checkbox" x-model="reengineerGen.autoMode" class="rounded" />

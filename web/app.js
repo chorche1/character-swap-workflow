@@ -103,6 +103,9 @@ function studio() {
       charIds: [],                   // selected character ids
       imageModel: 'nbp-swap',        // bake-off winner default
       autoMode: false,               // skip the image-approval gate
+      outfitMode: 'scene',           // scene | character | custom
+      outfitText: '',                // clothing description for custom mode
+      sceneSensitivity: 'high',      // normal | high | max cut detection
       submitting: false,
     },
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
@@ -1223,6 +1226,10 @@ function studio() {
     async submitReengineer() {
       const g = this.reengineerGen;
       if (!g.file || !g.charIds.length || g.submitting) return;
+      if (g.outfitMode === 'custom' && !g.outfitText.trim()) {
+        this.notifyError('Describe the outfit (or pick another outfit option)');
+        return;
+      }
       g.submitting = true;
       try {
         const fd = new FormData();
@@ -1230,6 +1237,9 @@ function studio() {
         fd.append('character_ids', JSON.stringify(g.charIds));
         fd.append('image_model', g.imageModel);
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
+        fd.append('outfit_mode', g.outfitMode);
+        fd.append('outfit_text', g.outfitText || '');
+        fd.append('scene_sensitivity', g.sceneSensitivity);
         const r = await fetch('/api/reengineer', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Reengineer failed: ' + await r.text()); return; }
         const state = await r.json();

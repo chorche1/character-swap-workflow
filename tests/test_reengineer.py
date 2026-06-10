@@ -139,3 +139,39 @@ def test_kling_audio_on_by_default(monkeypatch, tmp_path):
     pipeline.submit_video(image=img, movement_prompt="p", character_name="X",
                           model="kling-v3", duration_secs=5)
     assert seen["generate_audio"] is True
+
+
+def test_sensitivity_thresholds_mapping():
+    """UI sensitivity choices map to ffmpeg scene-score thresholds; default
+    SCENE_THRESHOLD is 'high' (0.12 — catches cuts between similar shots)."""
+    assert reengineer.SENSITIVITY_THRESHOLDS == {
+        "normal": 0.20, "high": 0.12, "max": 0.06}
+    assert reengineer.SCENE_THRESHOLD == reengineer.SENSITIVITY_THRESHOLDS["high"]
+
+
+def test_wallet_guard_merges_shortest_keeping_cut_boundaries(tmp_path):
+    """Above max_scenes the SHORTEST neighbors merge — surviving boundaries
+    stay aligned with real cuts (no even re-split)."""
+    video = _make_video(tmp_path / "v.mp4", ["red", "blue", "green", "yellow"])
+    spans = reengineer.detect_scenes(video, max_scenes=2)
+    assert len(spans) == 2
+    # Full coverage and at least one boundary on a real 3s-multiple cut.
+    assert spans[0][0] == 0.0
+    assert spans[-1][1] == pytest.approx(12.0, abs=0.5)
+    inner = spans[0][1]
+    assert any(abs(inner - cut) < 0.5 for cut in (3.0, 6.0, 9.0))
+
+
+def test_build_edit_swap_prompt_outfit_modes():
+    from character_swap import pipeline
+    # scene mode IS the validated default prompt.
+    assert pipeline.build_edit_swap_prompt("scene") == pipeline.EDIT_SWAP_PROMPT
+    char = pipeline.build_edit_swap_prompt("character")
+    assert "wears their own outfit from Image 2" in char
+    assert "do not keep the original person's clothing from Image 1" in char
+    custom = pipeline.build_edit_swap_prompt("custom", "a red hoodie")
+    assert "wears: a red hoodie" in custom
+    with pytest.raises(ValueError):
+        pipeline.build_edit_swap_prompt("custom", "")
+    with pytest.raises(ValueError):
+        pipeline.build_edit_swap_prompt("nope")

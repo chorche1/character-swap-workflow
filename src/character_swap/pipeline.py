@@ -94,51 +94,109 @@ GENERATION_PROMPT = (
 # winning nbp-swap runs. Used automatically by the fal dispatch when the job
 # carries the stock default prompt; a user-customized prompt always passes
 # through verbatim.
-EDIT_SWAP_PROMPT = (
-    "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
-    "identity reference for the replacement person.\n"
-    "Recreate Image 1 exactly — same framing, composition, crop, camera angle, "
-    "camera height, camera distance, focal-length appearance, perspective, "
-    "subject scale, headroom, and the exact placement, size, orientation, "
-    "color, material and physical state of every object, surface and "
-    "background element. Do not reframe, recrop, zoom, rotate, or shift the "
-    "camera in any way. Keep all visible text and brand labels legible and "
-    "unchanged.\n"
-    "Replace the person in Image 1 with the person from Image 2, as if they "
-    "had been standing there when the photo was taken — as if part of the "
-    "same photo. Take only the face, hairstyle, hair color and skin tone from "
-    "Image 2. The replacement person keeps the original person's exact pose, "
-    "body position, torso angle, shoulder position, arm placement, hand "
-    "placement and interaction with objects, and wears exactly the outfit "
-    "from Image 1 — same garments, colors, patterns, accessories and fit; do "
-    "not take any clothing from Image 2. The replacement person looks "
-    "directly into the camera lens with a natural, composed expression, even "
-    "if the original person was not.\n"
-    "Integration: light the replacement person with the scene's own light "
-    "sources and color grade. Match skin texture, facial shadows, "
-    "perspective, edge blending, white balance, sharpness, depth of field and "
-    "image grain to Image 1 so the person belongs naturally in the photo, "
-    "including correct cast shadows and contact shadows where the body meets "
-    "surfaces.\n"
-    "Style: a completely ordinary, unedited iPhone photo taken quickly by "
-    "another person — plain, slightly dull phone-camera colors, neutral white "
-    "balance, mundane ambient daylight, slightly uneven exposure, mild "
-    "softness, subtle sensor noise, natural non-polished skin with visible "
-    "pores, imperfect casual framing, small background distractions. It "
-    "should look like a normal photo from someone's camera roll, not an "
-    "advertisement or a professionally edited social-media image.\n"
-    "Constraints — do not violate any of these: do not alter the framing, "
-    "camera, background, objects, pose or outfit from Image 1; do not carry "
-    "any clothing, background or objects over from Image 2; do not blend the "
-    "original person's facial features into the new face; do not add people, "
-    "text, captions, subtitles, watermarks or logos, and remove any that are "
-    "burnt into Image 1; do not apply professional lighting, studio lighting, "
-    "cinematic contrast, dramatic shadows, HDR, warm or golden grading, "
-    "oversaturation, glossy highlights, beautification, retouching, filters "
-    "or portrait-mode background blur; keep hands and anatomy correctly "
-    "formed with the correct number of fingers; keep the image realistic and "
-    "non-explicit."
-)
+#
+# The OUTFIT is configurable (Reengineer's "Kläder" choice): the replacement
+# person can wear the scene person's clothes (default — pixel-faithful
+# rebuilds), their own clothes from the character reference, or a custom
+# described outfit. build_edit_swap_prompt() assembles the prompt per mode.
+
+_OUTFIT_CLAUSES = {
+    # mode -> (identity sentence-tail + outfit directive, constraints line)
+    "scene": (
+        "Take only the face, hairstyle, hair color and skin tone from "
+        "Image 2. The replacement person keeps the original person's exact "
+        "pose, body position, torso angle, shoulder position, arm placement, "
+        "hand placement and interaction with objects, and wears exactly the "
+        "outfit from Image 1 — same garments, colors, patterns, accessories "
+        "and fit; do not take any clothing from Image 2.",
+        "do not alter the framing, camera, background, objects, pose or "
+        "outfit from Image 1; do not carry any clothing, background or "
+        "objects over from Image 2;",
+    ),
+    "character": (
+        "Take the face, hairstyle, hair color, skin tone AND clothing from "
+        "Image 2 — the replacement person wears their own outfit from Image "
+        "2, fitted naturally to the original person's exact pose, body "
+        "position, torso angle, shoulder position, arm placement, hand "
+        "placement and interaction with objects. The outfit must follow the "
+        "scene's lighting and drape realistically in the pose.",
+        "do not alter the framing, camera, background, objects or pose from "
+        "Image 1; do not carry any background or objects over from Image 2; "
+        "do not keep the original person's clothing from Image 1;",
+    ),
+    "custom": (
+        "Take only the face, hairstyle, hair color and skin tone from "
+        "Image 2. The replacement person keeps the original person's exact "
+        "pose, body position, torso angle, shoulder position, arm placement, "
+        "hand placement and interaction with objects, and wears: {outfit}. "
+        "The outfit must follow the scene's lighting and drape realistically "
+        "in the pose; do not take any clothing from Image 2.",
+        "do not alter the framing, camera, background, objects or pose from "
+        "Image 1; do not carry any clothing, background or objects over from "
+        "Image 2; do not keep the original person's clothing from Image 1 "
+        "unless it matches the described outfit;",
+    ),
+}
+
+
+def build_edit_swap_prompt(outfit_mode: str = "scene",
+                           outfit_text: str | None = None) -> str:
+    """Assemble the instruction-edit swap prompt for an outfit mode:
+
+    - "scene" (default): wear exactly the original person's clothes from the
+      scene — the bake-off-validated wording, byte-identical to
+      EDIT_SWAP_PROMPT.
+    - "character": wear the character reference's own clothes.
+    - "custom": wear `outfit_text` (a free-text description).
+    """
+    if outfit_mode not in _OUTFIT_CLAUSES:
+        raise ValueError(f"Unknown outfit_mode '{outfit_mode}'")
+    if outfit_mode == "custom" and not (outfit_text or "").strip():
+        raise ValueError("outfit_mode 'custom' requires outfit_text")
+    outfit_clause, constraint_line = _OUTFIT_CLAUSES[outfit_mode]
+    if outfit_mode == "custom":
+        outfit_clause = outfit_clause.format(outfit=outfit_text.strip())
+    return (
+        "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
+        "identity reference for the replacement person.\n"
+        "Recreate Image 1 exactly — same framing, composition, crop, camera angle, "
+        "camera height, camera distance, focal-length appearance, perspective, "
+        "subject scale, headroom, and the exact placement, size, orientation, "
+        "color, material and physical state of every object, surface and "
+        "background element. Do not reframe, recrop, zoom, rotate, or shift the "
+        "camera in any way. Keep all visible text and brand labels legible and "
+        "unchanged.\n"
+        "Replace the person in Image 1 with the person from Image 2, as if they "
+        "had been standing there when the photo was taken — as if part of the "
+        "same photo. " + outfit_clause + " The replacement person looks "
+        "directly into the camera lens with a natural, composed expression, even "
+        "if the original person was not.\n"
+        "Integration: light the replacement person with the scene's own light "
+        "sources and color grade. Match skin texture, facial shadows, "
+        "perspective, edge blending, white balance, sharpness, depth of field and "
+        "image grain to Image 1 so the person belongs naturally in the photo, "
+        "including correct cast shadows and contact shadows where the body meets "
+        "surfaces.\n"
+        "Style: a completely ordinary, unedited iPhone photo taken quickly by "
+        "another person — plain, slightly dull phone-camera colors, neutral white "
+        "balance, mundane ambient daylight, slightly uneven exposure, mild "
+        "softness, subtle sensor noise, natural non-polished skin with visible "
+        "pores, imperfect casual framing, small background distractions. It "
+        "should look like a normal photo from someone's camera roll, not an "
+        "advertisement or a professionally edited social-media image.\n"
+        "Constraints — do not violate any of these: " + constraint_line + " do "
+        "not blend the original person's facial features into the new face; do "
+        "not add people, text, captions, subtitles, watermarks or logos, and "
+        "remove any that are burnt into Image 1; do not apply professional "
+        "lighting, studio lighting, cinematic contrast, dramatic shadows, HDR, "
+        "warm or golden grading, oversaturation, glossy highlights, "
+        "beautification, retouching, filters or portrait-mode background blur; "
+        "keep hands and anatomy correctly formed with the correct number of "
+        "fingers; keep the image realistic and non-explicit."
+    )
+
+
+EDIT_SWAP_PROMPT = build_edit_swap_prompt("scene")
 
 
 def generate_image(
