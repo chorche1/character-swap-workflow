@@ -323,9 +323,8 @@ def run_grok_edit(scene: Path, char: Path, prompt: str, dest: Path) -> None:
 
 def _person_mask(scene: Path) -> str:
     """BiRefNet matte of the scene -> threshold -> 12px dilate -> white-on-black
-    mask PNG at the scene's exact dimensions. Returns a fal CDN URL."""
+    mask PNG at the scene's exact dimensions. Returns a fal CDN URL. Pure PIL."""
     import io
-    import numpy as np
     from PIL import Image, ImageFilter
 
     resp = fal_queue("fal-ai/birefnet/v2", {"image_url": fal_url(scene)})
@@ -336,8 +335,7 @@ def _person_mask(scene: Path) -> str:
     with Image.open(scene) as sc:
         w, h = sc.size
     matte = Image.open(io.BytesIO(matte_bytes)).convert("L").resize((w, h))
-    arr = np.array(matte)
-    binary = Image.fromarray(((arr > 64) * 255).astype("uint8"))
+    binary = matte.point(lambda v: 255 if v > 64 else 0)
     # ~12px dilation via MaxFilter (odd kernel).
     dilated = binary.filter(ImageFilter.MaxFilter(25))
     mask_path = OUT / f"mask_{scene.stem}.png"

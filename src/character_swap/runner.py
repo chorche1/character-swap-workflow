@@ -102,16 +102,26 @@ def _is_gemini_image_model(slug: str) -> bool:
         return (slug or "").strip() in {"nano-banana", "nano-banana-pro"}
 
 
+# Swap models retired from the picker whose stored jobs must not regenerate
+# through them. higgsfield-swap: Soul regenerates an unrelated scene (the
+# 2026-06-10 bake-off scored it 2.5-3.3 with fatal flaws on every output).
+_RETIRED_SWAP_MODELS = {"higgsfield-swap"}
+
+
 def _swap_image_model(job: Job) -> str:
     """Effective image model for SWAP generation.
 
-    Google/Gemini models were removed from the Swap picker, so Swap must never
-    generate with one — even for jobs created BEFORE the removal that still
-    carry `image_model="nano-banana-pro"`. Any such model is coerced to the
-    default `gpt-image`. (Removing the cross-provider NSFW fallback earlier
-    closed the other route to Gemini; this closes the stored-model route.)"""
+    Google-DIRECT (Gemini-key) models were removed from the Swap picker, so
+    Swap must never generate via the Gemini API — even for jobs created
+    BEFORE the removal that still carry `image_model="nano-banana-pro"`.
+    (The fal-hosted nbp-swap/nb2-swap slugs are allowed: provider "fal",
+    different quota + billing.) Retired models (higgsfield-swap) are coerced
+    for the same reason: regenerating an old job through them reproduces a
+    known-bad failure mode. Both coerce to the default `gpt-image`."""
     m = (job.image_model or "gpt-image").strip()
-    return "gpt-image" if _is_gemini_image_model(m) else m
+    if _is_gemini_image_model(m) or m in _RETIRED_SWAP_MODELS:
+        return "gpt-image"
+    return m
 
 
 def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:

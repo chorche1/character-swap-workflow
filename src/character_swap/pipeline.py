@@ -86,21 +86,58 @@ GENERATION_PROMPT = (
 )
 
 
-# Compact imperative variant of GENERATION_PROMPT for INSTRUCTION-EDIT swap
-# engines (Qwen Edit+ / Kontext / Seedream Edit). Edit models follow short
-# directives far better than multi-section enforcement prose — the long prompt
-# was written for generation models (GPT Image). Used automatically by the fal
-# dispatch when the job carries the stock default prompt; a user-customized
-# prompt is always passed through verbatim.
+# Edit-engine swap prompt for the fal-hosted INSTRUCTION-EDIT models
+# (Nano Banana Pro/2, Seedream Edit). Validated by the 2026-06-10 overnight
+# bake-off — this "master" wording (Image 1/Image 2 role indexing + integration
+# + style + a single constraints block) scored at parity-or-better with every
+# alternative phrasing across both test scenes, and is the prompt behind the
+# winning nbp-swap runs. Used automatically by the fal dispatch when the job
+# carries the stock default prompt; a user-customized prompt always passes
+# through verbatim.
 EDIT_SWAP_PROMPT = (
-    "Replace the person in the first image with the person from the second image. "
-    "Take only the face, hair and skin tone from the second image. Keep everything "
-    "else from the first image exactly the same: identical framing, camera angle, "
-    "crop, pose, body position, hands, clothing and state of dress from the first "
-    "image, all objects and their positions, the background, and the lighting. The "
-    "person looks directly at the camera. Keep the ordinary unedited smartphone-photo "
-    "look of the first image: plain colors, neutral white balance, mild softness, no "
-    "beautification, no studio lighting. Remove any text or watermarks."
+    "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
+    "identity reference for the replacement person.\n"
+    "Recreate Image 1 exactly — same framing, composition, crop, camera angle, "
+    "camera height, camera distance, focal-length appearance, perspective, "
+    "subject scale, headroom, and the exact placement, size, orientation, "
+    "color, material and physical state of every object, surface and "
+    "background element. Do not reframe, recrop, zoom, rotate, or shift the "
+    "camera in any way. Keep all visible text and brand labels legible and "
+    "unchanged.\n"
+    "Replace the person in Image 1 with the person from Image 2, as if they "
+    "had been standing there when the photo was taken — as if part of the "
+    "same photo. Take only the face, hairstyle, hair color and skin tone from "
+    "Image 2. The replacement person keeps the original person's exact pose, "
+    "body position, torso angle, shoulder position, arm placement, hand "
+    "placement and interaction with objects, and wears exactly the outfit "
+    "from Image 1 — same garments, colors, patterns, accessories and fit; do "
+    "not take any clothing from Image 2. The replacement person looks "
+    "directly into the camera lens with a natural, composed expression, even "
+    "if the original person was not.\n"
+    "Integration: light the replacement person with the scene's own light "
+    "sources and color grade. Match skin texture, facial shadows, "
+    "perspective, edge blending, white balance, sharpness, depth of field and "
+    "image grain to Image 1 so the person belongs naturally in the photo, "
+    "including correct cast shadows and contact shadows where the body meets "
+    "surfaces.\n"
+    "Style: a completely ordinary, unedited iPhone photo taken quickly by "
+    "another person — plain, slightly dull phone-camera colors, neutral white "
+    "balance, mundane ambient daylight, slightly uneven exposure, mild "
+    "softness, subtle sensor noise, natural non-polished skin with visible "
+    "pores, imperfect casual framing, small background distractions. It "
+    "should look like a normal photo from someone's camera roll, not an "
+    "advertisement or a professionally edited social-media image.\n"
+    "Constraints — do not violate any of these: do not alter the framing, "
+    "camera, background, objects, pose or outfit from Image 1; do not carry "
+    "any clothing, background or objects over from Image 2; do not blend the "
+    "original person's facial features into the new face; do not add people, "
+    "text, captions, subtitles, watermarks or logos, and remove any that are "
+    "burnt into Image 1; do not apply professional lighting, studio lighting, "
+    "cinematic contrast, dramatic shadows, HDR, warm or golden grading, "
+    "oversaturation, glossy highlights, beautification, retouching, filters "
+    "or portrait-mode background blur; keep hands and anatomy correctly "
+    "formed with the correct number of fingers; keep the image realistic and "
+    "non-explicit."
 )
 
 
@@ -230,7 +267,8 @@ def _dispatch_variant(
         )
         atomic_write_bytes(dest, data)
         return dest
-    if model in ("qwen-edit-swap", "kontext-max-swap", "seedream-edit-swap"):
+    if model in ("nbp-swap", "nb2-swap", "seedream-edit-swap",
+                 "qwen-edit-swap", "kontext-max-swap"):
         # fal-hosted instruction-edit engines — strict scene preservation:
         # they EDIT the scene image in place guided by the prompt, taking the
         # new person's identity from the character image (reference #2).

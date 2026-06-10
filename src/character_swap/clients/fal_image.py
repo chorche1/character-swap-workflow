@@ -39,10 +39,24 @@ _POLL_INTERVAL_SECS = 3.0
 _POLL_TIMEOUT_SECS = 420.0
 
 # Swap-engine slugs (as exposed in the app's model picker) -> fal model ids.
+# Set chosen by the 2026-06-10 overnight bake-off (56 judged generations across
+# 2 real scene pairs; see eval_out/gallery.html):
+#   nbp-swap      7.2-7.6 composite, zero fatals, handled the moderation-
+#                 sensitive pair GPT Image refused. The clear winner.
+#   nb2-swap      6.3-6.8, same interface at about half the price.
+#   seedream-...  6.5-6.75, cheapest credible tier; weaker identity match.
+# Eliminated by the same bake-off: qwen-image-edit-plus (ignored the scene,
+# fidelity 1-2/10), flux kontext multi (identity 1/10 + all-black censorship
+# frames), higgsfield soul (regenerates an unrelated scene), easel (deprecated
+# + wrong identity), ideogram mask-inpaint (mask swallowed key props).
 SWAP_MODELS: dict[str, str] = {
-    "qwen-edit-swap":    "fal-ai/qwen-image-edit-plus",
-    "kontext-max-swap":  "fal-ai/flux-pro/kontext/max/multi",
-    "seedream-edit-swap": "fal-ai/bytedance/seedream/v4/edit",
+    "nbp-swap":           "fal-ai/nano-banana-pro/edit",
+    "nb2-swap":           "fal-ai/nano-banana-2/edit",
+    "seedream-edit-swap": "fal-ai/bytedance/seedream/v4.5/edit",
+    # Back-compat: jobs created while these were selectable keep working,
+    # but the slugs are no longer offered in the picker.
+    "qwen-edit-swap":     "fal-ai/qwen-image-edit-plus",
+    "kontext-max-swap":   "fal-ai/flux-pro/kontext/max/multi",
 }
 
 
@@ -84,8 +98,11 @@ def _payload_for(model_id: str, *, prompt: str, scene_image: Path,
     """Two-image edit payload, with per-model sizing quirks."""
     images = [_hosted_url(scene_image), _hosted_url(character_image)]
     payload: dict = {"prompt": prompt, "image_urls": images, "num_images": 1}
-    if "kontext" in model_id:
+    if "nano-banana" in model_id:
         payload["aspect_ratio"] = aspect_ratio        # e.g. "9:16"
+        payload["resolution"] = "1K"
+    elif "kontext" in model_id:
+        payload["aspect_ratio"] = aspect_ratio
     elif "seedream" in model_id:
         w, h = (1152, 2048) if aspect_ratio == "9:16" else (2048, 1152) if aspect_ratio == "16:9" else (1536, 1536)
         payload["image_size"] = {"width": w, "height": h}

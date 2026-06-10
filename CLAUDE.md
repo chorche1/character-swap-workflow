@@ -160,9 +160,21 @@ HIGGSFIELD_API_KEY=...            # Higgsfield Soul (image+video) / DoP / Lipsyn
 HIGGSFIELD_API_SECRET=...         # Required WITH the key for the official REST API
                                   # (Authorization: Key {key}:{secret}; create both at
                                   # cloud.higgsfield.ai/api-keys — distinct from the
-                                  # CLI/MCP device-login). Unlocks the Swap "Higgsfield
-                                  # Character Swap" model (clients/higgsfield.py): uploads
-                                  # scene+character → custom-reference → /v1/text2image/soul.
+                                  # CLI/MCP device-login). The "higgsfield-swap" Swap model
+                                  # built on this (clients/higgsfield.py) was RETIRED from
+                                  # the picker 2026-06-10: Soul regenerates an unrelated
+                                  # scene instead of editing it (bake-off: fatal on every
+                                  # output). Old jobs coerce to gpt-image on regenerate.
+FAL_API_KEY=...                   # fal.ai — VEED captions AND the Swap instruction-edit
+                                  # engines picked by the 2026-06-10 overnight bake-off
+                                  # (clients/fal_image.py): "nbp-swap" (Nano Banana Pro
+                                  # edit — the bake-off winner: best scene-fidelity +
+                                  # identity + integration, zero fatals, survives
+                                  # moderation-sensitive scenes GPT refuses), "nb2-swap"
+                                  # (≈same look, half price), "seedream-edit-swap"
+                                  # (Seedream 4.5, budget tier). These are Google/ByteDance
+                                  # models HOSTED ON FAL — billed on the fal key, no Gemini
+                                  # API quota. Swap default remains gpt-image.
 HEYGEN_API_KEY=...                # HeyGen Avatar 5 — talking-head videos (Avatar tab)
 ELEVENLABS_API_KEY=...            # ElevenLabs voice library (Audio tab + Editor voice swap +
                                   # optional voice source for HeyGen avatars)

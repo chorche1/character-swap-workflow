@@ -165,3 +165,27 @@ def test_dispatch_unknown_model_still_raises(tmp_path):
             character_image=Path("/c.png"), character_name="X",
             prompt="p", dest=tmp_path / "o.png", job_id=None,
         )
+
+
+def test_nbp_swap_payload(fake_fal):
+    """The bake-off winner: nano-banana models get aspect_ratio + resolution."""
+    scene, char = fake_fal
+    fal_image.swap_image(model_slug="nbp-swap", scene_image=scene,
+                         character_image=char, prompt="p", aspect_ratio="9:16")
+    payload = _submit_payload()
+    assert payload["aspect_ratio"] == "9:16"
+    assert payload["resolution"] == "1K"
+    assert "image_size" not in payload
+
+
+def test_seedream_uses_v45():
+    assert fal_image.SWAP_MODELS["seedream-edit-swap"].endswith("/v4.5/edit")
+
+
+def test_winner_slugs_registered_in_picker():
+    from character_swap.runner_media import IMAGE_MODELS
+    for slug in ("nbp-swap", "nb2-swap", "seedream-edit-swap"):
+        assert slug in IMAGE_MODELS and IMAGE_MODELS[slug]["provider"] == "fal"
+    # Eliminated by the bake-off — must NOT be offered in the picker.
+    for slug in ("higgsfield-swap", "qwen-edit-swap", "kontext-max-swap"):
+        assert slug not in IMAGE_MODELS

@@ -45,12 +45,22 @@ IMAGE_MODELS: dict[str, dict] = {
     "seedream-3":           {"label": "Seedream 3.0",                    "provider": "bytedance",  "price_setting": "seedream_price_usd"},
     "seededit":             {"label": "SeedEdit",                        "provider": "bytedance",  "price_setting": "seedream_price_usd"},
     "higgsfield-soul-img":  {"label": "Higgsfield Soul (image)",         "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
-    "higgsfield-swap":      {"label": "Higgsfield Character Swap",        "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
-    # fal-hosted instruction-edit swap engines (strict scene preservation).
-    # Slugs map to fal model ids in clients/fal_image.SWAP_MODELS.
-    "qwen-edit-swap":       {"label": "Qwen Edit+ Swap (fal)",            "provider": "fal",        "price_setting": "fal_swap_price_usd"},
-    "kontext-max-swap":     {"label": "FLUX Kontext Max Swap (fal)",      "provider": "fal",        "price_setting": "fal_swap_price_usd"},
-    "seedream-edit-swap":   {"label": "Seedream 4 Edit Swap (fal)",       "provider": "fal",        "price_setting": "fal_swap_price_usd"},
+    # fal-hosted instruction-edit swap engines. Set picked by the 2026-06-10
+    # overnight bake-off (56 generations judged by Claude vision against
+    # Hugo's criteria: scene fidelity / identity / integration / organic
+    # realism / artifacts; gallery in eval_out/):
+    #   nbp-swap won outright (7.2-7.6 composite, zero fatals, survives
+    #   moderation-sensitive scenes that GPT Image refuses). nb2-swap gives
+    #   nearly the same look at about half the price; Seedream 4.5 is the
+    #   budget tier (weaker identity match).
+    # Removed by the same data: higgsfield-swap (Soul regenerates an
+    # unrelated scene — the "horrendous" failure mode), qwen-edit-swap
+    # (ignored the scene entirely), kontext-max-swap (identity loss +
+    # censorship blackouts). Their dispatch branches remain so OLD jobs keep
+    # working, but the slugs are no longer offered in the picker.
+    "nbp-swap":             {"label": "Nano Banana Pro Swap (Google via fal)", "provider": "fal",   "price_setting": "fal_swap_price_usd"},
+    "nb2-swap":             {"label": "Nano Banana 2 Swap (Google via fal)",   "provider": "fal",   "price_setting": "fal_swap_price_usd"},
+    "seedream-edit-swap":   {"label": "Seedream 4.5 Edit Swap (fal)",          "provider": "fal",   "price_setting": "fal_swap_price_usd"},
 }
 
 AVATAR_MODELS: dict[str, dict] = {
@@ -278,7 +288,8 @@ async def run_image_gen(gen_id: str) -> None:
                 scene_image=refs[0], character_image=refs[1],
                 prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
             )
-        elif gen.model in {"qwen-edit-swap", "kontext-max-swap", "seedream-edit-swap"}:
+        elif gen.model in {"nbp-swap", "nb2-swap", "seedream-edit-swap",
+                           "qwen-edit-swap", "kontext-max-swap"}:
             # fal-hosted instruction-edit swaps: scene (1st ref) + character (2nd ref).
             if len(refs) < 2:
                 raise ValueError(

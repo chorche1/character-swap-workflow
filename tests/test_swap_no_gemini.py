@@ -36,3 +36,15 @@ def test_is_gemini_detection():
     assert runner._is_gemini_image_model("nano-banana") is True
     assert runner._is_gemini_image_model("gpt-image") is False
     assert runner._is_gemini_image_model("grok-image") is False
+
+
+def test_retired_higgsfield_swap_coerced_to_gpt_image():
+    """Old jobs stored with higgsfield-swap must not regenerate through Soul
+    (bake-off: scene-regeneration failure on every output)."""
+    assert runner._swap_image_model(_job("higgsfield-swap")) == "gpt-image"
+
+
+def test_fal_hosted_google_swaps_pass_through():
+    """nbp-swap/nb2-swap are fal-hosted (no Gemini key/quota) — NOT coerced."""
+    assert runner._swap_image_model(_job("nbp-swap")) == "nbp-swap"
+    assert runner._swap_image_model(_job("nb2-swap")) == "nb2-swap"
