@@ -4926,6 +4926,8 @@ function studio() {
 
     async deleteScene(sceneId) {
       if (!this.job) return;
+      // Removing a scene also deletes its variants + approvals — irreversible.
+      if (!confirm('Remove this scene? Its swapped images and approvals are deleted too.')) return;
       const r = await fetch(`/api/jobs/${this.job.job_id}/scenes/${sceneId}`,
                             { method: 'DELETE' });
       if (!r.ok) { this.notifyError('Delete scene failed: ' + await r.text()); return; }

@@ -312,6 +312,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     video_cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
     if "movement_prompt_override" not in video_cols:
         conn.execute("ALTER TABLE videos ADD COLUMN movement_prompt_override TEXT")
+    # --- model_json: full-fidelity persistence (2026-06-10) -----------------
+    # The column-enumeration approach silently DROPPED every model field the
+    # schema didn't know about (Job.scene_ids / scene_image_paths /
+    # durations_* / video_audio / origin, GeneratedImage.scene_id / imported,
+    # JobCharacter end-frame maps, ...) — multi-scene jobs collapsed to one
+    # scene after a server restart. Each row now also stores the COMPLETE
+    # pydantic dump (children excluded — they have their own rows); readers
+    # prefer it and fall back to the legacy columns for old rows. New model
+    # fields survive automatically — never enumerate columns again.
+    for table in ("jobs", "job_characters", "variants", "videos"):
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if "model_json" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN model_json TEXT")
     # One-time cleanup migration: the Reel feature has been removed. Drop
     # its tables if a prior schema left them behind. No-op on fresh DBs.
     conn.execute("DROP TABLE IF EXISTS reel_jobs")
@@ -374,6 +387,13 @@ def _project_from_row(r: sqlite3.Row, character_ids: list[str]) -> ProjectAsset:
 
 
 def _variant_from_row(r: sqlite3.Row) -> GeneratedImage:
+    # Prefer the full-fidelity dump (carries scene_id, imported, and every
+    # future field); legacy columns only serve rows written pre-migration.
+    if "model_json" in r.keys() and r["model_json"]:
+        try:
+            return GeneratedImage.model_validate_json(r["model_json"])
+        except (ValueError, TypeError):
+            pass
     return GeneratedImage(
         variant_id=r["variant_id"],
         path=r["path"],
@@ -386,6 +406,11 @@ def _variant_from_row(r: sqlite3.Row) -> GeneratedImage:
 
 
 def _video_from_row(r: sqlite3.Row) -> VideoVariant:
+    if "model_json" in r.keys() and r["model_json"]:
+        try:
+            return VideoVariant.model_validate_json(r["model_json"])
+        except (ValueError, TypeError):
+            pass
     try:
         st = VideoStatus(r["status"])
     except ValueError:
@@ -412,6 +437,14 @@ def _jc_from_row(r: sqlite3.Row, images: list[GeneratedImage],
                  videos: list[VideoVariant]) -> JobCharacter:
     from character_swap.models import CharStatus
     keys = r.keys()
+    if "model_json" in keys and r["model_json"]:
+        try:
+            jc = JobCharacter.model_validate_json(r["model_json"])
+            jc.images = images
+            jc.videos = videos
+            return jc
+        except (ValueError, TypeError):
+            pass
     # Multi-variant approval: prefer the new JSON column. Falls back to the
     # legacy single `approved_variant_id` so jobs created before the
     # migration ran are still readable.
@@ -520,6 +553,17 @@ def load_app_state(conn: sqlite3.Connection) -> AppState:
         return {}
 
     for r in conn.execute("SELECT * FROM jobs ORDER BY created_at"):
+        # Full-fidelity path: every Job field round-trips via model_json
+        # (children attached from their own rows). Legacy columns below only
+        # serve rows written before the 2026-06-10 migration.
+        if "model_json" in job_cols and r["model_json"]:
+            try:
+                j = Job.model_validate_json(r["model_json"])
+                j.characters = jc_by_job.get(j.job_id, {})
+                state.jobs[j.job_id] = j
+                continue
+            except (ValueError, TypeError):
+                pass
         movement_prompts = (
             _parse_prompts_dict(r["movement_prompts_json"])
             if has_movement_prompts else {}
@@ -706,6 +750,12 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
             _iso(j.created_at), _iso(j.updated_at),
         ),
     )
+    # Full-fidelity dump (characters live in their own rows) — the readers
+    # prefer this over the legacy columns, so EVERY Job field round-trips.
+    conn.execute(
+        "UPDATE jobs SET model_json = ? WHERE job_id = ?",
+        (j.model_dump_json(exclude={"characters"}), j.job_id),
+    )
     # Reset children — simplest correctness model for an in-place job update.
     conn.execute("DELETE FROM job_characters WHERE job_id = ?", (j.job_id,))
     conn.execute("DELETE FROM variants WHERE job_id = ?", (j.job_id,))
@@ -726,8 +776,8 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                   compile_status, compile_error,
                   pipeline_status, pipeline_error,
                   pipeline_temp_dir, pipeline_drive_link,
-                  updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  updated_at, model_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 j.job_id, cid, char_pos, jc.name, jc.source_image_path,
                 str(jc.status), legacy_single,
@@ -738,18 +788,20 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                 jc.pipeline_status, jc.pipeline_error,
                 jc.pipeline_temp_dir, jc.pipeline_drive_link,
                 _iso(jc.updated_at),
+                jc.model_dump_json(exclude={"images", "videos"}),
             ),
         )
         for i, v in enumerate(jc.images):
             conn.execute(
                 """INSERT INTO variants
                     (variant_id, job_id, char_id, position, path, prompt,
-                     parent_variant_id, status, error, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     parent_variant_id, status, error, created_at, model_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     v.variant_id, j.job_id, cid, i, v.path, v.prompt,
                     v.parent_variant_id, str(v.status), v.error,
                     _iso(v.created_at),
+                    v.model_dump_json(),
                 ),
             )
         for i, vv in enumerate(jc.videos):
@@ -758,14 +810,15 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
                     (video_id, job_id, char_id, position, grok_job_id,
                      status, submitted_at, completed_at, download_url,
                      final_video_path, source_variant_id, error,
-                     movement_prompt_override)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     movement_prompt_override, model_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     vv.video_id, j.job_id, cid, i, vv.grok_job_id,
                     str(vv.status), _iso(vv.submitted_at),
                     _iso(vv.completed_at), vv.download_url,
                     vv.final_video_path, vv.source_variant_id, vv.error,
                     vv.movement_prompt_override,
+                    vv.model_dump_json(),
                 ),
             )
 
