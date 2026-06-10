@@ -47,6 +47,9 @@ from character_swap.images import sha256_file
 _TIMEOUT = 90.0
 _POLL_INTERVAL_SECS = 3.0
 _POLL_TIMEOUT_SECS = 300.0
+# Reference (character) training is much slower than a generation — observed
+# >300s in production. Give it its own, longer budget.
+_REF_POLL_TIMEOUT_SECS = 900.0
 
 # Soul accepts a fixed set of width_and_height strings; map our aspect ratios to
 # the nearest. Swap is 9:16 portrait by default.
@@ -121,15 +124,33 @@ def _load_ref_cache() -> dict[str, str]:
         return {}
 
 
-def _save_ref(sha: str, reference_id: str) -> None:
+def _save_ref(sha: str, value) -> None:
+    """Persist a cache entry. `value` is either a plain id string (= ready,
+    legacy format) or {"id": ..., "status": "pending"} for an in-training
+    reference — so a poll timeout doesn't orphan the (paid) reference and the
+    next attempt RESUMES polling instead of re-creating it."""
     with _REF_CACHE_LOCK:
         cache = _load_ref_cache()
-        cache[sha] = reference_id
+        if value is None:
+            cache.pop(sha, None)
+        else:
+            cache[sha] = value
         p = _ref_cache_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(cache, indent=2), encoding="utf-8")
         tmp.replace(p)
+
+
+def _cached_ref(sha: str) -> tuple[str | None, bool]:
+    """Return (reference_id, is_ready) for a cached entry, (None, False) if absent."""
+    entry = _load_ref_cache().get(sha)
+    if entry is None:
+        return None, False
+    if isinstance(entry, str):              # legacy plain-string = ready
+        return entry, True
+    rid = entry.get("id")
+    return rid, (entry.get("status") == "ready")
 
 
 # --- upload ----------------------------------------------------------------------
@@ -162,13 +183,45 @@ def _upload(path: Path, client: httpx.Client) -> str:
 
 # --- character reference ---------------------------------------------------------
 
+def _poll_reference(ref_id: str, sha: str, client: httpx.Client,
+                    initial_data: dict | None = None) -> str:
+    """Poll a custom-reference until trained. Marks the cache entry ready on
+    success. On timeout the pending cache entry is KEPT so the next attempt
+    resumes polling this same (already-paid) reference instead of re-creating."""
+    data = initial_data or {}
+    deadline = time.monotonic() + _REF_POLL_TIMEOUT_SECS
+    while True:
+        status = (data.get("status") or "").lower()
+        if status in {"completed", "ready", "succeeded"}:
+            break
+        if status in {"failed", "error"}:
+            # Training genuinely failed → drop the pending entry so a retry
+            # creates a fresh reference.
+            _save_ref(sha, None)
+            raise HiggsfieldError(f"custom-reference {ref_id} failed: {data}")
+        if time.monotonic() > deadline:
+            raise HiggsfieldError(
+                f"custom-reference {ref_id} still training after "
+                f"{int(_REF_POLL_TIMEOUT_SECS)}s — retry shortly (it keeps "
+                f"training server-side and will be reused, not re-billed)")
+        time.sleep(_POLL_INTERVAL_SECS)
+        pr = client.get(f"/v1/custom-references/{ref_id}")
+        _raise_for_status(pr, "poll custom-reference")
+        data = pr.json()
+
+    _save_ref(sha, ref_id)   # plain string = ready
+    return ref_id
+
+
 def _ensure_reference(character_image: Path, client: httpx.Client) -> str:
-    """Return a Higgsfield custom-reference id for this character, creating it
-    once and caching by the character image's sha256."""
+    """Return a TRAINED Higgsfield custom-reference id for this character,
+    creating it at most once per unique image (sha256-cached, pending-resumable)."""
     sha = sha256_file(character_image)
-    cached = _load_ref_cache().get(sha)
-    if cached:
-        return cached
+    ref_id, ready = _cached_ref(sha)
+    if ref_id and ready:
+        return ref_id
+    if ref_id:                                # pending from an earlier timeout
+        return _poll_reference(ref_id, sha, client)
 
     char_url = _upload(character_image, client)
     r = client.post(
@@ -181,24 +234,9 @@ def _ensure_reference(character_image: Path, client: httpx.Client) -> str:
     ref_id = data.get("id") or data.get("reference_id")
     if not ref_id:
         raise HiggsfieldError(f"create custom-reference: no id in response {data}")
-
-    # Poll until the reference finishes training (status completed/failed).
-    deadline = time.monotonic() + _POLL_TIMEOUT_SECS
-    while True:
-        status = (data.get("status") or "").lower()
-        if status in {"completed", "ready", "succeeded"}:
-            break
-        if status in {"failed", "error"}:
-            raise HiggsfieldError(f"custom-reference {ref_id} failed: {data}")
-        if time.monotonic() > deadline:
-            raise HiggsfieldError(f"custom-reference {ref_id} timed out")
-        time.sleep(_POLL_INTERVAL_SECS)
-        pr = client.get(f"/v1/custom-references/{ref_id}")
-        _raise_for_status(pr, "poll custom-reference")
-        data = pr.json()
-
-    _save_ref(sha, ref_id)
-    return ref_id
+    # Persist BEFORE polling: a timeout must not orphan the paid reference.
+    _save_ref(sha, {"id": ref_id, "status": "pending"})
+    return _poll_reference(ref_id, sha, client, initial_data=data)
 
 
 # --- result extraction (robust to job-set vs generic shapes) ---------------------
@@ -283,11 +321,11 @@ def generate_swap(
         # The submit response may already be terminal; only poll if pending
         # (which requires a job id to build the status URL).
         status = _extract_status(data)
+        job_set_id = _job_set_id(data) or ""
+        entry["job_set_id"] = job_set_id
         if status == "pending":
-            job_set_id = _job_set_id(data)
             if not job_set_id:
                 raise HiggsfieldError(f"submit soul: no job id in response {data}")
-            entry["job_set_id"] = job_set_id
             status_url = _status_url(data, job_set_id)
             deadline = time.monotonic() + _POLL_TIMEOUT_SECS
             while status == "pending":
@@ -298,8 +336,6 @@ def generate_swap(
                 _raise_for_status(pr, "poll soul")
                 data = pr.json()
                 status = _extract_status(data)
-        else:
-            entry["job_set_id"] = _job_set_id(data) or ""
 
         if status == "nsfw":
             raise HiggsfieldError("Higgsfield rejected the swap as NSFW (credits refunded)")

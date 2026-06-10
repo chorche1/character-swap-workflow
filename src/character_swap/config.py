@@ -137,6 +137,9 @@ class Settings(BaseSettings):
     wan_price_usd: float = Field(default=0.40, validation_alias="WAN_PRICE_USD")
     sora_price_usd: float = Field(default=0.60, validation_alias="SORA_PRICE_USD")
     higgsfield_price_usd: float = Field(default=0.50, validation_alias="HIGGSFIELD_PRICE_USD")
+    # Rough flat estimate per fal-hosted swap edit (Qwen Edit+ / Kontext Max /
+    # Seedream Edit are all in the $0.03–0.08/image band).
+    fal_swap_price_usd: float = Field(default=0.06, validation_alias="FAL_SWAP_PRICE_USD")
     heygen_price_usd: float = Field(default=0.30, validation_alias="HEYGEN_PRICE_USD")
     elevenlabs_tts_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_TTS_PRICE_USD")
     elevenlabs_vc_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_VC_PRICE_USD")

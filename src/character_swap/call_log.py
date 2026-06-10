@@ -33,6 +33,9 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     # Higgsfield Character Swap — one Soul generation per variant.
     if phase == "higgsfield_swap":
         return settings.higgsfield_price_usd
+    # fal-hosted swap edits (Qwen Edit+ / Kontext Max / Seedream Edit).
+    if phase == "fal_swap":
+        return settings.fal_swap_price_usd
     # AI Director — one Opus call per Director invocation (swap or movement).
     if phase in {"director_swap", "director_movement"}:
         return settings.claude_opus_price_usd

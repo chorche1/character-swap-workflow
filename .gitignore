@@ -29,3 +29,6 @@ web/static/remotion-preview.js.map
 WORKFLOWS_GUIDE.pdf
 WORKFLOWS_GUIDE.html
 .claude/scheduled_tasks.lock
+
+# swap-engine eval outputs (scripts/swap_eval.py)
+eval_out/

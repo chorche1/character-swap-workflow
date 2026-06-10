@@ -46,6 +46,11 @@ IMAGE_MODELS: dict[str, dict] = {
     "seededit":             {"label": "SeedEdit",                        "provider": "bytedance",  "price_setting": "seedream_price_usd"},
     "higgsfield-soul-img":  {"label": "Higgsfield Soul (image)",         "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
     "higgsfield-swap":      {"label": "Higgsfield Character Swap",        "provider": "higgsfield", "price_setting": "higgsfield_price_usd"},
+    # fal-hosted instruction-edit swap engines (strict scene preservation).
+    # Slugs map to fal model ids in clients/fal_image.SWAP_MODELS.
+    "qwen-edit-swap":       {"label": "Qwen Edit+ Swap (fal)",            "provider": "fal",        "price_setting": "fal_swap_price_usd"},
+    "kontext-max-swap":     {"label": "FLUX Kontext Max Swap (fal)",      "provider": "fal",        "price_setting": "fal_swap_price_usd"},
+    "seedream-edit-swap":   {"label": "Seedream 4 Edit Swap (fal)",       "provider": "fal",        "price_setting": "fal_swap_price_usd"},
 }
 
 AVATAR_MODELS: dict[str, dict] = {
@@ -272,6 +277,21 @@ async def run_image_gen(gen_id: str) -> None:
                 higgsfield.generate_swap,
                 scene_image=refs[0], character_image=refs[1],
                 prompt=effective_prompt, aspect_ratio=gen.aspect_ratio, app_job_id=gen_id,
+            )
+        elif gen.model in {"qwen-edit-swap", "kontext-max-swap", "seedream-edit-swap"}:
+            # fal-hosted instruction-edit swaps: scene (1st ref) + character (2nd ref).
+            if len(refs) < 2:
+                raise ValueError(
+                    f"{IMAGE_MODELS[gen.model]['label']} needs two reference images: "
+                    "the scene (first) and the character (second)."
+                )
+            from character_swap.clients import fal_image
+            data = await asyncio.to_thread(
+                fal_image.swap_image,
+                model_slug=gen.model,
+                scene_image=refs[0], character_image=refs[1],
+                prompt=effective_prompt, aspect_ratio=gen.aspect_ratio or "9:16",
+                app_job_id=gen_id,
             )
         else:
             raise ValueError(f"Unknown image model: {gen.model}")

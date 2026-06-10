@@ -86,6 +86,24 @@ GENERATION_PROMPT = (
 )
 
 
+# Compact imperative variant of GENERATION_PROMPT for INSTRUCTION-EDIT swap
+# engines (Qwen Edit+ / Kontext / Seedream Edit). Edit models follow short
+# directives far better than multi-section enforcement prose — the long prompt
+# was written for generation models (GPT Image). Used automatically by the fal
+# dispatch when the job carries the stock default prompt; a user-customized
+# prompt is always passed through verbatim.
+EDIT_SWAP_PROMPT = (
+    "Replace the person in the first image with the person from the second image. "
+    "Take only the face, hair and skin tone from the second image. Keep everything "
+    "else from the first image exactly the same: identical framing, camera angle, "
+    "crop, pose, body position, hands, clothing and state of dress from the first "
+    "image, all objects and their positions, the background, and the lighting. The "
+    "person looks directly at the camera. Keep the ordinary unedited smartphone-photo "
+    "look of the first image: plain colors, neutral white balance, mild softness, no "
+    "beautification, no studio lighting. Remove any text or watermarks."
+)
+
+
 def generate_image(
     *,
     scene_image: Path,
@@ -209,6 +227,25 @@ def _dispatch_variant(
             reference_images=refs,
             app_job_id=job_id,
             model=model,
+        )
+        atomic_write_bytes(dest, data)
+        return dest
+    if model in ("qwen-edit-swap", "kontext-max-swap", "seedream-edit-swap"):
+        # fal-hosted instruction-edit engines — strict scene preservation:
+        # they EDIT the scene image in place guided by the prompt, taking the
+        # new person's identity from the character image (reference #2).
+        # Edit models want short imperative directives, so the stock long
+        # default prompt is swapped for EDIT_SWAP_PROMPT; custom prompts pass
+        # through verbatim.
+        from character_swap.clients import fal_image
+        effective = EDIT_SWAP_PROMPT if prompt == GENERATION_PROMPT else prompt
+        data = fal_image.swap_image(
+            model_slug=model,
+            scene_image=scene_image,
+            character_image=character_image,
+            prompt=effective,
+            aspect_ratio="9:16",
+            app_job_id=job_id,
         )
         atomic_write_bytes(dest, data)
         return dest
