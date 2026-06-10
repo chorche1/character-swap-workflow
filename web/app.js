@@ -106,6 +106,8 @@ function studio() {
       outfitMode: 'scene',           // scene | character | custom
       outfitText: '',                // clothing description for custom mode
       sceneSensitivity: 'high',      // normal | high | max cut detection
+      background: null,              // optional File: replacement environment
+      backgroundUrl: '',             // object URL for the thumbnail
       submitting: false,
     },
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
@@ -1217,6 +1219,13 @@ function studio() {
       this.reengineerGen.name = file.name;
     },
 
+    setReengineerBackground(file) {
+      if (!file) return;
+      if (this.reengineerGen.backgroundUrl) URL.revokeObjectURL(this.reengineerGen.backgroundUrl);
+      this.reengineerGen.background = file;
+      this.reengineerGen.backgroundUrl = URL.createObjectURL(file);
+    },
+
     toggleReengineerChar(cid) {
       const ids = this.reengineerGen.charIds;
       const i = ids.indexOf(cid);
@@ -1240,6 +1249,7 @@ function studio() {
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
+        if (g.background) fd.append('background_file', g.background);
         const r = await fetch('/api/reengineer', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Reengineer failed: ' + await r.text()); return; }
         const state = await r.json();

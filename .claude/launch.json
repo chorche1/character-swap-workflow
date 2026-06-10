@@ -4,13 +4,22 @@
     {
       "name": "character-swap",
       "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
-      "runtimeArgs": ["run", "character-swap", "serve", "--no-open"],
+      "runtimeArgs": [
+        "run",
+        "character-swap",
+        "serve",
+        "--no-open"
+      ],
       "port": 8000
     },
     {
       "name": "static-verify",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8765"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765"
+      ],
       "port": 8765
     }
   ]

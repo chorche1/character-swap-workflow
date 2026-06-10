@@ -175,3 +175,53 @@ def test_build_edit_swap_prompt_outfit_modes():
         pipeline.build_edit_swap_prompt("custom", "")
     with pytest.raises(ValueError):
         pipeline.build_edit_swap_prompt("nope")
+
+
+def test_background_prompt_mode():
+    """Background mode: Image 3 environment + relight directives; non-background
+    output stays byte-identical to the bake-off-validated prompt."""
+    from character_swap import pipeline
+    p = pipeline.build_edit_swap_prompt("scene", background=True)
+    assert "Image 3 is the NEW ENVIRONMENT" in p
+    assert "relight" in p.lower()
+    assert "do not keep Image 1's background" in p
+    # The kept-objects guarantee (products must survive the background swap).
+    assert "every object, product and prop the person touches" in p
+    # character outfit + background combine without contradiction
+    pc = pipeline.build_edit_swap_prompt("character", background=True)
+    assert "wears their own outfit from Image 2" in pc
+    # default stays the validated prompt
+    assert pipeline.build_edit_swap_prompt("scene") == pipeline.EDIT_SWAP_PROMPT
+
+
+def test_fal_payload_includes_background_as_third_image(monkeypatch, tmp_path):
+    from character_swap.clients import fal_image
+    monkeypatch.setattr(fal_image, "_hosted_url", lambda p: f"https://cdn.fake/{p.name}")
+    scene = tmp_path / "s.png"; scene.write_bytes(b"s")
+    char = tmp_path / "c.png"; char.write_bytes(b"c")
+    bg = tmp_path / "bg.png"; bg.write_bytes(b"b")
+    payload = fal_image._payload_for(
+        "fal-ai/nano-banana-pro/edit", prompt="p", scene_image=scene,
+        character_image=char, aspect_ratio="9:16", extra_reference_image=bg)
+    assert payload["image_urls"] == [
+        "https://cdn.fake/s.png", "https://cdn.fake/c.png", "https://cdn.fake/bg.png"]
+    # without background: two images, unchanged behavior
+    p2 = fal_image._payload_for(
+        "fal-ai/nano-banana-pro/edit", prompt="p", scene_image=scene,
+        character_image=char, aspect_ratio="9:16")
+    assert len(p2["image_urls"]) == 2
+
+
+def test_dispatch_threads_extra_reference_to_fal(monkeypatch, tmp_path):
+    from character_swap import pipeline
+    from character_swap.clients import fal_image
+    seen = {}
+    monkeypatch.setattr(fal_image, "swap_image",
+                        lambda **kw: seen.update(kw) or b"img")
+    bg = tmp_path / "bg.png"; bg.write_bytes(b"b")
+    pipeline._dispatch_variant(
+        model="nbp-swap", scene_image=Path("/s.png"),
+        character_image=Path("/c.png"), character_name="X",
+        prompt="custom", dest=tmp_path / "o.png", job_id=None,
+        extra_reference_image=bg)
+    assert seen["extra_reference_image"] == bg

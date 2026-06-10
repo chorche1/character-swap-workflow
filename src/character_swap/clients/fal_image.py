@@ -94,9 +94,13 @@ def _hosted_url(path: Path) -> str:
 
 
 def _payload_for(model_id: str, *, prompt: str, scene_image: Path,
-                 character_image: Path, aspect_ratio: str) -> dict:
-    """Two-image edit payload, with per-model sizing quirks."""
+                 character_image: Path, aspect_ratio: str,
+                 extra_reference_image: Path | None = None) -> dict:
+    """Two-image edit payload (+ optional 3rd reference, e.g. a replacement
+    background), with per-model sizing quirks."""
     images = [_hosted_url(scene_image), _hosted_url(character_image)]
+    if extra_reference_image is not None:
+        images.append(_hosted_url(extra_reference_image))
     payload: dict = {"prompt": prompt, "image_urls": images, "num_images": 1}
     if "nano-banana" in model_id:
         payload["aspect_ratio"] = aspect_ratio        # e.g. "9:16"
@@ -155,14 +159,18 @@ def swap_image(
     prompt: str,
     aspect_ratio: str = "9:16",
     app_job_id: str | None = None,
+    extra_reference_image: Path | None = None,
 ) -> bytes:
     """Run a scene-preserving person swap on a fal-hosted instruction-edit
-    model. `model_slug` is one of SWAP_MODELS' keys. Returns image bytes."""
+    model. `model_slug` is one of SWAP_MODELS' keys. An optional third
+    reference (Image 3 in the prompt — e.g. a replacement background) is
+    appended after scene + character. Returns image bytes."""
     model_id = SWAP_MODELS.get(model_slug)
     if model_id is None:
         raise FalError(f"Unknown fal swap model slug: {model_slug}")
     payload = _payload_for(model_id, prompt=prompt, scene_image=scene_image,
-                           character_image=character_image, aspect_ratio=aspect_ratio)
+                           character_image=character_image, aspect_ratio=aspect_ratio,
+                           extra_reference_image=extra_reference_image)
     with record(phase="fal_swap", model=model_slug, job_id=app_job_id) as entry:
         with httpx.Client(timeout=_TIMEOUT, headers=_headers()) as client:
             r = client.post(f"{_QUEUE_BASE}/{model_id}", json=payload)

@@ -140,14 +140,22 @@ _OUTFIT_CLAUSES = {
 
 
 def build_edit_swap_prompt(outfit_mode: str = "scene",
-                           outfit_text: str | None = None) -> str:
-    """Assemble the instruction-edit swap prompt for an outfit mode:
+                           outfit_text: str | None = None,
+                           background: bool = False) -> str:
+    """Assemble the instruction-edit swap prompt.
 
+    Outfit modes:
     - "scene" (default): wear exactly the original person's clothes from the
-      scene — the bake-off-validated wording, byte-identical to
-      EDIT_SWAP_PROMPT.
+      scene — the bake-off-validated wording; byte-identical to
+      EDIT_SWAP_PROMPT when background=False.
     - "character": wear the character reference's own clothes.
     - "custom": wear `outfit_text` (a free-text description).
+
+    `background=True` adds Image 3 as a replacement environment: the person,
+    pose, framing and every object they interact with stay from Image 1, but
+    the surroundings become Image 3's location — and the person + kept
+    foreground objects are RELIT with Image 3's light (direction, color
+    temperature, shadows, white balance, grain) so nothing looks pasted in.
     """
     if outfit_mode not in _OUTFIT_CLAUSES:
         raise ValueError(f"Unknown outfit_mode '{outfit_mode}'")
@@ -156,28 +164,84 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
     outfit_clause, constraint_line = _OUTFIT_CLAUSES[outfit_mode]
     if outfit_mode == "custom":
         outfit_clause = outfit_clause.format(outfit=outfit_text.strip())
+
+    if background:
+        roles = (
+            "Image 1 is the master scene for the subject: it fixes the framing, "
+            "the person's pose, and every object they interact with. Image 2 is "
+            "only the identity reference for the replacement person. Image 3 is "
+            "the NEW ENVIRONMENT: the finished photo takes place in Image 3's "
+            "location.\n"
+        )
+        preserve = (
+            "Keep from Image 1: the framing, composition, crop, camera angle, "
+            "camera height, camera distance, focal-length appearance, "
+            "perspective, subject scale and headroom, the person's exact "
+            "placement in the frame, and every object, product and prop the "
+            "person touches, holds or uses — same position relative to the "
+            "person, size, orientation, color, material and physical state, with "
+            "all text and brand labels legible and unchanged. Replace everything "
+            "else — the surroundings, surfaces, walls, floor/ground, furniture "
+            "and backdrop — with the environment from Image 3, matching Image "
+            "3's setting faithfully and extending it naturally where Image 3 "
+            "does not cover the frame.\n"
+        )
+        integration = (
+            "Integration — this decides whether the image is usable: relight "
+            "the person AND the kept foreground objects entirely with Image 3's "
+            "light. Use Image 3's light direction, color temperature, intensity "
+            "and softness; discard the lighting baked into Image 1 and Image 2. "
+            "Ground the person in the new environment with correct contact "
+            "shadows where body or objects meet Image 3's surfaces and a cast "
+            "shadow consistent with Image 3's light source. Match Image 3's "
+            "white balance, exposure, sharpness, depth of field and image grain "
+            "across the ENTIRE frame — person, props and background must read "
+            "as one single photograph taken in Image 3's location, never as a "
+            "person cut out and pasted onto a backdrop.\n"
+        )
+        # The per-outfit-mode constraint line stays intact except that Image
+        # 1's background is no longer protected (it is being replaced).
+        bg_constraints = (
+            "do not keep Image 1's background, walls, floors or surroundings; "
+            "do not invent an environment that is not Image 3's; do not leave "
+            "the person's lighting inconsistent with Image 3; "
+        )
+        constraint_line = bg_constraints + constraint_line.replace(
+            "do not alter the framing, camera, background, objects",
+            "do not alter the framing, camera, objects", 1)
+    else:
+        roles = (
+            "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
+            "identity reference for the replacement person.\n"
+        )
+        preserve = (
+            "Recreate Image 1 exactly — same framing, composition, crop, camera angle, "
+            "camera height, camera distance, focal-length appearance, perspective, "
+            "subject scale, headroom, and the exact placement, size, orientation, "
+            "color, material and physical state of every object, surface and "
+            "background element. Do not reframe, recrop, zoom, rotate, or shift the "
+            "camera in any way. Keep all visible text and brand labels legible and "
+            "unchanged.\n"
+        )
+        integration = (
+            "Integration: light the replacement person with the scene's own light "
+            "sources and color grade. Match skin texture, facial shadows, "
+            "perspective, edge blending, white balance, sharpness, depth of field and "
+            "image grain to Image 1 so the person belongs naturally in the photo, "
+            "including correct cast shadows and contact shadows where the body meets "
+            "surfaces.\n"
+        )
+
     return (
-        "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
-        "identity reference for the replacement person.\n"
-        "Recreate Image 1 exactly — same framing, composition, crop, camera angle, "
-        "camera height, camera distance, focal-length appearance, perspective, "
-        "subject scale, headroom, and the exact placement, size, orientation, "
-        "color, material and physical state of every object, surface and "
-        "background element. Do not reframe, recrop, zoom, rotate, or shift the "
-        "camera in any way. Keep all visible text and brand labels legible and "
-        "unchanged.\n"
-        "Replace the person in Image 1 with the person from Image 2, as if they "
+        roles
+        + preserve
+        + "Replace the person in Image 1 with the person from Image 2, as if they "
         "had been standing there when the photo was taken — as if part of the "
         "same photo. " + outfit_clause + " The replacement person looks "
         "directly into the camera lens with a natural, composed expression, even "
         "if the original person was not.\n"
-        "Integration: light the replacement person with the scene's own light "
-        "sources and color grade. Match skin texture, facial shadows, "
-        "perspective, edge blending, white balance, sharpness, depth of field and "
-        "image grain to Image 1 so the person belongs naturally in the photo, "
-        "including correct cast shadows and contact shadows where the body meets "
-        "surfaces.\n"
-        "Style: a completely ordinary, unedited iPhone photo taken quickly by "
+        + integration
+        + "Style: a completely ordinary, unedited iPhone photo taken quickly by "
         "another person — plain, slightly dull phone-camera colors, neutral white "
         "balance, mundane ambient daylight, slightly uneven exposure, mild "
         "softness, subtle sensor noise, natural non-polished skin with visible "
@@ -342,6 +406,7 @@ def _dispatch_variant(
             prompt=effective,
             aspect_ratio="9:16",
             app_job_id=job_id,
+            extra_reference_image=extra_reference_image,
         )
         atomic_write_bytes(dest, data)
         return dest

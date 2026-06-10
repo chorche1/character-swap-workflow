@@ -4072,6 +4072,9 @@ async def reengineer_create(
     outfit_text: str = Form(""),
     # Cut sensitivity: normal/high/max -> ffmpeg scene-score thresholds.
     scene_sensitivity: str = Form("high"),
+    # Optional replacement background: applied to EVERY scene's swap image;
+    # the character + kept props are relit to match its light.
+    background_file: UploadFile | None = File(None),
 ) -> dict:
     """Upload a reference video and start the Reengineer pipeline. Returns the
     initial state immediately; poll GET /api/reengineer/{re_id}."""
@@ -4117,6 +4120,21 @@ async def reengineer_create(
     tmp.write_bytes(data)
     tmp.replace(source_path)
 
+    background_path: str | None = None
+    if background_file is not None and (background_file.filename or "").strip():
+        bg_ext = _safe_ext(background_file.filename or "")
+        if not bg_ext:
+            raise HTTPException(400, "Background must be an image "
+                                     f"({sorted(ALLOWED_IMAGE_EXTS)})")
+        bg_data = await _read_capped(background_file)
+        if not bg_data:
+            raise HTTPException(400, "Empty background upload")
+        bg_dest = work / f"background{bg_ext}"
+        bg_tmp = bg_dest.with_suffix(bg_dest.suffix + ".tmp")
+        bg_tmp.write_bytes(bg_data)
+        bg_tmp.replace(bg_dest)
+        background_path = str(bg_dest)
+
     initial_state = {
         "re_id": re_id,
         "created_at": datetime.utcnow().isoformat() + "Z",
@@ -4132,6 +4150,7 @@ async def reengineer_create(
         "outfit_mode": outfit_mode,
         "outfit_text": outfit_text.strip(),
         "scene_sensitivity": scene_sensitivity,
+        "background_path": background_path,
         "scenes": [],
         "job_id": None,
         "finals": {},
