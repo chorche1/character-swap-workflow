@@ -25,10 +25,13 @@ from character_swap.models import (
     AppState,
     CharacterAsset,
     CharacterImage,
+    GeneratedImage,
     Job,
+    JobCharacter,
     MediaGeneration,
     ProjectAsset,
     SceneAsset,
+    VideoVariant,
 )
 
 
@@ -132,6 +135,21 @@ class JsonStateStore:
         job.updated_at = datetime.utcnow()
         self._state.jobs[job.job_id] = job
         self.save()
+
+    # Granular fast paths (one variant / one character / one video changed).
+    # The JSON backend rewrites the whole file regardless, so these simply
+    # delegate; they exist so callers can use one API on either backend —
+    # the SQLite versions write single rows instead of all children.
+    def update_variant(self, job: Job, jc: JobCharacter,
+                       variant: GeneratedImage) -> None:
+        self.update_job(job)
+
+    def update_job_character(self, job: Job, jc: JobCharacter) -> None:
+        self.update_job(job)
+
+    def update_video(self, job: Job, jc: JobCharacter,
+                     video: VideoVariant) -> None:
+        self.update_job(job)
 
     # projects
     def add_project(self, project: ProjectAsset) -> None:
@@ -285,6 +303,64 @@ class SqliteStateStore:
         self._state.jobs[job.job_id] = job
         with self._lock, db.transaction(self._conn) as conn:
             db.upsert_job(conn, job)
+
+    # Granular fast paths: a variant status flip on a 45-slot job used to
+    # DELETE+reinsert ALL its children (~550KB, ~65×/run) synchronously —
+    # these write the one changed row (+ its parent character row) instead.
+    # They CANNOT express deletions: structural changes (wiped images,
+    # removed characters) must go through update_job.
+    def _positions(self, job: Job, jc: JobCharacter):
+        char_pos = list(job.characters).index(jc.char_id)
+        return char_pos
+
+    def update_variant(self, job: Job, jc: JobCharacter,
+                       variant: GeneratedImage) -> None:
+        try:
+            v_pos = next(i for i, x in enumerate(jc.images)
+                         if x.variant_id == variant.variant_id)
+            char_pos = self._positions(job, jc)
+        except (StopIteration, ValueError):
+            # Not attached where expected — structural change; full write.
+            self.update_job(job)
+            return
+        job.updated_at = datetime.utcnow()
+        self._state.jobs[job.job_id] = job
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_job_character(conn, job.job_id, char_pos, jc)
+            db.upsert_variant(conn, job.job_id, jc.char_id, v_pos, variant)
+            db.touch_job(conn, job.job_id, job.updated_at.isoformat())
+
+    def update_job_character(self, job: Job, jc: JobCharacter) -> None:
+        try:
+            char_pos = self._positions(job, jc)
+        except ValueError:
+            self.update_job(job)
+            return
+        job.updated_at = datetime.utcnow()
+        self._state.jobs[job.job_id] = job
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_job_character(conn, job.job_id, char_pos, jc)
+            for i, v in enumerate(jc.images):
+                db.upsert_variant(conn, job.job_id, jc.char_id, i, v)
+            for i, vv in enumerate(jc.videos):
+                db.upsert_video(conn, job.job_id, jc.char_id, i, vv)
+            db.touch_job(conn, job.job_id, job.updated_at.isoformat())
+
+    def update_video(self, job: Job, jc: JobCharacter,
+                     video: VideoVariant) -> None:
+        try:
+            v_pos = next(i for i, x in enumerate(jc.videos)
+                         if x.video_id == video.video_id)
+            char_pos = self._positions(job, jc)
+        except (StopIteration, ValueError):
+            self.update_job(job)
+            return
+        job.updated_at = datetime.utcnow()
+        self._state.jobs[job.job_id] = job
+        with self._lock, db.transaction(self._conn) as conn:
+            db.upsert_job_character(conn, job.job_id, char_pos, jc)
+            db.upsert_video(conn, job.job_id, jc.char_id, v_pos, video)
+            db.touch_job(conn, job.job_id, job.updated_at.isoformat())
 
     # projects
     def add_project(self, project: ProjectAsset) -> None:

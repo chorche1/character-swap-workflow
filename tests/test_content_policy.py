@@ -57,12 +57,14 @@ def test_soften_appends_minimal_clause_first():
     assert len(out) > len("a man on a beach")
 
 
-def test_soften_uses_the_single_hypothetical_clause():
-    # Only one softener clause exists; every attempt reuses it.
-    a1 = cp.soften("x", 1)
-    assert a1.startswith("x")
-    assert "hypothetical" in a1.lower()
-    assert cp.soften("x", 2) == a1
+def test_soften_walks_the_ladder_append_only():
+    # Every rung of the softener ladder appends to the verbatim original;
+    # later rungs are distinct (escalating) clauses.
+    outs = [cp.soften("x", n) for n in range(1, cp.SOFTEN_ATTEMPTS + 1)]
+    for out in outs:
+        assert out.startswith("x")
+        assert len(out) > 1
+    assert len(set(outs)) == len(outs)   # each rung is a different clause
 
 
 def test_soften_past_last_reuses_strongest():
@@ -125,6 +127,23 @@ def test_gives_up_after_all_softeners_and_reraises():
         cp.generate_with_softening(call, prompt="nope")
     # original + SOFTEN_ATTEMPTS retries
     assert len(seen) == cp.SOFTEN_ATTEMPTS + 1
+
+
+def test_second_softener_is_stronger_and_applied():
+    """A prompt rejected twice gets the rung-2 reframe (the full fictional-
+    film-production clause) on the third provider call."""
+    seen = []
+    def call(*, prompt):
+        seen.append(prompt)
+        if len(seen) <= 2:
+            raise _rejection()
+        return b"OK"
+    out = cp.generate_with_softening(call, prompt="a risky scene")
+    assert out == b"OK"
+    assert len(seen) == 3
+    assert seen[2].startswith("a risky scene")
+    assert "fictional" in seen[2].lower()
+    assert len(seen[2]) > len(seen[1])   # rung 2 is the stronger clause
 
 
 def test_passes_through_other_kwargs():

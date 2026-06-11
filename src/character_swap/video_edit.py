@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,24 @@ import imageio_ffmpeg
 from character_swap.call_log import record
 from character_swap.clients import openai_image  # reuse _client() for OpenAI auth
 from character_swap.config import settings
+
+
+def _ffprobe() -> str | None:
+    """Path to an ffprobe binary, or None. imageio-ffmpeg bundles ONLY
+    ffmpeg, so we look on PATH and next to the bundled ffmpeg (system
+    installs ship the pair side by side). ffprobe answers metadata questions
+    (duration, has-audio) in <200ms where a full `ffmpeg -f null -` decode
+    of the whole file takes seconds-to-minutes."""
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    try:
+        sibling = Path(imageio_ffmpeg.get_ffmpeg_exe()).with_name("ffprobe")
+        if sibling.exists():
+            return str(sibling)
+    except Exception:
+        pass
+    return None
 
 
 def _ffmpeg() -> str:
@@ -193,14 +212,36 @@ def _run(args: list[str]) -> str:
 # --- 1. Silence-based jump-cut --------------------------------------------------------
 
 def _probe_duration(input_path: Path) -> float:
-    """Total duration in seconds."""
-    out = _run([
-        _ffmpeg(), "-hide_banner", "-i", str(input_path), "-f", "null", "-",
-    ])
+    """Total duration in seconds.
+
+    ffprobe fast path (<200ms); fallback is a HEADER-ONLY `ffmpeg -i` probe —
+    no output target, so ffmpeg prints the metadata and exits without
+    decoding a single frame. (The old `-f null -` form decoded the entire
+    file just to read one header line: seconds of CPU per call, and this is
+    called once per Reengineer analysis + 8+ Editor sites.)"""
+    probe = _ffprobe()
+    if probe:
+        try:
+            proc = subprocess.run(
+                [probe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(input_path)],
+                capture_output=True, text=True, check=False)
+            if proc.returncode == 0 and proc.stdout.strip():
+                return float(proc.stdout.strip())
+        except (ValueError, OSError):
+            pass
+    # `ffmpeg -i <file>` with no output exits non-zero AFTER printing the
+    # metadata to stderr — _run raises with that stderr embedded.
+    try:
+        out = _run([_ffmpeg(), "-hide_banner", "-i", str(input_path)])
+    except RuntimeError as e:
+        out = str(e)
     # ffmpeg prints "Duration: HH:MM:SS.ms," — parse it
     for line in out.splitlines():
         if "Duration:" in line:
             dur = line.split("Duration:")[1].split(",")[0].strip()
+            if dur == "N/A":
+                break
             h, m, s = dur.split(":")
             return int(h) * 3600 + int(m) * 60 + float(s)
     return 0.0
@@ -461,12 +502,25 @@ def _has_audio_stream(video_path: Path) -> bool:
     with "Output file does not contain any stream" when you try to extract
     audio from them. Callers should probe with this before _extract_audio
     or any atempo/setpts filter chain that maps `[0:a]`.
+
+    ffprobe fast path; fallback is a header-only `ffmpeg -i` probe (exits
+    non-zero after printing stream metadata — NO decode). The old `-f null -`
+    form decoded the whole file to answer a yes/no question.
     """
+    probe = _ffprobe()
+    if probe:
+        try:
+            proc = subprocess.run(
+                [probe, "-v", "error", "-select_streams", "a",
+                 "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+                 str(video_path)],
+                capture_output=True, text=True, check=False)
+            if proc.returncode == 0:
+                return bool(proc.stdout.strip())
+        except OSError:
+            pass
     try:
-        out = _run([
-            _ffmpeg(), "-hide_banner", "-i", str(video_path),
-            "-f", "null", "-",
-        ])
+        out = _run([_ffmpeg(), "-hide_banner", "-i", str(video_path)])
     except RuntimeError as e:
         out = str(e)
     # ffmpeg's -i probe prints a "Stream #0:N: Audio:" line for every

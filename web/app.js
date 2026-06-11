@@ -114,6 +114,16 @@ function studio() {
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
+    // variant_id → Date.now() set on per-slot retry. A retry overwrites the
+    // SAME file path, so the thumbnail <img> needs a cache-busting query to
+    // show the regenerated image instead of the browser-cached old one.
+    reengineerRetryNonce: {},
+    // job_id → WebSocket. Reengineer runs ride the same /ws/jobs/{job_id}
+    // stream the Swap tab uses — every variant.* event triggers a debounced
+    // slim refetch so thumbnails/progress land in ~real time instead of on
+    // the next 5s poll tick.
+    _reengineerSockets: {},
+    _reRefreshTimers: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -30,       // Hugo's preset
@@ -976,6 +986,29 @@ function studio() {
       return { n, done, failed, inFlight, percent, eta };
     },
 
+    // Swap/Reengineer: aggregate image-phase progress across every variant
+    // slot of a job — drives the "k/N images · m QC retries" counters in the
+    // Step-3 header, the Reengineer run header, and the status toast.
+    // retries counts qc_attempts beyond the first per slot (live while the
+    // slot is still generating, since the runner bumps qc_attempts in place).
+    jobImageProgress(job) {
+      const vs = Object.values(job?.characters || {}).flatMap(c => c.images || []);
+      if (!vs.length) return null;
+      const ready = vs.filter(v => v.status === 'ready').length;
+      const failed = vs.filter(v => v.status === 'failed').length;
+      const retries = vs.reduce((a, v) => a + Math.max(0, (v.qc_attempts || 1) - 1), 0);
+      return { total: vs.length, ready, failed, generating: vs.length - ready - failed, retries };
+    },
+
+    // Compact text form of jobImageProgress for headers/toast entries.
+    jobImageProgressText(job) {
+      const p = this.jobImageProgress(job);
+      if (!p) return '';
+      return `${p.ready + p.failed}/${p.total} images`
+        + (p.failed ? ` (${p.failed} failed)` : '')
+        + (p.retries ? ` · ${p.retries} QC ${p.retries === 1 ? 'retry' : 'retries'}` : '');
+    },
+
     // Aggregate every in-flight job across tabs into one list for the
     // persistent status toast at the bottom-right. Each entry has:
     //   {kind, label, status, tab, navigate(): switch to its tab}
@@ -989,7 +1022,11 @@ function studio() {
           id: r.re_id, kind: 'reengineer', tab: 'reengineer',
           label: (r.source_name || r.re_id).slice(0, 50),
           status: r.status,
-          progress: r.n_scenes ? `${r.n_scenes} scenes` : '',
+          // During the swap phase show live image progress; otherwise the
+          // static scene count.
+          progress: (r.status === 'swapping' && this.jobImageProgress(r.job))
+            ? this.jobImageProgressText(r.job)
+            : (r.n_scenes ? `${r.n_scenes} scenes` : ''),
           created_at: r.created_at,
         });
       }
@@ -1309,18 +1346,60 @@ function studio() {
     },
 
     _reengineerIsActive(r) {
-      return ['queued', 'analyzing', 'swapping', 'animating', 'assembling'].includes(r.status);
+      // awaiting_approval counts as active while a per-slot retry is in
+      // flight — otherwise the poll filter drops the run and the retried
+      // slot never repaints (the timer used to self-clear here).
+      return ['queued', 'analyzing', 'swapping', 'animating', 'assembling'].includes(r.status)
+        || (r.status === 'awaiting_approval' && this._reengineerHasInFlight(r));
+    },
+
+    _reengineerHasInFlight(r) {
+      return Object.values(r.job?.characters || {})
+        .some(c => (c.images || []).some(v => v.status === 'generating'));
+    },
+
+    // Live updates: subscribe to the existing per-job WebSocket (the runner
+    // emits variant.started/ready/failed/qc_retry/fallback on it) and turn
+    // any event into a debounced slim refetch. The 5s poll stays as the
+    // fallback for reengineer-level transitions (swapping→awaiting_approval
+    // is written to state.json by the watcher, not emitted over WS).
+    _ensureReengineerWS(run) {
+      const jid = run.job_id;
+      if (!jid || this._reengineerSockets[jid]) return;
+      const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
+        + '/ws/jobs/' + jid;
+      const ws = new WebSocket(url);
+      this._reengineerSockets[jid] = ws;
+      ws.onmessage = () => this._debouncedReengineerRefresh(run.re_id);
+      ws.onclose = () => { delete this._reengineerSockets[jid]; };
+      ws.onerror = () => {};
+    },
+
+    _closeReengineerWS(jobId) {
+      const ws = this._reengineerSockets[jobId];
+      if (ws) { try { ws.close(); } catch (_) {} delete this._reengineerSockets[jobId]; }
+    },
+
+    _debouncedReengineerRefresh(reId) {
+      clearTimeout(this._reRefreshTimers[reId]);
+      this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 400);
     },
 
     async refreshReengineer(reId) {
       try {
-        const r = await fetch('/api/reengineer/' + reId);
+        // slim=1: variant prompts (~3.3KB × 45) are never rendered here.
+        const r = await fetch('/api/reengineer/' + reId + '?slim=1');
         if (!r.ok) return;
         const fresh = await r.json();
         const i = this.reengineerHistory.findIndex(x => x.re_id === reId);
         const prev = i >= 0 ? this.reengineerHistory[i] : null;
         if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
         else this.reengineerHistory.unshift(fresh);
+        if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
+          if (fresh.job_id) this._closeReengineerWS(fresh.job_id);
+        } else if (fresh.job_id) {
+          this._ensureReengineerWS(fresh);
+        }
         if (prev && prev.status !== fresh.status) {
           if (fresh.status === 'awaiting_approval') {
             this.notifyMilestone('Reengineer — review swapped images',
@@ -1370,6 +1449,13 @@ function studio() {
           body: JSON.stringify({}) });
       if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
       this.notifyInfo('Regenerating the failed image…');
+      // Cache-buster: the retry regenerates into the SAME file path.
+      this.reengineerRetryNonce = { ...this.reengineerRetryNonce, [variantId]: Date.now() };
+      // Optimistically flip the slot so the poll filter sees the run as
+      // in-flight even from awaiting_approval (and the skeleton shows now).
+      const slot = (run.job?.characters?.[charId]?.images || [])
+        .find(v => v.variant_id === variantId);
+      if (slot) slot.status = 'generating';
       this._startReengineerPolling();
       await this.refreshReengineer(run.re_id);
     },

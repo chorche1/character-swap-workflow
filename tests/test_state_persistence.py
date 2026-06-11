@@ -321,3 +321,147 @@ def test_sqlite_multi_scene_survives_restart(sqlite_db_path):
     assert loaded.origin == "reengineer:re_x"
     lv = loaded.characters["c1"].images
     assert [v.scene_id for v in lv] == ["sc_A", "sc_B"]
+
+
+# --- Granular fast paths (update_variant / update_job_character / update_video) --------
+#
+# A variant status flip on a 45-slot job used to DELETE+reinsert every child
+# row (~550KB × ~65 writes per Reengineer run). The fast paths write single
+# rows; these tests prove they round-trip AND leave every sibling intact.
+
+from character_swap.models import (   # noqa: E402 — grouped with their tests
+    CharStatus,
+    GeneratedImage,
+    VariantStatus,
+    VideoStatus,
+    VideoVariant,
+)
+
+
+def _two_char_job() -> Job:
+    chars = {}
+    for c in ("cA", "cB"):
+        images = [GeneratedImage(variant_id=f"{c}-v{i}", path=f"/{c}-v{i}.png",
+                                 prompt=f"prompt-{c}-{i}", scene_id="s1",
+                                 status=VariantStatus.GENERATING)
+                  for i in range(2)]
+        videos = [VideoVariant(video_id=f"{c}-vid0", grok_job_id="g0",
+                               status=VideoStatus.PENDING)]
+        chars[c] = JobCharacter(char_id=c, name=c.upper(),
+                                source_image_path="/src.png",
+                                status=CharStatus.GENERATING,
+                                images=images, videos=videos)
+    return Job(job_id="j1", title="t", scene_id="s1",
+               scene_image_path="/scene.png", characters=chars)
+
+
+def test_sqlite_update_variant_fast_path_round_trip(sqlite_db_path):
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    jc = job.characters["cA"]
+    v = jc.images[1]
+    v.status = VariantStatus.READY
+    v.qc_status = "passed"
+    v.qc_attempts = 2
+    v.fallback_model = "nbp-swap"
+    s1.update_variant(job, jc, v)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_job("j1")
+    lv = loaded.characters["cA"].images[1]
+    assert lv.status == VariantStatus.READY
+    assert lv.qc_status == "passed"
+    assert lv.qc_attempts == 2
+    assert lv.fallback_model == "nbp-swap"
+    # Every sibling untouched, order preserved.
+    assert [x.variant_id for x in loaded.characters["cA"].images] == ["cA-v0", "cA-v1"]
+    assert loaded.characters["cA"].images[0].status == VariantStatus.GENERATING
+    assert [x.variant_id for x in loaded.characters["cB"].images] == ["cB-v0", "cB-v1"]
+    assert len(loaded.characters["cB"].videos) == 1
+
+
+def test_sqlite_update_job_character_fast_path(sqlite_db_path):
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    jc = job.characters["cB"]
+    jc.status = CharStatus.AWAITING_APPROVAL
+    jc.images[0].status = VariantStatus.READY
+    s1.update_job_character(job, jc)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_job("j1")
+    assert loaded.characters["cB"].status == CharStatus.AWAITING_APPROVAL
+    assert loaded.characters["cB"].images[0].status == VariantStatus.READY
+    assert loaded.characters["cA"].status == CharStatus.GENERATING
+
+
+def test_sqlite_update_video_fast_path(sqlite_db_path):
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    jc = job.characters["cA"]
+    vv = jc.videos[0]
+    vv.status = VideoStatus.DONE
+    vv.final_video_path = "/final.mp4"
+    s1.update_video(job, jc, vv)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_job("j1")
+    assert loaded.characters["cA"].videos[0].status == VideoStatus.DONE
+    assert loaded.characters["cA"].videos[0].final_video_path == "/final.mp4"
+    assert loaded.characters["cB"].videos[0].status == VideoStatus.PENDING
+
+
+def test_sqlite_appended_variant_via_fast_path(sqlite_db_path):
+    """_replace_variant appends NEW variants (e.g. edits) then fast-paths —
+    the insert must land."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    jc = job.characters["cA"]
+    new = GeneratedImage(variant_id="cA-edit", path="/e.png", prompt="edit",
+                         scene_id="s1", status=VariantStatus.GENERATING)
+    jc.images.append(new)
+    s1.update_variant(job, jc, new)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert [x.variant_id for x in s2.get_job("j1").characters["cA"].images] \
+        == ["cA-v0", "cA-v1", "cA-edit"]
+
+
+def test_sqlite_wipe_still_deletes_rows_via_full_update(sqlite_db_path):
+    """The _kick_char wipe path uses the FULL update_job — old variant rows
+    must actually disappear (the fast paths can't delete)."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    jc = job.characters["cA"]
+    jc.images = []
+    jc.videos = []
+    s1.update_job(job)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_job("j1")
+    assert loaded.characters["cA"].images == []
+    assert loaded.characters["cA"].videos == []
+    assert len(loaded.characters["cB"].images) == 2
+
+
+def test_json_store_fast_paths_delegate(tmp_path):
+    s1 = JsonStateStore(path=tmp_path / "state.json")
+    job = _two_char_job()
+    s1.add_job(job)
+    jc = job.characters["cA"]
+    v = jc.images[0]
+    v.status = VariantStatus.READY
+    s1.update_variant(job, jc, v)
+
+    s2 = JsonStateStore(path=tmp_path / "state.json")
+    assert s2.get_job("j1").characters["cA"].images[0].status == VariantStatus.READY

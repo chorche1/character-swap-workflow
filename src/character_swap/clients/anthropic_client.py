@@ -21,6 +21,7 @@ them and falls back to existing prompt-enrich / raw-prompt paths.
 from __future__ import annotations
 
 import base64
+import functools
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -46,33 +47,36 @@ def _client():
             "anthropic",
             hint=f"`anthropic` package is not installed ({e}). Run `uv sync`.",
         ) from e
-    return anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    # Explicit timeout: the SDK default is 600s + 2 retries — a hung call
+    # could stall the Reengineer analyst (which serializes in front of ALL
+    # image generation) for up to ~30 min. Every caller (scene analyst, swap
+    # QC, Director) has a clean fallback, so failing fast is strictly safer.
+    return anthropic.Anthropic(api_key=settings.anthropic_api_key,
+                               timeout=120.0, max_retries=1)
 
 
-_IMAGE_MEDIA_TYPES: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
+@functools.lru_cache(maxsize=64)
+def _encoded_image(path_str: str, mtime_ns: int, max_long_edge_px: int) -> tuple[str, str]:
+    """(media_type, base64-data) for a resized/re-encoded image file.
 
+    Cached by (path, mtime, size): the swap-QC judge attaches the SAME scene
+    frame + character reference to every one of a run's 45+ inspections —
+    re-opening, LANCZOS-resizing, and re-encoding them each call was a few
+    hundred GIL-bound ms apiece. `mtime_ns` in the key invalidates naturally
+    when a file is regenerated in place.
 
-def _file_to_image_block(path: Path, *, max_long_edge_px: int = 1024) -> dict:
-    """Convert a local image file to an Anthropic image content block.
-
-    Resizes large images down so the base64-encoded payload stays well under
-    Anthropic's 32 MB request limit (and so vision processing is faster).
-    PNG/JPEG/WEBP/GIF are accepted; everything else is encoded as PNG after
-    a Pillow round-trip.
+    Encoding: photographic content (everything without a real alpha channel
+    — scene frames, character refs, generated variants) goes out as JPEG q88,
+    ~5-10x smaller than the optimized PNG it used to be; Anthropic's vision
+    cost is resolution-based, so PNG bought nothing but upload time. Images
+    WITH alpha keep lossless PNG.
     """
     from PIL import Image
 
-    suffix = path.suffix.lower()
-    media_type = _IMAGE_MEDIA_TYPES.get(suffix, "image/png")
-
-    with Image.open(path) as img:
-        img = img.convert("RGB") if media_type == "image/jpeg" else img.convert("RGBA" if img.mode in ("RGBA", "LA") else "RGB")
+    with Image.open(Path(path_str)) as img:
+        has_alpha = (img.mode in ("RGBA", "LA")
+                     or (img.mode == "P" and "transparency" in img.info))
+        img = img.convert("RGBA") if has_alpha else img.convert("RGB")
         # Downscale on the LONG edge; preserves aspect ratio.
         w, h = img.size
         long_edge = max(w, h)
@@ -82,18 +86,25 @@ def _file_to_image_block(path: Path, *, max_long_edge_px: int = 1024) -> dict:
             img = img.resize(new_size, Image.LANCZOS)
 
         buf = BytesIO()
-        save_format = "JPEG" if media_type == "image/jpeg" else "PNG"
-        # PNG losslessly; JPEG at high quality. Avoids palette/alpha issues.
-        if save_format == "JPEG":
-            img.save(buf, format="JPEG", quality=88, optimize=True)
-            media_type = "image/jpeg"
-        else:
-            # Anthropic prefers PNG for non-photographic content. Force-PNG
-            # for everything else (webp/gif/unknown) since we re-encoded anyway.
-            img.save(buf, format="PNG", optimize=True)
+        if has_alpha:
+            img.save(buf, format="PNG")
             media_type = "image/png"
-        data = base64.standard_b64encode(buf.getvalue()).decode("ascii")
+        else:
+            img.save(buf, format="JPEG", quality=88)
+            media_type = "image/jpeg"
+        return media_type, base64.standard_b64encode(buf.getvalue()).decode("ascii")
 
+
+def _file_to_image_block(path: Path, *, max_long_edge_px: int = 1024) -> dict:
+    """Convert a local image file to an Anthropic image content block.
+
+    Resizes large images down so the base64-encoded payload stays well under
+    Anthropic's 32 MB request limit (and so vision processing is faster).
+    Encoded payloads are LRU-cached per (path, mtime); each call returns a
+    FRESH block dict so callers may mutate their copy safely.
+    """
+    media_type, data = _encoded_image(str(path), path.stat().st_mtime_ns,
+                                      max_long_edge_px)
     return {
         "type": "image",
         "source": {

@@ -87,7 +87,16 @@ class Settings(BaseSettings):
     gemini_video_model: str = Field(default="veo-3.0-generate-preview",
                                     validation_alias="GEMINI_VIDEO_MODEL")
 
+    # Per-PROVIDER image-generation parallelism for the Swap/Reengineer
+    # variant runner. The single global cap of 2 was the measured wall-clock
+    # bottleneck (effective concurrency 1.78 on a 65-image burst; fal queues
+    # server-side and ran 202/202 ok, so client-side throttling buys nothing
+    # there). `image_concurrency` remains the fallback for providers without
+    # a dedicated knob (grok, etc.) and for unknown model slugs.
     image_concurrency: int = Field(default=2, validation_alias="IMAGE_CONCURRENCY")
+    image_concurrency_fal: int = Field(default=8, validation_alias="IMAGE_CONCURRENCY_FAL")
+    image_concurrency_openai: int = Field(default=4, validation_alias="IMAGE_CONCURRENCY_OPENAI")
+    image_concurrency_gemini: int = Field(default=2, validation_alias="IMAGE_CONCURRENCY_GEMINI")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
@@ -174,6 +183,19 @@ class Settings(BaseSettings):
     video_qc_max_retries: int = Field(default=1, validation_alias="VIDEO_QC_MAX_RETRIES")
     video_qc_speech_threshold: float = Field(default=0.7,
                                              validation_alias="VIDEO_QC_SPEECH_THRESHOLD")
+
+    # Reengineer swap-phase watchdog. PROGRESS-based, not a fixed deadline:
+    # the old fixed 30-min ceiling fired below the realistic duration of any
+    # gpt-image run > ~27 slots (128s median/call at concurrency 4) and marked
+    # runs failed while generation kept going (and billing). "Progress" =
+    # any variant reaching a terminal state OR any qc_attempts bump — each
+    # generation attempt is ≤ ~131s measured, so 10 min of true silence means
+    # a hung provider call, not a slow run. The max ceiling is a generous
+    # backstop against a watchdog bug, not a pacing expectation.
+    swap_stall_timeout_secs: int = Field(default=600,
+                                         validation_alias="SWAP_STALL_TIMEOUT_SECS")
+    swap_phase_max_secs: int = Field(default=7200,
+                                     validation_alias="SWAP_PHASE_MAX_SECS")
 
     # Opt-in SQLite state backend. Default off — JSON file remains canonical
     # until the user runs `character-swap migrate` + flips this on. Once stable

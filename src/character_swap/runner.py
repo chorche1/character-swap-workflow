@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import events, pipeline, swap_qc, video_qc
+from character_swap import content_policy, events, pipeline, swap_qc, video_qc
 from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
@@ -41,7 +42,15 @@ def _persist(job: Job, jc: JobCharacter, *, status: CharStatus | None = None,
         setattr(jc, k, v)
     jc.updated_at = datetime.utcnow()
     job.characters[jc.char_id] = jc
-    store().update_job(job)
+    s = store()
+    # Granular fast path when the store offers it (SQLite: writes only this
+    # character's rows instead of DELETE+reinserting every child of the job
+    # — ~65 such writes per Reengineer run). Fake stores in tests and the
+    # JSON backend fall through to the classic full update.
+    if hasattr(s, "update_job_character"):
+        s.update_job_character(job, jc)
+    else:
+        s.update_job(job)
     return jc
 
 
@@ -124,6 +133,30 @@ def _swap_image_model(job: Job) -> str:
     return m
 
 
+def _model_provider(slug: str) -> str | None:
+    """Provider name for an image-model slug via the registry (lazy import —
+    same cycle-avoidance as `_is_gemini_image_model`)."""
+    try:
+        from character_swap.runner_media import IMAGE_MODELS
+        return (IMAGE_MODELS.get((slug or "").strip()) or {}).get("provider")
+    except Exception:
+        return None
+
+
+def _image_concurrency_for_model(slug: str) -> int:
+    """Semaphore width for the variant runner, sized per PROVIDER. fal queues
+    server-side (zero rate-limit failures observed at any width) so it gets a
+    wide lane; OpenAI tolerates moderate parallelism; Gemini-direct rate-limits
+    aggressively (observed 429 bursts). Unknown providers/slugs fall back to
+    the conservative global `image_concurrency`."""
+    per = {
+        "fal": settings.image_concurrency_fal,
+        "openai": settings.image_concurrency_openai,
+        "gemini": settings.image_concurrency_gemini,
+    }.get(_model_provider(slug))
+    return max(1, per or settings.image_concurrency)
+
+
 def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:
     """Look up the scene image path for this variant. Variants carry
     their own `scene_id` (when generated under multi-scene support);
@@ -142,45 +175,61 @@ async def _generate_one_variant(
     job: Job, jc: JobCharacter, variant: GeneratedImage,
     sem: asyncio.Semaphore,
 ) -> None:
-    async with sem:
-        # Promote char status the first time we actually start work.
-        if jc.status == CharStatus.QUEUED:
-            _persist(job, jc, status=CharStatus.GENERATING)
-            await _emit(job.job_id, "char.generating", char_id=jc.char_id)
-        await _emit(job.job_id, "variant.started",
-                    char_id=jc.char_id, variant_id=variant.variant_id)
-        dest = Path(variant.path)
-        extra_ref: Path | None = None
-        if job.extra_reference_path:
-            candidate = Path(job.extra_reference_path)
-            if candidate.exists():
-                extra_ref = candidate
+    dest = Path(variant.path)
+    extra_ref: Path | None = None
+    if job.extra_reference_path:
+        candidate = Path(job.extra_reference_path)
+        if candidate.exists():
+            extra_ref = candidate
 
-        # Generate → vision-QC → regenerate-with-corrective-hint loop. QC
-        # checks identity (right person?) + obvious defects; a failed verdict
-        # re-runs the slot with the judge's hint appended, up to
-        # swap_qc_max_retries extra attempts. QC unavailable → single attempt,
-        # qc_status="skipped". Exhausted retries KEEP the last image (a
-        # false-positive judge must not destroy a usable variant) with a ⚠
-        # qc_status="failed" for the UI.
-        scene_path = _scene_path_for_variant(job, variant)
-        char_path = Path(jc.source_image_path)
-        max_attempts = 1 + max(0, settings.swap_qc_max_retries)
-        # Per-attempt inputs. After a QC failure the FIRST retry runs in
-        # repair mode: the failed image itself becomes the scene input with a
-        # fix-only-this instruction, so the result changes as little as
-        # possible. A second failure falls back to a fresh re-roll from the
-        # original scene with the judge's hint appended. (grok-image is
-        # text-only — repair mode would be ignored, so it re-rolls directly.)
-        attempt_scene = scene_path
-        prompt = variant.prompt
-        verdict = None
-        try:
-            for attempt in range(1, max_attempts + 1):
-                variant.qc_attempts = attempt
-                await asyncio.to_thread(
-                    pipeline.generate_variant,
-                    model=_swap_image_model(job),
+    # Generate → vision-QC → regenerate-with-corrective-hint loop. QC
+    # checks identity (right person?) + obvious defects; a failed verdict
+    # re-runs the slot with the judge's hint appended, up to
+    # swap_qc_max_retries extra attempts. QC unavailable → single attempt,
+    # qc_status="skipped". Exhausted retries KEEP the last image (a
+    # false-positive judge must not destroy a usable variant) with a ⚠
+    # qc_status="failed" for the UI.
+    #
+    # The semaphore wraps ONLY each generation call: QC (a ~3s Anthropic
+    # call) and retry bookkeeping run with the lane RELEASED, so other slots'
+    # generations proceed while this one is being judged. Each retry
+    # re-acquires — bounded provider load, but a QC-failing slot no longer
+    # holds a lane hostage for 3x its generation time.
+    scene_path = _scene_path_for_variant(job, variant)
+    char_path = Path(jc.source_image_path)
+    max_attempts = 1 + max(0, settings.swap_qc_max_retries)
+    # Per-attempt inputs. After a QC failure the FIRST retry runs in
+    # repair mode: the failed image itself becomes the scene input with a
+    # fix-only-this instruction, so the result changes as little as
+    # possible. A second failure falls back to a fresh re-roll from the
+    # original scene with the judge's hint appended. (grok-image is
+    # text-only — repair mode would be ignored, so it re-rolls directly.)
+    attempt_scene = scene_path
+    prompt = variant.prompt
+    verdict = None
+    # The model can change mid-slot: a content-policy rejection (after the
+    # client's own prompt-softening ladder is exhausted) falls back to the
+    # fal-hosted nbp-swap, which survives moderation-sensitive scenes the
+    # OpenAI engines refuse. This is the sanctioned LOUD exception to the
+    # no-silent-cross-provider-fallback doctrine (pipeline.generate_variant
+    # docstring): content rejections ONLY, recorded on
+    # `variant.fallback_model`, emitted as `variant.fallback`, ⇄ chip in UI.
+    effective_model = _swap_image_model(job)
+    try:
+        for attempt in range(1, max_attempts + 1):
+            variant.qc_attempts = attempt
+            async with sem:
+                # Promote char status the first time we actually start work.
+                # (Store writes in this hot loop go through to_thread so a
+                # slow fsync never stalls the event loop for the other slots.)
+                if jc.status == CharStatus.QUEUED:
+                    await asyncio.to_thread(
+                        _persist, job, jc, status=CharStatus.GENERATING)
+                    await _emit(job.job_id, "char.generating", char_id=jc.char_id)
+                if attempt == 1:
+                    await _emit(job.job_id, "variant.started",
+                                char_id=jc.char_id, variant_id=variant.variant_id)
+                gen_kwargs = dict(
                     scene_image=attempt_scene,
                     character_image=char_path,
                     character_name=jc.name,
@@ -191,64 +240,90 @@ async def _generate_one_variant(
                     outfit_mode=job.outfit_mode or "scene",
                     outfit_text=job.outfit_text,
                 )
-                verdict = await asyncio.to_thread(
-                    swap_qc.inspect_variant,
-                    scene_image=scene_path,
-                    character_image=char_path,
-                    result_image=dest,
-                    background_replaced=extra_ref is not None,
-                    outfit_from_character=bool(job.prompt and
-                                               "own outfit from Image 2" in job.prompt),
-                    job_id=job.job_id,
-                )
-                if verdict is None:
-                    variant.qc_status = "skipped"
-                    variant.qc_reason = None
-                    break
-                if verdict.passed:
-                    variant.qc_status = "passed"
-                    variant.qc_reason = None
-                    break
-                variant.qc_status = "failed"
-                variant.qc_reason = verdict.reason
-                if attempt < max_attempts:
-                    await _emit(job.job_id, "variant.qc_retry",
-                                char_id=jc.char_id, variant_id=variant.variant_id,
-                                attempt=attempt, reason=verdict.reason)
-                    hint = (verdict.corrective_hint or verdict.reason or "").strip()
-                    if attempt == 1 and _swap_image_model(job) != "grok-image":
-                        # Repair mode: minimal-change edit of the failed image.
-                        failed_copy = dest.with_name(dest.stem + ".qcfail.png")
-                        failed_copy.write_bytes(dest.read_bytes())
-                        attempt_scene = failed_copy
-                        prompt = swap_qc.repair_prompt(hint)
-                    else:
-                        # Fresh re-roll from the original scene + hint.
-                        attempt_scene = scene_path
-                        prompt = variant.prompt + (
-                            f"\nIMPORTANT — the previous attempt was rejected by "
-                            f"quality control: {hint}" if hint else "")
-        except Exception as e:
-            variant.status = VariantStatus.FAILED
-            variant.error = f"{type(e).__name__}: {e}"
-            _replace_variant(job, jc, variant)
-            await _emit(job.job_id, "variant.failed",
-                        char_id=jc.char_id, variant_id=variant.variant_id,
-                        error=variant.error)
-            # If all variants failed, mark char failed.
-            if all(v.status == VariantStatus.FAILED for v in jc.images):
-                _persist(job, jc, status=CharStatus.FAILED,
-                         error="all variants failed")
-            return
-
-        variant.status = VariantStatus.READY
-        _replace_variant(job, jc, variant)
-        # First successful variant flips char to AWAITING_APPROVAL so user can act early.
-        if jc.status != CharStatus.AWAITING_APPROVAL:
-            _persist(job, jc, status=CharStatus.AWAITING_APPROVAL)
-        await _emit(job.job_id, "variant.ready",
+                try:
+                    await asyncio.to_thread(
+                        pipeline.generate_variant,
+                        model=effective_model, **gen_kwargs)
+                except Exception as e:
+                    if not (content_policy.is_content_rejection(e)
+                            and effective_model != "nbp-swap"
+                            and _model_provider(effective_model) != "fal"
+                            and settings.has_provider("fal")):
+                        raise
+                    effective_model = "nbp-swap"
+                    variant.fallback_model = "nbp-swap"
+                    await _emit(job.job_id, "variant.fallback",
+                                char_id=jc.char_id,
+                                variant_id=variant.variant_id,
+                                fallback_model="nbp-swap",
+                                reason=str(e)[:300])
+                    try:
+                        await asyncio.to_thread(
+                            pipeline.generate_variant,
+                            model="nbp-swap", **gen_kwargs)
+                    except Exception as e2:
+                        raise RuntimeError(
+                            "fallback(nbp-swap) after content rejection "
+                            f"failed: {type(e2).__name__}: {e2}") from e2
+            verdict = await asyncio.to_thread(
+                swap_qc.inspect_variant,
+                scene_image=scene_path,
+                character_image=char_path,
+                result_image=dest,
+                background_replaced=extra_ref is not None,
+                outfit_from_character=bool(job.prompt and
+                                           "own outfit from Image 2" in job.prompt),
+                job_id=job.job_id,
+            )
+            if verdict is None:
+                variant.qc_status = "skipped"
+                variant.qc_reason = None
+                break
+            if verdict.passed:
+                variant.qc_status = "passed"
+                variant.qc_reason = None
+                break
+            variant.qc_status = "failed"
+            variant.qc_reason = verdict.reason
+            if attempt < max_attempts:
+                await _emit(job.job_id, "variant.qc_retry",
+                            char_id=jc.char_id, variant_id=variant.variant_id,
+                            attempt=attempt, reason=verdict.reason)
+                hint = (verdict.corrective_hint or verdict.reason or "").strip()
+                if attempt == 1 and effective_model != "grok-image":
+                    # Repair mode: minimal-change edit of the failed image.
+                    failed_copy = dest.with_name(dest.stem + ".qcfail.png")
+                    await asyncio.to_thread(shutil.copyfile, dest, failed_copy)
+                    attempt_scene = failed_copy
+                    prompt = swap_qc.repair_prompt(hint)
+                else:
+                    # Fresh re-roll from the original scene + hint.
+                    attempt_scene = scene_path
+                    prompt = variant.prompt + (
+                        f"\nIMPORTANT — the previous attempt was rejected by "
+                        f"quality control: {hint}" if hint else "")
+    except Exception as e:
+        variant.status = VariantStatus.FAILED
+        variant.error = f"{type(e).__name__}: {e}"
+        await asyncio.to_thread(_replace_variant, job, jc, variant)
+        await _emit(job.job_id, "variant.failed",
                     char_id=jc.char_id, variant_id=variant.variant_id,
-                    path=variant.path)
+                    error=variant.error)
+        # If all variants failed, mark char failed.
+        if all(v.status == VariantStatus.FAILED for v in jc.images):
+            await asyncio.to_thread(_persist, job, jc, status=CharStatus.FAILED,
+                                    error="all variants failed")
+        return
+
+    variant.status = VariantStatus.READY
+    await asyncio.to_thread(_replace_variant, job, jc, variant)
+    # First successful variant flips char to AWAITING_APPROVAL so user can act early.
+    if jc.status != CharStatus.AWAITING_APPROVAL:
+        await asyncio.to_thread(_persist, job, jc,
+                                status=CharStatus.AWAITING_APPROVAL)
+    await _emit(job.job_id, "variant.ready",
+                char_id=jc.char_id, variant_id=variant.variant_id,
+                path=variant.path)
 
 
 def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> None:
@@ -259,7 +334,13 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
             break
     else:
         jc.images.append(variant)
-    _persist(job, jc)
+    jc.updated_at = datetime.utcnow()
+    job.characters[jc.char_id] = jc
+    s = store()
+    if hasattr(s, "update_variant"):
+        s.update_variant(job, jc, variant)      # single-row fast path
+    else:
+        s.update_job(job)
 
 
 def _parse_director_plan(job: Job):
@@ -291,7 +372,13 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     jc.videos = []
     jc.approved_variant_id = None
     jc.error = None
-    _persist(job, jc, status=CharStatus.QUEUED)
+    jc.status = CharStatus.QUEUED
+    jc.updated_at = datetime.utcnow()
+    job.characters[jc.char_id] = jc
+    # FULL job write (not the _persist fast path): images/videos were WIPED
+    # above and the granular row-upserts cannot delete — a fast-path write
+    # here would leave the old variants as orphan rows in SQLite.
+    store().update_job(job)
 
     # Effective scene list — multi-scene jobs use `scene_ids`; legacy
     # single-scene jobs fall back to a 1-item list.
@@ -384,7 +471,7 @@ async def regen_scene_end_frames(job_id: str, scene_id: str) -> None:
     pose = (job.end_frames_by_scene or {}).get(scene_id)
     if not pose or not Path(pose).exists():
         return
-    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     targets = [jc for jc in job.characters.values() if jc.images]
 
     async def _one(jc: JobCharacter) -> None:
@@ -443,7 +530,7 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
         _persist(job, jc, status=CharStatus.GENERATING, error=None)
     await _emit(job_id, "variant.started",
                 char_id=char_id, variant_id=variant_id)
-    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await _generate_one_variant(job, jc, target, sem)
 
 
@@ -508,7 +595,7 @@ async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
     await _emit(job_id, "char.queued", char_id=char_id,
                 images_per_character=n, n_scenes=1, scene_id=scene_id)
 
-    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
     )
@@ -607,7 +694,7 @@ async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -
     if not targets:
         return
 
-    sem = asyncio.Semaphore(max(1, settings.image_concurrency))
+    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await asyncio.gather(*[_kick_char(job, jc, n, sem) for jc in targets])
 
 
@@ -814,7 +901,13 @@ def _replace_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None:
             break
     else:
         jc.videos.append(video)
-    _persist(job, jc)
+    jc.updated_at = datetime.utcnow()
+    job.characters[jc.char_id] = jc
+    s = store()
+    if hasattr(s, "update_video"):
+        s.update_video(job, jc, video)          # single-row fast path
+    else:
+        s.update_job(job)
 
 
 _VIDEO_TERMINAL = {VideoStatus.DONE, VideoStatus.FAILED, VideoStatus.ERROR}

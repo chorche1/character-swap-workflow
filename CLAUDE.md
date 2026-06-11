@@ -63,9 +63,11 @@ The Swap flow (6 steps): persistent left sidebar of past jobs + main panel:
 
 **Dark mode is forced** (no toggle). Light mode classes still in DOM but never applied.
 
-Quality is double-gated: (1) automatic vision-QC — every generated swap IMAGE is inspected by a cheap Claude call (swap_qc.py: right person? broken/cutout?) and auto-regenerated on failure (first retry = minimal-change REPAIR of the failed image, then fresh re-roll + hint; SWAP_QC=0 disables), and every generated video CLIP is checked (video_qc.py: Whisper transcript vs expected dialogue — catches garbled TTS like 'baking goda' — + frame-sampled anatomy check; 1 retry, VIDEO_QC=0 disables); (2) human approval before any video is kicked off (video is the expensive step). QC never blocks: unavailable → skipped; exhausted retries keep the last output with a ⚠ qc_status chip.
+Quality is double-gated: (1) automatic vision-QC — every generated swap IMAGE is inspected by a cheap Claude call (swap_qc.py: right person? broken/cutout?) and auto-regenerated on failure (first retry = minimal-change REPAIR of the failed image, then fresh re-roll + hint; SWAP_QC=0 disables), and every generated video CLIP is checked (video_qc.py: Whisper transcript vs expected dialogue — catches garbled TTS like 'baking goda' — + frame-sampled anatomy check; 1 retry, VIDEO_QC=0 disables); (2) human approval before any video is kicked off (video is the expensive step). QC never blocks: unavailable → skipped; exhausted retries keep the last output with a ⚠ qc_status chip. QC + retries run OUTSIDE the image-gen semaphore (2026-06-11) so a judging/retrying slot never starves the generation lanes; the semaphore is sized per provider (`IMAGE_CONCURRENCY_FAL=8` / `_OPENAI=4` / `_GEMINI=2`, fallback `IMAGE_CONCURRENCY=2`).
 
-Resumable across browser closes AND server restarts: in-flight Grok jobs resume polling automatically on startup. Stale image generations from a killed server are marked `failed` so the user can click ↻ to retry.
+**Moderation ladder (2026-06-11).** When the chosen engine rejects a swap prompt on content-policy grounds: the client first retries with two escalating append-only softeners (`content_policy.py`, rung 2 is a full fictional-film-production reframe); if STILL rejected and fal is configured, the runner falls back that one slot to `nbp-swap` — loud, never silent: recorded on `GeneratedImage.fallback_model`, emitted as `variant.fallback`, purple ⇄ chip in Swap + Reengineer UIs. (Measured rationale: 49% of gpt-image-2 swap calls were safety rejections burning the full ~131s render each; nbp-swap had 0 moderation failures on the same scenes.) The PIPELINE layer still has no cross-provider fallback — this is a sanctioned runner-level exception.
+
+Resumable across browser closes AND server restarts: in-flight Grok jobs resume polling automatically on startup. Stale image generations from a killed server are marked `failed` so the user can click ↻ to retry. Reengineer resume (2026-06-11) reuses the run dir's `words.json`/`plan.json` instead of re-billing Whisper + the Claude analyst, and the swap job's id is persisted to the run state BEFORE job creation so a crash in that window re-attaches instead of creating a duplicate job. The Reengineer image-phase watchdog is PROGRESS-based (`SWAP_STALL_TIMEOUT_SECS`, default 10 min of zero progress; absolute backstop `SWAP_PHASE_MAX_SECS` 2 h) and actually CANCELS the generation tasks on stall — the old fixed 30-min deadline marked runs failed while generation kept billing. The Reengineer tab gets live per-variant updates over the existing `/ws/jobs/{job_id}` WebSocket (5s slim poll `GET /api/reengineer/{re_id}?slim=1` — variant prompts omitted — remains as fallback), shows a "k/N images · m QC retries" counter during the swap phase, and renders thumbnails via `x-if` so they appear the moment each file lands (the old `x-show` version 404'd before the file existed and stayed broken forever).
 
 ---
 
@@ -190,7 +192,13 @@ XAI_BASE_URL=https://api.x.ai/v1
 CLAUDE_OPUS_MODEL=claude-opus-4-5        # AI Director — override to roll forward to a newer Opus
 CLAUDE_OPUS_PRICE_USD=0.05               # rough per-call estimate, recorded in state/calls.jsonl
 IMAGE_SIZE=1024x1792
-IMAGE_CONCURRENCY=2
+IMAGE_CONCURRENCY=2               # fallback for providers without their own knob
+IMAGE_CONCURRENCY_FAL=8           # per-PROVIDER swap-variant parallelism (2026-06-11):
+IMAGE_CONCURRENCY_OPENAI=4        # the runner sizes its semaphore from the job's
+IMAGE_CONCURRENCY_GEMINI=2        # effective model's provider — fal queues server-side
+SWAP_STALL_TIMEOUT_SECS=600       # Reengineer image-phase watchdog: fail only when NO
+                                  # progress (terminal flips / qc_attempts) for this long
+SWAP_PHASE_MAX_SECS=7200          # absolute image-phase backstop (replaces old fixed 30 min)
 VIDEO_DURATION_SECS=10
 VIDEO_ASPECT_RATIO=9:16
 VIDEO_RESOLUTION=720p

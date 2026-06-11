@@ -115,6 +115,13 @@ class GeneratedImage(BaseModel):
     qc_status: str | None = None
     qc_reason: str | None = None
     qc_attempts: int = 0                     # total generation attempts incl. QC retries
+    # Set when the slot auto-fell-back to a different engine after the job's
+    # chosen model rejected the prompt on CONTENT-POLICY grounds even after
+    # prompt softening (e.g. gpt-image → "nbp-swap"). This is the sanctioned,
+    # LOUD exception to the no-silent-cross-provider-fallback doctrine
+    # (pipeline.generate_variant docstring): recorded here, emitted as a
+    # `variant.fallback` event, and rendered as a ⇄ chip in the UI.
+    fallback_model: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

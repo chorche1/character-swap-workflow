@@ -959,6 +959,9 @@
           <span class="step-num">3</span>
           <span class="ml-2">Generated images</span>
           <span class="text-sm font-normal text-neutral-500 dark:text-neutral-400 ml-2">— approve one per character to proceed</span>
+          <span class="text-sm font-normal text-amber-600 dark:text-amber-400 ml-2"
+                x-show="jobImageProgress(job)?.generating"
+                x-text="jobImageProgressText(job)"></span>
         </h2>
         <button x-show="canApproveAll()"
                 class="px-3 py-1.5 rounded-lg text-sm font-medium bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
@@ -1072,8 +1075,12 @@
                       <img :src="v.url" class="w-full h-full object-cover" />
                     </template>
                     <template x-if="v.status === 'generating'">
-                      <div class="skeleton w-full h-full flex items-center justify-center">
-                        <span class="text-neutral-400 dark:text-neutral-500 text-xs">generating…</span>
+                      <div class="skeleton w-full h-full flex items-center justify-center relative">
+                        <span class="text-neutral-400 dark:text-neutral-500 text-xs"
+                              x-text="v.qc_attempts > 1 ? 'QC retry ' + (v.qc_attempts - 1) + '…' : 'generating…'"></span>
+                        <span x-show="v.qc_attempts > 1"
+                              class="absolute bottom-1.5 left-1.5 bg-amber-500/90 text-white text-[10px] px-1.5 py-0.5 rounded"
+                              x-text="'QC ↻' + (v.qc_attempts - 1)"></span>
                       </div>
                     </template>
                     <template x-if="v.status === 'failed'">
@@ -1087,6 +1094,15 @@
                     <template x-if="v.imported">
                       <div class="absolute top-1.5 left-1.5 bg-indigo-600/80 text-white text-[10px] px-1.5 py-0.5 rounded">
                         ⇪ imported
+                      </div>
+                    </template>
+                    <!-- Content-policy fallback: the job's chosen engine refused
+                         this scene (even after prompt softening) and the slot
+                         auto-fell-back to another engine — loud, never silent. -->
+                    <template x-if="v.fallback_model">
+                      <div class="absolute top-1.5 left-1.5 bg-purple-600/80 text-white text-[10px] px-1.5 py-0.5 rounded cursor-help"
+                           :title="'The chosen engine refused this prompt on content-policy grounds — auto-fell-back to ' + v.fallback_model">
+                        ⇄ <span x-text="v.fallback_model"></span>
                       </div>
                     </template>
                     <!-- Vision-QC verdict: the agent inspected this image and
@@ -1816,6 +1832,9 @@
                   }"
                   x-text="r.status"></span>
             <span class="text-xs text-neutral-400" x-text="(r.scenes?.length || r.n_scenes || 0) + ' scenes'"></span>
+            <span class="text-xs text-amber-600 dark:text-amber-400"
+                  x-show="r.status === 'swapping' && jobImageProgress(r.job)"
+                  x-text="jobImageProgressText(r.job)"></span>
             <span class="text-xs text-neutral-400" x-show="r.auto_mode">⚡ auto</span>
             <button class="ml-auto text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
                     @click="deleteReengineer(r)">✕</button>
@@ -1839,17 +1858,24 @@
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-v-'+sc.idx+'-'+cid">
                       <template x-for="v in (jc.images || []).filter(v => v.scene_id === sc.scene_id)" :key="v.variant_id">
                         <div class="relative">
-                          <!-- Only render the <img> once the file exists (status
-                               ready) — while generating the URL 404s and the
-                               browser shows a broken-image "?" icon. -->
-                          <img x-show="v.status === 'ready' && v.url" :src="v.url"
-                               class="w-14 rounded object-cover border-2 cursor-pointer"
-                               :class="(jc.approved_variant_ids || []).includes(v.variant_id)
-                                         ? 'border-emerald-500' : 'border-neutral-200 dark:border-neutral-800'"
-                               :title="jc.name + ' — click to approve/unapprove' + (v.qc_status === 'failed' ? ' · QC: ' + (v.qc_reason || '') : '')"
-                               @click="reengineerApprove(r, cid, v.variant_id)" />
-                          <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded"
-                               :title="jc.name + ' — generating…'"></div>
+                          <!-- x-if (NOT x-show): the <img> must not exist in the
+                               DOM before the file does — x-show creates it with a
+                               src that 404s, and since the URL never changes the
+                               browser never refetches → permanent broken "?". -->
+                          <template x-if="v.status === 'ready' && v.url">
+                            <img :src="v.url + (reengineerRetryNonce[v.variant_id] ? '?r=' + reengineerRetryNonce[v.variant_id] : '')"
+                                 class="w-14 rounded object-cover border-2 cursor-pointer"
+                                 :class="(jc.approved_variant_ids || []).includes(v.variant_id)
+                                           ? 'border-emerald-500' : 'border-neutral-200 dark:border-neutral-800'"
+                                 :title="jc.name + ' — click to approve/unapprove' + (v.qc_status === 'failed' ? ' · QC: ' + (v.qc_reason || '') : '')"
+                                 @click="reengineerApprove(r, cid, v.variant_id)" />
+                          </template>
+                          <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded relative"
+                               :title="jc.name + ' — generating…' + (v.qc_attempts > 1 ? ' (QC retry ' + (v.qc_attempts - 1) + ')' : '')">
+                            <span x-show="v.qc_attempts > 1"
+                                  class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded"
+                                  x-text="'QC ↻' + (v.qc_attempts - 1)"></span>
+                          </div>
                           <div x-show="v.status === 'failed'" class="w-14 text-center">
                             <div class="text-[9px] text-rose-500" :title="v.error || 'generation failed'">✕ failed</div>
                             <button class="text-[10px] text-indigo-500 hover:underline"
@@ -1861,6 +1887,9 @@
                           <span x-show="v.qc_status === 'failed' && v.status === 'ready'"
                                 class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded cursor-help"
                                 :title="'QC: ' + (v.qc_reason || '')">⚠</span>
+                          <span x-show="v.fallback_model && v.status === 'ready'"
+                                class="absolute top-0.5 left-0.5 bg-purple-600/90 text-white text-[8px] px-1 rounded cursor-help"
+                                :title="'Content-policy fallback to ' + v.fallback_model">⇄</span>
                         </div>
                       </template>
                     </template>

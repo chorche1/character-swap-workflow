@@ -13,6 +13,19 @@
       "port": 8000
     },
     {
+      "name": "character-swap-8010",
+      "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
+      "runtimeArgs": [
+        "run",
+        "character-swap",
+        "serve",
+        "--port",
+        "8010",
+        "--no-open"
+      ],
+      "port": 8010
+    },
+    {
       "name": "static-verify",
       "runtimeExecutable": "python3",
       "runtimeArgs": [

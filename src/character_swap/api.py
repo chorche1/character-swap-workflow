@@ -319,6 +319,7 @@ def _job_to_dict(job: Job) -> dict:
                         "qc_status": v.qc_status,
                         "qc_reason": v.qc_reason,
                         "qc_attempts": v.qc_attempts,
+                        "fallback_model": v.fallback_model,
                         "download_name": _variant_download_name(jc, v),
                     }
                     for v in jc.images
@@ -4032,10 +4033,14 @@ async def broll_delete(broll_id: str) -> dict:
 _REENGINEER_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
 
 
-def _reengineer_view(state: dict) -> dict:
+def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
     """State + URL fields the frontend can render directly. Embeds a full
     job dict (variants for the approval strip, videos for progress) when the
-    underlying Swap job exists."""
+    underlying Swap job exists.
+
+    `slim=True` drops each variant's `prompt` — the Reengineer strip never
+    renders it, and at ~3-3.8KB × 45 variants the prompts alone were ~70% of
+    the payload the tab re-downloaded every 5s poll."""
     out = dict(state)
     if state.get("source_path"):
         out["source_url"] = _file_url(Path(state["source_path"]))
@@ -4053,6 +4058,10 @@ def _reengineer_view(state: dict) -> dict:
         job = store().get_job(state["job_id"])
         if job is not None:
             out["job"] = _job_to_dict(job)
+            if slim:
+                for jc in out["job"]["characters"].values():
+                    for img in jc["images"]:
+                        img.pop("prompt", None)
     return out
 
 
@@ -4184,12 +4193,14 @@ async def reengineer_list() -> list[dict]:
 
 
 @app.get("/api/reengineer/{re_id}")
-async def reengineer_get(re_id: str) -> dict:
+async def reengineer_get(re_id: str, slim: bool = False) -> dict:
+    """`?slim=1` omits each variant's prompt text from the embedded job —
+    the polling/WS-refresh path uses it (the strip never shows prompts)."""
     from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if not state:
         raise HTTPException(404, "re_id not found")
-    return _reengineer_view(state)
+    return _reengineer_view(state, slim=slim)
 
 
 @app.post("/api/reengineer/{re_id}/animate")

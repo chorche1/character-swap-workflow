@@ -31,6 +31,7 @@ the corresponding API endpoints do.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import secrets
@@ -52,8 +53,9 @@ from character_swap.state import store
 _log = logging.getLogger("reengineer")
 
 _POLL_SECS = 4.0
-# Generous ceilings so a hung provider can't spin the watcher forever.
-_SWAP_PHASE_TIMEOUT_SECS = 60 * 30
+# Generous ceiling so a hung provider can't spin the video watcher forever.
+# (The swap phase uses a PROGRESS-based watchdog instead — see
+# _watch_swap_phase + settings.swap_stall_timeout_secs.)
 _VIDEO_PHASE_TIMEOUT_SECS = 60 * 60
 
 
@@ -122,13 +124,20 @@ async def _resume_swapping(re_id: str, state: dict) -> None:
         _update(re_id, status="failed", error="underlying job lost across restart")
         return
     # Auto-retry the slots the restart killed (marked failed by resume_pending).
+    # Tasks are collected (not just _spawn'ed) so the stall watchdog can
+    # cancel them if a retried slot hangs.
+    retry_tasks: list[asyncio.Task] = []
     for cid, jc in job.characters.items():
         for v in jc.images:
             if (v.status == VariantStatus.FAILED
                     and "interrupted" in (v.error or "")):
-                _spawn(runner.retry_single_variant(job_id, cid, v.variant_id),
-                       f"reengineer-retry-{v.variant_id}")
-    await _watch_swap_phase(re_id, job_id)
+                task = asyncio.create_task(
+                    runner.retry_single_variant(job_id, cid, v.variant_id),
+                    name=f"reengineer-retry-{v.variant_id}")
+                _RESUME_TASKS.add(task)
+                task.add_done_callback(_RESUME_TASKS.discard)
+                retry_tasks.append(task)
+    await _watch_swap_phase(re_id, job_id, tasks=retry_tasks)
 
 
 async def _resume_animating(re_id: str, state: dict) -> None:
@@ -176,25 +185,103 @@ async def run_reengineer(re_id: str) -> None:
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
 
 
+def _load_cached_plan(run_dir: Path) -> list[dict] | None:
+    """Reuse a previous attempt's plan.json after a crash-resume: a crash
+    1 second before status flipped to 'swapping' used to recompute scene
+    detection, Whisper, AND the Claude analyst from scratch (double-billing
+    both API calls). The plan is only trusted when every referenced scene
+    PNG still exists in the library (they're content-addressed, so this is
+    a safe consistency check)."""
+    plan_file = run_dir / "plan.json"
+    if not plan_file.exists():
+        return None
+    try:
+        import json as _json
+        entries = _json.loads(plan_file.read_text(encoding="utf-8"))
+        if not isinstance(entries, list) or not entries:
+            return None
+        for e in entries:
+            sid = e.get("scene_id")
+            if not sid:
+                return None
+            scene = store().get_scene(sid)
+            if scene is None or not (settings.scenes_dir / scene.filename).exists():
+                return None
+        return entries
+    except Exception:
+        return None
+
+
 async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
     source = Path(state["source_path"])
     run_dir = reengineer.reengineer_dir(re_id)
 
-    # --- scene detection + frames ---------------------------------------
+    # --- resume short-circuit ---------------------------------------------
+    # A crash between add_job and the status flip used to leave status=
+    # "analyzing" with a live job in the store; re-running the analysis then
+    # created a DUPLICATE swap job. If the recorded job already exists,
+    # re-attach instead of re-analyzing.
+    if state.get("job_id") and store().get_job(state["job_id"]) is not None:
+        _log.info("reengineer %s: job %s already exists — re-attaching "
+                  "instead of re-analyzing", re_id, state["job_id"])
+        _update(re_id, status="swapping")
+        await _resume_swapping(re_id, state)
+        return
+
     _update(re_id, status="analyzing")
+    scene_entries = _load_cached_plan(run_dir)
+    if scene_entries is None:
+        scene_entries = await _analyze(re_id, state, source, run_dir)
+
+    # --- create the underlying Swap job (job_id persisted FIRST so a crash
+    # in this window resumes into the same id instead of duplicating) -------
+    job_id = state.get("job_id") or ("j_" + secrets.token_hex(5))
+    state = _update(re_id, job_id=job_id)
+    await _create_job_and_swap(re_id, state, scene_entries, job_id)
+
+
+async def _analyze(re_id: str, state: dict, source: Path,
+                   run_dir: Path) -> list[dict]:
+    """Scene detection + frames + Whisper + Claude analyst → scene_entries.
+    Whisper runs CONCURRENTLY with the frame-extract loop (independent
+    inputs); a words.json from a previous crashed attempt is reused."""
     threshold = reengineer.SENSITIVITY_THRESHOLDS.get(
         state.get("scene_sensitivity") or "high", reengineer.SCENE_THRESHOLD)
     spans = await asyncio.to_thread(reengineer.detect_scenes, source,
                                     threshold=threshold)
-    frames: list[Path] = []
-    for i, (a, b) in enumerate(spans):
-        dest = run_dir / "scenes" / f"scene-{i:02d}.png"
-        await asyncio.to_thread(reengineer.extract_frame, source, (a + b) / 2.0, dest)
-        frames.append(dest)
 
-    # --- transcript -------------------------------------------------------
-    words = await asyncio.to_thread(video_edit.transcribe_words, source, job_id=re_id)
-    (run_dir / "words.json").write_text(video_edit.words_to_json(words), encoding="utf-8")
+    # --- transcript (parallel with frame extraction) ----------------------
+    words_file = run_dir / "words.json"
+    words_task: asyncio.Task | None = None
+    cached_words = None
+    if words_file.exists():
+        try:
+            cached_words = video_edit.words_from_json(
+                words_file.read_text(encoding="utf-8"))
+        except Exception:
+            cached_words = None
+    if cached_words is None:
+        words_task = asyncio.create_task(asyncio.to_thread(
+            video_edit.transcribe_words, source, job_id=re_id))
+
+    # --- frames (bounded parallel ffmpeg extracts) -------------------------
+    frame_sem = asyncio.Semaphore(4)
+
+    async def _extract(i: int, a: float, b: float) -> Path:
+        dest = run_dir / "scenes" / f"scene-{i:02d}.png"
+        async with frame_sem:
+            await asyncio.to_thread(
+                reengineer.extract_frame, source, (a + b) / 2.0, dest)
+        return dest
+
+    frames = list(await asyncio.gather(
+        *[_extract(i, a, b) for i, (a, b) in enumerate(spans)]))
+
+    if cached_words is not None:
+        words = cached_words
+    else:
+        words = await words_task
+        words_file.write_text(video_edit.words_to_json(words), encoding="utf-8")
 
     # --- agent analysis (fallback never blocks the pipeline) -------------
     plans = await asyncio.to_thread(
@@ -219,6 +306,11 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
     import json as _json
     (run_dir / "plan.json").write_text(_json.dumps(scene_entries, indent=2),
                                        encoding="utf-8")
+    return scene_entries
+
+
+async def _create_job_and_swap(re_id: str, state: dict,
+                               scene_entries: list[dict], job_id: str) -> None:
 
     # --- create the underlying Swap job -----------------------------------
     s = store()
@@ -278,7 +370,7 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
             background=bool(background_path))
 
     job = Job(
-        job_id="j_" + secrets.token_hex(5),
+        job_id=job_id,
         title=f"Reengineer {state.get('source_name') or re_id} — {', '.join(names)}",
         scene_id=uniq_ids[0],
         scene_image_path=uniq_paths[0],
@@ -300,8 +392,12 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
             n_scenes=len(scene_entries))
 
     swap_task = asyncio.create_task(runner.run_image_generation(job.job_id))
-    await _watch_swap_phase(re_id, job.job_id)
-    await swap_task
+    await _watch_swap_phase(re_id, job.job_id, tasks=[swap_task])
+    # The watcher cancels swap_task on stall — CancelledError is BaseException
+    # in 3.11+, so run_reengineer's `except Exception` would NOT swallow it
+    # and the stall reason written by the watcher would get clobbered.
+    with contextlib.suppress(asyncio.CancelledError):
+        await swap_task
 
 
 def _variants_terminal(job: Job) -> bool:
@@ -310,9 +406,33 @@ def _variants_terminal(job: Job) -> bool:
                                for v in all_v)
 
 
-async def _watch_swap_phase(re_id: str, job_id: str) -> None:
-    """Wait for the image phase to finish; then gate or auto-continue."""
-    deadline = asyncio.get_event_loop().time() + _SWAP_PHASE_TIMEOUT_SECS
+def _swap_progress_marker(job: Job) -> tuple[int, int]:
+    """A cheap fingerprint of image-phase progress: (terminal slot count,
+    total QC attempts). Either number moving = something is happening —
+    a finished/failed slot OR a generation attempt inside the QC-retry loop
+    (the runner bumps qc_attempts in place before each attempt)."""
+    vs = [v for jc in job.characters.values() for v in jc.images]
+    terminal = sum(1 for v in vs
+                   if v.status in {VariantStatus.READY, VariantStatus.FAILED})
+    return terminal, sum(v.qc_attempts or 1 for v in vs)
+
+
+async def _watch_swap_phase(
+    re_id: str, job_id: str, tasks: list[asyncio.Task] | None = None,
+) -> None:
+    """Wait for the image phase to finish; then gate or auto-continue.
+
+    PROGRESS-based watchdog (not a fixed deadline): the run only fails when
+    NOTHING has moved for swap_stall_timeout_secs — the old fixed 30-min
+    ceiling fired below the realistic duration of large gpt-image runs and
+    marked them failed while generation kept going (and billing).
+    swap_phase_max_secs is a generous absolute backstop. On stall/ceiling
+    every `tasks` entry is CANCELLED (so no further attempts bill) and
+    still-generating variants are marked failed so the UI isn't stuck."""
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    last_marker: tuple[int, int] | None = None
+    last_change = start
     while True:
         await asyncio.sleep(_POLL_SECS)
         job = store().get_job(job_id)
@@ -321,8 +441,30 @@ async def _watch_swap_phase(re_id: str, job_id: str) -> None:
             return
         if _variants_terminal(job):
             break
-        if asyncio.get_event_loop().time() > deadline:
-            _update(re_id, status="failed", error="image phase timed out")
+        marker = _swap_progress_marker(job)
+        if marker != last_marker:
+            last_marker = marker
+            last_change = loop.time()
+        stalled = loop.time() - last_change > settings.swap_stall_timeout_secs
+        over_ceiling = loop.time() - start > settings.swap_phase_max_secs
+        if stalled or over_ceiling:
+            reason = (
+                f"image phase stalled — no progress in "
+                f"{settings.swap_stall_timeout_secs // 60} min"
+                if stalled else
+                f"image phase exceeded {settings.swap_phase_max_secs // 60} min ceiling"
+            )
+            for t in tasks or []:
+                t.cancel()
+            # Mark in-flight slots failed so _variants_terminal holds for
+            # later reads and the UI shows ✕ retry instead of forever-skeletons.
+            for jc in job.characters.values():
+                for v in jc.images:
+                    if v.status == VariantStatus.GENERATING:
+                        v.status = VariantStatus.FAILED
+                        v.error = reason
+            store().update_job(job)
+            _update(re_id, status="failed", error=reason)
             return
 
     job = store().get_job(job_id)

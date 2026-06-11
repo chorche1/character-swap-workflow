@@ -152,7 +152,7 @@ def test_resume_swapping_retries_interrupted_slots(monkeypatch, tmp_path):
     monkeypatch.setattr(runner_reengineer.runner, "retry_single_variant", fake_retry)
     monkeypatch.setattr(runner_reengineer, "_spawn",
                         lambda coro, name: asyncio.get_event_loop().create_task(coro))
-    async def fake_watch(re_id, job_id): return None
+    async def fake_watch(re_id, job_id, tasks=None): return None
     monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", fake_watch)
 
     async def run():

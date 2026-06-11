@@ -91,8 +91,10 @@ def list_states() -> list[dict]:
 
 def _ffmpeg_scene_changes(video: Path, threshold: float) -> list[float]:
     """Timestamps (secs) where ffmpeg's scene score exceeds `threshold`."""
+    # -an: the scene-score filter only reads video frames — decoding the
+    # audio track too was pure wasted CPU on every analysis pass.
     proc = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-i", str(video),
+        ["ffmpeg", "-hide_banner", "-an", "-i", str(video),
          "-vf", f"select='gt(scene,{threshold})',showinfo",
          "-f", "null", "-"],
         capture_output=True, text=True,

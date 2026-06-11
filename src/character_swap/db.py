@@ -757,70 +757,146 @@ def upsert_job(conn: sqlite3.Connection, j: Job) -> None:
         (j.model_dump_json(exclude={"characters"}), j.job_id),
     )
     # Reset children — simplest correctness model for an in-place job update.
+    # (Per-row updates that DON'T add/remove children should use the
+    # upsert_job_character/upsert_variant/upsert_video fast paths instead —
+    # this full DELETE+reinsert is O(all children) and was measured at
+    # ~550KB of redundant writes per variant status flip on a 45-slot job.)
     conn.execute("DELETE FROM job_characters WHERE job_id = ?", (j.job_id,))
     conn.execute("DELETE FROM variants WHERE job_id = ?", (j.job_id,))
     conn.execute("DELETE FROM videos WHERE job_id = ?", (j.job_id,))
     for char_pos, (cid, jc) in enumerate(j.characters.items()):
-        # Keep the legacy `approved_variant_id` column in sync with the
-        # first entry of the list, so older queries / migrations still see
-        # a sensible value. Source of truth is `approved_variant_ids_json`.
-        approved_ids = list(jc.approved_variant_ids or [])
-        if not approved_ids and jc.approved_variant_id:
-            approved_ids = [jc.approved_variant_id]
-        legacy_single = approved_ids[0] if approved_ids else None
-        conn.execute(
-            """INSERT INTO job_characters
-                 (job_id, char_id, position, name, source_image_path,
-                  status, approved_variant_id, approved_variant_ids_json,
-                  error, compiled_video_path, compile_edit_id,
-                  compile_status, compile_error,
-                  pipeline_status, pipeline_error,
-                  pipeline_temp_dir, pipeline_drive_link,
-                  updated_at, model_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                j.job_id, cid, char_pos, jc.name, jc.source_image_path,
-                str(jc.status), legacy_single,
-                _reel_json.dumps(approved_ids),
-                jc.error,
-                jc.compiled_video_path, jc.compile_edit_id,
-                jc.compile_status, jc.compile_error,
-                jc.pipeline_status, jc.pipeline_error,
-                jc.pipeline_temp_dir, jc.pipeline_drive_link,
-                _iso(jc.updated_at),
-                jc.model_dump_json(exclude={"images", "videos"}),
-            ),
-        )
+        upsert_job_character(conn, j.job_id, char_pos, jc)
         for i, v in enumerate(jc.images):
-            conn.execute(
-                """INSERT INTO variants
-                    (variant_id, job_id, char_id, position, path, prompt,
-                     parent_variant_id, status, error, created_at, model_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    v.variant_id, j.job_id, cid, i, v.path, v.prompt,
-                    v.parent_variant_id, str(v.status), v.error,
-                    _iso(v.created_at),
-                    v.model_dump_json(),
-                ),
-            )
+            upsert_variant(conn, j.job_id, cid, i, v)
         for i, vv in enumerate(jc.videos):
-            conn.execute(
-                """INSERT INTO videos
-                    (video_id, job_id, char_id, position, grok_job_id,
-                     status, submitted_at, completed_at, download_url,
-                     final_video_path, source_variant_id, error,
-                     movement_prompt_override, model_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    vv.video_id, j.job_id, cid, i, vv.grok_job_id,
-                    str(vv.status), _iso(vv.submitted_at),
-                    _iso(vv.completed_at), vv.download_url,
-                    vv.final_video_path, vv.source_variant_id, vv.error,
-                    vv.movement_prompt_override,
-                    vv.model_dump_json(),
-                ),
-            )
+            upsert_video(conn, j.job_id, cid, i, vv)
+
+
+def upsert_job_character(conn: sqlite3.Connection, job_id: str,
+                         position: int, jc: JobCharacter) -> None:
+    """Insert-or-update ONE job_characters row. Children (variants/videos)
+    are untouched — callers mutating those use their own upserts. Cannot
+    express deletions: structural changes (wiped images, removed chars) must
+    go through the full upsert_job."""
+    # Keep the legacy `approved_variant_id` column in sync with the
+    # first entry of the list, so older queries / migrations still see
+    # a sensible value. Source of truth is `approved_variant_ids_json`.
+    approved_ids = list(jc.approved_variant_ids or [])
+    if not approved_ids and jc.approved_variant_id:
+        approved_ids = [jc.approved_variant_id]
+    legacy_single = approved_ids[0] if approved_ids else None
+    conn.execute(
+        """INSERT INTO job_characters
+             (job_id, char_id, position, name, source_image_path,
+              status, approved_variant_id, approved_variant_ids_json,
+              error, compiled_video_path, compile_edit_id,
+              compile_status, compile_error,
+              pipeline_status, pipeline_error,
+              pipeline_temp_dir, pipeline_drive_link,
+              updated_at, model_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(job_id, char_id) DO UPDATE SET
+             position = excluded.position,
+             name = excluded.name,
+             source_image_path = excluded.source_image_path,
+             status = excluded.status,
+             approved_variant_id = excluded.approved_variant_id,
+             approved_variant_ids_json = excluded.approved_variant_ids_json,
+             error = excluded.error,
+             compiled_video_path = excluded.compiled_video_path,
+             compile_edit_id = excluded.compile_edit_id,
+             compile_status = excluded.compile_status,
+             compile_error = excluded.compile_error,
+             pipeline_status = excluded.pipeline_status,
+             pipeline_error = excluded.pipeline_error,
+             pipeline_temp_dir = excluded.pipeline_temp_dir,
+             pipeline_drive_link = excluded.pipeline_drive_link,
+             updated_at = excluded.updated_at,
+             model_json = excluded.model_json""",
+        (
+            job_id, jc.char_id, position, jc.name, jc.source_image_path,
+            str(jc.status), legacy_single,
+            _reel_json.dumps(approved_ids),
+            jc.error,
+            jc.compiled_video_path, jc.compile_edit_id,
+            jc.compile_status, jc.compile_error,
+            jc.pipeline_status, jc.pipeline_error,
+            jc.pipeline_temp_dir, jc.pipeline_drive_link,
+            _iso(jc.updated_at),
+            jc.model_dump_json(exclude={"images", "videos"}),
+        ),
+    )
+
+
+def upsert_variant(conn: sqlite3.Connection, job_id: str, char_id: str,
+                   position: int, v: GeneratedImage) -> None:
+    """Insert-or-update ONE variants row (PK variant_id)."""
+    conn.execute(
+        """INSERT INTO variants
+            (variant_id, job_id, char_id, position, path, prompt,
+             parent_variant_id, status, error, created_at, model_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(variant_id) DO UPDATE SET
+             job_id = excluded.job_id,
+             char_id = excluded.char_id,
+             position = excluded.position,
+             path = excluded.path,
+             prompt = excluded.prompt,
+             parent_variant_id = excluded.parent_variant_id,
+             status = excluded.status,
+             error = excluded.error,
+             created_at = excluded.created_at,
+             model_json = excluded.model_json""",
+        (
+            v.variant_id, job_id, char_id, position, v.path, v.prompt,
+            v.parent_variant_id, str(v.status), v.error,
+            _iso(v.created_at),
+            v.model_dump_json(),
+        ),
+    )
+
+
+def upsert_video(conn: sqlite3.Connection, job_id: str, char_id: str,
+                 position: int, vv: VideoVariant) -> None:
+    """Insert-or-update ONE videos row (PK video_id)."""
+    conn.execute(
+        """INSERT INTO videos
+            (video_id, job_id, char_id, position, grok_job_id,
+             status, submitted_at, completed_at, download_url,
+             final_video_path, source_variant_id, error,
+             movement_prompt_override, model_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(video_id) DO UPDATE SET
+             job_id = excluded.job_id,
+             char_id = excluded.char_id,
+             position = excluded.position,
+             grok_job_id = excluded.grok_job_id,
+             status = excluded.status,
+             submitted_at = excluded.submitted_at,
+             completed_at = excluded.completed_at,
+             download_url = excluded.download_url,
+             final_video_path = excluded.final_video_path,
+             source_variant_id = excluded.source_variant_id,
+             error = excluded.error,
+             movement_prompt_override = excluded.movement_prompt_override,
+             model_json = excluded.model_json""",
+        (
+            vv.video_id, job_id, char_id, position, vv.grok_job_id,
+            str(vv.status), _iso(vv.submitted_at),
+            _iso(vv.completed_at), vv.download_url,
+            vv.final_video_path, vv.source_variant_id, vv.error,
+            vv.movement_prompt_override,
+            vv.model_dump_json(),
+        ),
+    )
+
+
+def touch_job(conn: sqlite3.Connection, job_id: str, updated_at_iso: str) -> None:
+    """Bump jobs.updated_at without rewriting the row. NOTE: jobs.model_json
+    keeps its own embedded updated_at — readers rebuild children from their
+    own rows (load_app_state), so the staleness is cosmetic."""
+    conn.execute("UPDATE jobs SET updated_at = ? WHERE job_id = ?",
+                 (updated_at_iso, job_id))
 
 
 def delete_job(conn: sqlite3.Connection, job_id: str) -> None:
