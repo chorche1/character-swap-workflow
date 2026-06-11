@@ -465,3 +465,39 @@ def test_json_store_fast_paths_delegate(tmp_path):
 
     s2 = JsonStateStore(path=tmp_path / "state.json")
     assert s2.get_job("j1").characters["cA"].images[0].status == VariantStatus.READY
+
+
+def test_sqlite_remove_job_deletes_rows(sqlite_db_path):
+    """The exact bug from 2026-06-12: DELETE /api/jobs popped the job from
+    memory and called save(), but save() only re-upserts jobs still in
+    memory — the deleted job's rows stayed in the DB and the job resurrected
+    on the next server restart (junk job "j_ef"). remove_job must delete the
+    row (children cascade via FK)."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    job = _two_char_job()
+    s1.add_job(job)
+
+    removed = s1.remove_job("j1")
+    assert removed is not None and removed.job_id == "j1"
+    assert s1.get_job("j1") is None
+    # Removing a job that's already gone is a harmless no-op.
+    assert s1.remove_job("j1") is None
+
+    # Restart-equivalent: a fresh store on the same DB must NOT resurrect it.
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert s2.get_job("j1") is None
+    # Child rows are gone too, not orphaned.
+    for table in ("jobs", "job_characters", "variants", "videos"):
+        n = s2._conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE job_id = 'j1'"  # noqa: S608
+        ).fetchone()[0]
+        assert n == 0, f"orphaned rows left in {table}"
+
+
+def test_json_remove_job_persists(tmp_path):
+    s1 = JsonStateStore(path=tmp_path / "state.json")
+    s1.add_job(_two_char_job())
+    assert s1.remove_job("j1").job_id == "j1"
+
+    s2 = JsonStateStore(path=tmp_path / "state.json")
+    assert s2.get_job("j1") is None

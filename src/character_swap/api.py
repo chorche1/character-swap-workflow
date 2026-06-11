@@ -1285,8 +1285,7 @@ async def delete_job(job_id: str) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    s.state.jobs.pop(job_id, None)
-    s.save()
+    s.remove_job(job_id)
     # rmtree the job's output dir best-effort
     target = settings.output_dir / job_id
     if target.exists():

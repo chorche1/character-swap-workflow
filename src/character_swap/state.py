@@ -136,6 +136,12 @@ class JsonStateStore:
         self._state.jobs[job.job_id] = job
         self.save()
 
+    def remove_job(self, job_id: str) -> Job | None:
+        out = self._state.jobs.pop(job_id, None)
+        if out is not None:
+            self.save()
+        return out
+
     # Granular fast paths (one variant / one character / one video changed).
     # The JSON backend rewrites the whole file regardless, so these simply
     # delegate; they exist so callers can use one API on either backend —
@@ -303,6 +309,18 @@ class SqliteStateStore:
         self._state.jobs[job.job_id] = job
         with self._lock, db.transaction(self._conn) as conn:
             db.upsert_job(conn, job)
+
+    def remove_job(self, job_id: str) -> Job | None:
+        # save() only re-upserts jobs still in memory — popping from the dict
+        # and calling save() leaves the DB row behind, and the deleted job
+        # resurrects on the next restart via load_app_state (observed
+        # 2026-06-12 with junk job "j_ef"). Delete the row explicitly;
+        # FK ON DELETE CASCADE removes job_characters/variants/videos.
+        out = self._state.jobs.pop(job_id, None)
+        if out is not None:
+            with self._lock, db.transaction(self._conn) as conn:
+                db.delete_job(conn, job_id)
+        return out
 
     # Granular fast paths: a variant status flip on a 45-slot job used to
     # DELETE+reinsert ALL its children (~550KB, ~65×/run) synchronously —
