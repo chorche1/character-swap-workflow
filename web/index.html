@@ -1556,6 +1556,9 @@
           <p x-show="compileSettings.enableTrim" class="text-[10px] text-neutral-400 dark:text-neutral-500 -mt-1">
             Lower dB = only quieter gaps count as silence · Min silence = shortest gap to cut · Padding = speech kept around each cut.
           </p>
+          <p class="text-[10px] text-neutral-400 dark:text-neutral-500 -mt-1">
+            ✂ Klippstarten trimmas ALLTID till ljudstart per scen (styrs av Threshold dB) — kryssrutan ovan gäller pauser inne i videon.
+          </p>
           <label class="block" :class="compileSettings.enableVoiceSwap ? '' : 'opacity-40'">
             Voice override (batch-wide)
             <select x-model="compileSettings.voiceOverride"
@@ -2092,7 +2095,8 @@
 
             <!-- Step toggles -->
             <div class="flex items-center gap-4 text-xs flex-wrap">
-              <label class="flex items-center gap-1.5 cursor-pointer">
+              <label class="flex items-center gap-1.5 cursor-pointer"
+                     title="Klippstarten trimmas ALLTID till ljudstart (styrs av Threshold dB) — den här kryssrutan gäller pauser inne i videon.">
                 <input type="checkbox" x-model="editor.enableTrim" />
                 <span class="text-neutral-300">Trim silences</span>
               </label>
@@ -2935,7 +2939,8 @@
               <div class="border-t border-neutral-200 dark:border-neutral-800 p-4 bg-neutral-50 dark:bg-neutral-900/40 space-y-2">
                 <!-- Step toggles -->
                 <div class="flex items-center justify-center gap-4 text-xs flex-wrap">
-                  <label class="flex items-center gap-1.5 cursor-pointer">
+                  <label class="flex items-center gap-1.5 cursor-pointer"
+                         title="Varje klipp trimmas ALLTID till ljudstart innan ihopsättning (styrs av Threshold dB) — den här kryssrutan gäller pauser inne i videon.">
                     <input type="checkbox" x-model="editor.enableTrim" />
                     <span class="text-neutral-300">Trim silences</span>
                   </label>

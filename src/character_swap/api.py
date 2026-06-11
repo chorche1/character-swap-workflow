@@ -3060,14 +3060,30 @@ async def editor_auto_edit(
     if enable_captions:
         settings.require_keys("openai")
 
-    # Step 1: trim silences (optional)
+    # Step 0: ALWAYS cut to audio onset — every clip entering the Editor
+    # starts exactly when there's enough sound (silencedetect energy vs
+    # threshold_db), regardless of the enable_trim toggle, which governs
+    # interior pauses only. Failure → keep the original, never block.
     current = src
+    try:
+        no_lead = edit_dir / "00-noLead.mp4"
+        await asyncio.to_thread(
+            video_edit.trim_leading_silence, src, no_lead,
+            threshold_db=threshold_db,
+            min_silence_secs=0.05,  # very aggressive — exact start
+            job_id=edit_id,
+        )
+        current = no_lead
+    except (RuntimeError, ValueError):
+        pass
+
+    # Step 1: trim silences (optional — interior pauses)
     trim_summary: dict | None = None
     if enable_trim:
         trimmed = edit_dir / "01-trimmed.mp4"
         try:
             trim_summary = await asyncio.to_thread(
-                video_edit.trim_silences, src, trimmed,
+                video_edit.trim_silences, current, trimmed,
                 threshold_db=threshold_db, min_silence_secs=min_silence_secs,
                 pad_secs=pad_secs, job_id=edit_id,
             )
@@ -3114,22 +3130,10 @@ async def editor_auto_edit(
         if enable_captions and not words:
             raise HTTPException(422, "No speech detected — nothing to caption")
 
-    # Step 3a.5: Whisper-precise leading-silence recut. silencedetect's energy
-    # threshold can miss quiet ambient noise that Whisper correctly identifies
-    # as "no speech yet" — re-cut to the first word so output starts EXACTLY
-    # on speech. Word timestamps are shifted to match the recut timeline.
-    if enable_trim and words and words[0].start > 0.1:
-        recut = edit_dir / "03c-whisper-recut.mp4"
-        try:
-            await asyncio.to_thread(
-                video_edit.trim_to_first_word, current, recut, words,
-                pad_secs=0.0, job_id=edit_id,
-            )
-            offset = words[0].start
-            words = video_edit.shift_word_timestamps(words, offset)
-            current = recut
-        except (RuntimeError, ValueError):
-            pass  # leave `current` + words alone; existing trim still applied
+    # (The old Step 3a.5 Whisper-first-word recut was removed 2026-06-11:
+    # Hugo chose AUDIO energy as the start marker — the unconditional
+    # audio-onset trim at Step 0 is the contract now, and sub-threshold
+    # ambient before speech is intentional content.)
 
     # Step 3b: WPM normalization (time-stretch so spoken pace ≈ target_wpm)
     wpm_info: dict | None = None
@@ -3250,6 +3254,28 @@ async def editor_multi_auto_edit(
     if not clip_paths:
         raise HTTPException(400, "No valid clips uploaded")
 
+    # 1.5. ALWAYS cut every clip to audio onset at ENTRY — before
+    # transcription, so word timestamps, fuzzy matching, and WPM scaling all
+    # operate on the trimmed timeline (no shifting needed downstream).
+    # Independent of enable_trim (which governs interior pauses only).
+    # Failure on a clip → keep that clip untrimmed, never block.
+    async def _entry_trim(i: int, p: Path) -> Path:
+        cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.trim_leading_silence, p, cut,
+                threshold_db=threshold_db,
+                min_silence_secs=0.05,  # very aggressive — exact start
+                job_id=edit_id,
+            )
+            return cut
+        except (RuntimeError, ValueError):
+            return p
+
+    clip_paths = list(await asyncio.gather(*[
+        _entry_trim(i, p) for i, p in enumerate(clip_paths)
+    ]))
+
     # 2. Transcribe each clip in parallel via to_thread (Whisper is sync).
     try:
         transcripts_per_clip = await asyncio.gather(*[
@@ -3319,48 +3345,10 @@ async def editor_multi_auto_edit(
             encoding="utf-8",
         )
 
-    # 4.5. Per-clip leading-silence trim — ALWAYS runs (Hugo's hard
-    # requirement: every clip in a multi-clip concat must start exactly
-    # on the first spoken word, even when the user has un-checked
-    # "Trim silences" for interior silences). Uses Whisper words from
-    # step 2, scaled by the WPM speed_factor if the clip was stretched
-    # in step 4. Falls back to silencedetect-based trim_leading_silence
-    # when no words / no first-word timestamp.
-    leading_trimmed: list[Path] = []
-    for i, p in enumerate(ordered_paths):
-        words_for_clip = list(ordered_transcripts[i])
-        # If we WPM-stretched this clip the file timing is now scaled;
-        # scale the word timestamps accordingly so we trim at the right
-        # post-stretch offset.
-        if wpm_decisions:
-            speed = wpm_decisions[i].get("speed_factor", 1.0)
-            if abs(speed - 1.0) > 1e-3:
-                words_for_clip = video_edit.scale_word_timestamps(
-                    words_for_clip, speed)
-        cut = edit_dir / f"clip-{i:02d}-noLead.mp4"
-        trimmed_ok = False
-        if words_for_clip:
-            try:
-                await asyncio.to_thread(
-                    video_edit.trim_to_first_word, p, cut,
-                    words_for_clip, pad_secs=0.0, job_id=edit_id,
-                )
-                leading_trimmed.append(cut)
-                trimmed_ok = True
-            except (RuntimeError, ValueError):
-                pass
-        if not trimmed_ok:
-            try:
-                await asyncio.to_thread(
-                    video_edit.trim_leading_silence, p, cut,
-                    threshold_db=threshold_db,
-                    min_silence_secs=0.05,  # very aggressive — exact start
-                    job_id=edit_id,
-                )
-                leading_trimmed.append(cut)
-            except (RuntimeError, ValueError):
-                leading_trimmed.append(p)
-    ordered_paths = leading_trimmed
+    # (The old step 4.5 per-clip leading trim was moved to step 1.5 — every
+    # clip is now cut to AUDIO onset at entry, before transcription, so no
+    # word-timestamp scaling/shifting is needed here. Word-based
+    # trim_to_first_word was retired 2026-06-11: audio energy is the marker.)
 
     # 5. Concat in script order.
     concat_out = edit_dir / "01-concat.mp4"

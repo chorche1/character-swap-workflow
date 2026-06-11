@@ -502,9 +502,24 @@ When `enrich_prompt=True` AND `use_director=True`: Director wins where it succee
 
 ## Editor details
 
+**Always-on audio-onset start trim (2026-06-11, Hugo's directive).** Every clip
+entering ANY pipeline is first cut so it starts exactly when there is enough
+AUDIO — `video_edit.trim_leading_silence` (silencedetect energy vs the flow's
+`threshold_db`, `min_silence_secs=0.05`), UNCONDITIONALLY: the `enable_trim`
+toggle governs interior pauses only. Applies at clip entry in single-clip
+auto_edit, per clip in multi_auto_edit (before transcription, so timestamps
+need no shifting), per scene in Step-6 compile, and per Kling scene clip in
+Reengineer assemble (where the original-duration match became a CAP — finals
+are never longer than the original scene, usually tighter). The marker is
+audio ENERGY, deliberately NOT Whisper's first word (the old
+`trim_to_first_word` recuts were removed from the flows; the utility remains).
+No-audio clips pass through untouched; any trim failure falls back to the
+untrimmed clip — the start trim never blocks a render.
+
 ### Single-clip auto-edit
-`POST /api/editor/auto_edit` runs (in order, each step is opt-out via Form):
-1. Trim silences (`enable_trim`)
+`POST /api/editor/auto_edit` runs (in order; steps 1-5 opt-out via Form):
+0. **Audio-onset start trim — ALWAYS** (see above)
+1. Trim silences (`enable_trim` — interior pauses)
 2. Voice swap via ElevenLabs STS (only if `voice_id` set)
 3. Transcribe (Whisper, needed if captions OR WPM normalize is on)
 4. **WPM normalize** (`enable_wpm_normalize`, default true; `target_wpm` default 190): compute `active-WPM` (= words / (span − sum_of_long_pauses>0.4s)), compute `speed_factor = target / current` clamped to [0.5, 2.0] with 3% dead zone, time-stretch via `atempo`, scale word timestamps in lockstep.
@@ -513,11 +528,12 @@ When `enrich_prompt=True` AND `use_director=True`: Director wins where it succee
 ### Multi-clip auto-edit
 `POST /api/editor/multi_auto_edit` accepts N video files + a script:
 1. Save each clip
-2. Transcribe each (parallel)
-3. Fuzzy-match each clip's transcript to a position in the script (difflib via `match_clips_by_transcript`); reorder to script order
-4. Per-clip WPM normalize (same logic as above, on each clip independently)
-5. Concat in script order
-6. Trim silences, voice swap, captions (same as single-clip from step 5 onward)
+2. **Audio-onset start trim per clip — ALWAYS** (before transcription)
+3. Transcribe each (parallel)
+4. Fuzzy-match each clip's transcript to a position in the script (difflib via `match_clips_by_transcript`); reorder to script order
+5. Per-clip WPM normalize (same logic as above, on each clip independently)
+6. Concat in script order
+7. Trim silences, voice swap, captions (same as single-clip from step 1 onward)
 
 UI surfaces per-clip pacing decisions in a "Pace normalization" panel after rendering: `clip 3 · 245 WPM    ↑ 1.29× → 190 WPM` per clip.
 

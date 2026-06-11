@@ -637,9 +637,28 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 if video is None:
                     continue
                 src = Path(video.final_video_path)
+                # ALWAYS cut each scene clip to AUDIO onset first (Hugo
+                # 2026-06-11: every clip starts when there's enough sound) —
+                # Kling clips often open with dead air before the line.
+                # Audio-less clips pass through untouched (built into the
+                # primitive); on failure keep the untrimmed source.
+                no_lead = run_dir / f"clip_{cid}_{i:02d}_noLead.mp4"
+                try:
+                    await asyncio.to_thread(
+                        video_edit.trim_leading_silence, src, no_lead,
+                        threshold_db=-30.0,
+                        min_silence_secs=0.05,  # very aggressive — exact start
+                        job_id=re_id,
+                    )
+                    src = no_lead
+                except (RuntimeError, ValueError):
+                    pass
                 dur = durations.get(sid)
                 clip = run_dir / f"clip_{cid}_{i:02d}.mp4"
                 actual = video_edit._probe_duration(src)
+                # CAP at the original scene duration (after the onset trim the
+                # clip is shorter, so finals are tighter than the original —
+                # "never longer than the original scene", not "match exactly").
                 if dur and actual > dur + 0.15:
                     await asyncio.to_thread(video_edit.trim_range, src, clip,
                                             start_secs=0.0, end_secs=dur)

@@ -305,7 +305,12 @@ def trim_to_first_word(input_path: Path, output_path: Path, words: list,
                        *, pad_secs: float = 0.0,
                        job_id: str | None = None) -> dict:
     """Trim the start of `input_path` so it begins exactly at the first
-    transcribed word — the literal "starts on speech" cut Hugo asked for.
+    transcribed word.
+
+    NO LONGER wired into the default flows (2026-06-11): Hugo chose AUDIO
+    energy as the start marker, so `trim_leading_silence` replaced this in
+    auto_edit / multi_auto_edit / compile. Kept as a tested utility for
+    callers that explicitly want a speech-onset (vs sound-onset) cut.
 
     `words` is a list of objects with `.start` attribute (or 'start' key if
     dict) — the canonical Whisper word list this codebase passes around
@@ -378,15 +383,24 @@ def trim_leading_silence(input_path: Path, output_path: Path, *,
                          min_silence_secs: float = 0.2,
                          job_id: str | None = None) -> dict:
     """Drop ONLY the leading silence from `input_path` — internal silences are
-    preserved verbatim. Used per-clip before concat in multi-clip flows
-    (Editor multi_auto_edit + runner_compile) so every clip starts exactly
-    on speech instead of leaving 50ms remnants between concat boundaries.
+    preserved verbatim.
+
+    THE universal entry trim (Hugo, 2026-06-11): every clip entering any
+    pipeline — Editor auto_edit, multi_auto_edit per clip, Step-6 compile per
+    scene, Reengineer assemble per scene — is first cut to AUDIO ONSET,
+    unconditionally (independent of the enable_trim / "Trim silences" toggle,
+    which governs interior pauses only). The marker is audio ENERGY
+    (silencedetect vs `threshold_db`), deliberately NOT Whisper's first-word
+    timestamp — "när det blir tillräckligt mycket ljud" counts music/breath
+    as the start, while sub-threshold room tone does not.
 
     `min_silence_secs` is smaller than the trim_silences default (0.4) so
-    even short half-second pauses at the start get cut.
+    even short half-second pauses at the start get cut; flows pass 0.05 for
+    an exact start.
 
     Returns `{leading_silence_secs, original_duration, trimmed_duration}`.
-    No-op (just copies the file) when no leading silence is detected.
+    No-op (just copies the file) when no leading silence is detected or the
+    clip has no audio track.
     """
     import shutil as _shutil
     with record(phase="editor_trim_leading", model="ffmpeg-silencedetect",
