@@ -91,9 +91,11 @@ def test_state_roundtrip(tmp_path, monkeypatch):
 
 
 def test_clamp_kling_durations():
+    """Whole seconds, always rounded UP (Hugo 2026-06-12), inside [3, 15]."""
     assert _clamp_kling(1.2) == 3      # floor
-    assert _clamp_kling(7.4) == 7      # rounds
+    assert _clamp_kling(7.4) == 8      # rounds UP — never down
     assert _clamp_kling(7.6) == 8
+    assert _clamp_kling(8.0) == 8      # exact integers stay put
     assert _clamp_kling(40.0) == 15    # ceiling
 
 

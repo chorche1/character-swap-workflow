@@ -1908,6 +1908,18 @@
                                 :value="reSceneVal(r, sc, 'motion_prompt')"
                                 @input="reSceneEdit(r, sc, 'motion_prompt', $event.target.value)"
                                 @change="reengineerSaveScene(r, sc)"></textarea>
+                      <!-- EXACT Kling prompt = the textarea text + these auto-appended
+                           clauses (mirrors _with_accent server-side; updates live
+                           while typing). Nothing else is added or rewritten. -->
+                      <p x-show="klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                         class="text-[10px] text-neutral-400 dark:text-neutral-500 leading-snug">
+                        <span class="font-medium text-neutral-500 dark:text-neutral-400">＋ Kling får exakt texten ovan plus:</span>
+                        <span class="italic" x-text="klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"></span>
+                      </p>
+                      <p x-show="!klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                         class="text-[10px] text-emerald-600 dark:text-emerald-400">
+                        ✓ Skickas till Kling exakt som ovan — inga auto-tillägg
+                      </p>
                       <div class="flex items-center gap-3 text-[10px] text-neutral-500">
                         <label class="flex items-center gap-1">Längd (s)
                           <input type="number" min="1" max="15" step="0.5"
@@ -1916,6 +1928,11 @@
                                  @input="reSceneEdit(r, sc, 'duration', $event.target.value)"
                                  @change="reengineerSaveScene(r, sc)" />
                         </label>
+                        <!-- effective whole-second Kling duration: rounded UP,
+                             extended so the says-clause always fits -->
+                        <span class="text-neutral-400 dark:text-neutral-500"
+                              :title="'Rundas upp till hela sekunder och förlängs vid behov så repliken hinner sägas (' + klingDuration(r, sc) + ' s skickas till Kling)'"
+                              x-text="'→ Kling: ' + klingDuration(r, sc) + ' s'"></span>
                         <button x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
                                 class="text-indigo-500 hover:underline"
                                 title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"
@@ -2028,6 +2045,69 @@
             </div>
           </div>
 
+          <!-- ⚙ Slutvideo (Editor) settings — used by the automatic assemble
+               after ▶ Generate videos AND by ▶ Bygg ihop igen. Defaults keep
+               Kling's voice + natural pacing (voice swap + WPM normalize OFF);
+               captions + silence trim ON like Swap Step 6. -->
+          <details x-show="reengineerGateVisible(r) || (reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status))"
+                   class="border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
+            <summary class="px-3 py-2 text-xs font-medium cursor-pointer bg-neutral-50 dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900">
+              ⚙ Slutvideo (Editor)
+              <span class="text-neutral-400 dark:text-neutral-500 ml-1 font-normal"
+                    x-text="`(${reAsmSettings.template}${reAsmSettings.enableCaptions ? '' : ' · inga captions'}${reAsmSettings.enableWpmNormalize ? ` · ${reAsmSettings.targetWpm} WPM` : ''}${reAsmSettings.enableVoiceSwap ? ' · röstbyte' : ' · Kling-röst'})`"></span>
+            </summary>
+            <div class="p-3 space-y-3 text-xs">
+              <p class="text-[10px] text-neutral-400 dark:text-neutral-500">
+                Klippen behålls i FULL längd (talet klipps aldrig) — varje karaktärs scener läggs ihop och körs genom Editor-pipelinen: ljudstart-trim per klipp, tystnadstrim, ev. röstbyte, ev. tempo, captions. Resultatet går att efterjustera i Editor-tabben.
+              </p>
+              <div class="grid grid-cols-2 gap-2">
+                <label>Caption-mall
+                  <select x-model="reAsmSettings.template"
+                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
+                    <template x-for="t in editorTemplates" :key="'ra-'+t.slug">
+                      <option :value="t.slug" x-text="t.label || t.slug"></option>
+                    </template>
+                  </select>
+                </label>
+                <label :class="reAsmSettings.enableWpmNormalize ? '' : 'opacity-40'">Mål-WPM
+                  <input type="number" min="80" max="400" step="5"
+                         x-model.number="reAsmSettings.targetWpm"
+                         :disabled="!reAsmSettings.enableWpmNormalize"
+                         class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+                </label>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <label class="flex items-center gap-1">
+                  <input type="checkbox" x-model="reAsmSettings.enableTrim" class="accent-indigo-500"> Trimma tystnader
+                </label>
+                <label class="flex items-center gap-1">
+                  <input type="checkbox" x-model="reAsmSettings.enableCaptions" class="accent-indigo-500"> Bränn in captions
+                </label>
+                <label class="flex items-center gap-1">
+                  <input type="checkbox" x-model="reAsmSettings.enableWpmNormalize" class="accent-indigo-500"> Normalisera tempo (WPM)
+                </label>
+                <label class="flex items-center gap-1">
+                  <input type="checkbox" x-model="reAsmSettings.enableVoiceSwap" class="accent-indigo-500"> Röstbyte (ElevenLabs)
+                </label>
+              </div>
+              <label class="block" :class="reAsmSettings.enableVoiceSwap ? '' : 'opacity-40'">
+                Röst-override (alla karaktärer)
+                <select x-model="reAsmSettings.voiceOverride"
+                        :disabled="!reAsmSettings.enableVoiceSwap || !elevenlabsAvailable()"
+                        class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
+                  <option value="">— varje karaktärs preset-röst —</option>
+                  <template x-for="v in elevenlabsVoices" :key="'ra-ov-'+v.voice_id">
+                    <option :value="v.voice_id"
+                            x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
+                  </template>
+                </select>
+                <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-0.5">
+                  Av = Klings inbyggda röst (läppsynkad) behålls. På utan override = varje karaktärs 🎤-preset från biblioteket.
+                </p>
+              </label>
+            </div>
+          </details>
+
           <!-- edit-mode actions on finished runs -->
           <div x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
                class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
@@ -2040,7 +2120,7 @@
                     :class="r.finals_stale
                               ? 'bg-amber-500 hover:bg-amber-600 text-white'
                               : 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-900'"
-                    title="Bygger om finalvideorna per karaktär från nuvarande scener/klipp (gratis, lokal ffmpeg)"
+                    title="Bygger om finalvideorna per karaktär: klipp i FULL längd → Editor-pipelinen (Whisper-transkribering körs om; captions/röstbyte enligt ⚙-panelen)"
                     @click="reengineerAssemble(r)">▶ Bygg ihop igen</button>
             <span x-show="r.finals_stale" class="text-xs text-amber-600 dark:text-amber-400">
               klipp/scener har ändrats sedan senaste bygget
@@ -2070,8 +2150,10 @@
                 </div>
               </template>
             </div>
+            <!-- 'animating' removed: the video-phase watcher auto-assembles at
+                 the end — a manual click there would overlap the same build -->
             <button class="mt-2 text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
-                    x-show="['failed','partial_success','animating'].includes(r.status)"
+                    x-show="['failed','partial_success'].includes(r.status)"
                     @click="reengineerAssemble(r)">↻ re-assemble</button>
           </div>
         </div>

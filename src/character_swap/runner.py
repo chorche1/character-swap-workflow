@@ -1184,7 +1184,14 @@ async def run_video_synthesis(job_id: str) -> None:
     # Per-image prompts are explicit/verbatim — skip the Director + enrich
     # layers (they operate per-scene and would be ignored by the per-variant
     # resolver below anyway).
-    if job.use_director and job.movement_prompts and not job.movement_prompts_by_variant:
+    # Reengineer jobs are ALSO excluded (Hugo 2026-06-12: "I want to see the
+    # prompt exactly"): their use_director flag belongs to the swap-IMAGE
+    # phase, and the analyst already wrote the motion prompts the user
+    # reviews/edits at the gate — a movement-Director rewrite here would
+    # silently shadow that approved text via enriched_movement_prompts.
+    if (job.use_director and job.movement_prompts
+            and not job.movement_prompts_by_variant
+            and not job.from_reengineer):
         from pathlib import Path
 
         from character_swap import prompt_director
@@ -1243,7 +1250,9 @@ async def run_video_synthesis(job_id: str) -> None:
     # (e.g. one scene fails enrichment) doesn't re-pay the OpenAI cost
     # on every subsequent run / resume. Skips scenes the Director already
     # filled in (Director output is higher quality).
-    if job.enrich_prompt and job.movement_prompts and not job.movement_prompts_by_variant:
+    if (job.enrich_prompt and job.movement_prompts
+            and not job.movement_prompts_by_variant
+            and not job.from_reengineer):
         from character_swap import prompt_enrich
         enriched_dict = dict(job.enriched_movement_prompts or {})
         dirty = False

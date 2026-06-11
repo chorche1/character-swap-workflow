@@ -17,10 +17,16 @@ Rebuilds an uploaded reference video with different characters:
                              prompts + per-scene durations matched to the
                              original scene lengths; Kling v3 via fal generates
                              clips WITH NATIVE AUDIO (the new character's voice)
-           → assembling      per character: first DONE clip per scene, trimmed
-                             to the original scene duration, concatenated in
-                             scene order (Kling audio kept — no voice swap, no
-                             captions)
+           → assembling      per character: first DONE clip per scene (FULL
+                             length — never cut to the original scene duration;
+                             that cap chopped spoken lines mid-word), concatenated
+                             in scene order and finished through the shared
+                             Editor pipeline (audio-onset trim → interior-silence
+                             trim → optional voice swap → Whisper → optional WPM
+                             → captions), same as Swap Step 6. Settings come from
+                             state["assemble_settings"] (set by the ⚙ panel via
+                             the animate/assemble endpoints); defaults keep
+                             Kling's voice + pacing (voice swap OFF, WPM OFF)
            → done | partial_success | failed
 
 State lives at output/reengineer/<re_id>/state.json (same pattern as B-roll).
@@ -34,11 +40,21 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
+import re
 import secrets
+import shutil
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import events, reengineer, runner, runner_media, video_edit
+from character_swap import (
+    events,
+    reengineer,
+    runner,
+    runner_compile,
+    runner_media,
+    video_edit,
+)
 from character_swap.config import settings
 from character_swap.models import (
     CharStatus,
@@ -554,7 +570,42 @@ async def animate(re_id: str) -> None:
 
 
 def _clamp_kling(secs: float) -> int:
-    return max(3, min(15, round(secs)))
+    """Whole Kling seconds, always rounded UP (Hugo 2026-06-12: never round
+    a scene's time budget down), inside Kling's [3, 15] range."""
+    return max(3, min(15, math.ceil(secs - 1e-9)))
+
+
+# Conversational speech needs ~2.2 words/sec (≈130 wpm) plus a settle-in
+# margin — Kling rushing or truncating a line because the clip is shorter
+# than the dialogue was the root cause of "mycket av det som ska sägas
+# finns inte med" (Hugo 2026-06-12). Mirrored in app.js klingDuration();
+# a pytest keeps the constants in sync.
+_SPEECH_WORDS_PER_SEC = 2.2
+_SPEECH_MARGIN_SECS = 1.0
+_DIALOGUE_RE = re.compile(r'says\s*:?\s*["“]([^"”]+)["”]',
+                          re.IGNORECASE)
+
+
+def _speech_secs(entry: dict) -> float:
+    """Seconds Kling needs to comfortably SAY the scene's dialogue. Source:
+    the motion prompt's `The person says: "..."` clause(s) — the text the
+    user sees and edits at the gate — falling back to the analyst's verbatim
+    `speech` field. No dialogue → 0."""
+    texts = _DIALOGUE_RE.findall(entry.get("motion_prompt") or "")
+    spoken = " ".join(texts).strip() or (entry.get("speech") or "").strip()
+    words = len(spoken.split())
+    if not words:
+        return 0.0
+    return words / _SPEECH_WORDS_PER_SEC + _SPEECH_MARGIN_SECS
+
+
+def _kling_duration(entry: dict) -> int:
+    """Effective whole-second Kling duration for one scene entry: the
+    original scene length OR the time the dialogue needs, whichever is
+    longer, rounded UP. The final build trims silence, so a generous clip
+    costs a few Kling-seconds but never chops the line."""
+    return _clamp_kling(max(float(entry.get("duration") or 0.0),
+                            _speech_secs(entry)))
 
 
 def _with_accent(prompt: str) -> str:
@@ -584,11 +635,16 @@ async def _do_animate(re_id: str, state: dict) -> None:
 
     movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"])
                         for e in state["scenes"]}
-    durations = {e["scene_id"]: _clamp_kling(e["duration"]) for e in state["scenes"]}
+    durations = {e["scene_id"]: _kling_duration(e) for e in state["scenes"]}
 
     job.movement_prompts = movement_prompts
     job.movement_prompt = movement_prompts.get(job.scene_ids[0] if job.scene_ids
                                                else job.scene_id) or "animate"
+    # The gate textarea + accent suffix IS the exact Kling prompt — wipe any
+    # enriched/Director layer (it outranks movement_prompts in the resolver
+    # and would silently replace the text the user just approved).
+    job.enriched_movement_prompts = {}
+    job.enriched_movement_prompt = None
     job.durations_by_scene = durations
     job.videos_per_character = 1
     job.video_model = state.get("video_model") or "kling-v3"
@@ -643,17 +699,59 @@ async def _watch_video_phase(re_id: str, job_id: str) -> None:
 
 # --------------------------------------------------------------------------- phase 3: assemble
 
+# In-process duplicate-assemble guard. Assembly used to be a seconds-long
+# local concat where overlap was harmless; it now bills Whisper (+ optional
+# ElevenLabs/Remotion) per character and writes the same final_<cid>.mp4
+# paths — a double-click or the watcher firing alongside a manual
+# "Bygg ihop igen" must not run two builds for the same run.
+_ASSEMBLING: set[str] = set()
+
+
 async def assemble(re_id: str) -> None:
-    """Per character: pick the first DONE clip per scene (in scene order),
-    trim each to the ORIGINAL scene duration, concat keeping Kling audio."""
+    """Per character: pick the first DONE clip per scene (in scene order,
+    FULL length), concat, then finish through the shared Editor pipeline —
+    the same flow as Swap Step 6 (Hugo 2026-06-12)."""
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return
+    if re_id in _ASSEMBLING:
+        _log.info("reengineer %s: assemble already in flight — skipping duplicate", re_id)
+        return
+    _ASSEMBLING.add(re_id)
     try:
         await _do_assemble(re_id, state)
     except Exception as e:
         _log.exception("reengineer %s assemble failed", re_id)
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        _ASSEMBLING.discard(re_id)
+
+
+# Editor finishing defaults — mirrors Swap Step 6 EXCEPT voice swap + WPM
+# normalize, which default OFF here (Hugo 2026-06-12): Kling clips already
+# speak with the character's own lip-synced voice at its natural pace, so
+# both are opt-in via the ⚙ panel. Only keys listed here are accepted from
+# state["assemble_settings"] (anything else is ignored).
+ASSEMBLE_DEFAULTS: dict = {
+    "template": "capcut-purple-pill",
+    "overrides": None,
+    "enable_trim": True,
+    "enable_captions": True,
+    "enable_wpm_normalize": False,
+    "target_wpm": 190.0,
+    "threshold_db": -30.0,
+    "min_silence_secs": 0.30,
+    "pad_secs": 0.03,
+    "enable_voice_swap": False,
+    "voice_override": None,
+}
+
+
+def _assemble_settings(state: dict) -> dict:
+    cfg = dict(ASSEMBLE_DEFAULTS)
+    stored = state.get("assemble_settings") or {}
+    cfg.update({k: v for k, v in stored.items() if k in ASSEMBLE_DEFAULTS})
+    return cfg
 
 
 async def _do_assemble(re_id: str, state: dict) -> None:
@@ -662,61 +760,73 @@ async def _do_assemble(re_id: str, state: dict) -> None:
     if job is None:
         raise RuntimeError("underlying job disappeared")
     run_dir = reengineer.reengineer_dir(re_id)
-    scene_order = [e["scene_id"] for e in state["scenes"]]
-    durations = {e["scene_id"]: e["duration"] for e in state["scenes"]}
+    cfg = _assemble_settings(state)
     finals: dict[str, dict] = {}
 
-    for cid, jc in job.characters.items():
+    async def _one_character(cid: str, jc: JobCharacter) -> None:
         try:
+            # FULL clips, in state-scene order. The old hard cap at the
+            # original scene duration chopped Kling's spoken lines mid-word
+            # (scenes are often 1-2s where the line takes 5-10s) — pacing is
+            # tightened by the Editor pass cutting SILENCE instead.
             clips: list[Path] = []
-            for i, sid in enumerate(scene_order):
-                vid_variant = _approved_variant_for(jc, sid)
+            for e in state["scenes"]:
+                vid_variant = _approved_variant_for(jc, e["scene_id"])
                 video = next((vv for vv in jc.videos
                               if vv.status == VideoStatus.DONE
                               and vv.source_variant_id == vid_variant
                               and vv.final_video_path
                               and Path(vv.final_video_path).exists()), None)
-                if video is None:
-                    continue
-                src = Path(video.final_video_path)
-                # ALWAYS cut each scene clip to AUDIO onset first (Hugo
-                # 2026-06-11: every clip starts when there's enough sound) —
-                # Kling clips often open with dead air before the line.
-                # Audio-less clips pass through untouched (built into the
-                # primitive); on failure keep the untrimmed source.
-                no_lead = run_dir / f"clip_{cid}_{i:02d}_noLead.mp4"
-                try:
-                    await asyncio.to_thread(
-                        video_edit.trim_leading_silence, src, no_lead,
-                        threshold_db=-30.0,
-                        min_silence_secs=0.05,  # very aggressive — exact start
-                        job_id=re_id,
-                    )
-                    src = no_lead
-                except (RuntimeError, ValueError):
-                    pass
-                dur = durations.get(sid)
-                clip = run_dir / f"clip_{cid}_{i:02d}.mp4"
-                actual = video_edit._probe_duration(src)
-                # CAP at the original scene duration (after the onset trim the
-                # clip is shorter, so finals are tighter than the original —
-                # "never longer than the original scene", not "match exactly").
-                if dur and actual > dur + 0.15:
-                    await asyncio.to_thread(video_edit.trim_range, src, clip,
-                                            start_secs=0.0, end_secs=dur)
-                else:
-                    clip = src
-                clips.append(clip)
+                if video is not None:
+                    clips.append(Path(video.final_video_path))
             if not clips:
                 finals[cid] = {"status": "failed", "error": "no finished clips"}
-                continue
+                return
+
+            # One editor edit_id per character so the result also shows up
+            # in the Editor tab (re-render captions etc. without re-billing).
+            edit_id = "ed_" + secrets.token_hex(5)
+            edit_dir = settings.output_dir / "editor" / edit_id
+            edit_dir.mkdir(parents=True, exist_ok=True)
+            voice_id = runner_compile._resolve_compile_voice(
+                cfg["voice_override"], store().get_character(cid),
+                cfg["enable_voice_swap"])
+
+            # Non-fatal step failures (caption render is the known one) must
+            # be LOUD: logged + surfaced on the final's card via finals[cid].
+            warnings: list[str] = []
+
+            async def _warn(message: str) -> None:
+                _log.warning("reengineer %s %s: %s", re_id, cid, message)
+                warnings.append(message)
+
+            result = await runner_compile.run_editor_pipeline(
+                clips,
+                edit_id=edit_id, edit_dir=edit_dir,
+                template=cfg["template"], overrides=cfg["overrides"],
+                enable_trim=cfg["enable_trim"],
+                enable_captions=cfg["enable_captions"],
+                enable_wpm_normalize=cfg["enable_wpm_normalize"],
+                target_wpm=cfg["target_wpm"],
+                threshold_db=cfg["threshold_db"],
+                min_silence_secs=cfg["min_silence_secs"],
+                pad_secs=cfg["pad_secs"],
+                voice_id=voice_id,
+                warn=_warn,
+            )
             final = run_dir / f"final_{cid}.mp4"
-            await asyncio.to_thread(video_edit.concat_videos, clips, final,
-                                    aspect_ratio="9:16")
+            await asyncio.to_thread(shutil.copyfile, result.final, final)
             finals[cid] = {"status": "done", "final_path": str(final),
-                           "n_clips": len(clips)}
+                           "n_clips": len(clips), "edit_id": edit_id}
+            if warnings:
+                finals[cid]["warning"] = "; ".join(warnings)
         except Exception as e:
             finals[cid] = {"status": "failed", "error": f"{type(e).__name__}: {e}"}
+
+    # All characters in parallel, like Step 6 — Whisper calls overlap and the
+    # Remotion caption renders are gated process-wide in remotion_render.py.
+    await asyncio.gather(*[_one_character(cid, jc)
+                           for cid, jc in job.characters.items()])
 
     ok = [f for f in finals.values() if f["status"] == "done"]
     status = ("done" if len(ok) == len(finals) and ok
@@ -767,10 +877,16 @@ def _sync_movement_from_state(job: Job, state: dict,
                else [entries[i] for i in idxs if 0 <= i < len(entries)])
     job.movement_prompts = dict(job.movement_prompts or {})
     job.durations_by_scene = dict(job.durations_by_scene or {})
+    enriched = dict(job.enriched_movement_prompts or {})
     for e in targets:
         sid = e["scene_id"]
         job.movement_prompts[sid] = _with_accent(e["motion_prompt"])
-        job.durations_by_scene[sid] = _clamp_kling(e["duration"])
+        job.durations_by_scene[sid] = _kling_duration(e)
+        # Drop any enriched/Director layer for the synced scene — it outranks
+        # movement_prompts in the resolver, and the edited text the user SEES
+        # must be exactly what the redo clip gets.
+        enriched.pop(sid, None)
+    job.enriched_movement_prompts = enriched
     if entries:
         first = entries[0]["scene_id"]
         job.movement_prompt = (job.movement_prompts.get(first)

@@ -228,6 +228,24 @@ function studio() {
         return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
       } catch (_) { return defaults; }
     })(),
+    // Reengineer ⚙ Slutvideo (Editor) settings — same shape as Step 6's
+    // compileSettings minus the trim-tuning knobs (the runner uses Hugo's
+    // preset values for those). Defaults keep Kling's voice + pacing.
+    reAsmSettings: (() => {
+      const defaults = {
+        template: 'capcut-purple-pill',
+        enableTrim: true,
+        enableCaptions: true,
+        enableWpmNormalize: false,
+        enableVoiceSwap: false,
+        targetWpm: 190,
+        voiceOverride: '',
+      };
+      try {
+        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v1') || '{}');
+        return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+      } catch (_) { return defaults; }
+    })(),
     compiling: false,
     pipelineRunning: false,         // true while the 🚀 Run-full-pipeline orchestrator is running
     // --- Visual scrubbing timeline state (kept at top level for Alpine
@@ -1500,8 +1518,34 @@ function studio() {
       await this.refreshReengineer(run.re_id);
     },
 
+    // ⚙ Slutvideo (Editor) settings for the Reengineer final build. Sent
+    // with BOTH ▶ Generate videos (persisted server-side so the automatic
+    // assemble after the video phase uses them) and ▶ Bygg ihop igen.
+    // Defaults mirror Swap Step 6 EXCEPT voice swap + WPM normalize, which
+    // stay OFF so Kling's own lip-synced voice and pacing survive.
+    _reAsmBody() {
+      try {
+        localStorage.setItem('reassemble.settings.v1', JSON.stringify(this.reAsmSettings));
+      } catch (_) { /* private window etc. */ }
+      const s = this.reAsmSettings;
+      return {
+        template: s.template,
+        enable_trim: !!s.enableTrim,
+        enable_captions: !!s.enableCaptions,
+        enable_wpm_normalize: !!s.enableWpmNormalize,
+        // Clamp to the server's ge=80/le=400 — a typed out-of-range value
+        // would otherwise 422-block ▶ Generate videos on every click.
+        target_wpm: Math.min(400, Math.max(80, Number(s.targetWpm) || 190)),
+        enable_voice_swap: !!s.enableVoiceSwap,
+        voice_override: s.voiceOverride || '',
+      };
+    },
+
     async reengineerAnimate(run) {
-      const r = await fetch(`/api/reengineer/${run.re_id}/animate`, { method: 'POST' });
+      const r = await fetch(`/api/reengineer/${run.re_id}/animate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this._reAsmBody()),
+      });
       if (!r.ok) { this.notifyError('Animate failed: ' + await r.text()); return; }
       this.notifyInfo('Generating Kling clips with native audio…');
       run.status = 'animating';
@@ -1509,7 +1553,10 @@ function studio() {
     },
 
     async reengineerAssemble(run) {
-      const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, { method: 'POST' });
+      const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this._reAsmBody()),
+      });
       if (!r.ok) { this.notifyError('Assemble failed: ' + await r.text()); return; }
       run.status = 'assembling';
       this._startReengineerPolling();
@@ -1555,6 +1602,41 @@ function studio() {
     reSceneVal(run, sc, field) {
       const d = this.reSceneDrafts[run.re_id + ':' + sc.idx];
       return (d && d[field] !== undefined) ? d[field] : sc[field];
+    },
+
+    // EXACT mirror of runner_reengineer._kling_duration: the whole-second
+    // clip length Kling actually gets — the scene's original length OR the
+    // time the dialogue needs (words / 2.2 wps + 1.0s margin, parsed from
+    // the says-clause / speech field), whichever is longer, rounded UP and
+    // clamped to [3, 15]. A pytest keeps the constants in sync.
+    klingDuration(run, sc) {
+      const dur = Number(this.reSceneVal(run, sc, 'duration')) || 0;
+      const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
+      const m = [...prompt.matchAll(/says\s*:?\s*["“]([^"”]+)["”]/gi)];
+      const spoken = (m.map(x => x[1]).join(' ').trim() || String(sc.speech || '').trim());
+      const words = spoken ? spoken.split(/\s+/).length : 0;
+      const speechSecs = words ? words / 2.2 + 1.0 : 0;
+      return Math.max(3, Math.min(15, Math.ceil(Math.max(dur, speechSecs) - 1e-9)));
+    },
+
+    // EXACT mirror of runner_reengineer._with_accent: the only thing the
+    // backend adds to a Reengineer motion prompt before it reaches Kling.
+    // Shown live under the gate textarea so "the prompt you see" + this
+    // suffix == the literal Kling input. A pytest keeps the clause strings
+    // byte-identical with the Python side — edit both together.
+    klingSuffix(text) {
+      let out = String(text || '');
+      let suffix = '';
+      if (!out.toLowerCase().includes('american')) {
+        const clause = ' The person speaks fluent American English with a natural American accent.';
+        out = out.replace(/\s+$/, '') + clause;
+        suffix += clause;
+      }
+      if (!out.toLowerCase().includes('pronounc')) {
+        const clause = ' Every word is pronounced clearly, correctly and distinctly.';
+        suffix += clause;
+      }
+      return suffix.trim();
     },
 
     reSceneEdit(run, sc, field, value) {

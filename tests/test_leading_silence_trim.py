@@ -97,11 +97,38 @@ def test_sub_threshold_audio_counts_as_silence(tmp_path):
 
 # ------------------------------------------------- Reengineer assemble
 
+
+def _wire_assemble(monkeypatch, tmp_path, job):
+    """Common assemble harness: fake store (no character presets → no voice
+    swap), run dir + editor output under tmp, Whisper stubbed out (the real
+    transcribe would hit the OpenAI API from a checkout with keys loaded),
+    captions left to skip naturally on the empty word list."""
+    run_dir = tmp_path / "re_run"
+    run_dir.mkdir(exist_ok=True)
+
+    class _S:
+        def get_job(self, jid):
+            return job if jid == "j1" else None
+
+        def get_character(self, cid):
+            return None
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.runner_compile, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.reengineer, "reengineer_dir",
+                        lambda rid: run_dir)
+    monkeypatch.setattr(type(runner_reengineer.settings), "output_dir",
+                        property(lambda self: tmp_path / "out"), raising=False)
+    monkeypatch.setattr(video_edit, "transcribe_words",
+                        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no whisper in tests")))
+    updates: dict = {}
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda re_id, **kw: updates.update(kw))
+    return updates
+
+
 def test_assemble_cuts_each_scene_clip_to_audio_onset(tmp_path, monkeypatch):
     """Two Kling clips with 1s of dead air each → the per-character final
     is ~2s shorter than the raw clips combined."""
-    run_dir = tmp_path / "re_run"
-    run_dir.mkdir()
     clip_a = _clip(tmp_path / "scene-a.mp4", lead_silence=1.0, tone_secs=2.0)
     clip_b = _clip(tmp_path / "scene-b.mp4", lead_silence=1.0, tone_secs=2.0)
 
@@ -123,19 +150,8 @@ def test_assemble_cuts_each_scene_clip_to_audio_onset(tmp_path, monkeypatch):
         ])
     job = Job(job_id="j1", title="t", scene_id="s1",
               scene_image_path="/p.png", characters={"cA": jc})
+    updates = _wire_assemble(monkeypatch, tmp_path, job)
 
-    class _S:
-        def get_job(self, jid):
-            return job if jid == "j1" else None
-    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
-    monkeypatch.setattr(runner_reengineer.reengineer, "reengineer_dir",
-                        lambda rid: run_dir)
-    updates: dict = {}
-    monkeypatch.setattr(runner_reengineer, "_update",
-                        lambda re_id, **kw: updates.update(kw))
-
-    # Original scene durations = the full 3s (lead + tone): the onset trim is
-    # what shortens the final, NOT the duration cap.
     state = {"re_id": "re_t", "job_id": "j1",
              "scenes": [{"scene_id": "s1", "duration": 3.0},
                         {"scene_id": "s2", "duration": 3.0}]}
@@ -146,15 +162,17 @@ def test_assemble_cuts_each_scene_clip_to_audio_onset(tmp_path, monkeypatch):
     assert updates["finals_stale"] is False        # edit-mode flag cleared
     final = Path(updates["finals"]["cA"]["final_path"])
     assert final.exists()
+    # The result is re-renderable from the Editor tab.
+    assert updates["finals"]["cA"]["edit_id"].startswith("ed_")
     # 2 clips × ~2s tone after the ~1s lead is cut from each.
     assert video_edit._probe_duration(final) == pytest.approx(4.0, abs=0.8)
 
 
-def test_assemble_still_caps_at_original_scene_duration(tmp_path, monkeypatch):
-    """A clip with no lead but 3s of tone against a 2s original scene is
-    still capped at the original duration (never longer than the original)."""
-    run_dir = tmp_path / "re_run"
-    run_dir.mkdir()
+def test_assemble_keeps_full_clip_no_duration_cap(tmp_path, monkeypatch):
+    """REGRESSION (Hugo 2026-06-12): a 3s spoken clip against a 2s original
+    scene keeps its FULL length. The old cap at the original scene duration
+    chopped Kling's lines mid-word — pacing is tightened by silence trims,
+    never by cutting content."""
     clip_a = _clip(tmp_path / "scene-a.mp4", lead_silence=0.0, tone_secs=3.0)
 
     v_a = GeneratedImage(variant_id="va", path="/a.png", prompt="p",
@@ -168,16 +186,7 @@ def test_assemble_still_caps_at_original_scene_duration(tmp_path, monkeypatch):
                              final_video_path=str(clip_a))])
     job = Job(job_id="j1", title="t", scene_id="s1",
               scene_image_path="/p.png", characters={"cA": jc})
-
-    class _S:
-        def get_job(self, jid):
-            return job
-    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
-    monkeypatch.setattr(runner_reengineer.reengineer, "reengineer_dir",
-                        lambda rid: run_dir)
-    updates: dict = {}
-    monkeypatch.setattr(runner_reengineer, "_update",
-                        lambda re_id, **kw: updates.update(kw))
+    updates = _wire_assemble(monkeypatch, tmp_path, job)
 
     state = {"re_id": "re_t", "job_id": "j1",
              "scenes": [{"scene_id": "s1", "duration": 2.0}]}
@@ -185,4 +194,4 @@ def test_assemble_still_caps_at_original_scene_duration(tmp_path, monkeypatch):
 
     assert updates["status"] == "done"
     final = Path(updates["finals"]["cA"]["final_path"])
-    assert video_edit._probe_duration(final) == pytest.approx(2.0, abs=0.4)
+    assert video_edit._probe_duration(final) == pytest.approx(3.0, abs=0.4)

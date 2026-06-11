@@ -4250,10 +4250,56 @@ async def reengineer_get(re_id: str, slim: bool = False) -> dict:
     return _reengineer_view(state, slim=slim)
 
 
+class ReAssembleSettingsBody(BaseModel):
+    """Editor finishing settings for the Reengineer final build (the ⚙ panel).
+
+    Optional on both the animate endpoint (persisted BEFORE the video phase so
+    the auto-assemble that follows uses them) and the assemble endpoint
+    (re-builds). Field set mirrors Swap Step 6's CompileVideosBody; the
+    DEFAULTS differ — voice swap + WPM normalize are OFF so Kling's own
+    lip-synced voice and pacing survive (Hugo 2026-06-12). All fields default
+    to None = "keep whatever is already stored / the runner default"."""
+    template: str | None = None
+    overrides: dict | None = None
+    enable_trim: bool | None = None
+    enable_captions: bool | None = None
+    enable_wpm_normalize: bool | None = None
+    target_wpm: float | None = Field(default=None, ge=80, le=400)
+    threshold_db: float | None = Field(default=None, ge=-60, le=0)
+    min_silence_secs: float | None = Field(default=None, ge=0.05, le=5)
+    pad_secs: float | None = Field(default=None, ge=0, le=1)
+    enable_voice_swap: bool | None = None
+    voice_override: str | None = None
+
+
+def _store_assemble_settings(state: dict,
+                             body: ReAssembleSettingsBody | None) -> bool:
+    """Merge the panel's explicit (non-None) fields into the run state.
+    Returns True when something changed (caller persists). No body /
+    all-None → False, so settings-less calls keep the stored values."""
+    if body is None:
+        return False
+    sent = {k: v for k, v in body.model_dump().items() if v is not None}
+    # voice_override="" means "clear the override" — store it as None.
+    if body.voice_override is not None:
+        sent["voice_override"] = body.voice_override.strip() or None
+    if not sent:
+        return False
+    merged = dict(state.get("assemble_settings") or {})
+    merged.update(sent)
+    if merged == (state.get("assemble_settings") or {}):
+        return False
+    state["assemble_settings"] = merged
+    return True
+
+
 @app.post("/api/reengineer/{re_id}/animate")
-async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks) -> dict:
+async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks,
+                             body: ReAssembleSettingsBody | None = None) -> dict:
     """Continue after manual image approval: submit movement (agent prompts +
-    matched durations) and generate the Kling clips."""
+    matched durations) and generate the Kling clips. The optional body is the
+    ⚙ final-build panel — persisted NOW so the automatic assemble at the end
+    of the video phase (and any crash-resume) uses the user's choices."""
     from character_swap import reengineer as reengineer_mod, runner_reengineer
     state = reengineer_mod.load_state(re_id)
     if not state:
@@ -4262,20 +4308,30 @@ async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks) -> d
         raise HTTPException(409, "run has no underlying job yet")
     if state.get("status") not in {"awaiting_approval", "failed", "animating"}:
         raise HTTPException(409, f"cannot animate from status '{state.get('status')}'")
+    if _store_assemble_settings(state, body):
+        _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.animate, re_id)
     return {"ok": True, "re_id": re_id}
 
 
 @app.post("/api/reengineer/{re_id}/assemble")
-async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks) -> dict:
+async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
+                              body: ReAssembleSettingsBody | None = None) -> dict:
     """(Re-)run final assembly — e.g. after retrying a failed video in the
-    underlying job, or after a server restart mid-assembly."""
+    underlying job, after a server restart mid-assembly, or to re-build with
+    new ⚙ panel settings (passed in the optional body)."""
     from character_swap import reengineer as reengineer_mod, runner_reengineer
     state = reengineer_mod.load_state(re_id)
     if not state:
         raise HTTPException(404, "re_id not found")
     if not state.get("job_id"):
         raise HTTPException(409, "run has no underlying job yet")
+    # Assembly now bills Whisper (+ optional Remotion/ElevenLabs) per
+    # character — refuse overlap instead of double-building the same finals.
+    if state.get("status") == "assembling" or re_id in runner_reengineer._ASSEMBLING:
+        raise HTTPException(409, "assembly already running for this run")
+    if _store_assemble_settings(state, body):
+        _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
     return {"ok": True, "re_id": re_id}
 

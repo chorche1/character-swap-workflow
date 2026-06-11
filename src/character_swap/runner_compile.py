@@ -26,6 +26,7 @@ import secrets
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import NamedTuple
 
 from character_swap import events, video_edit
 from character_swap.config import settings
@@ -105,6 +106,197 @@ def _resolve_compile_voice(voice_override: str | None, char_asset,
     return vid
 
 
+class EditorResult(NamedTuple):
+    """Outcome of `run_editor_pipeline` — the finished MP4 inside the
+    edit dir, plus whether the optional voice swap actually applied."""
+    final: Path
+    voice_applied: bool
+
+
+async def run_editor_pipeline(
+    paths: list[Path],
+    *,
+    edit_id: str,
+    edit_dir: Path,
+    template: str,
+    overrides: dict | None,
+    enable_trim: bool,
+    enable_captions: bool,
+    enable_wpm_normalize: bool,
+    target_wpm: float,
+    threshold_db: float,
+    min_silence_secs: float,
+    pad_secs: float,
+    voice_id: str | None,
+    enable_transcribe: bool = True,
+    warn=None,
+) -> EditorResult:
+    """Concat + Editor finishing, shared by the Step-6 compile and the
+    Reengineer assemble: per-clip audio-onset trim → concat → interior
+    silence trim → ElevenLabs voice swap (when `voice_id` is set) → Whisper
+    transcribe → WPM normalize → caption burn-in. The result lives inside
+    `edit_dir` under the given `edit_id`, so it is re-renderable from the
+    Editor tab like any other edit.
+
+    `warn` is an optional async callback(message) for non-fatal step
+    failures (currently: caption render) — callers surface it their own way.
+    """
+    # Step 0.5: per-clip audio-onset trim — ALWAYS runs (Hugo 2026-06-11:
+    # every clip starts exactly when there's enough sound, independent of
+    # enable_trim, which governs interior pauses only). Each clip is cut at
+    # the start to the audio onset so the concatenated output has no
+    # inter-clip dead air.
+    no_lead: list[Path] = []
+    for i, p in enumerate(paths):
+        cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.trim_leading_silence, p, cut,
+                threshold_db=threshold_db,
+                min_silence_secs=0.05,  # very aggressive — exact start
+                job_id=edit_id,
+            )
+            no_lead.append(cut)
+        except (RuntimeError, ValueError):
+            no_lead.append(p)
+    paths = no_lead
+
+    # Step 1: concat per-scene MP4s into one.
+    concat_out = edit_dir / "00-concat.mp4"
+    await asyncio.to_thread(
+        video_edit.concat_videos, paths, concat_out,
+        aspect_ratio=settings.video_aspect_ratio,
+    )
+    current = concat_out
+
+    # Step 2: trim silences (optional — INTERIOR pauses only; the start
+    # was already cut to audio onset per clip in Step 0.5).
+    if enable_trim:
+        trimmed = edit_dir / "01-trimmed.mp4"
+        try:
+            await asyncio.to_thread(
+                video_edit.trim_silences, current, trimmed,
+                threshold_db=threshold_db,
+                min_silence_secs=min_silence_secs,
+                pad_secs=pad_secs, job_id=edit_id,
+            )
+            current = trimmed
+        except RuntimeError:
+            # Trim failed (e.g. no silences detected) — keep going with
+            # the un-trimmed source rather than failing the whole compile.
+            pass
+
+    # Step 3: voice swap via ElevenLabs (optional — only when the caller
+    # resolved a voice AND the key is configured).
+    voice_applied = False
+    if voice_id and settings.has_provider("elevenlabs"):
+        try:
+            from character_swap.clients import elevenlabs as _eleven
+            tmp_audio_in = edit_dir / "02-original.wav"
+            await asyncio.to_thread(
+                video_edit._run,
+                [video_edit._ffmpeg(), "-y", "-i", str(current),
+                 "-vn", "-ac", "1", "-ar", "44100", str(tmp_audio_in)],
+            )
+            new_audio_bytes = await asyncio.to_thread(
+                _eleven.voice_changer,
+                voice_id=voice_id,
+                source_audio=tmp_audio_in,
+                app_job_id=edit_id,
+            )
+            new_audio = edit_dir / "02-swapped.mp3"
+            new_audio.write_bytes(new_audio_bytes)
+            swapped = edit_dir / "02-swapped.mp4"
+            await asyncio.to_thread(
+                video_edit.replace_audio, current, new_audio, swapped,
+            )
+            current = swapped
+            voice_applied = True
+            tmp_audio_in.unlink(missing_ok=True)
+        except Exception:
+            # Voice swap is the most fragile step (network / quota /
+            # bad audio). Don't fail the whole compile — captions +
+            # WPM still produce a usable MP4 without it.
+            pass
+
+    # Step 4a: transcribe. Needed for: captions, WPM normalize, AND the
+    # Resolve-export flow (SRT generated from words.json). `enable_transcribe`
+    # defaults True so the words are always available for downstream consumers
+    # even when captions + WPM are both off.
+    words: list = []
+    if enable_transcribe or enable_captions or enable_wpm_normalize:
+        try:
+            words = await asyncio.to_thread(
+                video_edit.transcribe_words, current, job_id=edit_id,
+            )
+        except Exception:
+            words = []
+
+    # (The old Step 4a.5 Whisper-first-word recut was removed 2026-06-11:
+    # audio energy is the start marker — Step 0.5's unconditional
+    # per-clip audio-onset trim is the contract; sub-threshold ambient
+    # before speech is intentional content.)
+
+    # Step 4b: WPM normalize (time-stretch).
+    if enable_wpm_normalize and words:
+        try:
+            speed = video_edit.compute_speed_factor(
+                words, target_wpm=target_wpm,
+            )
+            if abs(speed - 1.0) > 1e-3:
+                stretched = edit_dir / "03-stretched.mp4"
+                await asyncio.to_thread(
+                    video_edit.time_stretch, current, stretched,
+                    speed_factor=speed, job_id=edit_id,
+                )
+                words = video_edit.scale_word_timestamps(words, speed)
+                current = stretched
+        except Exception:
+            pass
+
+    # Persist the transcript NOW (after any WPM scaling) so the Resolve
+    # export can build an SRT even when caption burn-in is skipped, AND
+    # so re-renders / debug have the canonical word list.
+    if words:
+        try:
+            (edit_dir / "words.json").write_text(
+                video_edit.words_to_json(words), encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    # Step 4c: captions burn-in.
+    if enable_captions and words:
+        try:
+            style = video_edit.style_from_params(template, overrides)
+            (edit_dir / "pre_caption.txt").write_text(
+                str(current), encoding="utf-8",
+            )
+            final_out = edit_dir / "04-final.mp4"
+            await asyncio.to_thread(
+                video_edit.render_captions, current, final_out,
+                words=words, style=style, job_id=edit_id,
+            )
+            current = final_out
+        except Exception as e:
+            # Caption render is the LAST step; if it fails we still ship
+            # the WPM-normalized + voice-swapped result.
+            if warn is not None:
+                await warn(f"caption render failed: {e}")
+    else:
+        # No captions → the output IS the pre-caption file. Record that
+        # for the Resolve-export endpoint (so it can pick the right video
+        # as pre-caption AND skip the duplicate copy).
+        try:
+            (edit_dir / "pre_caption.txt").write_text(
+                str(current), encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    return EditorResult(final=current, voice_applied=voice_applied)
+
+
 async def _compile_one_character(
     job_id: str, char_id: str,
     *,
@@ -173,164 +365,25 @@ async def _compile_one_character(
         return
 
     try:
-        # Step 0.5: per-scene audio-onset trim — ALWAYS runs (Hugo 2026-06-11:
-        # every clip starts exactly when there's enough sound, independent of
-        # enable_trim, which governs interior pauses only). Each scene's video
-        # is cut at the start to the audio onset so the concatenated output
-        # has no inter-scene dead air.
-        no_lead: list[Path] = []
-        for i, p in enumerate(paths):
-            cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
-            try:
-                await asyncio.to_thread(
-                    video_edit.trim_leading_silence, p, cut,
-                    threshold_db=threshold_db,
-                    min_silence_secs=0.05,  # very aggressive — exact start
-                    job_id=edit_id,
-                )
-                no_lead.append(cut)
-            except (RuntimeError, ValueError):
-                no_lead.append(p)
-        paths = no_lead
+        async def _warn(message: str) -> None:
+            await _emit(job_id, "char.compile_warning",
+                        char_id=char_id, message=message)
 
-        # Step 1: concat per-scene MP4s into one.
-        concat_out = edit_dir / "00-concat.mp4"
-        await asyncio.to_thread(
-            video_edit.concat_videos, paths, concat_out,
-            aspect_ratio=settings.video_aspect_ratio,
+        result = await run_editor_pipeline(
+            paths,
+            edit_id=edit_id, edit_dir=edit_dir,
+            template=template, overrides=overrides,
+            enable_trim=enable_trim, enable_captions=enable_captions,
+            enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
+            threshold_db=threshold_db, min_silence_secs=min_silence_secs,
+            pad_secs=pad_secs, voice_id=effective_voice_id,
+            enable_transcribe=enable_transcribe, warn=_warn,
         )
-        current = concat_out
-
-        # Step 2: trim silences (optional — INTERIOR pauses only; the start
-        # was already cut to audio onset per scene in Step 0.5).
-        if enable_trim:
-            trimmed = edit_dir / "01-trimmed.mp4"
-            try:
-                await asyncio.to_thread(
-                    video_edit.trim_silences, current, trimmed,
-                    threshold_db=threshold_db,
-                    min_silence_secs=min_silence_secs,
-                    pad_secs=pad_secs, job_id=edit_id,
-                )
-                current = trimmed
-            except RuntimeError:
-                # Trim failed (e.g. no silences detected) — keep going with
-                # the un-trimmed source rather than failing the whole compile.
-                pass
-
-        # Step 3: voice swap via ElevenLabs (optional — only if char has a
-        # preset OR the batch override is set, AND the key is configured).
-        swap_summary: dict | None = None
-        if effective_voice_id and settings.has_provider("elevenlabs"):
-            try:
-                from character_swap.clients import elevenlabs as _eleven
-                tmp_audio_in = edit_dir / "02-original.wav"
-                await asyncio.to_thread(
-                    video_edit._run,
-                    [video_edit._ffmpeg(), "-y", "-i", str(current),
-                     "-vn", "-ac", "1", "-ar", "44100", str(tmp_audio_in)],
-                )
-                new_audio_bytes = await asyncio.to_thread(
-                    _eleven.voice_changer,
-                    voice_id=effective_voice_id,
-                    source_audio=tmp_audio_in,
-                    app_job_id=edit_id,
-                )
-                new_audio = edit_dir / "02-swapped.mp3"
-                new_audio.write_bytes(new_audio_bytes)
-                swapped = edit_dir / "02-swapped.mp4"
-                await asyncio.to_thread(
-                    video_edit.replace_audio, current, new_audio, swapped,
-                )
-                current = swapped
-                swap_summary = {"voice_id": effective_voice_id}
-                tmp_audio_in.unlink(missing_ok=True)
-            except Exception:
-                # Voice swap is the most fragile step (network / quota /
-                # bad audio). Don't fail the whole compile — captions +
-                # WPM still produce a usable MP4 without it.
-                pass
-
-        # Step 4a: transcribe. Needed for: captions, WPM normalize, AND the
-        # Resolve-export flow (SRT generated from words.json). `enable_transcribe`
-        # defaults True so the words are always available for downstream consumers
-        # even when captions + WPM are both off.
-        words: list = []
-        if enable_transcribe or enable_captions or enable_wpm_normalize:
-            try:
-                words = await asyncio.to_thread(
-                    video_edit.transcribe_words, current, job_id=edit_id,
-                )
-            except Exception:
-                words = []
-
-        # (The old Step 4a.5 Whisper-first-word recut was removed 2026-06-11:
-        # audio energy is the start marker — Step 0.5's unconditional
-        # per-scene audio-onset trim is the contract; sub-threshold ambient
-        # before speech is intentional content.)
-
-        # Step 4b: WPM normalize (time-stretch).
-        if enable_wpm_normalize and words:
-            try:
-                speed = video_edit.compute_speed_factor(
-                    words, target_wpm=target_wpm,
-                )
-                if abs(speed - 1.0) > 1e-3:
-                    stretched = edit_dir / "03-stretched.mp4"
-                    await asyncio.to_thread(
-                        video_edit.time_stretch, current, stretched,
-                        speed_factor=speed, job_id=edit_id,
-                    )
-                    words = video_edit.scale_word_timestamps(words, speed)
-                    current = stretched
-            except Exception:
-                pass
-
-        # Persist the transcript NOW (after any WPM scaling) so the Resolve
-        # export can build an SRT even when caption burn-in is skipped, AND
-        # so re-renders / debug have the canonical word list.
-        if words:
-            try:
-                (edit_dir / "words.json").write_text(
-                    video_edit.words_to_json(words), encoding="utf-8",
-                )
-            except OSError:
-                pass
-
-        # Step 4c: captions burn-in.
-        if enable_captions and words:
-            try:
-                style = video_edit.style_from_params(template, overrides)
-                (edit_dir / "pre_caption.txt").write_text(
-                    str(current), encoding="utf-8",
-                )
-                final_out = edit_dir / "04-final.mp4"
-                await asyncio.to_thread(
-                    video_edit.render_captions, current, final_out,
-                    words=words, style=style, job_id=edit_id,
-                )
-                current = final_out
-            except Exception as e:
-                # Caption render is the LAST step; if it fails we still ship
-                # the WPM-normalized + voice-swapped result.
-                await _emit(job_id, "char.compile_warning",
-                            char_id=char_id,
-                            message=f"caption render failed: {e}")
-        else:
-            # No captions → the compiled output IS the pre-caption file. Record
-            # that for the Resolve-export endpoint (so it can pick the right
-            # video as pre-caption AND skip the duplicate copy).
-            try:
-                (edit_dir / "pre_caption.txt").write_text(
-                    str(current), encoding="utf-8",
-                )
-            except OSError:
-                pass
 
         # Copy the final result to the canonical per-character location so
         # the UI can grab it from `output/<job_id>/compiled/<char_id>.mp4`.
         compiled_final = compiled_dir / f"{char_id}.mp4"
-        shutil.copyfile(current, compiled_final)
+        shutil.copyfile(result.final, compiled_final)
 
         _persist_jc(job, jc,
                     compiled_video_path=str(compiled_final),
@@ -340,7 +393,7 @@ async def _compile_one_character(
                     char_id=char_id, edit_id=edit_id,
                     output_path=str(compiled_final),
                     voice_id=effective_voice_id,
-                    voice_applied=swap_summary is not None)
+                    voice_applied=result.voice_applied)
     except Exception as e:
         _persist_jc(job, jc,
                     compile_status="failed",
