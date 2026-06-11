@@ -5506,6 +5506,38 @@ function studio() {
       this.job = await r.json();
     },
 
+    // Reengineer card: show "↻ Ta om misslyckade" once clips exist and some
+    // failed. Hidden at the approval gate (no clips yet — nothing to retry).
+    reCanRetryFailed(r) {
+      return r.status !== 'awaiting_approval' && this.failedVideosCount(r.job) > 0;
+    },
+
+    // Count of failed/error clips across all characters. Pass a job object
+    // for the Reengineer card (r.job); defaults to the active Swap job.
+    failedVideosCount(job) {
+      const j = job || this.job;
+      if (!j) return 0;
+      return Object.values(j.characters || {}).reduce((n, jc) =>
+        n + (jc.videos || []).filter(v => ['failed', 'error'].includes(v.status)).length, 0);
+    },
+
+    // "↻ Retry all failed" — one click re-submits every failed/error clip
+    // (the recovery path for restart-stranded clips that resume marks failed).
+    async retryAllFailedVideos(job) {
+      const j = job || this.job;
+      if (!j) return;
+      const n = this.failedVideosCount(j);
+      const r = await fetch('/api/jobs/' + j.job_id + '/retry_failed_videos', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      if (!r.ok) { this.notifyError('Retry all failed: ' + await r.text()); return; }
+      const updated = await r.json();
+      if (this.job && this.job.job_id === j.job_id) this.job = updated;
+      this.notifyInfo('Retrying ' + n + ' failed clip' + (n === 1 ? '' : 's') + '…');
+    },
+
     // "+ N more videos" button per character in Step 5. Appends N takes
     // PER approved variant (so 2 approved scenes × n=3 = 6 new videos).
     // Existing videos are untouched. The lock-flag prevents rapid double-

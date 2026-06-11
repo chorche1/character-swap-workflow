@@ -2419,6 +2419,40 @@ async def retry_video(job_id: str, body: RetryVideoBody,
     return _job_to_dict(job)
 
 
+class RetryFailedVideosBody(BaseModel):
+    """Optional filter — when set, only this character's failed clips retry."""
+    char_id: str | None = None
+
+
+@app.post("/api/jobs/{job_id}/retry_failed_videos")
+async def retry_failed_videos(job_id: str, background: BackgroundTasks,
+                              body: RetryFailedVideosBody | None = None) -> dict:
+    """Re-submit EVERY failed/error video on the job in one click — the
+    recovery path for restart-stranded clips (resume_pending marks them
+    failed; this button re-bills them only when Hugo asks). Each clip goes
+    through the same `retry_one_video` as the per-clip ↻ button."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
+    if key_name:
+        settings.require_keys(key_name)
+    if not job.movement_prompt:
+        raise HTTPException(409, "Job has no movement prompt yet")
+    char_id = body.char_id if body else None
+    failed = [
+        v for cid, jc in job.characters.items()
+        if char_id is None or cid == char_id
+        for v in jc.videos
+        if v.status in {VideoStatus.FAILED, VideoStatus.ERROR}
+    ]
+    if not failed:
+        raise HTTPException(409, "No failed videos to retry")
+    background.add_task(_run_async, runner.retry_failed_videos, job_id, char_id)
+    return _job_to_dict(job)
+
+
 class CompileVideosBody(BaseModel):
     """POST /api/jobs/{job_id}/compile_videos — per-character compile of all
     scene videos into ONE final MP4 per character. Settings apply uniformly

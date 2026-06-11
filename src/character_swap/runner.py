@@ -35,7 +35,7 @@ def _short(prefix: str = "") -> str:
 
 
 def _persist(job: Job, jc: JobCharacter, *, status: CharStatus | None = None,
-             **fields) -> JobCharacter:
+             structural: bool = False, **fields) -> JobCharacter:
     if status is not None:
         jc.status = status
     for k, v in fields.items():
@@ -47,7 +47,11 @@ def _persist(job: Job, jc: JobCharacter, *, status: CharStatus | None = None,
     # character's rows instead of DELETE+reinserting every child of the job
     # — ~65 such writes per Reengineer run). Fake stores in tests and the
     # JSON backend fall through to the classic full update.
-    if hasattr(s, "update_job_character"):
+    # `structural=True` forces the full update: the fast paths upsert by
+    # child id and CANNOT delete, so any change that replaces/removes a
+    # child id (e.g. retry_one_video swapping in a fresh video_id) must
+    # rewrite the whole job or the old row survives as a ghost.
+    if not structural and hasattr(s, "update_job_character"):
         s.update_job_character(job, jc)
     else:
         s.update_job(job)
@@ -1144,7 +1148,11 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
         movement_prompt_override=effective_override,
     )
     jc.videos[idx] = fresh
-    _persist(job, jc, status=CharStatus.ANIMATING)
+    # structural: the old video_id's row must be DELETED — the granular
+    # upsert can't do that, and the orphan row would resurrect as a ghost
+    # pending/failed video on the next restart (observed: 61 rows for a
+    # 45-video job after the re_345deead2e rescue, 2026-06-11).
+    _persist(job, jc, status=CharStatus.ANIMATING, structural=True)
     # Resolve the prompt: per-video override > enriched > raw per-scene > job-level.
     source_variant = next(
         (iv for iv in jc.images if iv.variant_id == source_variant_id), None,
@@ -1323,6 +1331,12 @@ async def resume_pending(job_id: str) -> None:
     After a server restart:
       - Stale `generating` image variants: mark failed (interrupted).
       - In-flight videos with a grok_job_id: re-poll & download.
+      - Stranded videos WITHOUT a grok_job_id (placeholder created, submit
+        never reached the provider before the restart): mark failed so the
+        ↻ retry UI applies — they used to sit `pending` forever, which kept
+        `_videos_terminal` false and timed out reengineer runs (re_345deead2e,
+        2026-06-11). Hugo's call: no auto-resubmit (no billing without a
+        click); the "↻ retry all failed" button recovers them in one go.
     """
     s = store()
     job = s.get_job(job_id)
@@ -1339,13 +1353,50 @@ async def resume_pending(job_id: str) -> None:
         if all(v.status == VariantStatus.FAILED for v in jc.images) and jc.images:
             jc.status = CharStatus.FAILED
             jc.error = "all variants failed"
+        for v in jc.videos:
+            if not v.grok_job_id and v.status not in _VIDEO_TERMINAL:
+                v.status = VideoStatus.FAILED
+                v.error = "interrupted (server restart) — submit never reached the provider"
+                dirty = True
     if dirty:
+        # Full job write — also purges any pre-existing orphan video rows
+        # (upsert_job DELETE+reinserts children), self-healing DBs from
+        # before the retry_one_video structural-persist fix.
         s.update_job(job)
 
     for jc in job.characters.values():
         for v in jc.videos:
             if v.grok_job_id and v.status not in _VIDEO_TERMINAL:
                 asyncio.create_task(_resume_video(job, jc, v))
+        # Chars whose videos are now ALL terminal (e.g. every remaining slot
+        # was stranded) would otherwise stay `animating` forever — close them
+        # out the same way the live path does. Guarded so already-terminal
+        # chars across job history aren't re-persisted on every startup.
+        if jc.status == CharStatus.ANIMATING:
+            _maybe_complete_char(job, jc)
+
+
+async def retry_failed_videos(job_id: str, char_id: str | None = None) -> None:
+    """Re-submit every FAILED/ERROR video on the job (optionally one char's)
+    in parallel — the "↻ retry all failed" button. Each slot goes through
+    `retry_one_video` so prompt/duration resolution and in-place replacement
+    match the single-clip retry exactly."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None or not job.movement_prompt:
+        return
+    pairs = [
+        (cid, v.video_id)
+        for cid, jc in job.characters.items()
+        if char_id is None or cid == char_id
+        for v in jc.videos
+        if v.status in {VideoStatus.FAILED, VideoStatus.ERROR}
+    ]
+    if not pairs:
+        return
+    await asyncio.gather(
+        *[retry_one_video(job_id, cid, vid) for cid, vid in pairs]
+    )
 
 
 async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None:
