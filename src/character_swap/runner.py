@@ -498,8 +498,14 @@ async def regen_scene_end_frames(job_id: str, scene_id: str) -> None:
 
 
 async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
-                               prompt: str | None = None) -> None:
-    """Re-run image gen for ONE specific (already-failed) variant slot.
+                               prompt: str | None = None, *,
+                               sem: asyncio.Semaphore | None = None) -> None:
+    """Re-run image gen for ONE specific variant slot (failed retry OR
+    reject-and-regenerate of a ready-but-wrong image).
+
+    `sem` lets a caller retrying MANY slots at once (crash-resume) share one
+    semaphore — otherwise each call creates its own and N parallel retries
+    would hit the provider with N simultaneous requests.
 
     Unlike `run_image_generation` which wipes all variants for the
     character, this keeps the other (possibly successful) variants intact
@@ -530,7 +536,8 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
         _persist(job, jc, status=CharStatus.GENERATING, error=None)
     await _emit(job_id, "variant.started",
                 char_id=char_id, variant_id=variant_id)
-    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
+    if sem is None:
+        sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await _generate_one_variant(job, jc, target, sem)
 
 

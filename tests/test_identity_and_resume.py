@@ -147,7 +147,7 @@ def test_resume_swapping_retries_interrupted_slots(monkeypatch, tmp_path):
     monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
 
     retried: list[str] = []
-    async def fake_retry(job_id, cid, vid, prompt=None):
+    async def fake_retry(job_id, cid, vid, prompt=None, **kw):
         retried.append(vid)
     monkeypatch.setattr(runner_reengineer.runner, "retry_single_variant", fake_retry)
     monkeypatch.setattr(runner_reengineer, "_spawn",

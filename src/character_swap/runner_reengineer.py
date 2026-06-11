@@ -125,14 +125,19 @@ async def _resume_swapping(re_id: str, state: dict) -> None:
         return
     # Auto-retry the slots the restart killed (marked failed by resume_pending).
     # Tasks are collected (not just _spawn'ed) so the stall watchdog can
-    # cancel them if a retried slot hangs.
+    # cancel them if a retried slot hangs. ONE shared semaphore across all
+    # retries — without it, a resume with 30 dead slots would fire 30
+    # simultaneous provider calls (each retry otherwise creates its own).
+    retry_sem = asyncio.Semaphore(
+        runner._image_concurrency_for_model(runner._swap_image_model(job)))
     retry_tasks: list[asyncio.Task] = []
     for cid, jc in job.characters.items():
         for v in jc.images:
             if (v.status == VariantStatus.FAILED
                     and "interrupted" in (v.error or "")):
                 task = asyncio.create_task(
-                    runner.retry_single_variant(job_id, cid, v.variant_id),
+                    runner.retry_single_variant(job_id, cid, v.variant_id,
+                                                sem=retry_sem),
                     name=f"reengineer-retry-{v.variant_id}")
                 _RESUME_TASKS.add(task)
                 task.add_done_callback(_RESUME_TASKS.discard)
