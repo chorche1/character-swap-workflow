@@ -125,6 +125,12 @@ function studio() {
     // the next 5s poll tick.
     _reengineerSockets: {},
     _reRefreshTimers: {},
+    // Edit mode (opt-in iteration on a finished run / at the gate):
+    // re_id → bool toggle; drafts keyed `${re_id}:${idx}` so the 5s poll
+    // can't clobber a half-typed prompt; per-run add-scene form state.
+    reEdit: {},
+    reSceneDrafts: {},
+    reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -30,       // Hugo's preset
@@ -1356,16 +1362,18 @@ function studio() {
     },
 
     _reengineerIsActive(r) {
-      // awaiting_approval counts as active while a per-slot retry is in
-      // flight — otherwise the poll filter drops the run and the retried
-      // slot never repaints (the timer used to self-clear here).
-      return ['queued', 'analyzing', 'swapping', 'animating', 'assembling'].includes(r.status)
-        || (r.status === 'awaiting_approval' && this._reengineerHasInFlight(r));
+      // awaiting_approval / finished runs count as active while edit-mode
+      // work is in flight (per-slot retries, added-scene images, clip redos)
+      // — otherwise the poll filter drops the run and nothing repaints.
+      return ['queued', 'analyzing', 'swapping', 'animating', 'reanimating', 'assembling'].includes(r.status)
+        || (['awaiting_approval', 'done', 'partial_success', 'failed'].includes(r.status)
+            && this._reengineerHasInFlight(r));
     },
 
     _reengineerHasInFlight(r) {
       return Object.values(r.job?.characters || {})
-        .some(c => (c.images || []).some(v => v.status === 'generating'));
+        .some(c => (c.images || []).some(v => v.status === 'generating')
+                || (c.videos || []).some(v => ['pending', 'processing'].includes(v.status)));
     },
 
     // Live updates: subscribe to the existing per-job WebSocket (the runner
@@ -1405,7 +1413,9 @@ function studio() {
         const prev = i >= 0 ? this.reengineerHistory[i] : null;
         if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
         else this.reengineerHistory.unshift(fresh);
-        if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
+        // Keep the WS while edit-mode work is in flight on a finished run.
+        if (['done', 'partial_success', 'failed'].includes(fresh.status)
+            && !this._reengineerHasInFlight(fresh)) {
           if (fresh.job_id) this._closeReengineerWS(fresh.job_id);
         } else if (fresh.job_id) {
           this._ensureReengineerWS(fresh);
@@ -1415,6 +1425,11 @@ function studio() {
             this.notifyMilestone('Reengineer — review swapped images',
               (fresh.source_name || reId) + ' is ready for approval',
               { kind: 'approval', tag: 're-approve-' + reId });
+          } else if (prev.status === 'reanimating'
+                     && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
+            this.notifyMilestone('Re-animation klar',
+              (fresh.source_name || reId) + ' — bygg ihop finalerna igen',
+              { kind: 'approval', tag: 're-reanim-' + reId });
           } else if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
             this.notifyMilestone('Reengineer ' + fresh.status,
               fresh.source_name || reId, { tag: 're-done-' + reId });
@@ -1446,6 +1461,9 @@ function studio() {
         body: JSON.stringify({ char_id: charId, action: 'approve', variant_id: variantId }),
       });
       if (!r.ok) { this.notifyError('Approve failed: ' + await r.text()); return; }
+      // Swapping the approved image on an already-animated scene makes its
+      // existing clip stale — flag it so "Animera om ändrade" picks it up.
+      await this._reMarkVariantSceneDirty(run, charId, variantId);
       await this.refreshReengineer(run.re_id);
     },
 
@@ -1466,6 +1484,8 @@ function studio() {
       const slot = (run.job?.characters?.[charId]?.images || [])
         .find(v => v.variant_id === variantId);
       if (slot) slot.status = 'generating';
+      // A regenerated image differs from the clip that animated the old one.
+      await this._reMarkVariantSceneDirty(run, charId, variantId);
       this._startReengineerPolling();
       await this.refreshReengineer(run.re_id);
     },
@@ -1497,6 +1517,199 @@ function studio() {
       const r = await fetch('/api/reengineer/' + run.re_id, { method: 'DELETE' });
       if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
       this.reengineerHistory = this.reengineerHistory.filter(x => x.re_id !== run.re_id);
+    },
+
+    // ---------------------------------------------------------- edit mode
+
+    reEditable(r) {
+      return ['awaiting_approval', 'done', 'partial_success', 'failed'].includes(r.status);
+    },
+
+    toggleReengineerEdit(run) {
+      this.reEdit = { ...this.reEdit, [run.re_id]: !this.reEdit[run.re_id] };
+    },
+
+    _spliceReengineerView(view) {
+      const i = this.reengineerHistory.findIndex(x => x.re_id === view.re_id);
+      if (i >= 0) this.reengineerHistory.splice(i, 1, view);
+    },
+
+    // Draft-or-state read/write — drafts survive the 5s poll splice.
+    reSceneVal(run, sc, field) {
+      const d = this.reSceneDrafts[run.re_id + ':' + sc.idx];
+      return (d && d[field] !== undefined) ? d[field] : sc[field];
+    },
+
+    reSceneEdit(run, sc, field, value) {
+      const key = run.re_id + ':' + sc.idx;
+      this.reSceneDrafts = {
+        ...this.reSceneDrafts,
+        [key]: { ...(this.reSceneDrafts[key] || {}), [field]: value },
+      };
+    },
+
+    async reengineerSaveScene(run, sc) {
+      const key = run.re_id + ':' + sc.idx;
+      const draft = this.reSceneDrafts[key];
+      if (!draft) return;
+      const body = {};
+      if (draft.motion_prompt !== undefined
+          && draft.motion_prompt !== sc.motion_prompt) body.motion_prompt = draft.motion_prompt;
+      if (draft.duration !== undefined
+          && Number(draft.duration) !== sc.duration) body.duration = Number(draft.duration);
+      if (!Object.keys(body).length) {
+        const { [key]: _, ...rest } = this.reSceneDrafts;
+        this.reSceneDrafts = rest;
+        return;
+      }
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte spara scenen: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      const { [key]: _, ...rest } = this.reSceneDrafts;
+      this.reSceneDrafts = rest;
+    },
+
+    // After approve-swaps / image-regens on an ALREADY-ANIMATED scene, the
+    // existing clip no longer matches the chosen image — flag the scene.
+    async _reMarkVariantSceneDirty(run, charId, variantId) {
+      if (!['done', 'partial_success', 'failed'].includes(run.status)) return;
+      const v = (run.job?.characters?.[charId]?.images || [])
+        .find(x => x.variant_id === variantId);
+      const idx = (run.scenes || []).findIndex(sc => sc.scene_id === v?.scene_id);
+      if (idx < 0) return;
+      try {
+        const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${idx}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dirty: true }),
+        });
+        if (r.ok) this._spliceReengineerView(await r.json());
+      } catch (_) {}
+    },
+
+    reengineerAddSceneFile(run, file) {
+      if (!file) return;
+      this.reAdd = {
+        ...this.reAdd,
+        [run.re_id]: {
+          file, name: file.name,
+          isVideo: /\.(mp4|mov|webm)$/i.test(file.name),
+          whisper: false, prompt: '', submitting: false,
+        },
+      };
+    },
+
+    async reengineerSubmitAddScene(run) {
+      const a = this.reAdd[run.re_id];
+      if (!a || !a.file || a.submitting) return;
+      a.submitting = true;
+      const fd = new FormData();
+      fd.append('file', a.file);
+      fd.append('motion_prompt', a.prompt || '');
+      fd.append('duration', '0');
+      fd.append('whisper', a.whisper ? 'true' : 'false');
+      fd.append('position', '-1');
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes`, {
+        method: 'POST', body: fd,
+      });
+      if (!r.ok) {
+        this.notifyError('Kunde inte lägga till scen: ' + await r.text());
+        a.submitting = false;
+        return;
+      }
+      this._spliceReengineerView(await r.json());
+      const { [run.re_id]: _, ...rest } = this.reAdd;
+      this.reAdd = rest;
+      this.notifyInfo('Scen tillagd — bilder genereras för varje karaktär. Godkänn dem, sen ▶ Animera om.');
+      this._startReengineerPolling();
+    },
+
+    async reengineerDuplicateScene(run, sc) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/duplicate`,
+                            { method: 'POST' });
+      if (!r.ok) { this.notifyError('Kunde inte duplicera: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      this.notifyInfo('Scen duplicerad (gratis — bilderna återanvänds). Redigera kopians prompt, sen ▶ Animera om.');
+    },
+
+    async reengineerDeleteScene(run, sc) {
+      if (!confirm(`Ta bort scen ${sc.idx + 1} ur finalen?`)) return;
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`,
+                            { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Kunde inte ta bort: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+    },
+
+    async reengineerMoveScene(run, sc, dir) {
+      const n = (run.scenes || []).length;
+      const j = sc.idx + dir;
+      if (j < 0 || j >= n) return;
+      const order = [...Array(n).keys()];
+      [order[sc.idx], order[j]] = [order[j], order[sc.idx]];
+      const r = await fetch(`/api/reengineer/${run.re_id}/scene_order`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order }),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte flytta: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+    },
+
+    // The clip a (scene × character) pair would contribute to the final:
+    // JS mirror of the backend's approved-variant resolution.
+    reengineerClipFor(run, sc, cid) {
+      const jc = run.job?.characters?.[cid];
+      if (!jc) return null;
+      const approved = new Set(jc.approved_variant_ids || []);
+      const variant = (jc.images || [])
+        .find(v => approved.has(v.variant_id) && v.scene_id === sc.scene_id);
+      if (!variant) return { variant: null, video: null };
+      const video = (jc.videos || [])
+        .find(v => v.source_variant_id === variant.variant_id) || null;
+      return { variant, video };
+    },
+
+    async reengineerRedoClip(run, sc, cid) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ char_id: cid }),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte göra om klippet: ' + await r.text()); return; }
+      this.notifyInfo('Ny tagning på väg (~2 min)…');
+      run.status = 'reanimating';
+      this._startReengineerPolling();
+    },
+
+    async reengineerRedoScene(run, sc) {
+      if (!confirm(`Ta om scen ${sc.idx + 1} för ALLA karaktärer? (en Kling-rendering per karaktär)`)) return;
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte ta om scenen: ' + await r.text()); return; }
+      this.notifyInfo('Nya tagningar på väg för alla karaktärer…');
+      run.status = 'reanimating';
+      this._startReengineerPolling();
+    },
+
+    reengineerDirtyCount(run) {
+      return (run.scenes || []).filter(sc => sc.dirty).length;
+    },
+
+    async reengineerAnimateDirty(run) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/animate_scenes`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte animera om: ' + await r.text()); return; }
+      const out = await r.json();
+      if ((out.skipped || []).length) {
+        this.notifyInfo(`${out.skipped.length} (scen × karaktär)-par hoppas över — bilden är inte godkänd än.`);
+      }
+      this.notifyInfo(`Animerar om ${out.idxs.length} scen(er)…`);
+      run.status = 'reanimating';
+      this._startReengineerPolling();
     },
 
     // A broll is "active" (i.e. we should keep polling it) if the job

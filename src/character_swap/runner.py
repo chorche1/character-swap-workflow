@@ -514,10 +514,14 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
 
     `prompt` (optional) overrides the slot's stored prompt before retrying —
     lets the user edit the prompt that failed and regenerate in place.
+
+    The movement lock is relaxed for Reengineer-origin jobs: edit mode
+    legitimately regenerates images after videos exist (its own approval
+    flow gates the expensive work).
     """
     s = store()
     job = s.get_job(job_id)
-    if job is None or job.movement_prompt:
+    if job is None or (job.movement_prompt and not job.from_reengineer):
         return
     jc = job.characters.get(char_id)
     if jc is None:
@@ -542,7 +546,8 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
 
 
 async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
-                               prompt: str | None = None) -> None:
+                               prompt: str | None = None, *,
+                               sem: asyncio.Semaphore | None = None) -> None:
     """Generate N fresh variants for ONE (character, scene) pair, ADDING them
     to the character without wiping its other scenes' variants.
 
@@ -553,11 +558,16 @@ async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
 
     `n` follows `job.images_per_character`. Prompt precedence matches
     `_kick_char`: caller override → per-variant Director plan → enriched →
-    `job.prompt` → `GENERATION_PROMPT`. Refuses once movement is submitted.
+    `job.prompt` → `GENERATION_PROMPT`. Refuses once movement is submitted —
+    EXCEPT for Reengineer-origin jobs (edit mode adds scenes after videos
+    exist; its own approval flow gates the expensive work).
+
+    `sem` lets a caller fanning out over MANY characters (Reengineer
+    add-scene) share one provider semaphore instead of N independent ones.
     """
     s = store()
     job = s.get_job(job_id)
-    if job is None or job.movement_prompt:
+    if job is None or (job.movement_prompt and not job.from_reengineer):
         return
     jc = job.characters.get(char_id)
     if jc is None:
@@ -602,7 +612,8 @@ async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
     await _emit(job_id, "char.queued", char_id=char_id,
                 images_per_character=n, n_scenes=1, scene_id=scene_id)
 
-    sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
+    if sem is None:
+        sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await asyncio.gather(
         *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
     )

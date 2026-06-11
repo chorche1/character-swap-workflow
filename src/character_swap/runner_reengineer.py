@@ -113,6 +113,9 @@ async def resume_all() -> None:
             _spawn(_resume_swapping(re_id, state), f"reengineer-resume-{re_id}")
         elif status == "animating":
             _spawn(_resume_animating(re_id, state), f"reengineer-resume-{re_id}")
+        elif status == "reanimating":
+            # Edit-mode re-animation: finalize WITHOUT assembling.
+            _spawn(_resume_reanimating(re_id, state), f"reengineer-resume-{re_id}")
         elif status == "assembling":
             _spawn(assemble(re_id), f"reengineer-resume-{re_id}")
 
@@ -570,10 +573,24 @@ async def _do_animate(re_id: str, state: dict) -> None:
     s.update_job(job)
     await events.publish(job.job_id, {"kind": "movement.set", "job_id": job.job_id})
 
-    _update(re_id, status="animating")
+    # Full animate covers every scene — any edit-mode dirty flags are moot.
+    for e in state["scenes"]:
+        e.pop("dirty", None)
+    _update(re_id, status="animating", scenes=state["scenes"])
     video_task = asyncio.create_task(runner.run_video_synthesis(job.job_id))
     await _watch_video_phase(re_id, job.job_id)
     await video_task
+
+
+def _approved_variant_for(jc: JobCharacter, scene_id: str) -> str | None:
+    """First APPROVED variant for this (character, scene) — the image its
+    Kling clip animates. Shared by assembly and edit-mode re-animation."""
+    approved = set(jc.approved_variant_ids or
+                   ([jc.approved_variant_id] if jc.approved_variant_id else []))
+    for v in jc.images:
+        if v.variant_id in approved and v.scene_id == scene_id:
+            return v.variant_id
+    return None
 
 
 def _videos_terminal(job: Job) -> bool:
@@ -625,15 +642,9 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 
     for cid, jc in job.characters.items():
         try:
-            approved = set(jc.approved_variant_ids or
-                           ([jc.approved_variant_id] if jc.approved_variant_id else []))
-            variant_by_scene: dict[str, str] = {}
-            for v in jc.images:
-                if v.variant_id in approved and v.scene_id and v.scene_id not in variant_by_scene:
-                    variant_by_scene[v.scene_id] = v.variant_id
             clips: list[Path] = []
             for i, sid in enumerate(scene_order):
-                vid_variant = variant_by_scene.get(sid)
+                vid_variant = _approved_variant_for(jc, sid)
                 video = next((vv for vv in jc.videos
                               if vv.status == VideoStatus.DONE
                               and vv.source_variant_id == vid_variant
@@ -684,5 +695,199 @@ async def _do_assemble(re_id: str, state: dict) -> None:
     ok = [f for f in finals.values() if f["status"] == "done"]
     status = ("done" if len(ok) == len(finals) and ok
               else "partial_success" if ok else "failed")
-    _update(re_id, status=status, finals=finals,
+    _update(re_id, status=status, finals=finals, finals_stale=False,
             completed_at=_now())
+
+
+# --------------------------------------------------------------------------- edit mode
+#
+# Opt-in iteration on a run AFTER the default flow finished (or at the gate):
+# edit per-scene motion prompts, redo single clips / whole scenes, add scenes
+# (uploaded image/video or duplicate), delete + reorder scenes, then rebuild
+# finals behind an explicit button. The DEFAULT pipeline above is untouched.
+#
+# state.json additions: per scenes[i] — `dirty` (prompt/duration changed after
+# clips exist, or scene is new/duplicated; cleared by targeted re-animation
+# and by the full _do_animate), `source` ("analysis"|"image"|"video"|
+# "duplicate"), `transcribing` (transient Whisper prefill). Run level —
+# `finals_stale` (clips/scene-list changed since last assemble; cleared by
+# _do_assemble), `resume_status` + `reanimate_idxs` + `reanimate_clear_dirty`
+# (only while status="reanimating", consumed by the finalizer/crash-resume).
+
+_EDITABLE_RUN_STATES = {"awaiting_approval", "done", "partial_success", "failed"}
+
+# Generic UGC direction for user-added scenes (mirror of fallback_plans'
+# agent-less prompt, sans dialogue). The Whisper prefill appends the spoken
+# line when the user uploads a video and asks for transcription.
+ADDED_SCENE_PROMPT = (
+    "Ordinary hand-held UGC phone footage: the person continues the action "
+    "visible in the frame with natural small movements and gestures, looking "
+    "at the camera. Static framing with slight hand-held wobble. Not cinematic.")
+
+
+def _speech_clause(spoken: str) -> str:
+    return (f' The person says: "{spoken}" with natural lip-sync and a casual, '
+            'conversational delivery in fluent American English with a natural '
+            'American accent, pronouncing every word clearly and correctly.')
+
+
+def _sync_movement_from_state(job: Job, state: dict,
+                              idxs: list[int] | None = None) -> None:
+    """Push edited per-scene prompts/durations from the run state into the
+    underlying job so retry_one_video / generate_more_videos resolve them
+    (they read job.movement_prompts[scene_id] + durations_by_scene)."""
+    entries = state.get("scenes") or []
+    targets = (entries if idxs is None
+               else [entries[i] for i in idxs if 0 <= i < len(entries)])
+    job.movement_prompts = dict(job.movement_prompts or {})
+    job.durations_by_scene = dict(job.durations_by_scene or {})
+    for e in targets:
+        sid = e["scene_id"]
+        job.movement_prompts[sid] = _with_accent(e["motion_prompt"])
+        job.durations_by_scene[sid] = _clamp_kling(e["duration"])
+    if entries:
+        first = entries[0]["scene_id"]
+        job.movement_prompt = (job.movement_prompts.get(first)
+                               or job.movement_prompt)
+    store().update_job(job)
+
+
+async def generate_added_scene(re_id: str, scene_id: str, *,
+                               whisper_source: str | None = None) -> None:
+    """Background half of '+ Lägg till scen': optional Whisper dialogue
+    prefill, then swap-image generation for EVERY character (shared provider
+    semaphore; QC runs automatically inside _generate_one_variant). The new
+    variants land as normal awaiting-approval slots in the strip."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    job = store().get_job(state["job_id"])
+    if job is None:
+        return
+
+    if whisper_source:
+        spoken = ""
+        try:
+            words = await asyncio.to_thread(
+                video_edit.transcribe_words, Path(whisper_source), job_id=re_id)
+            spoken = " ".join(w.text for w in words).strip()
+        except Exception:
+            _log.exception("reengineer %s: whisper prefill failed", re_id)
+        state = reengineer.load_state(re_id) or state
+        for e in state.get("scenes") or []:
+            if e.get("scene_id") != scene_id:
+                continue
+            e.pop("transcribing", None)
+            # Only prefill when the user left the generated default prompt.
+            if spoken and e.get("motion_prompt", "").startswith(
+                    ADDED_SCENE_PROMPT[:40]):
+                e["motion_prompt"] = ADDED_SCENE_PROMPT + _speech_clause(spoken)
+                e["speech"] = spoken
+        reengineer.save_state(state)
+
+    sem = asyncio.Semaphore(
+        runner._image_concurrency_for_model(runner._swap_image_model(job)))
+    await asyncio.gather(*[
+        runner.regen_scene_variants(job.job_id, cid, scene_id, sem=sem)
+        for cid in job.characters
+    ])
+
+
+async def reanimate(re_id: str, idxs: list[int], *,
+                    char_id: str | None = None,
+                    clear_dirty: bool = True) -> None:
+    """Edit-mode animation engine: (re)generate Kling clips for the given
+    scene entries — for one character or all. Existing clips are redone IN
+    PLACE via retry_one_video (assembly automatically picks the new take);
+    scenes without a clip yet (added/duplicated) get their first via
+    generate_more_videos. NEVER assembles — the user rebuilds behind the
+    explicit button. `clear_dirty=False` for plain redos (the scene's prompt
+    wasn't the reason for the redo)."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None or not (job.movement_prompts or job.movement_prompt):
+        return                      # pre-gate: the default animate covers it
+    entries = state.get("scenes") or []
+    idxs = [i for i in idxs if 0 <= i < len(entries)]
+    if not idxs:
+        return
+
+    _sync_movement_from_state(job, state, idxs)
+    prior = state.get("status")
+    resume_to = (prior if prior in {"done", "partial_success", "failed"}
+                 else "done")
+    _update(re_id, status="reanimating", resume_status=resume_to,
+            reanimate_idxs=idxs, reanimate_clear_dirty=clear_dirty)
+
+    tasks = []
+    for i in idxs:
+        sid = entries[i]["scene_id"]
+        for cid, jc in job.characters.items():
+            if char_id and cid != char_id:
+                continue
+            vid = _approved_variant_for(jc, sid)
+            if vid is None:
+                continue            # not approved yet — surfaced by the API
+            existing = next((v for v in jc.videos
+                             if v.source_variant_id == vid), None)
+            if existing is not None and existing.status in {
+                    VideoStatus.PENDING, VideoStatus.PROCESSING}:
+                continue            # already in flight
+            if existing is not None:
+                tasks.append(runner.retry_one_video(
+                    job.job_id, cid, existing.video_id))
+            else:
+                tasks.append(runner.generate_more_videos(
+                    job.job_id, cid, 1, source_variant_id=vid))
+    if tasks:
+        await asyncio.gather(*tasks)
+    _finalize_reanimate(re_id, clear_dirty=clear_dirty)
+
+
+def _finalize_reanimate(re_id: str, *, clear_dirty: bool,
+                        error: str | None = None) -> None:
+    state = reengineer.load_state(re_id) or {"re_id": re_id}
+    entries = state.get("scenes") or []
+    if clear_dirty:
+        for i in state.get("reanimate_idxs") or []:
+            if 0 <= i < len(entries):
+                entries[i].pop("dirty", None)
+    _update(re_id,
+            scenes=entries,
+            finals_stale=True,
+            status=state.get("resume_status") or "done",
+            error=error,
+            resume_status=None, reanimate_idxs=None,
+            reanimate_clear_dirty=None)
+
+
+async def _resume_reanimating(re_id: str, state: dict) -> None:
+    """Crash path: video polling itself is revived by runner.resume_pending
+    in the lifespan; we re-attach a watcher that finalizes WITHOUT
+    assembling (unlike _watch_video_phase)."""
+    job_id = state.get("job_id")
+    if not job_id or store().get_job(job_id) is None:
+        _update(re_id, status="failed", error="underlying job lost across restart")
+        return
+    deadline = asyncio.get_event_loop().time() + _VIDEO_PHASE_TIMEOUT_SECS
+    while True:
+        await asyncio.sleep(_POLL_SECS)
+        job = store().get_job(job_id)
+        if job is None:
+            _update(re_id, status="failed", error="underlying job disappeared")
+            return
+        if _videos_terminal(job):
+            break
+        if asyncio.get_event_loop().time() > deadline:
+            st = reengineer.load_state(re_id) or {}
+            _update(re_id, status=st.get("resume_status") or "done",
+                    error="re-animation timed out",
+                    resume_status=None, reanimate_idxs=None,
+                    reanimate_clear_dirty=None)
+            return
+    st = reengineer.load_state(re_id) or {}
+    _finalize_reanimate(re_id,
+                        clear_dirty=bool(st.get("reanimate_clear_dirty", True)))

@@ -1306,7 +1306,10 @@ async def approve(job_id: str, body: ApproveBody, background: BackgroundTasks) -
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if job.movement_prompt:
+    # Reengineer edit mode approves NEW-scene variants after videos exist —
+    # its own approval flow gates the expensive work, so the lock is relaxed
+    # for reengineer-origin jobs only.
+    if job.movement_prompt and not job.from_reengineer:
         raise HTTPException(409, "Movement prompt already submitted; approvals are locked")
     jc = job.characters.get(body.char_id)
     if jc is None:
@@ -1522,13 +1525,14 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
       Any approval of the rejected image is withdrawn first — the new image
       is a different picture and must be re-approved.
 
-    Refuses if movement_prompt is set (gen flow is locked) or the slot is
-    still GENERATING (already in flight)."""
+    Refuses if movement_prompt is set (gen flow is locked — relaxed for
+    Reengineer edit mode, see `approve`) or the slot is still GENERATING
+    (already in flight)."""
     s = store()
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if job.movement_prompt:
+    if job.movement_prompt and not job.from_reengineer:
         raise HTTPException(409, "Movement prompt already submitted; variants are locked")
     jc = job.characters.get(char_id)
     if jc is None:
@@ -1933,20 +1937,12 @@ def _belongs_to_scene(variant: GeneratedImage, scene_id: str, primary: str) -> b
     return (variant.scene_id or primary) == scene_id
 
 
-@app.post("/api/jobs/{job_id}/scenes/{scene_id}/duplicate")
-async def duplicate_scene(job_id: str, scene_id: str) -> dict:
-    """Clone a scene slot: a new scene_id is inserted right after the source,
-    reusing the same background image, and every character's APPROVED variant
-    for that scene is cloned (same file on disk, new variant_id) and
-    pre-approved under the new scene. The duplicate gets its own movement
-    prompt + duration in Step 4 — the Higgsfield "duplicate slot" model."""
-    s = store()
-    job = s.get_job(job_id)
-    if job is None:
-        raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
-        raise HTTPException(409, "Movement already submitted; scenes are locked")
-
+def _apply_scene_duplicate(job: Job, scene_id: str) -> str:
+    """Lock-free core of scene duplication (shared by the Swap endpoint and
+    Reengineer edit mode): insert a new scene slot right after the source,
+    reuse the same background image, clone every character's APPROVED
+    variant (same file on disk, new variant_id) pre-approved under the new
+    scene, carry end frames. Returns the new scene_id. Caller persists."""
     scene_ids = _effective_scene_ids(job)
     scene_paths = _effective_scene_paths(job)
     if scene_id not in scene_ids:
@@ -1994,6 +1990,24 @@ async def duplicate_scene(job_id: str, scene_id: str) -> dict:
     job.scene_id = scene_ids[0]
     job.scene_image_path = scene_paths[0]
     job.updated_at = datetime.utcnow()
+    return new_sid
+
+
+@app.post("/api/jobs/{job_id}/scenes/{scene_id}/duplicate")
+async def duplicate_scene(job_id: str, scene_id: str) -> dict:
+    """Clone a scene slot: a new scene_id is inserted right after the source,
+    reusing the same background image, and every character's APPROVED variant
+    for that scene is cloned (same file on disk, new variant_id) and
+    pre-approved under the new scene. The duplicate gets its own movement
+    prompt + duration in Step 4 — the Higgsfield "duplicate slot" model."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job):
+        raise HTTPException(409, "Movement already submitted; scenes are locked")
+
+    new_sid = _apply_scene_duplicate(job, scene_id)
     s.update_job(job)
     await events.publish(job_id, {"kind": "scene.duplicated", "job_id": job_id,
                                   "scene_id": scene_id, "new_scene_id": new_sid})
@@ -2016,22 +2030,28 @@ async def reorder_scenes(job_id: str, body: SceneOrderBody) -> dict:
     if _movement_locked(job):
         raise HTTPException(409, "Movement already submitted; scene order is locked")
 
-    cur_ids = _effective_scene_ids(job)
-    cur_paths = _effective_scene_paths(job)
-    if sorted(body.scene_ids) != sorted(cur_ids):
-        raise HTTPException(400, "scene_ids must be a permutation of the job's scenes")
-
-    path_by_id = {sid: (cur_paths[i] if i < len(cur_paths) else cur_paths[0])
-                  for i, sid in enumerate(cur_ids)}
-    job.scene_ids = list(body.scene_ids)
-    job.scene_image_paths = [path_by_id[sid] for sid in body.scene_ids]
-    job.scene_id = job.scene_ids[0]
-    job.scene_image_path = job.scene_image_paths[0]
-    job.updated_at = datetime.utcnow()
+    _apply_scene_reorder(job, body.scene_ids)
     s.update_job(job)
     await events.publish(job_id, {"kind": "scene.reordered", "job_id": job_id,
                                   "scene_ids": job.scene_ids})
     return _job_to_dict(job)
+
+
+def _apply_scene_reorder(job: Job, new_order: list[str]) -> None:
+    """Lock-free core of scene reordering (shared by the Swap endpoint and
+    Reengineer edit mode). `new_order` must be a permutation. Caller persists."""
+    cur_ids = _effective_scene_ids(job)
+    cur_paths = _effective_scene_paths(job)
+    if sorted(new_order) != sorted(cur_ids):
+        raise HTTPException(400, "scene_ids must be a permutation of the job's scenes")
+
+    path_by_id = {sid: (cur_paths[i] if i < len(cur_paths) else cur_paths[0])
+                  for i, sid in enumerate(cur_ids)}
+    job.scene_ids = list(new_order)
+    job.scene_image_paths = [path_by_id[sid] for sid in new_order]
+    job.scene_id = job.scene_ids[0]
+    job.scene_image_path = job.scene_image_paths[0]
+    job.updated_at = datetime.utcnow()
 
 
 @app.delete("/api/jobs/{job_id}/scenes/{scene_id}")
@@ -2046,6 +2066,18 @@ async def delete_scene(job_id: str, scene_id: str) -> dict:
     if _movement_locked(job):
         raise HTTPException(409, "Movement already submitted; scenes are locked")
 
+    _apply_scene_delete(job, scene_id)
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "scene.deleted", "job_id": job_id,
+                                  "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
+def _apply_scene_delete(job: Job, scene_id: str) -> None:
+    """Lock-free core of scene deletion (shared by the Swap endpoint and
+    Reengineer edit mode): drop the slot + every variant that belongs to it.
+    Files on disk are left in place (a duplicate may share the same path).
+    Caller persists."""
     scene_ids = _effective_scene_ids(job)
     scene_paths = _effective_scene_paths(job)
     if scene_id not in scene_ids:
@@ -2076,10 +2108,6 @@ async def delete_scene(job_id: str, scene_id: str) -> dict:
     job.scene_id = scene_ids[0]
     job.scene_image_path = scene_paths[0] if scene_paths else job.scene_image_path
     job.updated_at = datetime.utcnow()
-    s.update_job(job)
-    await events.publish(job_id, {"kind": "scene.deleted", "job_id": job_id,
-                                  "scene_id": scene_id})
-    return _job_to_dict(job)
 
 
 @app.post("/api/jobs/{job_id}/scenes/{scene_id}/end_frame")
@@ -4256,6 +4284,358 @@ async def reengineer_delete(re_id: str) -> dict:
         raise HTTPException(404, "re_id not found")
     shutil.rmtree(work, ignore_errors=True)
     return {"ok": True, "re_id": re_id}
+
+
+# ------------------------------------------------------------- reengineer EDIT MODE
+#
+# Opt-in iteration on a run at the approval gate or after it finished. All
+# endpoints key scenes by their LIST INDEX (`idx`) — scene_id is NOT unique
+# within state.scenes (static videos legitimately repeat one id). The default
+# pipeline is untouched: these endpoints only run when the user acts.
+
+def _editable_reengineer_state(re_id: str, *, statuses: set[str] | None = None) -> dict:
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    allowed = statuses if statuses is not None else runner_reengineer._EDITABLE_RUN_STATES
+    if state.get("status") not in allowed:
+        raise HTTPException(409,
+            f"cannot edit while run status is '{state.get('status')}'")
+    return state
+
+
+def _reengineer_entry(state: dict, idx: int) -> dict:
+    entries = state.get("scenes") or []
+    if idx < 0 or idx >= len(entries):
+        raise HTTPException(404, f"scene idx {idx} out of range (0..{len(entries) - 1})")
+    return entries[idx]
+
+
+def _renumber_scenes(state: dict) -> None:
+    entries = state.get("scenes") or []
+    for i, e in enumerate(entries):
+        e["idx"] = i
+    state["n_scenes"] = len(entries)
+
+
+def _save_reengineer_state(state: dict) -> None:
+    from character_swap import reengineer as reengineer_mod
+    state["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    reengineer_mod.save_state(state)
+
+
+def _mark_finals_stale(state: dict) -> None:
+    if state.get("finals"):
+        state["finals_stale"] = True
+
+
+class ReSceneEditBody(BaseModel):
+    motion_prompt: str | None = None
+    duration: float | None = None
+    # Explicit dirty mark — the frontend sets it after approve-swaps /
+    # variant-regens on an already-animated scene (new image ≠ old clip).
+    dirty: bool | None = None
+
+
+@app.patch("/api/reengineer/{re_id}/scenes/{idx}")
+async def reengineer_edit_scene(re_id: str, idx: int, body: ReSceneEditBody) -> dict:
+    """Edit one scene entry's motion prompt (incl. dialogue) and/or duration.
+    At the gate this is free — _do_animate reads the state fresh. After the
+    videos exist the entry is marked dirty AND the edit is synced onto the
+    job so single-clip redos already use the new text."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+
+    changed = False
+    if body.motion_prompt is not None and body.motion_prompt.strip():
+        if body.motion_prompt.strip() != entry.get("motion_prompt"):
+            entry["motion_prompt"] = body.motion_prompt.strip()
+            changed = True
+    if body.duration is not None:
+        dur = max(1.0, min(15.0, float(body.duration)))
+        if dur != entry.get("duration"):
+            entry["duration"] = dur
+            changed = True
+    if body.dirty:
+        entry["dirty"] = True
+
+    job = store().get_job(state.get("job_id") or "")
+    post_gate = bool(job is not None and (job.movement_prompts or job.movement_prompt))
+    if changed and post_gate:
+        entry["dirty"] = True
+        runner_reengineer._sync_movement_from_state(job, state, [idx])
+    _save_reengineer_state(state)
+    return _reengineer_view(state, slim=True)
+
+
+@app.post("/api/reengineer/{re_id}/scenes")
+async def reengineer_add_scene(
+    re_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    motion_prompt: str = Form(""),
+    duration: float = Form(0.0),
+    whisper: bool = Form(False),
+    position: int = Form(-1),
+) -> dict:
+    """Add a scene from an uploaded IMAGE or VIDEO. Video → mid-frame becomes
+    the scene image (+ optional Whisper dialogue prefill into the prompt).
+    Swap images for EVERY character generate in the background (normal QC);
+    the new variants need manual approval before the scene can animate."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import video_edit
+    state = _editable_reengineer_state(re_id)
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    ext = _safe_ext(file.filename or "upload.png", allow_video=True)
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tok = secrets.token_hex(4)
+
+    is_video = ext in {".mp4", ".mov", ".webm"}
+    whisper_source: str | None = None
+    if is_video:
+        src = run_dir / f"src_{tok}{ext}"
+        src.write_bytes(data)
+        vid_dur = await asyncio.to_thread(video_edit._probe_duration, src)
+        frame = run_dir / f"frame_{tok}.png"
+        await asyncio.to_thread(reengineer_mod.extract_frame, src,
+                                max(0.0, vid_dur / 2.0), frame)
+        scene_id, _path = runner_reengineer._register_frame_as_scene(frame)
+        if duration <= 0:
+            duration = max(1.0, min(15.0, vid_dur or 5.0))
+        if whisper:
+            settings.require_keys("openai")
+            whisper_source = str(src)
+    else:
+        upload = run_dir / f"upload_{tok}{ext}"
+        upload.write_bytes(data)
+        scene_id, _path = runner_reengineer._register_frame_as_scene(upload)
+        if duration <= 0:
+            duration = 5.0
+
+    duration = max(1.0, min(15.0, float(duration)))
+    entry = {
+        "idx": 0,  # renumbered below
+        "scene_id": scene_id,
+        "start": 0.0,
+        "end": round(duration, 3),
+        "duration": round(duration, 3),
+        "motion_prompt": (motion_prompt.strip()
+                          or runner_reengineer.ADDED_SCENE_PROMPT),
+        "speech": "",
+        "summary": (file.filename or "Egen scen")[:80],
+        "dirty": True,
+        "source": "video" if is_video else "image",
+    }
+    if whisper_source:
+        entry["transcribing"] = True
+
+    entries = state.get("scenes") or []
+    pos = position if 0 <= position <= len(entries) else len(entries)
+    entries.insert(pos, entry)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    _mark_finals_stale(state)
+
+    # Extend the underlying job so variant generation accepts the scene.
+    # (Append is fine — assembly order follows state.scenes, not the job.)
+    if scene_id not in (job.scene_ids or []):
+        job.scene_ids = list(job.scene_ids or [job.scene_id]) + [scene_id]
+        job.scene_image_paths = (list(job.scene_image_paths
+                                      or [job.scene_image_path])
+                                 + [str(_path)])
+        job.updated_at = datetime.utcnow()
+        s.update_job(job)
+
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_reengineer.generate_added_scene,
+                              re_id, scene_id, whisper_source=whisper_source)
+    return _reengineer_view(state, slim=True)
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/duplicate")
+async def reengineer_duplicate_scene(re_id: str, idx: int) -> dict:
+    """Duplicate a scene: same image, NEW scene_id, every character's approved
+    image cloned + auto-approved (zero image generations — only the new Kling
+    clip costs). Edit the copy's prompt to e.g. say a different line."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    new_sid = _apply_scene_duplicate(job, entry["scene_id"])
+    s.update_job(job)
+    # The strip resolves thumbnails via store().get_scene — register the new
+    # id pointing at the SAME file as the source scene (no copy).
+    src_scene = s.get_scene(entry["scene_id"])
+    filename = (src_scene.filename if src_scene
+                else Path(job.scene_image_paths[
+                    job.scene_ids.index(new_sid)]).name)
+    if s.get_scene(new_sid) is None:
+        s.add_scene(SceneAsset(scene_id=new_sid, filename=filename,
+                               original_name=f"{entry.get('summary', new_sid)} (kopia)"))
+
+    copy = dict(entry)
+    copy.update({
+        "scene_id": new_sid,
+        "summary": f"{entry.get('summary', '')} (kopia)".strip(),
+        "dirty": True,
+        "source": "duplicate",
+    })
+    copy.pop("transcribing", None)
+    entries = state.get("scenes") or []
+    entries.insert(idx + 1, copy)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+    return _reengineer_view(state, slim=True)
+
+
+@app.delete("/api/reengineer/{re_id}/scenes/{idx}")
+async def reengineer_delete_scene(re_id: str, idx: int) -> dict:
+    """Remove a scene entry from the run (and its variants from the job when
+    no other entry still references the same scene_id)."""
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    entries = state.get("scenes") or []
+    if len(entries) <= 1:
+        raise HTTPException(409, "Can't delete the only scene")
+
+    sid = entry["scene_id"]
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is not None:
+        for jc in job.characters.values():
+            scene_variant_ids = {v.variant_id for v in jc.images
+                                 if v.scene_id == sid}
+            if any(v.scene_id == sid and v.status == VariantStatus.GENERATING
+                   for v in jc.images):
+                raise HTTPException(409, "Scene images are still generating")
+            if any(vv.source_variant_id in scene_variant_ids
+                   and vv.status in {VideoStatus.PENDING, VideoStatus.PROCESSING}
+                   for vv in jc.videos):
+                raise HTTPException(409, "Scene clip is still rendering")
+
+    entries.pop(idx)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    _mark_finals_stale(state)
+
+    shared = any(e.get("scene_id") == sid for e in entries)
+    if job is not None and not shared and sid in (job.scene_ids or []):
+        try:
+            _apply_scene_delete(job, sid)
+            s.update_job(job)
+        except HTTPException:
+            pass  # e.g. last scene on the job — state already updated
+    _save_reengineer_state(state)
+    return _reengineer_view(state, slim=True)
+
+
+class ReSceneOrderBody(BaseModel):
+    order: list[int]
+
+
+@app.patch("/api/reengineer/{re_id}/scene_order")
+async def reengineer_scene_order(re_id: str, body: ReSceneOrderBody) -> dict:
+    """Reorder scenes — `order` is a permutation of the current indices.
+    Finals concatenate in the new order on the next rebuild."""
+    state = _editable_reengineer_state(re_id)
+    entries = state.get("scenes") or []
+    if sorted(body.order) != list(range(len(entries))):
+        raise HTTPException(400, "order must be a permutation of 0..N-1")
+
+    state["scenes"] = [entries[i] for i in body.order]
+    _renumber_scenes(state)
+    _mark_finals_stale(state)
+
+    # Keep the job's scene order in lockstep when the sets still match
+    # (cosmetic — assembly follows state.scenes).
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is not None:
+        deduped: list[str] = []
+        for e in state["scenes"]:
+            if e["scene_id"] not in deduped:
+                deduped.append(e["scene_id"])
+        if sorted(deduped) == sorted(job.scene_ids or []):
+            _apply_scene_reorder(job, deduped)
+            s.update_job(job)
+    _save_reengineer_state(state)
+    return _reengineer_view(state, slim=True)
+
+
+class ReRedoBody(BaseModel):
+    char_id: str | None = None
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/redo")
+async def reengineer_redo_scene(re_id: str, idx: int,
+                                background_tasks: BackgroundTasks,
+                                body: ReRedoBody | None = None) -> dict:
+    """New take of a scene's Kling clip(s) — for ONE character (`char_id`)
+    or all. Same prompt unless the scene was edited (edits sync onto the
+    job). Keeps the dirty flag: a redo isn't a re-animation of an edit."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(
+        re_id, statuses={"done", "partial_success", "failed"})
+    _reengineer_entry(state, idx)
+    char_id = body.char_id if body else None
+    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
+                              re_id, [idx], char_id=char_id, clear_dirty=False)
+    return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
+
+
+class ReAnimateScenesBody(BaseModel):
+    idxs: list[int] | None = None
+
+
+@app.post("/api/reengineer/{re_id}/animate_scenes")
+async def reengineer_animate_scenes(re_id: str,
+                                    background_tasks: BackgroundTasks,
+                                    body: ReAnimateScenesBody | None = None) -> dict:
+    """Re-animate edited (dirty) scenes — or an explicit idx list. Clears the
+    dirty flags on completion. Never assembles; use the rebuild button."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(
+        re_id, statuses={"done", "partial_success", "failed"})
+    entries = state.get("scenes") or []
+    idxs = (body.idxs if body and body.idxs is not None
+            else [i for i, e in enumerate(entries) if e.get("dirty")])
+    idxs = [i for i in idxs if 0 <= i < len(entries)]
+    if not idxs:
+        raise HTTPException(400, "no dirty scenes to re-animate")
+
+    # Surface unapproved (entry × char) pairs so the UI can warn up front.
+    skipped: list[dict] = []
+    job = store().get_job(state.get("job_id") or "")
+    if job is not None:
+        from character_swap.runner_reengineer import _approved_variant_for
+        for i in idxs:
+            sid = entries[i]["scene_id"]
+            for cid, jc in job.characters.items():
+                if _approved_variant_for(jc, sid) is None:
+                    skipped.append({"idx": i, "char_id": cid,
+                                    "reason": "no approved variant"})
+
+    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
+                              re_id, idxs)
+    return {"ok": True, "re_id": re_id, "idxs": idxs, "skipped": skipped}
 
 
 @app.post("/api/broll/{broll_id}/regenerate_clip")

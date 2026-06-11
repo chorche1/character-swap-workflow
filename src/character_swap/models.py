@@ -234,6 +234,14 @@ class Job(BaseModel):
     # Provenance tag: "reengineer:<re_id>" when this job was created by the
     # Reengineer pipeline (video → scenes → swap). None for normal Swap jobs.
     origin: str | None = None
+
+    @property
+    def from_reengineer(self) -> bool:
+        """True for jobs created by the Reengineer pipeline. The Reengineer
+        EDIT MODE deliberately mutates approvals/variants after movement was
+        submitted (its own approval flow gates the expensive work), so the
+        Swap flow's movement locks are relaxed for these jobs only."""
+        return (self.origin or "").startswith("reengineer:")
     # Legacy single movement prompt. Kept in sync with the FIRST scene's
     # entry in `movement_prompts` so all "is the job in movement state?"
     # checks (`if job.movement_prompt:`) still work for callers that haven't

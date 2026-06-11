@@ -1832,7 +1832,7 @@
             <span class="text-[11px] px-2 py-0.5 rounded-full"
                   :class="{
                     'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300': r.status === 'done',
-                    'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': ['queued','analyzing','swapping','animating','assembling'].includes(r.status),
+                    'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': ['queued','analyzing','swapping','animating','reanimating','assembling'].includes(r.status),
                     'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300': r.status === 'awaiting_approval',
                     'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300': ['failed','partial_success'].includes(r.status),
                   }"
@@ -1842,7 +1842,15 @@
                   x-show="r.status === 'swapping' && jobImageProgress(r.job)"
                   x-text="jobImageProgressText(r.job)"></span>
             <span class="text-xs text-neutral-400" x-show="r.auto_mode">⚡ auto</span>
-            <button class="ml-auto text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
+            <button class="ml-auto text-sm px-2 py-1 rounded"
+                    x-show="reEditable(r)"
+                    :class="reEdit[r.re_id]
+                              ? 'bg-indigo-600 text-white'
+                              : 'text-indigo-500 hover:bg-indigo-50 dark:hover:bg-indigo-950'"
+                    title="Redigera körningen: ändra prompter, gör om/lägg till/ta bort scener, bygg ihop igen"
+                    @click="toggleReengineerEdit(r)">✎ Redigera</button>
+            <button class="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
+                    :class="reEditable(r) ? '' : 'ml-auto'"
                     @click="deleteReengineer(r)">✕</button>
           </div>
           <div x-show="r.error" class="text-xs px-3 py-2 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
@@ -1857,8 +1865,55 @@
                   <div class="text-[10px] text-neutral-400 mt-0.5" x-text="(sc.duration || 0).toFixed(1) + 's'"></div>
                 </div>
                 <div class="min-w-0 flex-1">
-                  <div class="text-xs font-medium truncate" x-text="'Scene ' + (sc.idx + 1) + ' — ' + (sc.summary || '')"></div>
-                  <div class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2" x-text="sc.motion_prompt"></div>
+                  <div class="flex items-center gap-2">
+                    <div class="text-xs font-medium truncate" x-text="'Scene ' + (sc.idx + 1) + ' — ' + (sc.summary || '')"></div>
+                    <span x-show="sc.dirty"
+                          class="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300 shrink-0"
+                          title="Ändrad sedan klippen genererades — kör ▶ Animera om ändrade">● ändrad</span>
+                    <span x-show="['image','video','duplicate'].includes(sc.source)"
+                          class="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 shrink-0"
+                          x-text="sc.source === 'duplicate' ? '⧉ kopia' : '+ egen'"></span>
+                    <span x-show="sc.transcribing" class="text-[9px] text-neutral-400 shrink-0">transkriberar…</span>
+                    <!-- edit-mode toolbar: move / duplicate / delete -->
+                    <div x-show="reEdit[r.re_id]" class="ml-auto flex gap-0.5 text-xs shrink-0">
+                      <button class="px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"
+                              title="Flytta upp" @click="reengineerMoveScene(r, sc, -1)">↑</button>
+                      <button class="px-1.5 py-0.5 rounded hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-500"
+                              title="Flytta ner" @click="reengineerMoveScene(r, sc, 1)">↓</button>
+                      <button class="px-1.5 py-0.5 rounded hover:bg-indigo-50 dark:hover:bg-indigo-950 text-indigo-500"
+                              title="Duplicera scenen (gratis — bilderna återanvänds; redigera kopians prompt för t.ex. en annan replik)"
+                              @click="reengineerDuplicateScene(r, sc)">⧉</button>
+                      <button class="px-1.5 py-0.5 rounded hover:bg-rose-50 dark:hover:bg-rose-950 text-rose-500"
+                              title="Ta bort scenen ur finalen" @click="reengineerDeleteScene(r, sc)">✕</button>
+                    </div>
+                  </div>
+                  <!-- motion prompt: editable at the gate and in edit mode -->
+                  <template x-if="!(r.status === 'awaiting_approval' || reEdit[r.re_id])">
+                    <div class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2" x-text="sc.motion_prompt"></div>
+                  </template>
+                  <template x-if="r.status === 'awaiting_approval' || reEdit[r.re_id]">
+                    <div class="mt-1 space-y-1">
+                      <textarea rows="3"
+                                class="w-full text-[11px] px-2 py-1.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 text-neutral-700 dark:text-neutral-300"
+                                placeholder="Motion prompt + dialog (The person says: …)"
+                                :value="reSceneVal(r, sc, 'motion_prompt')"
+                                @input="reSceneEdit(r, sc, 'motion_prompt', $event.target.value)"
+                                @change="reengineerSaveScene(r, sc)"></textarea>
+                      <div class="flex items-center gap-3 text-[10px] text-neutral-500">
+                        <label class="flex items-center gap-1">Längd (s)
+                          <input type="number" min="1" max="15" step="0.5"
+                                 class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                 :value="reSceneVal(r, sc, 'duration')"
+                                 @input="reSceneEdit(r, sc, 'duration', $event.target.value)"
+                                 @change="reengineerSaveScene(r, sc)" />
+                        </label>
+                        <button x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
+                                class="text-indigo-500 hover:underline"
+                                title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"
+                                @click="reengineerRedoScene(r, sc)">↻ Ta om scen</button>
+                      </div>
+                    </div>
+                  </template>
                   <!-- swapped variants per character for THIS scene -->
                   <div class="flex gap-2 mt-1.5 flex-wrap">
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-v-'+sc.idx+'-'+cid">
@@ -1907,9 +1962,80 @@
                       </template>
                     </template>
                   </div>
+                  <!-- per-(scene × character) clips — edit mode on finished runs -->
+                  <div x-show="reEdit[r.re_id] && ['done','partial_success','failed','reanimating'].includes(r.status)"
+                       class="flex gap-1.5 mt-1.5 flex-wrap items-center">
+                    <span class="text-[10px] text-neutral-400">Klipp:</span>
+                    <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-clip-'+sc.idx+'-'+cid">
+                      <div class="flex items-center gap-1 text-[10px] border border-neutral-200 dark:border-neutral-800 rounded px-1.5 py-0.5">
+                        <span class="text-neutral-500" x-text="jc.name"></span>
+                        <template x-if="reengineerClipFor(r, sc, cid)?.video?.status === 'done' && reengineerClipFor(r, sc, cid)?.video?.url">
+                          <a :href="reengineerClipFor(r, sc, cid).video.url" target="_blank"
+                             class="text-indigo-500 hover:underline" title="Förhandsvisa klippet">▶</a>
+                        </template>
+                        <span x-show="['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
+                              class="text-amber-500" title="Renderas…">⏳</span>
+                        <span x-show="['failed','error'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
+                              class="text-rose-500 cursor-help"
+                              :title="reengineerClipFor(r, sc, cid)?.video?.error || 'failed'">✕</span>
+                        <span x-show="!reengineerClipFor(r, sc, cid)?.variant"
+                              class="text-neutral-400 cursor-help"
+                              title="Ingen godkänd bild för den här scenen — godkänn en först">—</span>
+                        <button x-show="reengineerClipFor(r, sc, cid)?.variant
+                                        && !['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
+                                class="text-indigo-500 hover:underline"
+                                :title="'Ny tagning av ' + jc.name + 's klipp för den här scenen'"
+                                @click="reengineerRedoClip(r, sc, cid)">↻</button>
+                      </div>
+                    </template>
+                  </div>
                 </div>
               </div>
             </template>
+            <!-- + add scene — edit mode -->
+            <div x-show="reEdit[r.re_id]"
+                 class="border-t border-dashed border-neutral-200 dark:border-neutral-800 pt-3 flex items-center gap-2 text-xs flex-wrap">
+              <label class="px-3 py-1.5 rounded-lg border border-indigo-300 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950 cursor-pointer">
+                + Lägg till scen (bild/video)
+                <input type="file" accept="image/*,video/*" class="hidden"
+                       @change="reengineerAddSceneFile(r, $event.target.files[0]); $event.target.value=''" />
+              </label>
+              <template x-if="reAdd[r.re_id]">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-neutral-400" x-text="reAdd[r.re_id].name"></span>
+                  <label x-show="reAdd[r.re_id].isVideo" class="flex items-center gap-1 cursor-pointer"
+                         title="Transkribera videons tal och lägg dialogen i prompten automatiskt">
+                    <input type="checkbox" x-model="reAdd[r.re_id].whisper" /> hämta dialog
+                  </label>
+                  <input type="text" placeholder="Motion prompt (valfri — standard-UGC annars)"
+                         x-model="reAdd[r.re_id].prompt"
+                         class="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 w-72" />
+                  <button class="px-3 py-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-40"
+                          :disabled="reAdd[r.re_id].submitting"
+                          @click="reengineerSubmitAddScene(r)"
+                          x-text="reAdd[r.re_id].submitting ? 'Laddar upp…' : 'Lägg till'"></button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- edit-mode actions on finished runs -->
+          <div x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
+               class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
+            <button class="text-sm px-3 py-1.5 rounded-lg border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950 disabled:opacity-40"
+                    :disabled="!reengineerDirtyCount(r)"
+                    title="Genererar nya Kling-klipp för scenerna märkta ● ändrad"
+                    @click="reengineerAnimateDirty(r)"
+                    x-text="'▶ Animera om ändrade (' + reengineerDirtyCount(r) + ')'"></button>
+            <button class="text-sm px-4 py-1.5 rounded-lg font-medium"
+                    :class="r.finals_stale
+                              ? 'bg-amber-500 hover:bg-amber-600 text-white'
+                              : 'bg-neutral-900 dark:bg-white text-white dark:text-neutral-900'"
+                    title="Bygger om finalvideorna per karaktär från nuvarande scener/klipp (gratis, lokal ffmpeg)"
+                    @click="reengineerAssemble(r)">▶ Bygg ihop igen</button>
+            <span x-show="r.finals_stale" class="text-xs text-amber-600 dark:text-amber-400">
+              klipp/scener har ändrats sedan senaste bygget
+            </span>
           </div>
 
           <!-- approval actions -->

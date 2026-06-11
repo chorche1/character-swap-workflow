@@ -143,6 +143,7 @@ def test_assemble_cuts_each_scene_clip_to_audio_onset(tmp_path, monkeypatch):
     asyncio.run(runner_reengineer._do_assemble("re_t", state))
 
     assert updates["status"] == "done"
+    assert updates["finals_stale"] is False        # edit-mode flag cleared
     final = Path(updates["finals"]["cA"]["final_path"])
     assert final.exists()
     # 2 clips × ~2s tone after the ~1s lead is cut from each.
