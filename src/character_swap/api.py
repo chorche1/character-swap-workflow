@@ -4085,7 +4085,7 @@ async def reengineer_create(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     character_ids: str = Form(...),          # JSON array of char ids
-    image_model: str = Form("nbp-swap"),
+    image_model: str = Form("gpt2-id-swap"),
     video_model: str = Form("kling-v3"),
     auto_mode: bool = Form(False),
     # Outfit ("Kläder"): scene = wear the original video person's clothes;

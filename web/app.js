@@ -101,7 +101,8 @@ function studio() {
       file: null,                    // File object
       name: '',
       charIds: [],                   // selected character ids
-      imageModel: 'nbp-swap',        // bake-off winner default
+      imageModel: 'gpt2-id-swap',    // Hugo's preset (2026-06-11) — sticky via
+                                     // localStorage; loadGenModels re-asserts
       autoMode: false,               // skip the image-approval gate
       outfitMode: 'scene',           // scene | character | custom
       outfitText: '',                // clothing description for custom mode
@@ -409,6 +410,10 @@ function studio() {
       this.$watch('avatarGen.avatarId', v => v && localStorage.setItem('avatarGen.avatarId', v));
       this.$watch('brollGen.videoModel', v => v && localStorage.setItem('brollGen.videoModel', v));
       this.$watch('brollGen.aspectRatio', v => v && localStorage.setItem('brollGen.aspectRatio', v));
+      // Reengineer swap-engine pick is a sticky preset (Hugo 2026-06-11:
+      // gpt2-id-swap is his GPT engine of choice — make it survive reloads).
+      this.$watch('reengineerGen.imageModel',
+                  v => v && localStorage.setItem('reengineerGen.imageModel', v));
       // Refresh daily cost every minute while the tab is open.
       this._dailyCostTimer = setInterval(() => this.loadDailyCost(), 60000);
       // 1-second tick so the elapsed-time labels in the status toast +
@@ -803,13 +808,18 @@ function studio() {
         if (firstImage && !this.models.image.find(m => m.slug === this.imageGen.model)?.available) {
           this.imageGen.model = firstImage.slug;
         }
-        // Re-assert the Reengineer default AFTER models load. The <select>
+        // Re-assert the Reengineer engine pick AFTER models load. The <select>
         // renders before its options exist, so the browser auto-selects the
         // first option in the DOM without telling Alpine; setting state to
         // the SAME value wouldn't trigger a re-sync — bounce it through ''
         // so the change is observable and Alpine re-applies it to the DOM.
-        const reDefault = this.models.image?.find(m => m.slug === 'nbp-swap');
-        const reTarget = (reDefault?.available) ? 'nbp-swap'
+        // Preference order: the user's sticky localStorage pick → the preset
+        // default gpt2-id-swap (Hugo's GPT engine of choice, 2026-06-11;
+        // replaces the old nbp-swap default) → first available model.
+        const _avail = slug => this.models.image?.find(m => m.slug === slug)?.available;
+        const stored = localStorage.getItem('reengineerGen.imageModel');
+        const reTarget = (stored && _avail(stored)) ? stored
+          : _avail('gpt2-id-swap') ? 'gpt2-id-swap'
           : (firstImage ? firstImage.slug : this.reengineerGen.imageModel);
         this.reengineerGen.imageModel = '';
         this.$nextTick(() => { this.reengineerGen.imageModel = reTarget; });

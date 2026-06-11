@@ -34,11 +34,19 @@ from character_swap.swap_qc import QCVerdict
     ("seedream-edit-swap", 8),  # fal
     ("gpt-image", 4),           # openai
     ("gpt2-id-swap", 4),        # openai
-    ("nano-banana-pro", 2),     # gemini
+    ("nano-banana-pro", 3),     # gemini
     ("grok-image", 2),          # xai → global fallback
     ("totally-unknown", 2),     # unknown slug → global fallback
 ])
-def test_concurrency_resolves_per_provider(slug, expected):
+def test_concurrency_resolves_per_provider(monkeypatch, slug, expected):
+    """Provider → setting RESOLUTION (settings pinned — the dev .env may
+    override the shipped defaults, e.g. Hugo runs OPENAI=8/FAL=10)."""
+    for name, val in (("image_concurrency_fal", 8),
+                      ("image_concurrency_openai", 4),
+                      ("image_concurrency_gemini", 3),
+                      ("image_concurrency", 2)):
+        monkeypatch.setattr(type(settings), name,
+                            property(lambda self, v=val: v), raising=False)
     assert runner._image_concurrency_for_model(slug) == expected
 
 
