@@ -36,6 +36,14 @@ hold:
   CHARACTER — e.g. the SCENE's original person is still there, the face is a
   blend of the two, or a third, different person appears. This is the most
   important check. Compare facial identity, not clothing or hair styling.
+- WRONG PROPS / ACTION: the person in RESULT must hold and interact with the
+  SAME object(s) and perform the SAME action as the person in SCENE. Look at
+  the hands first: if SCENE shows the person holding specific items (food,
+  a tool, a product), RESULT must show the SAME items held the SAME way — a
+  different object, a missing object, an invented object, or a clearly
+  different action is a FAIL. Also fail if a key prop on the table/counter
+  changed into something else. (This applies even when
+  background_replaced=true — props travel with the person.)
 - MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
   SCENE nor CHARACTER.
 - BROKEN IMAGE: fully or mostly black/blank/censored output, heavy

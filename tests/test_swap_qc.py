@@ -139,3 +139,22 @@ def test_inspect_variant_parses_verdict(monkeypatch, tmp_path):
     assert verdict is not None and verdict.passed is False
     assert verdict.reason == "wrong person"
     assert verdict.corrective_hint == "use Image 2's face"
+
+
+def test_qc_prompt_covers_prop_and_action_fidelity():
+    """Regression guard (Hugo 2026-06-11): wrong-prop images (person holding
+    a completely different thing than in the scene) passed QC because the
+    judge was never ASKED about props. The system prompt must instruct an
+    explicit same-objects/same-action check."""
+    text = swap_qc.QC_SYSTEM
+    assert "WRONG PROPS" in text
+    assert "SAME object" in text
+    assert "action" in text.lower()
+
+
+def test_qc_default_judge_is_sonnet():
+    """The fine-grained scene-vs-result comparison needs the stronger vision
+    model (wrong-prop images passed the Haiku judge live). Env-overridable
+    via SWAP_QC_MODEL."""
+    from character_swap.config import settings
+    assert "sonnet" in settings.swap_qc_model

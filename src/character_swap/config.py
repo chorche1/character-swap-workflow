@@ -166,15 +166,20 @@ class Settings(BaseSettings):
     # request with vision); recorded in calls.jsonl via call_log._cost_usd.
     claude_opus_model: str = Field(default="claude-opus-4-5", validation_alias="CLAUDE_OPUS_MODEL")
     claude_opus_price_usd: float = Field(default=0.05, validation_alias="CLAUDE_OPUS_PRICE_USD")
-    # Vision QC on every generated swap variant (Swap + Reengineer): a cheap
-    # Claude call checks identity (right person?) + obvious defects and the
-    # runner regenerates failed slots with a corrective hint. SWAP_QC=0
-    # disables. Haiku is vision-capable and ~5x cheaper than Opus.
+    # Vision QC on every generated swap variant (Swap + Reengineer): a Claude
+    # call checks identity (right person?), props/action fidelity (holding
+    # the same thing, doing the same thing) + obvious defects, and the runner
+    # regenerates failed slots with a corrective hint. SWAP_QC=0 disables.
+    # Default judge bumped Haiku → Sonnet 4.6 (2026-06-11): wrong-prop images
+    # passed the Haiku judge in Hugo's runs; the fine-grained scene-vs-result
+    # comparison needs the stronger vision model. ~4x the QC cost (~$0.04 vs
+    # $0.01/call) — noise next to the image+video spend it protects. Set
+    # SWAP_QC_MODEL=claude-haiku-4-5-20251001 to go back to the cheap judge.
     swap_qc_enabled: bool = Field(default=True, validation_alias="SWAP_QC")
-    swap_qc_model: str = Field(default="claude-haiku-4-5-20251001",
+    swap_qc_model: str = Field(default="claude-sonnet-4-6",
                                validation_alias="SWAP_QC_MODEL")
     swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
-    swap_qc_price_usd: float = Field(default=0.01, validation_alias="SWAP_QC_PRICE_USD")
+    swap_qc_price_usd: float = Field(default=0.04, validation_alias="SWAP_QC_PRICE_USD")
     # QC on generated video CLIPS: Whisper-vs-expected-dialogue (catches
     # garbled TTS like "baking goda") + frame-sampled vision check for
     # impossible motion/anatomy. Auto-resubmits the clip on failure — video is
