@@ -2,6 +2,26 @@
 
 > **This is the live development copy** at `~/character-swap-workflow/`. May change at any time and may temporarily be broken. For day-to-day use, prefer the frozen stable copy at `~/character-swap-stable/` (see its README).
 
+## Working with Hugo — ALWAYS ASK WHEN UNSURE (project standard, 2026-06-11)
+
+Hugo's explicit standing instruction: **whenever you are uncertain about his
+GOAL or how he wants something to behave, ask him questions (AskUserQuestion)
+BEFORE building — keep asking until you are completely synced.** He would
+rather answer 3 quick questions than get a feature that misses the intent.
+Concretely:
+
+- Ambiguous scope, multiple reasonable interpretations, or a UX choice that
+  isn't obvious → ask, with a recommended option first.
+- Quality/cost/speed tradeoffs (image engines, QC retries, model choices) →
+  ask; his standing priorities are reliability > quality > speed > cost, but
+  confirm when a change shifts the balance.
+- NEVER change default behavior of an existing flow without asking — new
+  capabilities should be opt-in unless he says otherwise.
+- When he reports a broken/wrong output: ask (or check the data) for WHICH
+  run/scene/character before guessing, and confirm the expected result.
+- Don't ask about things the code, his data, or this file already answers —
+  questions are for his INTENT, not for facts you can look up.
+
 
 
 ## What this project does

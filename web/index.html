@@ -2038,8 +2038,9 @@
             </span>
           </div>
 
-          <!-- approval actions -->
-          <div x-show="r.status === 'awaiting_approval'" class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
+          <!-- approval actions (also on failed runs whose video phase never
+               started — the animate endpoint accepts 'failed') -->
+          <div x-show="reengineerGateVisible(r)" class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
             <span class="text-xs text-neutral-500 dark:text-neutral-400">Approve one image per scene per character, then:</span>
             <button class="text-sm px-3 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950"
                     @click="reengineerApproveAll(r)">✓ Approve all</button>

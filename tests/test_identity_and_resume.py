@@ -172,3 +172,15 @@ def test_resume_swapping_lost_job_fails_run(monkeypatch):
                         lambda re_id, **kw: updates.update(kw))
     asyncio.run(runner_reengineer._resume_swapping("re_x", _state("re_x", "swapping")))
     assert updates["status"] == "failed"
+
+
+def test_gpt_id_swap_prompt_locks_framing():
+    """Hugo 2026-06-11: the compact identity-first prompt must carry an
+    explicit framing lock — outputs drifted wider/more zoomed-out than the
+    source ("exakt samma framing som originalvideon"; props same size and
+    same spot in frame)."""
+    for bg in (False, True):
+        p = pipeline.build_gpt_id_swap_prompt("scene", background=bg)
+        assert "Do NOT zoom out" in p
+        assert "exact same SIZE relative to the frame" in p
+        assert "frame edges cut off stays cut off" in p

@@ -44,6 +44,15 @@ hold:
   different action is a FAIL. Also fail if a key prop on the table/counter
   changed into something else. (This applies even when
   background_replaced=true — props travel with the person.)
+- WRONG FRAMING / ZOOM: RESULT must match SCENE's exact framing — same
+  camera distance, crop and subject scale. FAIL if RESULT is noticeably more
+  zoomed out than SCENE (the person/objects look smaller, more of the room
+  is visible, new space appears at the edges) or noticeably more zoomed in,
+  or if a key object sits at a clearly different position or size in the
+  frame. Compare how much of the frame the person's body and the held
+  objects occupy in SCENE vs RESULT. (background_replaced=true changes WHAT
+  is behind the person, not the camera geometry — framing must still match
+  SCENE.)
 - MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
   SCENE nor CHARACTER.
 - BROKEN IMAGE: fully or mostly black/blank/censored output, heavy

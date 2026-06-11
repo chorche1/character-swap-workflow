@@ -311,10 +311,21 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
 
     roles = ("Image 1 is only the identity reference for the replacement "
              "person. Image 2 is the fixed master scene and ground truth.")
+    # FRAMING LOCK (Hugo 2026-06-11: gpt2-id-swap outputs drifted noticeably
+    # wider/more zoomed-out than the source — "exakt samma framing som
+    # originalvideon"). Kept tight per the bake-off's compact-prompt lesson,
+    # but explicit about the zoom-out failure mode and prop scale/position.
+    framing_lock = (" Do NOT zoom out, widen the shot, or move the camera "
+                    "back or forward: the camera distance and crop are "
+                    "IDENTICAL to Image 2, the person and every object stay "
+                    "the exact same SIZE relative to the frame and in the "
+                    "exact same SPOT, and whatever Image 2's frame edges cut "
+                    "off stays cut off.")
     scene_keep = ("Recreate Image 2 exactly — same framing, crop, camera "
                   "angle, perspective, subject scale, pose, background and "
                   "every object in its exact position and state; keep all "
-                  "text and brand labels legible and unchanged.")
+                  "text and brand labels legible and unchanged."
+                  + framing_lock)
     bg_part = ""
     if background:
         roles += (" Image 3 is the NEW ENVIRONMENT: the finished photo takes "
@@ -322,7 +333,7 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
         scene_keep = ("Recreate Image 2's framing, crop, camera angle, "
                       "perspective, subject scale, pose and every object the "
                       "person touches — exact positions and states, brand "
-                      "labels legible.")
+                      "labels legible." + framing_lock)
         bg_part = (" Replace the surroundings with Image 3's environment and "
                    "relight the person and the kept objects entirely with "
                    "Image 3's light — matching its direction, color "

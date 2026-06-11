@@ -1525,6 +1525,20 @@ function studio() {
       return ['awaiting_approval', 'done', 'partial_success', 'failed'].includes(r.status);
     },
 
+    // The approve/Generate-videos gate bar. Besides awaiting_approval it
+    // must also show on a FAILED run whose video phase never produced
+    // anything (e.g. animate was clicked with zero approvals) — the animate
+    // endpoint accepts 'failed', but the button used to be hidden, leaving
+    // the user stuck with 45 ready images and no way forward.
+    reengineerGateVisible(r) {
+      if (r.status === 'awaiting_approval') return true;
+      if (r.status !== 'failed' || !r.job) return false;
+      const chars = Object.values(r.job.characters || {});
+      const noVideos = chars.every(c => !(c.videos || []).length);
+      const anyReady = chars.some(c => (c.images || []).some(v => v.status === 'ready'));
+      return noVideos && anyReady;
+    },
+
     toggleReengineerEdit(run) {
       this.reEdit = { ...this.reEdit, [run.re_id]: !this.reEdit[run.re_id] };
     },

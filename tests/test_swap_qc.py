@@ -158,3 +158,14 @@ def test_qc_default_judge_is_sonnet():
     via SWAP_QC_MODEL."""
     from character_swap.config import settings
     assert "sonnet" in settings.swap_qc_model
+
+
+def test_qc_prompt_covers_framing_and_zoom():
+    """Regression guard (Hugo 2026-06-11): gpt2-id-swap outputs noticeably
+    more zoomed-out than the source scene passed QC — the judge was never
+    asked about framing. The system prompt must instruct an explicit
+    camera-distance/crop/subject-scale comparison."""
+    text = swap_qc.QC_SYSTEM
+    assert "WRONG FRAMING" in text
+    assert "zoomed out" in text
+    assert "subject scale" in text
