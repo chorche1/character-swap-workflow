@@ -534,10 +534,25 @@ Prompt format rules (follow exactly):
   recompose; every object keeps this exact size and position."
 - Mention the scene's actual light (direction/quality) in a few words so the
   inserted person is lit to match.
+- Do NOT write any photographic-style/grading language (no "cinematic",
+  "professional", "high quality", camera/lens jargon) — a fixed organic
+  phone-photo style paragraph is appended to your prompt automatically.
 - Imperative, concrete, NO long lists of generic constraints, no headers.
 
 Return via the tool with one entry per scene, scene_ids verbatim.
 """
+
+# Hugo's organic anti-"produced" look (same intent as the static templates'
+# style paragraph): appended VERBATIM in code to every Director-written
+# prompt — never delegated to the agent, so it can't be paraphrased away.
+ORGANIC_STYLE_CLAUSE = (
+    " Style: a completely ordinary, unedited iPhone photo — plain, slightly "
+    "dull phone-camera colors, neutral white balance, mundane ambient light, "
+    "slightly uneven exposure, mild softness, subtle sensor noise, natural "
+    "non-polished skin with visible pores. Not staged, not professional: no "
+    "studio lighting, no cinematic grading, no glossy highlights, no "
+    "retouching, no portrait-mode blur."
+)
 
 REENGINEER_SWAP_TOOL: dict[str, Any] = {
     "name": "submit_reengineer_swap_prompts",
@@ -661,7 +676,8 @@ def direct_reengineer_swap(
             resp, "submit_reengineer_swap_prompts")
         if not data or not data.get("scenes"):
             return None
-        prompts = {str(s["scene_id"]): str(s["prompt"]).strip()
+        prompts = {str(s["scene_id"]):
+                   str(s["prompt"]).strip() + ORGANIC_STYLE_CLAUSE
                    for s in data["scenes"]
                    if s.get("scene_id") and (s.get("prompt") or "").strip()}
         if not prompts:

@@ -64,8 +64,17 @@ def test_direct_reengineer_swap_happy_path(monkeypatch, tmp_path):
     out = prompt_director.direct_reengineer_swap(
         scenes=[("s1", tmp_path / "f1.png"), ("s2", tmp_path / "f2.png")],
         outfit_mode="scene", job_id="re_t")
-    assert out == ("ugc kiwi video",
-                   {"s1": "Tailored one", "s2": "Tailored two"})
+    assert out is not None
+    intent, prompts = out
+    assert intent == "ugc kiwi video"
+    assert prompts["s1"].startswith("Tailored one")
+    assert prompts["s2"].startswith("Tailored two")
+    # Hugo's organic anti-"produced" style is appended VERBATIM in code to
+    # every Director prompt — the agent is told NOT to write style language.
+    for p in prompts.values():
+        assert "unedited iPhone photo" in p
+        assert "no studio lighting" in p
+    assert "appended to your prompt automatically" in seen["system"]
     # System prompt carries the verbatim identity + outfit + framing rules.
     assert "recognizable likeness" in seen["system"]
     assert "outfit from Image 1" in seen["system"]       # scene mode
