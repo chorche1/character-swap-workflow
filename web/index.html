@@ -1817,6 +1817,15 @@
             <input type="checkbox" x-model="reengineerGen.autoMode" class="rounded" />
             ⚡ fully automatic
           </label>
+          <label class="text-sm flex items-center gap-1.5"
+                 :class="health.anthropic_key ? 'cursor-pointer' : 'opacity-40 cursor-not-allowed'"
+                 :title="health.anthropic_key
+                           ? 'AI Director: Claude tittar på varje scenbild och skriver en skräddarsydd swap-prompt per scen — namnger props med storlek/position och låser kameraavståndet. ~$0.10 + ~1 min extra per körning.'
+                           : 'Kräver ANTHROPIC_API_KEY i .env'">
+            <input type="checkbox" x-model="reengineerGen.useDirector" class="rounded"
+                   :disabled="!health.anthropic_key" />
+            🎬 AI Director
+          </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!reengineerGen.file || reengineerGen.charIds.length === 0 || reengineerGen.submitting"
                   @click="submitReengineer()"

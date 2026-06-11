@@ -488,3 +488,187 @@ def direct_movement(
     except ValidationError as e:
         logger.warning("director_movement: validation failed: %s", e)
         return None
+
+
+# --- Reengineer swap Director ----------------------------------------------
+#
+# Opt-in (checkbox at Reengineer upload): ONE Claude call that LOOKS at every
+# detected scene frame and writes a tailored, COMPACT swap prompt per SCENE
+# (identity comes from the reference image at generation time, so prompts
+# don't need to vary per character — the per-scene prompt is replicated into
+# the standard SwapDirectorPlan so the existing `_kick_char` plumbing picks
+# it up unchanged).
+#
+# Two hard rules learned from this project's data:
+#   1. COMPACT (≤ ~120 words) — the 2026-06-10 bake-off showed GPT image
+#      models score WORSE with long constraint-block prose.
+#   2. Concrete anchors beat generic rules — name each key prop with its
+#      position and approximate size in frame, and describe the camera
+#      distance, so framing/prop drift (the observed failure modes) has
+#      specific targets to hold on to.
+#
+# Prompts are written in STANDARD orientation (Image 1 = scene, Image 2 =
+# identity reference, Image 3 = optional new environment) — the gpt2-id-swap
+# dispatch mechanically flips Image 1<->2 for its reversed reference order.
+
+REENGINEER_SWAP_DIRECTOR_SYSTEM = """\
+You are a swap-prompt director for a character-swap image pipeline. You will
+be shown N scene frames extracted from a reference video. For EACH scene,
+write ONE compact image-editing prompt (max ~120 words) that instructs an
+image model to replace the person in the scene with a different person whose
+identity comes from a separate reference image.
+
+Prompt format rules (follow exactly):
+- Refer to the scene frame as "Image 1" and the identity reference as
+  "Image 2". {bg_role}
+- ALWAYS include, verbatim: "The face must be a clear, recognizable likeness
+  of the person in Image 2 — unmistakably the same individual; this identity
+  match is the single most important requirement."
+- ALWAYS include this outfit directive: {outfit_directive}
+- FRAMING ANCHORS — the most important part of YOUR job: name the 2-4 key
+  objects/props you actually SEE, each with its position in frame and
+  approximate size (e.g. "the blender with kiwi pieces sits bottom-center,
+  filling about a quarter of the frame"). State the camera distance/crop you
+  see (e.g. "waist-up shot, person fills the left two-thirds of the frame")
+  and add: "identical camera distance and crop — do not zoom out or
+  recompose; every object keeps this exact size and position."
+- Mention the scene's actual light (direction/quality) in a few words so the
+  inserted person is lit to match.
+- Imperative, concrete, NO long lists of generic constraints, no headers.
+
+Return via the tool with one entry per scene, scene_ids verbatim.
+"""
+
+REENGINEER_SWAP_TOOL: dict[str, Any] = {
+    "name": "submit_reengineer_swap_prompts",
+    "description": "One compact tailored swap prompt per scene.",
+    "input_schema": {
+        "type": "object",
+        "required": ["intent", "scenes"],
+        "properties": {
+            "intent": {"type": "string",
+                       "description": "One line on the overall video."},
+            "scenes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["scene_id", "prompt"],
+                    "properties": {
+                        "scene_id": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+_REENGINEER_OUTFIT_DIRECTIVES = {
+    "scene": ('"Take only the face, hairstyle, hair color and skin tone from '
+              'Image 2. The person keeps the original pose, hand placement and '
+              'interaction with objects, and wears exactly the outfit from '
+              'Image 1."'),
+    "character": ('"Take the face, hairstyle, hair color, skin tone AND '
+                  'clothing from Image 2 — the person wears their own outfit '
+                  'from Image 2, fitted naturally to the original pose."'),
+    "custom": ('"Take only the face, hairstyle, hair color and skin tone from '
+               'Image 2. The person keeps the original pose and interaction '
+               'with objects, and wears: {outfit}."'),
+}
+
+
+def plan_from_scene_prompts(
+    intent: str,
+    scene_prompts: dict[str, str],
+    characters: list[tuple[str, str]],          # [(char_id, name)]
+) -> SwapDirectorPlan:
+    """Expand per-SCENE prompts into the per-(char × scene × variant) shape
+    `_kick_char` consumes — the same prompt replicated for every character
+    (identity varies via the reference image, not the text)."""
+    return SwapDirectorPlan(
+        intent=intent,
+        characters=[
+            CharacterPlan(
+                char_id=cid, name=name,
+                scenes=[
+                    ScenePlanForChar(
+                        scene_id=sid,
+                        variants=[VariantPlan(variant_index=0, prompt=prompt)],
+                    )
+                    for sid, prompt in scene_prompts.items()
+                ],
+            )
+            for cid, name in characters
+        ],
+    )
+
+
+def direct_reengineer_swap(
+    *,
+    scenes: list[tuple[str, Path]],             # [(scene_id, frame_path)]
+    outfit_mode: str = "scene",
+    outfit_text: str | None = None,
+    background: bool = False,
+    job_id: str | None = None,
+) -> tuple[str, dict[str, str]] | None:
+    """ONE Claude call with every scene frame → (intent, {scene_id: prompt}).
+    Returns None on ANY failure — callers fall back to the static template;
+    image generation never blocks on the Director."""
+    if not scenes:
+        return None
+    outfit = _REENGINEER_OUTFIT_DIRECTIVES.get(outfit_mode or "scene")
+    if outfit is None:
+        return None
+    if outfit_mode == "custom":
+        if not (outfit_text or "").strip():
+            return None
+        outfit = outfit.format(outfit=outfit_text.strip())
+    bg_role = (
+        "Image 3 is the NEW ENVIRONMENT the finished photo takes place in — "
+        "say the surroundings are replaced with Image 3's location and the "
+        "person plus kept objects are relit entirely with Image 3's light."
+        if background else
+        "There is no Image 3 — the scene's own background is preserved exactly."
+    )
+    system = REENGINEER_SWAP_DIRECTOR_SYSTEM.format(
+        bg_role=bg_role, outfit_directive=outfit)
+
+    content: list[dict] = [
+        {"type": "text",
+         "text": "SCENES (use these scene_ids verbatim in your answer):"},
+    ]
+    for scene_id, frame in scenes:
+        content.append({"type": "text", "text": f"SCENE {scene_id}:"})
+        try:
+            content.append(anthropic_client._file_to_image_block(frame))
+        except Exception as e:
+            logger.warning("director_reengineer: failed to encode %s: %s",
+                           scene_id, e)
+            return None
+
+    try:
+        resp = anthropic_client.messages_with_tools(
+            system=system,
+            messages=[{"role": "user", "content": content}],
+            tools=[REENGINEER_SWAP_TOOL],
+            tool_choice={"type": "tool",
+                         "name": "submit_reengineer_swap_prompts"},
+            max_tokens=8192,
+            job_id=job_id,
+            phase="director_swap",
+        )
+        data = anthropic_client.extract_tool_call(
+            resp, "submit_reengineer_swap_prompts")
+        if not data or not data.get("scenes"):
+            return None
+        prompts = {str(s["scene_id"]): str(s["prompt"]).strip()
+                   for s in data["scenes"]
+                   if s.get("scene_id") and (s.get("prompt") or "").strip()}
+        if not prompts:
+            return None
+        return (str(data.get("intent") or ""), prompts)
+    except ProviderNotConfigured:
+        return None
+    except Exception:
+        logger.exception("director_reengineer failed; falling back")
+        return None

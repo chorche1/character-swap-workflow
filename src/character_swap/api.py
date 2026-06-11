@@ -4122,6 +4122,10 @@ async def reengineer_create(
     outfit_text: str = Form(""),
     # Cut sensitivity: normal/high/max -> ffmpeg scene-score thresholds.
     scene_sensitivity: str = Form("high"),
+    # 🎬 AI Director: one Claude call looks at every scene frame and writes a
+    # tailored compact swap prompt per scene (props named with position/size,
+    # camera distance anchored). Off by default; needs ANTHROPIC_API_KEY.
+    use_director: bool = Form(False),
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
@@ -4212,6 +4216,7 @@ async def reengineer_create(
         "outfit_mode": outfit_mode,
         "outfit_text": outfit_text.strip(),
         "scene_sensitivity": scene_sensitivity,
+        "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "background_path": background_path,
         "character_source_image_ids": source_overrides,
         "scenes": [],

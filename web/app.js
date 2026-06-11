@@ -104,6 +104,7 @@ function studio() {
       imageModel: 'gpt2-id-swap',    // Hugo's preset (2026-06-11) — sticky via
                                      // localStorage; loadGenModels re-asserts
       autoMode: false,               // skip the image-approval gate
+      useDirector: false,            // 🎬 tailored per-scene swap prompts (Claude)
       outfitMode: 'scene',           // scene | character | custom
       outfitText: '',                // clothing description for custom mode
       sceneSensitivity: 'high',      // normal | high | max cut detection
@@ -1325,6 +1326,8 @@ function studio() {
         fd.append('character_ids', JSON.stringify(g.charIds));
         fd.append('image_model', g.imageModel);
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
+        fd.append('use_director',
+                  (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);

@@ -377,9 +377,35 @@ async def _create_job_and_swap(re_id: str, state: dict,
             outfit_mode, state.get("outfit_text"),
             background=bool(background_path))
 
+    # Optional AI Director (checkbox at upload, off by default): ONE Claude
+    # call LOOKS at every scene frame and writes a tailored compact swap
+    # prompt per scene — naming the actual props with position/size in frame
+    # and the camera distance, which is exactly where the static template
+    # drifts (wrong props / zoomed-out framing). Failure → None → the normal
+    # template chain applies; generation never blocks on the Director.
+    director_json: str | None = None
+    if state.get("use_director"):
+        from character_swap import prompt_director
+        result = await asyncio.to_thread(
+            prompt_director.direct_reengineer_swap,
+            scenes=[(sid, Path(p)) for sid, p in zip(uniq_ids, uniq_paths)],
+            outfit_mode=outfit_mode,
+            outfit_text=state.get("outfit_text"),
+            background=bool(background_path),
+            job_id=job_id,
+        )
+        if result is not None:
+            intent, prompts = result
+            director_json = prompt_director.plan_from_scene_prompts(
+                intent, prompts,
+                [(cid, jc.name) for cid, jc in chars.items()],
+            ).model_dump_json()
+
     job = Job(
         job_id=job_id,
         title=f"Reengineer {state.get('source_name') or re_id} — {', '.join(names)}",
+        use_director=bool(director_json),
+        director_prompts_json=director_json,
         scene_id=uniq_ids[0],
         scene_image_path=uniq_paths[0],
         scene_ids=uniq_ids,
