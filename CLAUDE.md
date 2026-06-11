@@ -196,6 +196,19 @@ IMAGE_CONCURRENCY=2               # fallback for providers without their own kno
 IMAGE_CONCURRENCY_FAL=8           # per-PROVIDER swap-variant parallelism (2026-06-11):
 IMAGE_CONCURRENCY_OPENAI=4        # the runner sizes its semaphore from the job's
 IMAGE_CONCURRENCY_GEMINI=2        # effective model's provider — fal queues server-side
+REMOTION_MAX_CONCURRENT_RENDERS=2 # process-wide cap on simultaneous `npx remotion render`
+                                  # subprocesses (2026-06-11): Step-6 compile fans out per
+                                  # character, and 11 ungated renders measured 430s median
+                                  # each (vs 71s solo) + 30s delayRender frame timeouts +
+                                  # a Chrome launch crash. All Remotion render paths funnel
+                                  # through this gate in remotion_render.py.
+REMOTION_CONCURRENCY=4            # browser tabs PER render (--concurrency). Measured on the
+                                  # 18-core machine: 1 tab=99s, 4 tabs=29s, 8 tabs=22s for a
+                                  # 39s 1080x1920 PurplePill render — 4 is the knee, and
+                                  # gate×tabs = 8 Chrome tabs max by default.
+REMOTION_TIMEOUT_MS=120000        # per-frame delayRender budget (--timeout). Remotion's 30s
+                                  # default is too tight for cold OffthreadVideo seeks in
+                                  # long Step-6 concat videos.
 SWAP_STALL_TIMEOUT_SECS=600       # Reengineer image-phase watchdog: fail only when NO
                                   # progress (terminal flips / qc_attempts) for this long
 SWAP_PHASE_MAX_SECS=7200          # absolute image-phase backstop (replaces old fixed 30 min)
@@ -267,7 +280,13 @@ src/character_swap/
 ├── remotion_render.py — Python→Node bridge for the Remotion caption engine. Calls
                          `npx remotion render` as a subprocess; SHA-256 caches outputs
                          under `output/cache/remotion/<hash>.mp4`. Wrapped in
-                         `call_log.record(phase="remotion_render", ...)`.
+                         `call_log.record(phase="remotion_render", ...)`. A process-wide
+                         threading.BoundedSemaphore (REMOTION_MAX_CONCURRENT_RENDERS=2)
+                         gates simultaneous renders — every caller (Step-6 compile,
+                         rerender, auto_edit, timeline) funnels through it, each render
+                         gets REMOTION_CONCURRENCY=4 browser tabs, the cache is
+                         re-checked after queueing, and queue_wait_secs is logged
+                         separately from latency_ms.
 ├── runner_compile.py  — Step 6: per-character compile. `compile_job_videos()` fans
                          out across every approved character via asyncio.gather; each
                          character concatenates its per-scene DONE videos (in
@@ -330,7 +349,8 @@ src/character_swap/
 
 remotion/                  — React + Remotion project for the caption engine.
 ├── package.json           — remotion 4.0.247, @remotion/player, @remotion/google-fonts, react 19
-├── remotion.config.ts     — Chromium config, concurrency=1
+├── remotion.config.ts     — Chromium config, concurrency=4 (manual-run default; the
+                             Python bridge always passes --concurrency explicitly)
 ├── build-preview.mjs      — esbuild → web/static/remotion-preview.js (in-browser Player)
 ├── src/index.ts           — registerRoot(Root)
 ├── src/Root.tsx           — four <Composition> registrations

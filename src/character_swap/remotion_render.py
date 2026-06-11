@@ -20,6 +20,8 @@ import hashlib
 import json
 import shutil
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,26 @@ import imageio_ffmpeg
 
 from character_swap.call_log import record
 from character_swap.config import settings
+
+
+# Process-wide cap on simultaneous `npx remotion render` subprocesses. Every
+# caller (Step-6 compile, /rerender, auto_edit, timeline) funnels through
+# render_remotion via asyncio.to_thread, so a threading semaphore here gates
+# them all. Without it, compile's per-character fan-out launches one headless
+# Chrome per character at once and the machine thrashes: 11 concurrent
+# renders measured 430s median each (vs 71s solo) with per-frame delayRender
+# timeouts. Built lazily so tests can override the setting before first use.
+_gate_lock = threading.Lock()
+_gate: threading.BoundedSemaphore | None = None
+
+
+def _render_gate() -> threading.BoundedSemaphore:
+    global _gate
+    with _gate_lock:
+        if _gate is None:
+            _gate = threading.BoundedSemaphore(
+                max(1, settings.remotion_max_concurrent_renders))
+        return _gate
 
 
 # Path to the Remotion project. Resolved relative to the repo root via the
@@ -171,15 +193,51 @@ def render_remotion(
             "cached": True,
         }
 
+    queue_t0 = time.monotonic()
+    with _render_gate():
+        queue_wait = time.monotonic() - queue_t0
+        # A queued sibling (e.g. a compile retry with identical inputs) may
+        # have filled the cache while we waited for a render slot.
+        if cache_path.is_file():
+            shutil.copy2(cache_path, output_video)
+            return {
+                "engine": "remotion",
+                "composition": composition_id,
+                "n_words": len(words),
+                "cached": True,
+            }
+        return _render_locked(
+            input_video, output_video,
+            composition_id=composition_id, full_props=full_props,
+            words=words, cache_key=cache_key, cache_path=cache_path,
+            queue_wait=queue_wait, job_id=job_id,
+        )
+
+
+def _render_locked(
+    input_video: Path,
+    output_video: Path,
+    *,
+    composition_id: str,
+    full_props: dict[str, Any],
+    words: list[dict[str, Any]],
+    cache_key: str,
+    cache_path: Path,
+    queue_wait: float,
+    job_id: str | None,
+) -> dict:
+    remotion_dir = _remotion_dir()
     with record(phase="remotion_render", model=composition_id,
-                character="editor", job_id=job_id):
+                character="editor", job_id=job_id) as entry:
+        # Queue wait is logged but excluded from latency_ms (record starts
+        # after the gate) so per-render stats stay comparable over time.
+        entry["queue_wait_secs"] = round(queue_wait, 2)
         # Spin up an ephemeral HTTP server serving the directory that
         # contains the input video; rewrite videoSrc to its real URL so
         # the Remotion renderer's headless Chrome can fetch the file.
         import functools
         import http.server
         import socketserver
-        import threading
         import urllib.parse as _urlparse
         serve_dir = input_video.parent
 
@@ -208,9 +266,17 @@ def render_remotion(
                 composition_id,
                 str(cache_path),
                 f"--props={props_path}",
-                "--concurrency=1",
+                # Tabs-per-render × the process-wide gate is the real
+                # parallelism budget: 4 × 2 = 8 Chrome tabs on an 18-core
+                # machine. Overrides remotion.config.ts.
+                f"--concurrency={max(1, settings.remotion_concurrency)}",
+                # Per-frame delayRender budget. The Remotion default (30s)
+                # is too tight for a cold OffthreadVideo seek in the long
+                # concat videos Step-6 compile produces.
+                f"--timeout={max(30_000, settings.remotion_timeout_ms)}",
                 "--log=info",
             ]
+            entry["concurrency"] = max(1, settings.remotion_concurrency)
             proc = subprocess.run(
                 cmd, cwd=str(remotion_dir),
                 capture_output=True, text=True,

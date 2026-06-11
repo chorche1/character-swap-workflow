@@ -97,6 +97,22 @@ class Settings(BaseSettings):
     image_concurrency_fal: int = Field(default=8, validation_alias="IMAGE_CONCURRENCY_FAL")
     image_concurrency_openai: int = Field(default=4, validation_alias="IMAGE_CONCURRENCY_OPENAI")
     image_concurrency_gemini: int = Field(default=2, validation_alias="IMAGE_CONCURRENCY_GEMINI")
+    # Remotion caption renders are LOCAL CPU work (one headless Chrome +
+    # OffthreadVideo ffmpeg frame extractors per render), unlike the
+    # network-bound providers above — so fan-out callers (Step-6 compile is
+    # per-character-parallel) must NOT each get their own render. Measured
+    # 2026-06-10: a 12-character compile ran 11 renders simultaneously →
+    # 430s median per render (vs 71s solo), delayRender 30s timeouts on
+    # single frames, one Chrome launch crash. remotion_render.py gates
+    # renders process-wide at `remotion_max_concurrent_renders` and gives
+    # each render `remotion_concurrency` browser tabs (the old hardcoded
+    # --concurrency=1 left 17 of 18 cores idle once renders were serialized).
+    # `remotion_timeout_ms` is the per-frame delayRender budget — insurance
+    # for long compile concats where a cold OffthreadVideo seek can be slow.
+    remotion_max_concurrent_renders: int = Field(
+        default=2, validation_alias="REMOTION_MAX_CONCURRENT_RENDERS")
+    remotion_concurrency: int = Field(default=4, validation_alias="REMOTION_CONCURRENCY")
+    remotion_timeout_ms: int = Field(default=120_000, validation_alias="REMOTION_TIMEOUT_MS")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
