@@ -1140,6 +1140,9 @@
                       <button class="text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded px-2 py-1 text-sm"
                               title="Edit with custom prompt"
                               @click="openEdit(cid, v.variant_id)">✎</button>
+                      <button class="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
+                              title="Reject & regenerate — a fresh take of just this image (approval is withdrawn)"
+                              @click="retryVariant(cid, v.variant_id)">✕↻</button>
                       <label class="text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950 rounded px-2 py-1 text-sm cursor-pointer"
                              title="Replace this image with one from your computer">⇪
                         <input type="file" accept="image/*" class="hidden"
@@ -1887,6 +1890,13 @@
                           </div>
                           <span x-show="(jc.approved_variant_ids || []).includes(v.variant_id)"
                                 class="absolute top-0.5 right-0.5 bg-emerald-500 text-white text-[9px] px-1 rounded">✓</span>
+                          <!-- Reject & regenerate a READY-but-wrong image: same
+                               per-slot retry endpoint as failed slots; any
+                               approval of the old image is withdrawn server-side. -->
+                          <button x-show="v.status === 'ready'"
+                                  class="absolute bottom-0.5 right-0.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-[9px] px-1 rounded leading-tight"
+                                  :title="'Reject & regenerate — ' + jc.name + ' gets a fresh take of this image'"
+                                  @click.stop="reengineerRetryVariant(r, cid, v.variant_id)">✕↻</button>
                           <span x-show="v.qc_status === 'failed' && v.status === 'ready'"
                                 class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded cursor-help"
                                 :title="'QC: ' + (v.qc_reason || '')">⚠</span>

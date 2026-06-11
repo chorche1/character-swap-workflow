@@ -1448,7 +1448,7 @@ function studio() {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({}) });
       if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
-      this.notifyInfo('Regenerating the failed image…');
+      this.notifyInfo('Regenerating this image — a fresh take is on its way…');
       // Cache-buster: the retry regenerates into the SAME file path.
       this.reengineerRetryNonce = { ...this.reengineerRetryNonce, [variantId]: Date.now() };
       // Optimistically flip the slot so the poll filter sees the run as

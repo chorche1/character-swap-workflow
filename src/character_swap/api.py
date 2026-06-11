@@ -1512,10 +1512,18 @@ class RetryVariantBody(BaseModel):
 async def retry_variant(job_id: str, char_id: str, variant_id: str,
                         background: BackgroundTasks,
                         body: RetryVariantBody | None = None) -> dict:
-    """Re-run image gen for one specific failed variant — keeps the other
-    variants on this character intact and only re-attempts the failed slot.
-    Refuses if movement_prompt is set (gen flow is locked) or if the variant
-    isn't currently in FAILED state."""
+    """Re-run image gen for one specific variant slot — keeps the other
+    variants on this character intact and only re-attempts this one.
+
+    Two flavors, same endpoint:
+    - FAILED slot → classic retry.
+    - READY slot → "reject & regenerate": the user judged the image wrong
+      (wrong character/clothes/background) and wants a fresh take in place.
+      Any approval of the rejected image is withdrawn first — the new image
+      is a different picture and must be re-approved.
+
+    Refuses if movement_prompt is set (gen flow is locked) or the slot is
+    still GENERATING (already in flight)."""
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -1528,9 +1536,28 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
     target = next((v for v in jc.images if v.variant_id == variant_id), None)
     if target is None:
         raise HTTPException(404, "Variant not found on this character")
-    if target.status != VariantStatus.FAILED:
+    if target.status not in {VariantStatus.FAILED, VariantStatus.READY}:
         raise HTTPException(409,
-            f"Variant status is '{target.status}', not 'failed' — nothing to retry")
+            f"Variant status is '{target.status}' — only failed or ready "
+            f"slots can be regenerated")
+    # Withdraw any approval of the old image (mirrors the approve toggle's
+    # bookkeeping: list + legacy field + char status).
+    approved_ids = list(jc.approved_variant_ids or [])
+    if not approved_ids and jc.approved_variant_id:
+        approved_ids = [jc.approved_variant_id]
+    if variant_id in approved_ids:
+        approved_ids = [vid for vid in approved_ids if vid != variant_id]
+        jc.approved_variant_ids = approved_ids
+        jc.approved_variant_id = approved_ids[0] if approved_ids else None
+        if jc.status == CharStatus.APPROVED and not approved_ids:
+            jc.status = CharStatus.AWAITING_APPROVAL
+        jc.updated_at = datetime.utcnow()
+        job.characters[char_id] = jc
+        s.update_job(job)
+        await events.publish(job_id, {"kind": "char.unapproved", "job_id": job_id,
+                                      "char_id": char_id,
+                                      "variant_id": variant_id,
+                                      "approved_variant_ids": approved_ids})
     background.add_task(_run_async, runner.retry_single_variant,
                         job_id, char_id, variant_id,
                         (body.prompt if body else None))
