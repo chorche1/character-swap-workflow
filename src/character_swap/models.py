@@ -186,6 +186,10 @@ class JobCharacter(BaseModel):
     compile_edit_id: str | None = None       # the editor edit_id used (re-render / debug)
     compile_status: str | None = None        # None | "compiling" | "done" | "failed"
     compile_error: str | None = None
+    # Non-fatal compile caveat surfaced in the UI (backlog #9, 2026-06-12):
+    # e.g. "final is missing 2 scene(s): s3 (no finished video)" — the
+    # compile still succeeds, but never silently.
+    compile_warning: str | None = None
     # Phase 4 (Full pipeline) per-character status. The "🚀 Run full pipeline"
     # button in Step 6 chains: compile-no-captions → package zip into a temp
     # dir → spawn `python automate.py` (Resolve render → Drive upload) → wait

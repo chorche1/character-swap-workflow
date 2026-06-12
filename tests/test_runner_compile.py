@@ -64,7 +64,9 @@ def test_ordered_scene_videos_empty_when_no_approved(tmp_path):
         approved_variant_ids=[],
     )
     job = _mkjob(["sc1"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == []
+    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    assert paths == []
+    assert missing == ["sc1 (no approved variant)"]
 
 
 def test_ordered_scene_videos_picks_first_done_per_scene(tmp_path):
@@ -85,8 +87,9 @@ def test_ordered_scene_videos_picks_first_done_per_scene(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    result = runner_compile._ordered_scene_videos(job, jc)
-    assert result == [v1_path, v2_path]
+    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    assert paths == [v1_path, v2_path]
+    assert missing == []
 
 
 def test_ordered_scene_videos_skips_scene_without_done_video(tmp_path):
@@ -108,7 +111,9 @@ def test_ordered_scene_videos_skips_scene_without_done_video(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == [v1]
+    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    assert paths == [v1]
+    assert missing == ["sc2 (no finished video)"]
 
 
 def test_ordered_scene_videos_skips_scene_with_missing_file(tmp_path):
@@ -130,7 +135,9 @@ def test_ordered_scene_videos_skips_scene_with_missing_file(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == [v1]
+    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    assert paths == [v1]
+    assert missing == ["sc2 (video file missing on disk)"]
 
 
 def test_ordered_scene_videos_legacy_single_scene_uses_approved_variant_id(tmp_path):
@@ -144,7 +151,7 @@ def test_ordered_scene_videos_legacy_single_scene_uses_approved_variant_id(tmp_p
         videos=[_mkvideo(v, source_variant_id="var_only")],
     )
     job = _mkjob(["sc1"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == [v]
+    assert runner_compile._ordered_scene_videos(job, jc) == ([v], [])
 
 
 def test_ordered_scene_videos_picks_first_done_when_multiple_videos_per_variant(tmp_path):
@@ -163,7 +170,101 @@ def test_ordered_scene_videos_picks_first_done_when_multiple_videos_per_variant(
         ],
     )
     job = _mkjob(["sc1"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == [v1]
+    assert runner_compile._ordered_scene_videos(job, jc) == ([v1], [])
+
+
+def test_compile_persists_missing_scene_warning(monkeypatch, tmp_path):
+    """Backlog #9 (audit 2026-06-12): a final that silently skips scenes
+    ships with whole lines of dialogue absent and status 'done'. When scenes
+    are dropped, the compile must persist compile_warning, emit
+    char.compile_warning, and include the warning in char.compile_done."""
+    import asyncio
+    from types import SimpleNamespace
+    from character_swap.config import settings
+
+    v1 = tmp_path / "scene1.mp4"; v1.write_text("fake")
+    jc = JobCharacter(
+        char_id="c1", name="A", source_image_path="/tmp/a.png",
+        images=[_mkvariant("var_sc1", "sc1"), _mkvariant("var_sc2", "sc2")],
+        approved_variant_ids=["var_sc1", "var_sc2"],
+        videos=[_mkvideo(v1, source_variant_id="var_sc1")],  # sc2: none
+    )
+    job = _mkjob(["sc1", "sc2"], jc)
+
+    fake_store = SimpleNamespace(
+        get_job=lambda jid: job,
+        update_job=lambda j: None,
+        get_character=lambda cid: None,
+    )
+    monkeypatch.setattr(runner_compile, "store", lambda: fake_store)
+    monkeypatch.setattr(settings, "output_dir", tmp_path, raising=False)
+
+    events: list[tuple[str, dict]] = []
+
+    async def fake_emit(job_id, kind, **kw):
+        events.append((kind, kw))
+    monkeypatch.setattr(runner_compile, "_emit", fake_emit)
+
+    final = tmp_path / "result.mp4"; final.write_text("final")
+
+    async def fake_pipeline(paths, **kw):
+        assert paths == [v1]                       # only the existing scene
+        return runner_compile.EditorResult(final=final, voice_applied=False)
+    monkeypatch.setattr(runner_compile, "run_editor_pipeline", fake_pipeline)
+
+    asyncio.run(runner_compile._compile_one_character(
+        "j1", "c1", template="submagic-pro", overrides=None,
+        enable_trim=True, enable_captions=False, enable_wpm_normalize=False,
+        target_wpm=190, threshold_db=-35.0, min_silence_secs=0.35,
+        pad_secs=0.06, voice_override=None, enable_voice_swap=False))
+
+    assert jc.compile_status == "done"
+    assert "sc2 (no finished video)" in (jc.compile_warning or "")
+    kinds = dict(events)
+    assert "char.compile_warning" in kinds
+    assert "sc2" in kinds["char.compile_warning"]["message"]
+    assert kinds["char.compile_done"]["warning"] == jc.compile_warning
+
+
+def test_compile_clears_stale_warning_on_full_success(monkeypatch, tmp_path):
+    """A re-compile where every scene now has a clip must clear the old
+    warning — stale caveats are as misleading as silent drops."""
+    import asyncio
+    from types import SimpleNamespace
+    from character_swap.config import settings
+
+    v1 = tmp_path / "s1.mp4"; v1.write_text("fake")
+    jc = JobCharacter(
+        char_id="c1", name="A", source_image_path="/tmp/a.png",
+        images=[_mkvariant("var_sc1", "sc1")],
+        approved_variant_ids=["var_sc1"],
+        videos=[_mkvideo(v1, source_variant_id="var_sc1")],
+        compile_warning="final is missing 1 scene(s): old",
+    )
+    job = _mkjob(["sc1"], jc)
+    fake_store = SimpleNamespace(get_job=lambda jid: job,
+                                 update_job=lambda j: None,
+                                 get_character=lambda cid: None)
+    monkeypatch.setattr(runner_compile, "store", lambda: fake_store)
+    monkeypatch.setattr(settings, "output_dir", tmp_path, raising=False)
+
+    async def fake_emit(*a, **k):
+        pass
+    monkeypatch.setattr(runner_compile, "_emit", fake_emit)
+    final = tmp_path / "r.mp4"; final.write_text("x")
+
+    async def fake_pipeline(paths, **kw):
+        return runner_compile.EditorResult(final=final, voice_applied=False)
+    monkeypatch.setattr(runner_compile, "run_editor_pipeline", fake_pipeline)
+
+    asyncio.run(runner_compile._compile_one_character(
+        "j1", "c1", template="submagic-pro", overrides=None,
+        enable_trim=True, enable_captions=False, enable_wpm_normalize=False,
+        target_wpm=190, threshold_db=-35.0, min_silence_secs=0.35,
+        pad_secs=0.06, voice_override=None, enable_voice_swap=False))
+
+    assert jc.compile_status == "done"
+    assert jc.compile_warning is None
 
 
 # --- compile_job_videos target selection -----------------------------------------------

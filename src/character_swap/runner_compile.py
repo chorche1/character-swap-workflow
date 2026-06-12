@@ -43,19 +43,25 @@ async def _emit(job_id: str, kind: str, char_id: str | None = None, **data) -> N
     await events.publish(job_id, payload)
 
 
-def _ordered_scene_videos(job: Job, jc: JobCharacter) -> list[Path]:
+def _ordered_scene_videos(
+        job: Job, jc: JobCharacter) -> tuple[list[Path], list[str]]:
     """Build the ordered list of per-scene video file paths for one character.
 
     Iterates `job.scene_ids` in order. For each scene, finds the approved
     variant for THIS character on THAT scene, then picks the first DONE
-    VideoVariant whose `source_variant_id` matches. Skips scenes with no
-    DONE video (with a console warning — caller's job to surface)."""
+    VideoVariant whose `source_variant_id` matches.
+
+    Returns (paths, missing): `missing` names every scene that contributes
+    NO clip, with the reason. Backlog #9 (2026-06-12): these scenes used to
+    be dropped silently — the final shipped with whole lines of dialogue
+    absent and status 'done'."""
     scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
     approved_set = set(jc.approved_variant_ids or [])
     if jc.approved_variant_id:
         approved_set.add(jc.approved_variant_id)
 
     paths: list[Path] = []
+    missing: list[str] = []
     for sid in scene_ids:
         # Approved variant for THIS (char, scene). Variants with
         # scene_id=None map to the first scene (legacy single-scene jobs).
@@ -67,6 +73,7 @@ def _ordered_scene_videos(job: Job, jc: JobCharacter) -> list[Path]:
             None,
         )
         if approved_variant is None:
+            missing.append(f"{sid} (no approved variant)")
             continue
         # First DONE video whose source_variant_id matches.
         video = next(
@@ -76,9 +83,13 @@ def _ordered_scene_videos(job: Job, jc: JobCharacter) -> list[Path]:
              and vv.final_video_path),
             None,
         )
-        if video and Path(video.final_video_path).exists():
+        if video is None:
+            missing.append(f"{sid} (no finished video)")
+        elif not Path(video.final_video_path).exists():
+            missing.append(f"{sid} (video file missing on disk)")
+        else:
             paths.append(Path(video.final_video_path))
-    return paths
+    return paths, missing
 
 
 def _persist_jc(job: Job, jc: JobCharacter, **fields) -> JobCharacter:
@@ -363,12 +374,15 @@ async def _compile_one_character(
     _persist_jc(job, jc,
                 compile_status="compiling",
                 compile_edit_id=edit_id,
-                compile_error=None)
+                compile_error=None,
+                compile_warning=None)
     await _emit(job_id, "char.compile_started",
                 char_id=char_id, edit_id=edit_id)
 
-    # Step 0: build ordered scene-video list. Bail if empty.
-    paths = _ordered_scene_videos(job, jc)
+    # Step 0: build ordered scene-video list. Bail if empty; warn LOUDLY
+    # when scenes are missing (backlog #9: a final that silently skips
+    # scenes ships with missing dialogue and status 'done').
+    paths, missing_scenes = _ordered_scene_videos(job, jc)
     if not paths:
         _persist_jc(job, jc,
                     compile_status="failed",
@@ -376,6 +390,12 @@ async def _compile_one_character(
         await _emit(job_id, "char.compile_failed",
                     char_id=char_id, error="no DONE videos found")
         return
+    scene_warning = None
+    if missing_scenes:
+        scene_warning = (f"final is missing {len(missing_scenes)} scene(s): "
+                         + ", ".join(missing_scenes))
+        await _emit(job_id, "char.compile_warning",
+                    char_id=char_id, message=scene_warning)
 
     try:
         async def _warn(message: str) -> None:
@@ -401,12 +421,14 @@ async def _compile_one_character(
         _persist_jc(job, jc,
                     compiled_video_path=str(compiled_final),
                     compile_status="done",
-                    compile_error=None)
+                    compile_error=None,
+                    compile_warning=scene_warning)
         await _emit(job_id, "char.compile_done",
                     char_id=char_id, edit_id=edit_id,
                     output_path=str(compiled_final),
                     voice_id=effective_voice_id,
-                    voice_applied=result.voice_applied)
+                    voice_applied=result.voice_applied,
+                    warning=scene_warning)
     except Exception as e:
         _persist_jc(job, jc,
                     compile_status="failed",
