@@ -7,11 +7,17 @@ export type Card = {
   words: Array<Word & { startFrame: number; endFrame: number }>;
 };
 
+// Mirrors video_edit.CARD_GAP_BREAK_SECS — a card never spans a real pause
+// or scene join (the next scene's words used to sit on screen seconds
+// early). A pytest keeps the constant byte-identical across the three
+// grouping sites (Python / this file / app.js).
+export const GAP_BREAK_SECS = 0.8;
+
 export function groupIntoCards(words: Word[], perCard: number, fps: number): Card[] {
   const cards: Card[] = [];
-  for (let i = 0; i < words.length; i += perCard) {
-    const chunk = words.slice(i, i + perCard);
-    if (chunk.length === 0) continue;
+  let chunk: Word[] = [];
+  const flush = () => {
+    if (chunk.length === 0) return;
     const enriched = chunk.map((w) => ({
       ...w,
       startFrame: Math.max(0, Math.round(w.start * fps)),
@@ -22,7 +28,17 @@ export function groupIntoCards(words: Word[], perCard: number, fps: number): Car
       endFrame: enriched[enriched.length - 1].endFrame,
       words: enriched,
     });
+    chunk = [];
+  };
+  for (const w of words) {
+    if (chunk.length > 0 &&
+        (chunk.length >= perCard ||
+         w.start - chunk[chunk.length - 1].end > GAP_BREAK_SECS)) {
+      flush();
+    }
+    chunk.push(w);
   }
+  flush();
   return cards;
 }
 

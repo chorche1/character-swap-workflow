@@ -2218,18 +2218,32 @@ function studio() {
           ?? this._currentTemplateInfo()?.words_per_card
           ?? 3,
       10) || 3);
+      // Mirrors video_edit.CARD_GAP_BREAK_SECS — a card never spans a real
+      // pause/scene join. A pytest keeps the constant in sync.
+      const GAP_BREAK_SECS = 0.8;
       const cards = [];
-      for (let i = 0; i < this.editor.editedWords.length; i += perCard) {
-        const slice = this.editor.editedWords.slice(i, i + perCard);
-        if (!slice.length) continue;
+      let startIdx = 0;
+      let slice = [];
+      const flush = (endIdx) => {
+        if (!slice.length) return;
         cards.push({
-          startIdx: i,
-          endIdx: i + slice.length - 1,
+          startIdx,
+          endIdx,
           start: slice[0].start,
           end: slice[slice.length - 1].end,
           words: slice,
         });
-      }
+        slice = [];
+      };
+      this.editor.editedWords.forEach((w, i) => {
+        if (slice.length && (slice.length >= perCard
+            || w.start - slice[slice.length - 1].end > GAP_BREAK_SECS)) {
+          flush(i - 1);
+          startIdx = i;
+        }
+        slice.push(w);
+      });
+      flush(this.editor.editedWords.length - 1);
       return cards;
     },
 

@@ -1234,14 +1234,27 @@ def _format_ts(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
+# A caption card never spans a real pause or scene join (backlog #21,
+# 2026-06-12): a gap longer than this between consecutive words starts a new
+# card — otherwise the next scene's words sat on screen seconds early.
+# Mirrored in remotion/src/lib/useCurrentWord.ts (GAP_BREAK_SECS) and
+# app.js captionCards(); a pytest keeps the three in sync.
+CARD_GAP_BREAK_SECS = 0.8
+
+
 def _group_words(words: list[Word], per_card: int) -> list[tuple[float, float, list[Word]]]:
-    """Group words into N-word cards. Returns (card_start, card_end, words)."""
+    """Group words into up-to-N-word cards, breaking EARLY at real pauses
+    (> CARD_GAP_BREAK_SECS). Returns (card_start, card_end, words)."""
     cards: list[tuple[float, float, list[Word]]] = []
-    for i in range(0, len(words), per_card):
-        chunk = words[i:i + per_card]
-        if not chunk:
-            continue
-        cards.append((chunk[0].start, chunk[-1].end, chunk))
+    current: list[Word] = []
+    for w in words:
+        if current and (len(current) >= per_card
+                        or w.start - current[-1].end > CARD_GAP_BREAK_SECS):
+            cards.append((current[0].start, current[-1].end, current))
+            current = []
+        current.append(w)
+    if current:
+        cards.append((current[0].start, current[-1].end, current))
     return cards
 
 
