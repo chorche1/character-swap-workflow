@@ -258,3 +258,48 @@ def test_resolve_source_filename():
     assert ch.resolve_source_filename(None) == "primary.png"
     assert ch.resolve_source_filename("im_b") == "outfit2.png"   # outfit pick
     assert ch.resolve_source_filename("im_gone") == "primary.png"  # stale id
+
+
+# --- analyst failure is never silent (backlog #23, 2026-06-12) ---------------
+
+
+def _analyze_with(monkeypatch, tmp_path, analyze_result):
+    """Run runner_reengineer._analyze on a tiny real video with the
+    provider-shaped pieces (Whisper, Claude analyst, store) stubbed."""
+    import asyncio
+    from character_swap import runner_reengineer
+
+    video = _make_video(tmp_path / "v.mp4", ["red", "blue"])
+    run_dir = tmp_path / "run"
+    (run_dir / "scenes").mkdir(parents=True)
+    monkeypatch.setattr(runner_reengineer.video_edit, "transcribe_words",
+                        lambda src, job_id=None: [])
+    monkeypatch.setattr(runner_reengineer.reengineer, "analyze_scenes",
+                        lambda **kw: analyze_result(**kw)
+                        if callable(analyze_result) else analyze_result)
+    monkeypatch.setattr(runner_reengineer, "_register_frame_as_scene",
+                        lambda f: (f"sc_{f.stem}", f))
+    state = {"re_id": "re_t", "scene_sensitivity": "high"}
+    entries = asyncio.run(
+        runner_reengineer._analyze("re_t", state, video, run_dir))
+    return state, entries
+
+
+def test_analyst_failure_sets_fallback_flag(tmp_path, monkeypatch):
+    """analyze_scenes -> None used to be invisible: generic prompts appeared
+    at the gate with no hint. The state must carry analyst_fallback=True so
+    the UI renders the review-before-animating banner."""
+    state, entries = _analyze_with(monkeypatch, tmp_path, None)
+    assert state.get("analyst_fallback") is True
+    assert entries and all(e["motion_prompt"] for e in entries)
+
+
+def test_analyst_success_does_not_set_fallback_flag(tmp_path, monkeypatch):
+    def fake_analyze(*, frames, spans, words, re_id, motion_frames):
+        return [reengineer.ScenePlan(idx=i, motion_prompt=f"plan {i}",
+                                     speech="", summary="")
+                for i in range(len(frames))]
+    state, entries = _analyze_with(monkeypatch, tmp_path, fake_analyze)
+    assert "analyst_fallback" not in state
+    assert [e["motion_prompt"] for e in entries] == \
+        [f"plan {i}" for i in range(len(entries))]

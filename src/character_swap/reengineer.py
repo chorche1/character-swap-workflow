@@ -22,10 +22,13 @@ Storage per run under `output/reengineer/<re_id>/`:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from character_swap.config import settings
 from character_swap.video_edit import Word, _probe_duration
@@ -337,13 +340,19 @@ def analyze_scenes(
         )
         data = anthropic_client.extract_tool_call(resp, "submit_scene_plan")
         if not data:
+            logger.warning("reengineer analyst (%s): submit_scene_plan tool "
+                           "not invoked in response", re_id)
             return None
         plans = [ScenePlan(idx=int(s["idx"]), motion_prompt=s["motion_prompt"],
                            speech=s.get("speech", ""), summary=s.get("summary", ""))
                  for s in data["scenes"]]
         by_idx = {p.idx: p for p in plans}
         return [by_idx[i] for i in range(len(frames)) if i in by_idx] or None
-    except Exception:
+    except Exception as e:
+        # Callers fall back to generic prompts — but the operator must be
+        # able to see WHY the analyst died (backlog #23).
+        logger.warning("reengineer analyst (%s) failed: %s: %s",
+                       re_id, type(e).__name__, e)
         return None
 
 

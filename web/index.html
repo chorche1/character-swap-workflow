@@ -1886,6 +1886,14 @@
           </div>
           <div x-show="r.error" class="text-xs px-3 py-2 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
                x-text="r.error"></div>
+          <!-- AI-analyst failure is never silent (backlog #23): generic
+               fallback prompts need human review before any Kling spend. -->
+          <div x-show="r.analyst_fallback"
+               class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300">
+            ⚠ AI-analysen misslyckades — motion-prompterna nedan är generiska
+            fallbacks (dialogen är korrekt från Whisper). Granska och redigera
+            dem innan du animerar.
+          </div>
 
           <!-- scene plan + approval strip -->
           <div x-show="(r.scenes || []).length" class="space-y-3">

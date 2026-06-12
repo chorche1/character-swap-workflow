@@ -344,7 +344,16 @@ async def _analyze(re_id: str, state: dict, source: Path,
         reengineer.analyze_scenes,
         frames=frames, spans=spans, words=words, re_id=re_id,
         motion_frames=sequences,
-    ) or reengineer.fallback_plans(spans, words)
+    )
+    if plans is None:
+        # Backlog #23 (2026-06-12): this used to be invisible — generic
+        # fallback prompts appeared at the gate with no hint the analyst
+        # had failed. The flag renders an amber banner so the prompts get
+        # human eyes before any Kling spend.
+        _log.warning("reengineer %s: Claude analyst failed — using generic "
+                     "fallback motion prompts", re_id)
+        state["analyst_fallback"] = True
+        plans = reengineer.fallback_plans(spans, words)
 
     # --- register frames as scenes + persist the plan ---------------------
     scene_entries: list[dict] = []
