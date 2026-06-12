@@ -37,8 +37,10 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     if phase == "fal_swap":
         return settings.fal_swap_price_usd
     # AI Director — one Opus call per Director invocation (swap or movement).
-    # Reengineer's scene analyst is the same one-Claude-call shape.
-    if phase in {"director_swap", "director_movement", "reengineer_analyze"}:
+    # Reengineer's scene analyst and the scene-level prompt rewrite are the
+    # same one-Claude-call shape.
+    if phase in {"director_swap", "director_movement", "reengineer_analyze",
+                 "director_rewrite"}:
         return settings.claude_opus_price_usd
     # Vision QC — one cheap Haiku call per generated swap variant / video clip.
     if phase in {"swap_qc", "video_qc"}:

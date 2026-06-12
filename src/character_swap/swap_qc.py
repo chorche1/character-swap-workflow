@@ -92,7 +92,8 @@ hold:
   must match SCENE. If SCENE's person looks down at what they are doing, a
   RESULT staring into the camera is a FAIL; a distinct gesture in SCENE
   (thumbs-up, pointing, mid-pour) replaced by generic open/resting hands is
-  a FAIL.
+  a FAIL. (The camera_gaze context flag below INVERTS the gaze half of this
+  rule when set — gestures must always match.)
 - WRONG OUTFIT: by default the person must wear the SAME clothing as the
   person in SCENE (an identity swap keeps the scene's wardrobe). FAIL if the
   clothing was clearly swapped to the CHARACTER reference's outfit or
@@ -133,6 +134,11 @@ Context flags you may receive:
 - custom_outfit="...": the person is SUPPOSED to wear the described outfit —
   FAIL (WRONG OUTFIT) if the clothing clearly does not match the
   description; ignore both SCENE's and CHARACTER's wardrobe in that case.
+- camera_gaze=true: the person in RESULT is SUPPOSED to look directly into
+  the camera with a natural expression, REGARDLESS of where SCENE's person
+  looks. Never fail camera gaze; instead FAIL (WRONG GAZE) if RESULT's
+  person is clearly looking away from the camera. Distinct hand gestures
+  must still match SCENE.
 - USER INTENT (optional text block before the images): the user's own prompt
   for this job. It is AUTHORITATIVE and may explicitly request deviations
   from SCENE — different clothing, added/removed props, a changed action or
@@ -319,6 +325,7 @@ def inspect_variant(
     outfit_from_character: bool = False,
     outfit_text: str | None = None,
     user_intent: str | None = None,
+    camera_gaze: bool = False,
     job_id: str | None = None,
 ) -> QCVerdict | None:
     """ONE cheap vision call: does the generated swap pass? None when QC is
@@ -338,6 +345,8 @@ def inspect_variant(
                  f"outfit_from_character={'true' if outfit_from_character else 'false'}")
         if outfit_text:
             flags += f', custom_outfit="{outfit_text[:200]}"'
+        if camera_gaze:
+            flags += ", camera_gaze=true"
         intent_block = (
             f"USER INTENT (authoritative — do not fail deviations it "
             f"requests):\n{user_intent.strip()[:600]}\n\n" if user_intent

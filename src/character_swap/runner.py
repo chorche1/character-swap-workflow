@@ -312,7 +312,14 @@ async def _generate_one_variant(
                 # The user's own prompt may request deviations from the
                 # scene (backlog #17): without it the judge false-failed
                 # swap-with-modifications jobs and 'repaired' them back.
-                user_intent=job.prompt,
+                # Slot-level intent (✎↻ / scene-level "ändra bild") wins —
+                # job.prompt is None for default reengineer runs, and the
+                # judge was reverting requested changes (review 2026-06-13).
+                user_intent=(variant.qc_intent or job.prompt),
+                # Reengineer gaze policy (Hugo 2026-06-13): every Reengineer
+                # image looks straight into the camera — the judge must
+                # ENFORCE it, not fail it as a SCENE mismatch.
+                camera_gaze=job.from_reengineer,
                 job_id=job.job_id,
             )
             if verdict is None:
@@ -555,6 +562,7 @@ async def regen_scene_end_frames(job_id: str, scene_id: str) -> None:
 
 async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
                                prompt: str | None = None, *,
+                               qc_intent: str | None = None,
                                sem: asyncio.Semaphore | None = None) -> None:
     """Re-run image gen for ONE specific variant slot (failed retry OR
     reject-and-regenerate of a ready-but-wrong image).
@@ -588,6 +596,21 @@ async def retry_single_variant(job_id: str, char_id: str, variant_id: str,
     # Optional edited prompt → use it for this retry (and keep it on the slot).
     if prompt and prompt.strip():
         target.prompt = prompt.strip()
+        # The edit IS the user's intent: the QC judge must treat the
+        # requested deviation as authoritative, not "repair" it back to the
+        # scene (review 2026-06-13). A plain-language change request
+        # (qc_intent) is the sharpest signal; the edited prompt is the
+        # fallback.
+        target.qc_intent = (qc_intent or prompt).strip()
+    # Duplicated scenes clone variants SHARING the original's file on disk
+    # (zero-cost copy) — regenerating in place would overwrite the SIBLING
+    # scene's approved image too (review 2026-06-13). Re-point this slot at
+    # its own file first; the clone's variant_id is unique even though the
+    # path was shared.
+    if any(v.path == target.path and v.variant_id != target.variant_id
+           for c in job.characters.values() for v in c.images):
+        target.path = str(_output_dir(job.job_id, jc.char_id)
+                          / f"variant_{target.variant_id}.png")
     # Reset the slot to GENERATING + clear any prior error
     target.status = VariantStatus.GENERATING
     target.error = None

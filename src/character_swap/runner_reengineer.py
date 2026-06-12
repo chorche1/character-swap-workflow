@@ -922,7 +922,15 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
     for e in state["scenes"]:
         vid_variant = _approved_variant_for(jc, e["scene_id"])
         if vid_variant is None:
-            continue                      # never animated — not expected
+            # No approved image. A scene the character has NO slots for was
+            # never theirs — skip. But slots WITHOUT approval (e.g. the
+            # scene-level image regen withdrew them) are a TRUE GAP: report
+            # it loudly instead of silently shipping a final without the
+            # scene (review 2026-06-13). Not waitable — a clip can only
+            # appear after a manual approve + re-animate.
+            if any(v.scene_id == e["scene_id"] for v in jc.images):
+                missing.append(f"scen {e['idx'] + 1} (ingen godkänd bild)")
+            continue
         video = next((vv for vv in jc.videos
                       if vv.status == VideoStatus.DONE
                       and vv.source_variant_id == vid_variant
@@ -1149,6 +1157,30 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
     ])
 
 
+async def regen_scene_images_with_prompt(job_id: str, prompt: str,
+                                         variant_ids: dict[str, str],
+                                         change: str | None = None) -> None:
+    """Scene-level "ändra bilden" (Hugo 2026-06-13): regenerate ONE scene's
+    swap image for EVERY character with a NEW prompt (Director-rewritten or
+    hand-edited). `variant_ids` = {char_id: variant_id} — the endpoint picked
+    each character's slot and withdrew its approval. Slots regenerate IN
+    PLACE (same variant_id) with the shared provider semaphore; QC runs as
+    usual inside _generate_one_variant; the prompt persists on each slot so
+    later per-slot retries inherit it. `change` = the user's plain-language
+    change request, forwarded as the slot's QC intent so the judge treats
+    the deviation as requested instead of repairing it back."""
+    job = store().get_job(job_id)
+    if job is None:
+        return
+    sem = asyncio.Semaphore(
+        runner._image_concurrency_for_model(runner._swap_image_model(job)))
+    await asyncio.gather(*[
+        runner.retry_single_variant(job_id, cid, vid, prompt,
+                                    qc_intent=change, sem=sem)
+        for cid, vid in variant_ids.items()
+    ])
+
+
 async def reanimate(re_id: str, idxs: list[int], *,
                     char_id: str | None = None,
                     clear_dirty: bool = True) -> None:
@@ -1201,12 +1233,12 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
     resume_to = (prior if prior in {"awaiting_assembly", "done",
                                     "partial_success", "failed"}
                  else "done")
-    _update(re_id, status="reanimating", resume_status=resume_to,
-            reanimate_idxs=idxs, reanimate_clear_dirty=clear_dirty)
 
     tasks = []
+    acted: list[int] = []
     for i in idxs:
         sid = entries[i]["scene_id"]
+        n_before = len(tasks)
         for cid, jc in job.characters.items():
             if char_id and cid != char_id:
                 continue
@@ -1224,6 +1256,15 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
             else:
                 tasks.append(runner.generate_more_videos(
                     job.job_id, cid, 1, source_variant_id=vid))
+        if len(tasks) > n_before:
+            acted.append(i)
+    # Persist only the idxs that actually spawned a clip task: a scene whose
+    # every pair was skipped (e.g. approvals withdrawn by a scene-level image
+    # regen still in flight) must KEEP its dirty flag, or the later "Animera
+    # om ändrade" has nothing to pick up and the old clip silently ships with
+    # the new image (review 2026-06-13).
+    _update(re_id, status="reanimating", resume_status=resume_to,
+            reanimate_idxs=acted, reanimate_clear_dirty=clear_dirty)
     if tasks:
         await asyncio.gather(*tasks)
     _finalize_reanimate(re_id, clear_dirty=clear_dirty)

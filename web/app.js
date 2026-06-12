@@ -1749,7 +1749,11 @@ function studio() {
     // After approve-swaps / image-regens on an ALREADY-ANIMATED scene, the
     // existing clip no longer matches the chosen image — flag the scene.
     async _reMarkVariantSceneDirty(run, charId, variantId) {
-      if (!['done', 'partial_success', 'failed'].includes(run.status)) return;
+      // awaiting_assembly included (review 2026-06-13): approving a
+      // regenerated image at the clip-review gate must re-flag the scene,
+      // or the old clip silently ships with the new image.
+      if (!['done', 'partial_success', 'failed',
+            'awaiting_assembly'].includes(run.status)) return;
       const v = (run.job?.characters?.[charId]?.images || [])
         .find(x => x.variant_id === variantId);
       const idx = (run.scenes || []).findIndex(sc => sc.scene_id === v?.scene_id);
@@ -5561,8 +5565,31 @@ function studio() {
         charName: jc?.name || charId, sceneId: v.scene_id || null,
         prompt: v.prompt || '', loading: !v.prompt, submitting: false, reRun,
       };
+      // Reengineer context: prefill the ENGINE-EFFECTIVE prompt from the
+      // server — slots can store stock templates that dispatch substitutes,
+      // so the stored text is the wrong text to edit (review 2026-06-13).
+      const idx = reRun
+        ? (reRun.scenes || []).findIndex(sc => sc.scene_id === v.scene_id)
+        : -1;
+      if (reRun && idx >= 0) {
+        this.imgRegenModal.loading = true;
+        try {
+          const r = await fetch(
+            `/api/reengineer/${reRun.re_id}/scenes/${idx}/swap_prompt`
+            + `?variant_id=${encodeURIComponent(v.variant_id)}`);
+          if (r.ok) {
+            const data = await r.json();
+            if (this.imgRegenModal.variantId === v.variant_id) {
+              this.imgRegenModal.prompt = data.prompt || '';
+            }
+          }
+        } finally {
+          this.imgRegenModal.loading = false;
+        }
+        return;
+      }
       if (!v.prompt) {
-        // Slim reengineer payloads omit variant prompts — fetch the full job.
+        // Slim payloads omit variant prompts — fetch the full job.
         try {
           const r = await fetch('/api/jobs/' + jobId);
           if (r.ok) {
@@ -5599,6 +5626,103 @@ function studio() {
         else if (this.job?.job_id === m.jobId) this.job = job;
         this.imgRegenModal.open = false;
         this.notifyInfo(`Regenererar ${m.charName}s bild med den ändrade prompten…`);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Scene-level image change for ALL characters (Hugo 2026-06-13): the
+    // user describes the change in plain language → POST rewrite_prompt
+    // (AI Director, pure preview) → editable prompt → POST regen_images.
+    sceneImgModal: {
+      open: false, reId: null, idx: null, sceneLabel: '', nChars: 0,
+      change: '', prompt: '', currentPrompt: '', loading: false,
+      directorLoading: false, submitting: false,
+    },
+
+    async openSceneImgModal(r, sc) {
+      const nChars = Object.keys(r.job?.characters || {}).length;
+      this.sceneImgModal = {
+        open: true, reId: r.re_id, idx: sc.idx,
+        sceneLabel: 'Scen ' + (sc.idx + 1) + (sc.summary ? ' — ' + sc.summary : ''),
+        nChars, change: '', prompt: '', currentPrompt: '',
+        loading: true, directorLoading: false, submitting: false,
+      };
+      // Prefill with the scene's ENGINE-EFFECTIVE swap prompt — the server
+      // resolves what the images were ACTUALLY generated with (stock
+      // templates are substituted at dispatch time, so the stored slot
+      // prompt can be the wrong text to edit).
+      try {
+        const resp = await fetch(
+          `/api/reengineer/${r.re_id}/scenes/${sc.idx}/swap_prompt`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (this.sceneImgModal.idx === sc.idx && this.sceneImgModal.reId === r.re_id) {
+            this.sceneImgModal.prompt = data.prompt || '';
+            this.sceneImgModal.currentPrompt = data.prompt || '';
+          }
+        }
+      } finally {
+        this.sceneImgModal.loading = false;
+      }
+    },
+
+    async sceneImgDirector() {
+      const m = this.sceneImgModal;
+      if (!(m.change || '').trim() || m.directorLoading) return;
+      m.directorLoading = true;
+      try {
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/scenes/${m.idx}/rewrite_prompt`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            // current_prompt = the textarea content, so a second Director
+            // pass builds on the previous rewrite/hand edits instead of
+            // rebasing on the stored prompt.
+            body: JSON.stringify({ change: m.change.trim(),
+                                   current_prompt: (m.prompt || '').trim() || null }),
+          });
+        if (!r.ok) {
+          this.notifyError('AI Director misslyckades: ' + await r.text());
+          return;
+        }
+        const data = await r.json();
+        m.prompt = data.prompt || '';
+        m.currentPrompt = data.current_prompt || m.currentPrompt;
+        this.notifyInfo('Directorn har skrivit om prompten — granska och regenerera.');
+      } finally {
+        m.directorLoading = false;
+      }
+    },
+
+    async submitSceneImgRegen() {
+      const m = this.sceneImgModal;
+      if (!(m.prompt || '').trim() || m.submitting) return;
+      m.submitting = true;
+      try {
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/scenes/${m.idx}/regen_images`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            // change rides along as the slots' QC intent: the judge treats
+            // the requested deviation as authoritative instead of
+            // "repairing" the original prop back.
+            body: JSON.stringify({ prompt: m.prompt.trim(),
+                                   change: (m.change || '').trim() || null }),
+          });
+        if (!r.ok) {
+          this.notifyError('Regen misslyckades: ' + await r.text());
+          return;
+        }
+        const view = await r.json();
+        // Cache-busters: each slot regenerates into the SAME file path.
+        const regen = view.regen_variants || {};
+        const nonces = { ...this.reengineerRetryNonce };
+        Object.values(regen).forEach(vid => { nonces[vid] = Date.now(); });
+        this.reengineerRetryNonce = nonces;
+        this._spliceReengineerView(view);
+        this.sceneImgModal.open = false;
+        this.notifyInfo(`Regenererar scenens bild för ${Object.keys(regen).length} karaktärer…`);
+        this._startReengineerPolling();
+        await this.refreshReengineer(m.reId);
       } finally {
         m.submitting = false;
       }

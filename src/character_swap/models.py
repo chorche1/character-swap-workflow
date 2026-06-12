@@ -115,6 +115,12 @@ class GeneratedImage(BaseModel):
     qc_status: str | None = None
     qc_reason: str | None = None
     qc_attempts: int = 0                     # total generation attempts incl. QC retries
+    # The user's EXPLICIT intent for this slot — set when a prompt override
+    # (✎↻ / scene-level "ändra bild") is supplied. Fed to the QC judge as
+    # authoritative USER INTENT so it never fails — and REPAIR never reverts —
+    # a deviation the user asked for (review 2026-06-13: the judge restored
+    # the original prop because it only ever saw job.prompt).
+    qc_intent: str | None = None
     # Set when the slot auto-fell-back to a different engine after the job's
     # chosen model rejected the prompt on CONTENT-POLICY grounds even after
     # prompt softening (e.g. gpt-image → "nbp-swap"). This is the sanctioned,

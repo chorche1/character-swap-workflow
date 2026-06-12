@@ -577,11 +577,13 @@ Prompt format rules (follow exactly):
   and a glass mug became a tumbler. Include foreground furniture/surfaces
   with their frame coverage ("the wooden desk fills the bottom of frame") —
   dropping the surface the props rest on breaks set continuity.
-- PERFORMANCE ANCHORS — state the gaze direction you see ("eyes down on the
-  glass, NOT at camera") and the exact hand state/gesture ("right hand
-  thumbs-up beside the blender", "bare hands — no gloves"): unanchored,
-  every output drifts to a camera-facing stare with generic open hands, and
-  gloves/jewelry leak in from the character reference.
+- PERFORMANCE ANCHORS — GAZE IS FIXED BY POLICY (Hugo 2026-06-13): ALWAYS
+  include, verbatim: "They look directly into the camera with a natural,
+  composed expression, even if the original person was not." Never anchor
+  the original gaze direction and never write any other gaze. Still anchor
+  the exact hand state/gesture you see ("right hand thumbs-up beside the
+  blender", "bare hands — no gloves"): unanchored, hands drift to generic
+  open palms and gloves/jewelry leak in from the character reference.
 - OUTFIT ANCHOR — name the scene outfit's visible pieces AND colors in a few
   words ("white open-collar shirt under a grey pinstripe suit"): unanchored,
   single scenes invent role-typical wardrobe (a doctor got blue scrubs in
@@ -618,6 +620,27 @@ ORGANIC_STYLE_CLAUSE = (
     "key light, no cinematic grading, no glossy highlights, no retouching, "
     "no portrait-mode blur."
 )
+
+# Reengineer gaze policy (Hugo 2026-06-13): EVERY image generated in the
+# Reengineer flow has the person looking straight into the camera — same
+# sentence the static templates use. The Director systems are instructed to
+# include it verbatim; ensure_camera_gaze() is the code-level guarantee
+# (never delegated to the agent alone).
+CAMERA_GAZE_SENTENCE = (
+    "They look directly into the camera with a natural, composed "
+    "expression, even if the original person was not."
+)
+
+
+def ensure_camera_gaze(prompt: str) -> str:
+    """Append CAMERA_GAZE_SENTENCE unless the prompt already demands camera
+    gaze (matched on the affirmative phrase, so an old away-gaze anchor like
+    'NOT at camera' does not count as compliance)."""
+    p = (prompt or "").strip()
+    if "directly into the camera" in p:
+        return p
+    return (p + " " + CAMERA_GAZE_SENTENCE) if p else CAMERA_GAZE_SENTENCE
+
 
 # The full inline negative list for direct_swap plans (the image engines
 # have no separate negative-prompt field). Appended in code after
@@ -812,7 +835,7 @@ def direct_reengineer_swap(
         if not data or not data.get("scenes"):
             return None
         prompts = {str(s["scene_id"]):
-                   str(s["prompt"]).strip() + ORGANIC_STYLE_CLAUSE
+                   ensure_camera_gaze(str(s["prompt"])) + ORGANIC_STYLE_CLAUSE
                    for s in data["scenes"]
                    if s.get("scene_id") and (s.get("prompt") or "").strip()}
         if not prompts:
@@ -823,3 +846,175 @@ def direct_reengineer_swap(
     except Exception:
         logger.exception("director_reengineer failed; falling back")
         return None
+
+
+# --- Scene-level prompt REWRITE (Hugo 2026-06-13) ---------------------------
+#
+# "Ändra scenens bild för alla karaktärer": the user describes WHAT should
+# change in plain language (Swedish or English), ONE Claude call looks at the
+# scene frame + the current swap prompt and rewrites the prompt with only
+# that change applied. The caller shows the result for review before any
+# image is regenerated — this function never spends image-generation money.
+
+SCENE_REWRITE_DIRECTOR_SYSTEM = """\
+You are revising ONE existing swap prompt for a character-swap image
+pipeline. You see the scene frame (it is "Image 1" at generation time; the
+identity reference is "Image 2" and is not shown to you). You get the
+CURRENT PROMPT and the user's CHANGE REQUEST (may be Swedish or English).
+{bg_rule}
+
+Rules:
+- Apply the requested change fully and concretely — anchor every new or
+  changed element exactly like the existing anchors do: name it with its
+  position in frame and approximate size (e.g. "a clear glass of water,
+  half full, bottom-center, about a tenth of the frame").
+- Keep EVERYTHING the change does not touch word-for-word: the identity
+  sentence, outfit directive, framing/camera anchors, prop anchors, hand
+  anchors, headroom lock and light description. Remove or rewrite ONLY
+  anchors the change invalidates.
+- GAZE IS FIXED BY POLICY: the rewritten prompt must always include,
+  verbatim: "They look directly into the camera with a natural, composed
+  expression, even if the original person was not." Keep it if present, add
+  it if missing, and never write any other gaze direction — even if the
+  change request or the current prompt says otherwise.
+- ONE compact prompt, max ~120 words, imperative and concrete; no headers,
+  no lists.
+- Do NOT write photographic-style/grading language (no "cinematic",
+  "professional", "high quality", camera/lens jargon) — a fixed organic
+  phone-photo style paragraph is appended to your prompt automatically. If
+  the current prompt still contains style/quality boilerplate, drop it.
+- Write the prompt in English even if the change request is Swedish.
+
+Return the FULL rewritten prompt via the tool.
+"""
+
+# {bg_rule} variants for the rewrite system. The with-background rule is the
+# distilled REENGINEER bg machinery (the "red barn" lesson: a Director blind
+# to Image 3 anchors the ORIGINAL background that is being thrown away).
+_REWRITE_BG_RULE = """
+A REPLACEMENT BACKGROUND image is also shown (it is "Image 3" at generation
+time): the finished photo's surroundings are REPLACED by Image 3's location,
+and the person plus kept props are relit entirely with Image 3's ordinary
+flat phone-snapshot light. Keep the current prompt's Image 3 directives
+intact wherever the change doesn't touch them. STRICTLY FORBIDDEN: naming or
+describing ANYTHING visible only in the scene frame's original background
+(buildings, walls, sky, signage, location) — the original environment is
+thrown away, so anchors must cover ONLY the person, the held/foreground
+props and the camera distance/crop; only Image 1's framing, crop and subject
+scale are kept, never Image 3's headroom or horizon."""
+
+_REWRITE_NO_BG_RULE = """
+There is no Image 3 — the scene's own background is preserved exactly. If
+the change touches the light description, describe ordinary phone-snapshot
+light (flat, uneven, everyday) — never 'soft', 'diffused', 'flattering',
+'golden', 'cinematic' or 'studio'."""
+
+
+SCENE_REWRITE_TOOL: dict[str, Any] = {
+    "name": "submit_rewritten_swap_prompt",
+    "description": "The full rewritten swap prompt with the change applied.",
+    "input_schema": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+            "prompt": {"type": "string"},
+        },
+    },
+}
+
+
+def strip_style_clauses(prompt: str) -> str:
+    """Remove the code-appended style/negative clauses from a stored variant
+    prompt — the Director must see (and rewrite) only the scene-specific
+    part; the clauses are re-appended verbatim in code afterwards."""
+    out = prompt or ""
+    for clause in (SWAP_AVOID_CLAUSE, ORGANIC_STYLE_CLAUSE):
+        out = out.replace(clause, "").replace(clause.strip(), "")
+    return " ".join(out.split()).strip()
+
+
+def direct_scene_prompt_rewrite(
+    *,
+    scene_id: str,
+    frame_path: Path,
+    current_prompt: str,
+    change_request: str,
+    background_path: Path | None = None,
+    job_id: str | None = None,
+) -> str | None:
+    """ONE Claude call: scene frame + current swap prompt + the user's
+    plain-language change → the rewritten prompt (style clause re-appended).
+    `background_path`: the run's replacement environment (Image 3 at
+    generation time) — the Director must SEE it to keep anchoring the
+    environment to IT instead of the discarded original background.
+    Returns None on ANY failure — the caller surfaces that to the user, who
+    can edit the prompt by hand instead. Never blocks image generation."""
+    if not (change_request or "").strip():
+        return None
+    content: list[dict] = []
+    if background_path is not None:
+        content.append({"type": "text",
+                        "text": "REPLACEMENT BACKGROUND (this is Image 3 at "
+                                "generation time — the environment the "
+                                "finished photo takes place in):"})
+        try:
+            content.append(anthropic_client._file_to_image_block(background_path))
+        except Exception as e:
+            logger.warning("director_rewrite: failed to encode background: %s", e)
+            return None
+    content.append(
+        {"type": "text",
+         "text": f"SCENE FRAME (Image 1 at generation time) — scene {scene_id}:"})
+    try:
+        content.append(anthropic_client._file_to_image_block(frame_path))
+    except Exception as e:
+        logger.warning("director_rewrite: failed to encode %s: %s",
+                       scene_id, e)
+        return None
+    content.append({
+        "type": "text",
+        "text": ("CURRENT PROMPT:\n"
+                 f"{strip_style_clauses(current_prompt)}\n\n"
+                 "CHANGE REQUEST:\n"
+                 f"{change_request.strip()}"),
+    })
+    system = SCENE_REWRITE_DIRECTOR_SYSTEM.format(
+        bg_rule=(_REWRITE_BG_RULE if background_path is not None
+                 else _REWRITE_NO_BG_RULE))
+    try:
+        resp = anthropic_client.messages_with_tools(
+            system=system,
+            messages=[{"role": "user", "content": content}],
+            tools=[SCENE_REWRITE_TOOL],
+            tool_choice={"type": "tool",
+                         "name": "submit_rewritten_swap_prompt"},
+            max_tokens=2048,
+            job_id=job_id,
+            phase="director_rewrite",
+        )
+        data = anthropic_client.extract_tool_call(
+            resp, "submit_rewritten_swap_prompt")
+        new_prompt = (data or {}).get("prompt", "")
+        if not (new_prompt or "").strip():
+            return None
+        return ensure_camera_gaze(str(new_prompt)) + ORGANIC_STYLE_CLAUSE
+    except ProviderNotConfigured:
+        return None
+    except Exception:
+        logger.exception("director_rewrite failed")
+        return None
+
+
+def replace_scene_prompt_in_plan(plan: SwapDirectorPlan, scene_id: str,
+                                 prompt: str) -> bool:
+    """Overwrite the cached plan's prompt for ONE scene across every
+    character (scene prompts are shared — identity varies via the reference
+    image, not the text). Returns True if any entry changed."""
+    changed = False
+    for cp in plan.characters:
+        for sp in cp.scenes:
+            if sp.scene_id == scene_id:
+                for vp in sp.variants:
+                    vp.prompt = prompt
+                changed = True
+    return changed

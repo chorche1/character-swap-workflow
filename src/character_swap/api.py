@@ -4800,6 +4800,258 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
 
 
+# ------------------------------------------ scene-level image rewrite + regen
+# "Ändra scenens bild för alla karaktärer" (Hugo 2026-06-13): the user writes
+# WHAT should change in plain language → the AI Director rewrites the scene's
+# swap prompt (preview, editable) → one click regenerates the scene's image
+# for EVERY character with the new prompt.
+
+def _scene_swap_prompt_for(job: Job, scene_id: str) -> str:
+    """The swap prompt stored on this scene's slots — an approved slot's is
+    the source of truth; else any slot with a prompt; else the job-level
+    fallback chain. NOTE: stock templates are substituted at dispatch time —
+    run the result through _engine_effective_swap_prompt before showing or
+    rewriting it."""
+    from character_swap import pipeline
+    for jc in job.characters.values():
+        approved = set(jc.approved_variant_ids or
+                       ([jc.approved_variant_id] if jc.approved_variant_id else []))
+        cands = [v for v in jc.images
+                 if v.scene_id == scene_id and (v.prompt or "").strip()]
+        if not cands:
+            continue
+        best = next((v for v in cands if v.variant_id in approved), cands[0])
+        return best.prompt
+    return (job.enriched_image_prompt or job.prompt
+            or pipeline.GENERATION_PROMPT)
+
+
+def _engine_effective_swap_prompt(job: Job, prompt: str) -> str:
+    """The prompt the image was ACTUALLY generated with. Slots store stock
+    templates verbatim (e.g. GENERATION_PROMPT), but pipeline's dispatch
+    SUBSTITUTES those with engine-specific prompts — gpt2-id-swap's compact
+    identity-first prompt, the fal engines' EDIT_SWAP_PROMPT. Editing the
+    stored stock string would rewrite text the engine never saw AND bypass
+    the substitution on regen, silently losing the compact prompt's identity
+    + framing locks (review 2026-06-13). gpt2's prompt is returned in
+    standard Image1=scene orientation (dispatch re-flips it mechanically)."""
+    from character_swap import pipeline, runner as runner_mod
+    background = bool(job.extra_reference_path)
+    outfit_mode = job.outfit_mode or "scene"
+    stock = {pipeline.GENERATION_PROMPT, pipeline.EDIT_SWAP_PROMPT}
+    try:
+        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=background))
+        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=False))
+    except ValueError:
+        pass
+    if prompt not in stock:
+        return prompt
+    try:
+        if runner_mod._swap_image_model(job) == "gpt2-id-swap":
+            return pipeline._flip_image_roles(
+                pipeline.build_gpt_id_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=background))
+        return pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                               background=background)
+    except ValueError:
+        return pipeline.EDIT_SWAP_PROMPT
+
+
+def _scene_frame_path(job: Job, scene_id: str) -> Path | None:
+    """The scene's frame image on disk — via its SceneAsset, else the job's
+    parallel scene_image_paths list."""
+    scene = store().get_scene(scene_id)
+    if scene is not None:
+        p = settings.scenes_dir / scene.filename
+        if p.exists():
+            return p
+    try:
+        i = (job.scene_ids or []).index(scene_id)
+        p = Path((job.scene_image_paths or [])[i])
+        return p if p.exists() else None
+    except (ValueError, IndexError):
+        return None
+
+
+@app.get("/api/reengineer/{re_id}/scenes/{idx}/swap_prompt")
+async def reengineer_scene_swap_prompt(re_id: str, idx: int,
+                                       variant_id: str | None = None) -> dict:
+    """The ENGINE-EFFECTIVE swap prompt for one scene — what the images were
+    actually generated with (stock templates substituted). Prefills the
+    scene-level "ändra bild" modal; `variant_id` narrows to one specific
+    slot's prompt for the per-image ✎↻ modal."""
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job missing")
+    scene_id = entry["scene_id"]
+    raw: str | None = None
+    if variant_id:
+        for jc in job.characters.values():
+            v = next((x for x in jc.images if x.variant_id == variant_id), None)
+            if v is not None:
+                raw = (v.prompt or "").strip() or None
+                break
+    prompt = _engine_effective_swap_prompt(
+        job, raw or _scene_swap_prompt_for(job, scene_id))
+    return {"re_id": re_id, "idx": idx, "scene_id": scene_id, "prompt": prompt}
+
+
+class ReRewritePromptBody(BaseModel):
+    # Plain-language change request, Swedish or English — e.g. "byt ut
+    # kaffemuggen mot ett glas vatten".
+    change: str
+    # The prompt currently shown in the modal (may carry an earlier rewrite
+    # or hand edits). When set, the Director rebases on THIS text instead of
+    # the stored slot prompt — so iterating changes doesn't lose the
+    # previous step (review 2026-06-13).
+    current_prompt: str | None = None
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/rewrite_prompt")
+async def reengineer_rewrite_scene_prompt(re_id: str, idx: int,
+                                          body: ReRewritePromptBody) -> dict:
+    """AI Director rewrites ONE scene's swap prompt from a plain-language
+    change request. PURE PREVIEW — nothing is mutated and no image money is
+    spent; the user reviews (and can edit) the result before
+    POST .../regen_images applies it to every character."""
+    from character_swap import prompt_director
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    change = (body.change or "").strip()
+    if not change:
+        raise HTTPException(400, "change is required")
+    if not settings.anthropic_api_key:
+        raise HTTPException(503, "ANTHROPIC_API_KEY required for the AI Director")
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job missing")
+    scene_id = entry["scene_id"]
+    current = _engine_effective_swap_prompt(
+        job, (body.current_prompt or "").strip()
+        or _scene_swap_prompt_for(job, scene_id))
+    frame = _scene_frame_path(job, scene_id)
+    if frame is None:
+        raise HTTPException(409, "scene frame missing on disk")
+    # Background-replacement runs: the Director must SEE Image 3 and anchor
+    # the environment to IT — blind, it re-anchors the original scene's
+    # background (the documented "red barn" drift, prompt_director.py).
+    background = (Path(job.extra_reference_path)
+                  if job.extra_reference_path
+                  and Path(job.extra_reference_path).exists() else None)
+    new_prompt = await asyncio.to_thread(
+        prompt_director.direct_scene_prompt_rewrite,
+        scene_id=scene_id, frame_path=frame, current_prompt=current,
+        change_request=change, background_path=background,
+        job_id=job.job_id)
+    if not new_prompt:
+        raise HTTPException(502, "AI Director kunde inte skriva om prompten — "
+                                 "försök igen eller redigera prompten manuellt")
+    return {"re_id": re_id, "idx": idx, "scene_id": scene_id,
+            "prompt": new_prompt, "current_prompt": current}
+
+
+class ReRegenImagesBody(BaseModel):
+    # The full new swap prompt (Director-rewritten and/or hand-edited).
+    prompt: str
+    # The user's plain-language change request — forwarded to the QC judge
+    # as the slots' authoritative intent so the deviation is never
+    # "repaired" back to the original scene.
+    change: str | None = None
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/regen_images")
+async def reengineer_regen_scene_images(re_id: str, idx: int,
+                                        background_tasks: BackgroundTasks,
+                                        body: ReRegenImagesBody) -> dict:
+    """Regenerate ONE scene's swap image for EVERY character with a NEW
+    prompt. Per character the approved slot (else first ready, else first
+    failed) regenerates IN PLACE; its approval is withdrawn first — the new
+    image is a different picture and must be re-approved. Post-gate the
+    scene is marked dirty (new image ≠ old clip) and finals go stale."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt is required")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job missing")
+    scene_id = entry["scene_id"]
+
+    targets: dict[str, str] = {}
+    for cid, jc in job.characters.items():
+        cands = [v for v in jc.images if v.scene_id == scene_id]
+        if not cands:
+            continue
+        approved_ids = list(jc.approved_variant_ids or
+                            ([jc.approved_variant_id] if jc.approved_variant_id else []))
+        # In-flight slots are never picked (mirrors retry_variant's guard) —
+        # two concurrent submits must not double-run the same slot.
+        target = (next((v for v in cands if v.variant_id in approved_ids
+                        and v.status != VariantStatus.GENERATING), None)
+                  or next((v for v in cands if v.status == VariantStatus.READY), None)
+                  or next((v for v in cands if v.status == VariantStatus.FAILED), None))
+        if target is None:                  # every slot already in flight
+            continue
+        if target.variant_id in approved_ids:
+            # Withdraw the approval (mirrors retry_variant's bookkeeping).
+            approved_ids = [v for v in approved_ids if v != target.variant_id]
+            jc.approved_variant_ids = approved_ids
+            jc.approved_variant_id = approved_ids[0] if approved_ids else None
+            if jc.status == CharStatus.APPROVED and not approved_ids:
+                jc.status = CharStatus.AWAITING_APPROVAL
+            jc.updated_at = datetime.utcnow()
+            await events.publish(job.job_id, {
+                "kind": "char.unapproved", "job_id": job.job_id,
+                "char_id": cid, "variant_id": target.variant_id,
+                "approved_variant_ids": approved_ids})
+        targets[cid] = target.variant_id
+    if not targets:
+        raise HTTPException(409, "no regenerable image slots for this scene "
+                                 "(images still generating?)")
+
+    # Persist the new prompt into the cached Director plan for this scene so
+    # any future whole-scene regen inherits it. (retry_single_variant also
+    # stores it on each slot — that covers per-slot retries regardless.)
+    # No plan (Director-off runs — the default — or a stale fingerprint)?
+    # Synthesize one covering JUST this scene: lookup() returns [] for the
+    # other scenes so they keep the normal fallback chain, and
+    # _maybe_run_director_swap never overwrites it while use_director=False.
+    from character_swap import prompt_director
+    plan = runner._parse_director_plan(job)
+    if plan is not None:
+        if prompt_director.replace_scene_prompt_in_plan(plan, scene_id, prompt):
+            job.director_prompts_json = plan.model_dump_json()
+    else:
+        job.director_prompts_json = prompt_director.plan_from_scene_prompts(
+            "scene-image rewrite", {scene_id: prompt},
+            [(cid, jc.name) for cid, jc in job.characters.items()],
+        ).model_dump_json()
+    s.update_job(job)
+
+    # New image ≠ old clip: post-gate the scene must re-animate.
+    if job.movement_prompts or job.movement_prompt:
+        entry["dirty"] = True
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+
+    background_tasks.add_task(_run_async,
+                              runner_reengineer.regen_scene_images_with_prompt,
+                              job.job_id, prompt, targets,
+                              (body.change or "").strip() or None)
+    view = _reengineer_view(state, slim=True)
+    view["regen_variants"] = targets
+    return view
+
+
 class ReAnimateScenesBody(BaseModel):
     idxs: list[int] | None = None
 

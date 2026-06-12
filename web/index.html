@@ -2032,6 +2032,12 @@
                                 class="text-indigo-500 hover:underline"
                                 title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"
                                 @click="reengineerRedoScene(r, sc)">↻ Ta om scen</button>
+                        <!-- Scene-level image change for ALL characters (Hugo
+                             2026-06-13): plain-language change → AI Director
+                             rewrites the swap prompt → review → regenerate. -->
+                        <button class="text-violet-500 hover:underline"
+                                title="Ändra scenens BILD för alla karaktärer — beskriv ändringen i klartext, AI Director skriver om bildprompten, granska och regenerera"
+                                @click="openSceneImgModal(r, sc)">🪄 Ändra bild</button>
                       </div>
                     </div>
                   </template>
@@ -4511,6 +4517,73 @@
                 @click="submitImgRegen()">
           <span x-show="!imgRegenModal.submitting">✎↻ Regenerera</span>
           <span x-show="imgRegenModal.submitting">Skickar…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scene-level "ändra bilden för ALLA karaktärer" (Hugo 2026-06-13):
+       describe the change in plain language → AI Director rewrites the
+       scene's swap prompt (preview, editable) → one click regenerates every
+       character's image for this scene with the new prompt. -->
+  <div x-show="sceneImgModal.open"
+       @click="sceneImgModal.open = false"
+       @keydown.window.escape="if (sceneImgModal.open) sceneImgModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl max-h-[90vh] overflow-y-auto">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">🪄 Ändra scenens bild — alla karaktärer</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            <span x-text="sceneImgModal.sceneLabel"></span>
+            · <span x-text="sceneImgModal.nChars"></span> karaktärer
+            · de nya bilderna ersätter de nuvarande (godkännanden dras tillbaka)
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="sceneImgModal.open = false">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <label class="block">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Vad ska ändras?</span>
+          <textarea x-model="sceneImgModal.change"
+                    rows="2"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg"
+                    placeholder="t.ex. 'byt ut kaffemuggen mot ett glas vatten' eller 'ta bort solglasögonen' (svenska eller engelska)"></textarea>
+        </label>
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-violet-300 dark:border-violet-800 text-violet-600 dark:text-violet-300 hover:bg-violet-50 dark:hover:bg-violet-950 font-medium disabled:opacity-40"
+                :disabled="sceneImgModal.directorLoading || !(sceneImgModal.change || '').trim()"
+                @click="sceneImgDirector()">
+          <span x-show="!sceneImgModal.directorLoading">🎬 Skriv ny prompt (AI Director)</span>
+          <span x-show="sceneImgModal.directorLoading">Directorn tittar på scenen… (~20 s)</span>
+        </button>
+        <label class="block">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+            Ny bildprompt
+            <span x-show="sceneImgModal.loading" class="ml-2 text-neutral-400">(hämtar nuvarande prompt…)</span>
+          </span>
+          <textarea x-model="sceneImgModal.prompt"
+                    rows="8"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg"
+                    placeholder="Förifylls med scenens nuvarande prompt — eller låt AI Director skriva om den ovan…"></textarea>
+          <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1">
+            Granska/finjustera prompten innan du regenererar — samma prompt
+            används för ALLA karaktärer (identiteten kommer från respektive
+            referensbild). Prompten sparas på scenen så framtida omtagningar
+            utgår från den.
+          </p>
+        </label>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="sceneImgModal.open = false">Avbryt</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-violet-600 hover:bg-violet-700 text-white font-medium disabled:opacity-40"
+                :disabled="sceneImgModal.submitting || sceneImgModal.loading || !(sceneImgModal.prompt || '').trim()"
+                @click="submitSceneImgRegen()">
+          <span x-show="!sceneImgModal.submitting"
+                x-text="'✎↻ Regenerera ' + sceneImgModal.nChars + ' bilder'"></span>
+          <span x-show="sceneImgModal.submitting">Skickar…</span>
         </button>
       </div>
     </div>
