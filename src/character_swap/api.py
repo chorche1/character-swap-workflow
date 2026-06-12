@@ -4790,7 +4790,7 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     job). Keeps the dirty flag: a redo isn't a re-animation of an edit."""
     from character_swap import runner_reengineer
     state = _editable_reengineer_state(
-        re_id, statuses={"done", "partial_success", "failed"})
+        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
     _reengineer_entry(state, idx)
     if re_id in runner_reengineer._ANIMATING:
         raise HTTPException(409, "animation already running for this run")
@@ -4812,7 +4812,7 @@ async def reengineer_animate_scenes(re_id: str,
     dirty flags on completion. Never assembles; use the rebuild button."""
     from character_swap import runner_reengineer
     state = _editable_reengineer_state(
-        re_id, statuses={"done", "partial_success", "failed"})
+        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
     entries = state.get("scenes") or []
     idxs = (body.idxs if body and body.idxs is not None
             else [i for i, e in enumerate(entries) if e.get("dirty")])

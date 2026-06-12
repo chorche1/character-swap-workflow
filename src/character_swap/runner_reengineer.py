@@ -131,8 +131,8 @@ async def resume_all() -> None:
         status = state.get("status")
         if not re_id or status in _TERMINAL_RUN_STATES:
             continue
-        if status == "awaiting_approval":
-            continue                       # user gate — nothing to re-attach
+        if status in {"awaiting_approval", "awaiting_assembly"}:
+            continue                       # user gates — nothing to re-attach
         _log.info("resuming reengineer %s from status=%r", re_id, status)
         if status in {"queued", "analyzing"}:
             # Analysis died mid-flight — safe to redo from the source video.
@@ -829,7 +829,15 @@ async def _watch_video_phase(re_id: str, job_id: str) -> None:
         if asyncio.get_event_loop().time() > deadline:
             _update(re_id, status="failed", error="video phase timed out")
             return
-    await assemble(re_id)
+    state = reengineer.load_state(re_id) or {}
+    if state.get("auto_mode"):
+        await assemble(re_id)
+    else:
+        # Clip-review gate (Hugo 2026-06-12): without ⚡ fully automatic the
+        # run STOPS here so every Kling clip can be inspected — and redone
+        # per scene — and the ⚙ Editor settings tweaked, BEFORE the final
+        # build. The user continues with ▶ Bygg ihop.
+        _update(re_id, status="awaiting_assembly")
 
 
 # --------------------------------------------------------------------------- phase 3: assemble
@@ -996,7 +1004,8 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 # _do_assemble), `resume_status` + `reanimate_idxs` + `reanimate_clear_dirty`
 # (only while status="reanimating", consumed by the finalizer/crash-resume).
 
-_EDITABLE_RUN_STATES = {"awaiting_approval", "done", "partial_success", "failed"}
+_EDITABLE_RUN_STATES = {"awaiting_approval", "awaiting_assembly",
+                        "done", "partial_success", "failed"}
 
 # Generic UGC direction for user-added scenes (mirror of fallback_plans'
 # agent-less prompt, sans dialogue). The Whisper prefill appends the spoken
@@ -1132,7 +1141,8 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
 
     _sync_movement_from_state(job, state, idxs)
     prior = state.get("status")
-    resume_to = (prior if prior in {"done", "partial_success", "failed"}
+    resume_to = (prior if prior in {"awaiting_assembly", "done",
+                                    "partial_success", "failed"}
                  else "done")
     _update(re_id, status="reanimating", resume_status=resume_to,
             reanimate_idxs=idxs, reanimate_clear_dirty=clear_dirty)

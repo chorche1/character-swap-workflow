@@ -1857,6 +1857,7 @@
                     'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300': r.status === 'done',
                     'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': ['queued','analyzing','swapping','animating','reanimating','assembling'].includes(r.status),
                     'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300': r.status === 'awaiting_approval',
+                    'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': r.status === 'awaiting_assembly',
                     'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300': ['failed','partial_success'].includes(r.status),
                   }"
                   x-text="r.status"></span>
@@ -1988,7 +1989,7 @@
                               class="text-amber-500 cursor-help"
                               :title="'Repliken behöver ca ' + Math.ceil(klingSpeechSecs(r, sc)) + ' s för att hinna sägas, men klippet är ' + klingDuration(r, sc) + ' s — höj Kling-fältet om slutet klipps.'"
                               x-text="'⚠ replik ~' + Math.ceil(klingSpeechSecs(r, sc)) + 's'"></span>
-                        <button x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
+                        <button x-show="r.status === 'awaiting_assembly' || (reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status))"
                                 class="text-indigo-500 hover:underline"
                                 title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"
                                 @click="reengineerRedoScene(r, sc)">↻ Ta om scen</button>
@@ -2064,7 +2065,7 @@
                     </template>
                   </div>
                   <!-- per-(scene × character) clips — edit mode on finished runs -->
-                  <div x-show="reEdit[r.re_id] && ['done','partial_success','failed','reanimating'].includes(r.status)"
+                  <div x-show="r.status === 'awaiting_assembly' || (reEdit[r.re_id] && ['done','partial_success','failed','reanimating'].includes(r.status))"
                        class="flex gap-1.5 mt-1.5 flex-wrap items-center">
                     <span class="text-[10px] text-neutral-400">Klipp:</span>
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-clip-'+sc.idx+'-'+cid">
@@ -2124,7 +2125,7 @@
                after ▶ Generate videos AND by ▶ Bygg ihop igen. Defaults keep
                Kling's voice + natural pacing (voice swap + WPM normalize OFF);
                captions + silence trim ON like Swap Step 6. -->
-          <details x-show="reengineerGateVisible(r) || (reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status))"
+          <details x-show="reengineerGateVisible(r) || r.status === 'awaiting_assembly' || (reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status))"
                    class="border border-neutral-200 dark:border-neutral-800 rounded-lg overflow-hidden">
             <summary class="px-3 py-2 text-xs font-medium cursor-pointer bg-neutral-50 dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900">
               ⚙ Slutvideo (Editor)
@@ -2206,6 +2207,26 @@
             <span x-show="r.finals_stale" class="text-xs text-amber-600 dark:text-amber-400">
               klipp/scener har ändrats sedan senaste bygget
             </span>
+          </div>
+
+          <!-- CLIP-REVIEW GATE (Hugo 2026-06-12): without ⚡ fully automatic
+               the run stops here after the video phase — every Kling clip is
+               reviewable per scene above (▶ preview, ↻ Ta om scen, prompt
+               edits mark scenes dirty), and the ⚙ panel applies to the build. -->
+          <div x-show="r.status === 'awaiting_assembly'"
+               class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
+            <span class="text-xs text-neutral-500 dark:text-neutral-400">
+              Alla klipp är klara — granska per scen ovan (▶), gör om enskilda
+              (↻), justera ⚙-inställningarna, och bygg sen:
+            </span>
+            <button class="text-sm px-3 py-1.5 rounded-lg border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300 hover:bg-amber-50 dark:hover:bg-amber-950 disabled:opacity-40"
+                    x-show="reengineerDirtyCount(r) > 0"
+                    title="Genererar nya Kling-klipp för scenerna märkta ● ändrad"
+                    @click="reengineerAnimateDirty(r)"
+                    x-text="'▶ Animera om ändrade (' + reengineerDirtyCount(r) + ')'"></button>
+            <button class="text-sm px-4 py-1.5 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 font-medium"
+                    title="Bygger finalvideorna per karaktär: klipp i FULL längd → Editor-pipelinen med ⚙-panelens inställningar"
+                    @click="reengineerAssemble(r)">▶ Bygg ihop</button>
           </div>
 
           <!-- approval actions (also on failed runs whose video phase never

@@ -1388,7 +1388,7 @@ function studio() {
       // work is in flight (per-slot retries, added-scene images, clip redos)
       // — otherwise the poll filter drops the run and nothing repaints.
       return ['queued', 'analyzing', 'swapping', 'animating', 'reanimating', 'assembling'].includes(r.status)
-        || (['awaiting_approval', 'done', 'partial_success', 'failed'].includes(r.status)
+        || (['awaiting_approval', 'awaiting_assembly', 'done', 'partial_success', 'failed'].includes(r.status)
             && this._reengineerHasInFlight(r));
     },
 
@@ -1447,6 +1447,10 @@ function studio() {
             this.notifyMilestone('Reengineer — review swapped images',
               (fresh.source_name || reId) + ' is ready for approval',
               { kind: 'approval', tag: 're-approve-' + reId });
+          } else if (fresh.status === 'awaiting_assembly') {
+            this.notifyMilestone('Reengineer — granska klippen',
+              (fresh.source_name || reId) + ' — alla Kling-klipp är klara; granska och bygg ihop',
+              { kind: 'approval', tag: 're-clips-' + reId });
           } else if (prev.status === 'reanimating'
                      && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
             this.notifyMilestone('Re-animation klar',
@@ -1576,7 +1580,8 @@ function studio() {
     // ---------------------------------------------------------- edit mode
 
     reEditable(r) {
-      return ['awaiting_approval', 'done', 'partial_success', 'failed'].includes(r.status);
+      return ['awaiting_approval', 'awaiting_assembly',
+              'done', 'partial_success', 'failed'].includes(r.status);
     },
 
     // The approve/Generate-videos gate bar. Besides awaiting_approval it
