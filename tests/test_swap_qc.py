@@ -171,6 +171,20 @@ def test_qc_prompt_covers_framing_and_zoom():
     assert "subject scale" in text
 
 
+def test_qc_zoom_anchor_survives_replaced_background():
+    """Backlog #2 (audit 2026-06-12): clearly wider variants passed QC when
+    background_replaced=true — with a new environment the judge had nothing
+    to compare the room against and went lenient on zoom. The rule must
+    explicitly re-anchor the comparison on the SUBJECT's frame occupancy,
+    exactly like the headroom rule already does."""
+    low = swap_qc.QC_SYSTEM.lower()
+    z = low.index("wrong framing")
+    block = low[z:low.index("wrong headroom")]
+    assert "background_replaced=true" in block
+    assert "subject" in block
+    assert "fraction of the frame" in block
+
+
 def test_qc_prompt_covers_headroom_drift():
     """Regression guard (Hugo 2026-06-12): with a replaced background the
     swap pushed the subject down and added the new background's sky/scenery

@@ -50,7 +50,13 @@ hold:
   is visible, new space appears at the edges) or noticeably more zoomed in,
   or if a key object sits at a clearly different position or size in the
   frame. Compare how much of the frame the person's body and the held
-  objects occupy in SCENE vs RESULT.
+  objects occupy in SCENE vs RESULT. This holds EVEN when
+  background_replaced=true: a replaced background changes WHAT surrounds the
+  person, never the camera distance — judge zoom by the SUBJECT, not the
+  room. The fraction of the frame the person's head, body and held objects
+  occupy must match SCENE (e.g. if SCENE is chest-up, a RESULT showing the
+  full torso or knees-up is a FAIL even though the environment is new and
+  cannot be compared).
 - WRONG HEADROOM / VERTICAL FRAMING: pay special attention to the space
   ABOVE the head. FAIL if RESULT has clearly MORE empty space / sky /
   scenery above the subject's head than SCENE does — i.e. the head sits
