@@ -1621,12 +1621,13 @@ function studio() {
     // clamped to [3, 15]. A pytest keeps the constants in sync.
     klingDuration(run, sc) {
       // A manual override (the editable "Kling s" field) wins outright;
-      // AUTO = the original scene clip's length, rounded UP (Hugo
-      // 2026-06-12 evening — no speech extension; mirror of _kling_duration).
+      // AUTO = the original scene clip's length rounded UP to the
+      // SECOND-next whole second, ceil + 1 (Hugo 2026-06-13: 6.4s → 8s;
+      // mirror of _kling_duration — no speech extension).
       const override = Number(this.reSceneVal(run, sc, 'kling_secs')) || 0;
       if (override) return Math.max(3, Math.min(15, Math.ceil(override - 1e-9)));
       const dur = Number(this.reSceneVal(run, sc, 'duration')) || 0;
-      return Math.max(3, Math.min(15, Math.ceil(dur - 1e-9)));
+      return Math.max(3, Math.min(15, Math.ceil(dur - 1e-9) + 1));
     },
 
     // Seconds the dialogue needs to be spoken (words / 2.2 + 1.0 — mirror

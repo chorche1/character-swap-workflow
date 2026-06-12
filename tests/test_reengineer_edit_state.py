@@ -122,7 +122,7 @@ def test_patch_post_gate_marks_dirty_and_syncs_job(wired):
     assert saved["scenes"][1]["duration"] == 8.0
     assert job.movement_prompts["s2"].startswith("Say something else")
     assert "American" in job.movement_prompts["s2"]     # accent enforced
-    assert job.durations_by_scene["s2"] == 8            # clamped int
+    assert job.durations_by_scene["s2"] == 9            # ceil + 1 (2026-06-13)
 
 
 def test_patch_duration_clamped(wired):

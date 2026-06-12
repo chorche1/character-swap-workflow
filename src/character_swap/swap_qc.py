@@ -78,6 +78,17 @@ hold:
   occupy must match SCENE (e.g. if SCENE is chest-up, a RESULT showing the
   full torso or knees-up is a FAIL even though the environment is new and
   cannot be compared).
+  HEAD-RULER TEST — do this FIRST, mechanically, before weighing anything
+  else: estimate the person's HEAD height as a fraction of the image height
+  in SCENE, then in RESULT (e.g. "head fills ~1/4 of frame height"). State
+  both estimates in your reasoning. FAIL (WRONG FRAMING / ZOOM) if RESULT's
+  head-fraction is below two-thirds of SCENE's (zoomed out — e.g. SCENE
+  ~1/4, RESULT ~1/7) or above 1.5× (zoomed in). A chest-up SCENE that comes
+  back waist-up or wider is ALWAYS a fail. This numeric rule is NEVER
+  relaxed by background_replaced=true, outfit flags, or any other requested
+  deviation — those change pixels, not camera geometry. (Observed
+  2026-06-13: a tight chest-up scene returned as a staged waist-up portrait
+  at roughly half the subject scale PASSED — the result was unusable.)
 - WRONG HEADROOM / VERTICAL FRAMING: pay special attention to the space
   ABOVE the head. FAIL if RESULT has clearly MORE empty space / sky /
   scenery above the subject's head than SCENE does — i.e. the head sits
@@ -143,7 +154,9 @@ Context flags you may receive:
   for this job. It is AUTHORITATIVE and may explicitly request deviations
   from SCENE — different clothing, added/removed props, a changed action or
   expression. NEVER fail a deviation the user intent clearly requests; judge
-  everything it does not mention by the normal rules above.
+  everything it does not mention by the normal rules above. The framing /
+  zoom / headroom rules (incl. the HEAD-RULER TEST) stay in force unless the
+  intent EXPLICITLY asks for a different framing.
 
 Be decisive. Borderline-acceptable images PASS — only clear failures fail.
 When you fail, START the reason with the violated rule's NAME in caps
