@@ -277,17 +277,19 @@ async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
 
 async def _analyze(re_id: str, state: dict, source: Path,
                    run_dir: Path) -> list[dict]:
-    """Scene detection + frames + Whisper + Claude analyst → scene_entries.
-    Whisper runs CONCURRENTLY with the frame-extract loop (independent
-    inputs); a words.json from a previous crashed attempt is reused."""
+    """Scene detection + Whisper + boundary snap + frames + Claude analyst
+    → scene_entries. Whisper now runs BEFORE frame extraction (backlog #31:
+    the visual scene boundaries must snap to inter-word gaps before any
+    frames are sampled — a phrase crossing a visual cut used to be split
+    mid-word across two Kling clips). A words.json from a previous crashed
+    attempt is reused."""
     threshold = reengineer.SENSITIVITY_THRESHOLDS.get(
         state.get("scene_sensitivity") or "high", reengineer.SCENE_THRESHOLD)
     spans = await asyncio.to_thread(reengineer.detect_scenes, source,
                                     threshold=threshold)
 
-    # --- transcript (parallel with frame extraction) ----------------------
+    # --- transcript (needed before frames for the boundary snap) ----------
     words_file = run_dir / "words.json"
-    words_task: asyncio.Task | None = None
     cached_words = None
     if words_file.exists():
         try:
@@ -295,9 +297,17 @@ async def _analyze(re_id: str, state: dict, source: Path,
                 words_file.read_text(encoding="utf-8"))
         except Exception:
             cached_words = None
-    if cached_words is None:
-        words_task = asyncio.create_task(asyncio.to_thread(
-            video_edit.transcribe_words, source, job_id=re_id))
+    if cached_words is not None:
+        words = cached_words
+    else:
+        words = await asyncio.to_thread(
+            video_edit.transcribe_words, source, job_id=re_id)
+        words_file.write_text(video_edit.words_to_json(words),
+                              encoding="utf-8")
+
+    # Visual cuts land mid-word — snap boundaries into word gaps so each
+    # scene's dialogue is whole phrases (backlog #31).
+    spans = reengineer.snap_spans_to_word_gaps(spans, words)
 
     # --- frames (bounded parallel ffmpeg extracts) -------------------------
     # Per scene: the MID frame stays the canonical scene asset (swap input),
@@ -339,12 +349,6 @@ async def _analyze(re_id: str, state: dict, source: Path,
     # Canonical mid frame per scene (the swap input) = the scene-XX.png slot.
     frames = [next(p for p, _ in seq if p.name == f"scene-{i:02d}.png")
               for i, seq in enumerate(sequences)]
-
-    if cached_words is not None:
-        words = cached_words
-    else:
-        words = await words_task
-        words_file.write_text(video_edit.words_to_json(words), encoding="utf-8")
 
     # --- agent analysis (fallback never blocks the pipeline) -------------
     plans = await asyncio.to_thread(

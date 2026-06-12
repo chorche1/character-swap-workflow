@@ -337,3 +337,46 @@ def test_pre_v2_finals_rebuild_hint_in_ui():
         encoding="utf-8")
     assert "f.status === 'done' && !f.edit_id" in html
     assert "Bygg ihop igen" in html
+
+
+# --- scene boundaries snap to word gaps (backlog #31, 2026-06-12) ------------
+
+
+def _word(t0, t1, text="w"):
+    return Word(text=text, start=t0, end=t1)
+
+
+def test_snap_moves_mid_word_boundary_to_nearest_gap():
+    spans = [(0.0, 2.0), (2.0, 4.0)]
+    words = [_word(0.5, 1.0), _word(1.8, 2.3),      # crosses the 2.0 cut
+             _word(2.6, 3.0)]                       # gap 2.3-2.6 → mid 2.45
+    out = reengineer.snap_spans_to_word_gaps(spans, words)
+    assert out == [(0.0, 2.45), (2.45, 4.0)]
+
+
+def test_snap_keeps_boundary_already_in_silence():
+    spans = [(0.0, 2.0), (2.0, 4.0)]
+    words = [_word(0.5, 1.5), _word(2.5, 3.5)]      # 2.0 sits in the gap
+    assert reengineer.snap_spans_to_word_gaps(spans, words) == spans
+
+
+def test_snap_falls_back_to_word_end_when_no_gap_near():
+    spans = [(0.0, 2.0), (2.0, 4.0)]
+    # One long unbroken word stream (offset so 2.0 lands MID-word) — no gaps.
+    words = [_word(i * 0.4 + 0.2, (i + 1) * 0.4 + 0.2) for i in range(10)]
+    out = reengineer.snap_spans_to_word_gaps(spans, words)
+    (a0, b0), (a1, b1) = out
+    assert b0 == pytest.approx(2.22, abs=0.001)     # crossing word's end
+    assert (a0, b1) == (0.0, 4.0)                   # range preserved
+    assert b0 == a1                                  # contiguous
+
+
+def test_snap_merges_degenerate_spans():
+    spans = [(0.0, 0.1), (0.1, 4.0)]                # 0.1s sliver scene
+    words = [_word(0.05, 0.5)]                      # boundary mid-word, no gap
+    out = reengineer.snap_spans_to_word_gaps(spans, words)
+    # Moving the boundary to 0.52 keeps both spans >= min_span → 2 spans;
+    # contiguity + full coverage hold regardless.
+    assert out[0][0] == 0.0 and out[-1][1] == 4.0
+    assert all(b - a >= 0.3 for a, b in out)
+    assert all(out[i][1] == out[i + 1][0] for i in range(len(out) - 1))

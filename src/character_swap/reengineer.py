@@ -377,6 +377,56 @@ def analyze_scenes(
         return None
 
 
+def snap_spans_to_word_gaps(
+    spans: list[tuple[float, float]],
+    words: list[Word],
+    *,
+    max_shift: float = 0.6,
+    min_gap: float = 0.12,
+    min_span: float = 0.3,
+) -> list[tuple[float, float]]:
+    """Move interior span boundaries off mid-word onto the nearest
+    inter-word gap (backlog #31, 2026-06-12). ffmpeg's scene detector cuts
+    on VISUALS — a phrase crossing a visual cut got split mid-word, baking
+    an orphan fragment into one Kling clip and the rest into the next.
+
+    A boundary inside a word moves to the nearest gap midpoint within
+    `max_shift`, falling back to that word's end. Boundaries already in
+    silence stay put. Output spans remain contiguous and cover the same
+    total range; degenerate spans (< `min_span`) merge into their
+    neighbor."""
+    if len(spans) < 2 or not words:
+        return spans
+    # Only contiguous span chains (detect_scenes' contract) can have their
+    # shared boundaries moved — anything else passes through untouched.
+    if any(abs(spans[i][1] - spans[i + 1][0]) > 1e-6
+           for i in range(len(spans) - 1)):
+        return spans
+    gaps = [(w1.end + w2.start) / 2.0
+            for w1, w2 in zip(words, words[1:])
+            if (w2.start - w1.end) >= min_gap]
+    start0, end_n = spans[0][0], spans[-1][1]
+    moved: list[float] = []
+    for _, b in spans[:-1]:
+        word = next((w for w in words if w.start < b < w.end), None)
+        if word is None:
+            moved.append(b)
+            continue
+        near = [g for g in gaps if abs(g - b) <= max_shift]
+        moved.append(min(near, key=lambda g: abs(g - b)) if near
+                     else word.end + 0.02)
+    cleaned: list[float] = []
+    prev = start0
+    for b in sorted(moved):
+        b = min(b, end_n - min_span)
+        if b < prev + min_span:
+            continue                      # degenerate — merge into neighbor
+        cleaned.append(b)
+        prev = b
+    edges = [start0, *cleaned, end_n]
+    return list(zip(edges, edges[1:]))
+
+
 def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[ScenePlan]:
     """Agent-less fallback: generic hand-held direction + verbatim dialogue."""
     out: list[ScenePlan] = []
