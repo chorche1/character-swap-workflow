@@ -177,6 +177,92 @@ class QCVerdict:
     corrective_hint: str
 
 
+CONSISTENCY_SYSTEM = """\
+You inspect CROSS-SCENE consistency for a character-swap video pipeline.
+
+You see one CHARACTER reference image, then the SAME character's generated
+images for the consecutive SCENES of one video, labeled by scene_id. Within
+one video the person's appearance must stay consistent from scene to scene:
+the same outfit pieces and their state (sleeves rolled or not, jacket on or
+off), same glasses or none, same gloves or bare hands, same hairstyle and
+facial hair. Judge against the MAJORITY across scenes — report each scene
+whose appearance clearly contradicts the others, with the concrete
+difference. Differences in pose, framing, lighting, expression and
+background are EXPECTED and never an issue. Be conservative: only clear
+wardrobe/appearance contradictions count. Empty list when consistent.
+"""
+
+CONSISTENCY_TOOL: dict = {
+    "name": "submit_consistency",
+    "description": "Report cross-scene appearance contradictions.",
+    "input_schema": {
+        "type": "object",
+        "required": ["issues"],
+        "properties": {
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["scene_id", "issue"],
+                    "properties": {
+                        "scene_id": {"type": "string"},
+                        "issue": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+
+def inspect_consistency(
+    *,
+    variants: list[tuple[str, Path]],     # [(scene_id, image_path)] in order
+    character_image: Path,
+    job_id: str | None = None,
+) -> list[dict] | None:
+    """ONE vision call over a character's per-scene results (backlog #13):
+    each variant passes solo QC, but nothing compared them ACROSS scenes —
+    sleeves/gloves/glasses wobbled scene to scene in the same final. Returns
+    [{scene_id, issue}, ...] (empty = consistent) or None when unavailable.
+    Advisory only — surfaced at the gate, never blocks or fails variants."""
+    from character_swap.config import settings
+    if not settings.swap_qc_enabled or not settings.anthropic_api_key:
+        return None
+    if len(variants) < 2:
+        return []
+    try:
+        from character_swap.clients import anthropic_client
+        content: list[dict] = [
+            {"type": "text", "text": "CHARACTER reference:"},
+            anthropic_client._file_to_image_block(character_image),
+        ]
+        for sid, p in variants:
+            content.append({"type": "text", "text": f"SCENE {sid}:"})
+            content.append(anthropic_client._file_to_image_block(p))
+        resp = anthropic_client.messages_with_tools(
+            system=CONSISTENCY_SYSTEM,
+            messages=[{"role": "user", "content": content}],
+            tools=[CONSISTENCY_TOOL],
+            tool_choice={"type": "tool", "name": "submit_consistency"},
+            max_tokens=600,
+            temperature=0.0,
+            model=settings.swap_qc_model,
+            job_id=job_id,
+            phase="swap_qc_consistency",
+        )
+        data = anthropic_client.extract_tool_call(resp, "submit_consistency")
+        if data is None or "issues" not in data:
+            return None
+        return [{"scene_id": str(i.get("scene_id") or ""),
+                 "issue": str(i.get("issue") or "")}
+                for i in data["issues"] if i.get("scene_id")]
+    except Exception as e:
+        logger.warning("consistency QC unavailable: %s: %s",
+                       type(e).__name__, e)
+        return None
+
+
 # Failure classes whose flaw IS the image's geometry or content base — a
 # minimal-change edit of the failed image cannot fix what must be
 # REGENERATED, and the repair contract ("keep framing/background unchanged")

@@ -53,6 +53,7 @@ from character_swap import (
     runner,
     runner_compile,
     runner_media,
+    swap_qc,
     video_edit,
 )
 from character_swap.config import settings
@@ -577,12 +578,45 @@ async def _watch_swap_phase(
         _update(re_id, status="failed", error="every swap variant failed")
         return
 
+    # Cross-scene consistency annotation (backlog #13): every variant passed
+    # solo QC, but nothing compared them ACROSS scenes — sleeves/gloves/
+    # glasses wobbled between scenes of the same final. One cheap vision
+    # call per character; advisory only (amber chips at the gate).
+    try:
+        warnings = await _consistency_warnings(job)
+        if warnings:
+            _update(re_id, consistency_warnings=warnings)
+    except Exception as e:
+        _log.warning("reengineer %s: consistency annotation failed: %s",
+                     re_id, e)
+
     state = reengineer.load_state(re_id) or {}
     if state.get("auto_mode"):
         _auto_approve(job)
         await animate(re_id)
     else:
         _update(re_id, status="awaiting_approval")
+
+
+async def _consistency_warnings(job: Job) -> dict[str, list[dict]]:
+    """{char_id: [{scene_id, issue}, ...]} for characters whose READY
+    variants contradict each other across scenes. Never raises past the
+    caller's guard; unavailable QC → no annotation."""
+    out: dict[str, list[dict]] = {}
+    for cid, jc in job.characters.items():
+        ready = [(v.scene_id or "", Path(v.path)) for v in jc.images
+                 if v.status == VariantStatus.READY and v.path
+                 and Path(v.path).exists()]
+        if len(ready) < 2:
+            continue
+        issues = await asyncio.to_thread(
+            swap_qc.inspect_consistency,
+            variants=ready,
+            character_image=Path(jc.source_image_path),
+            job_id=job.job_id)
+        if issues:
+            out[cid] = issues
+    return out
 
 
 def _auto_approve(job: Job) -> None:

@@ -1894,6 +1894,16 @@
             fallbacks (dialogen är korrekt från Whisper). Granska och redigera
             dem innan du animerar.
           </div>
+          <!-- Cross-scene consistency annotation (backlog #13): each image
+               passed solo QC, but wardrobe can wobble BETWEEN scenes. -->
+          <div x-show="r.consistency_warnings && Object.keys(r.consistency_warnings).length"
+               class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
+               x-text="'⚠ Konsistens mellan scener: ' +
+                 Object.entries(r.consistency_warnings || {}).flatMap(([cid, issues]) =>
+                   issues.map(i => (r.job?.characters?.[cid]?.name || cid) +
+                     ' (scen ' + i.scene_id + '): ' + i.issue)
+                 ).join(' · ') + ' — välj en annan variant eller regenerera innan du animerar.'">
+          </div>
 
           <!-- scene plan + approval strip -->
           <div x-show="(r.scenes || []).length" class="space-y-3">
