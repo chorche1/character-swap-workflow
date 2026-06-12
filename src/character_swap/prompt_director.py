@@ -553,11 +553,15 @@ Return via the tool with one entry per scene, scene_ids verbatim.
 # prompt — never delegated to the agent, so it can't be paraphrased away.
 ORGANIC_STYLE_CLAUSE = (
     " Style: a completely ordinary, unedited iPhone photo — plain, slightly "
-    "dull phone-camera colors, neutral white balance, mundane ambient light, "
-    "slightly uneven exposure, mild softness, subtle sensor noise, natural "
-    "non-polished skin with visible pores. Not staged, not professional: no "
-    "studio lighting, no cinematic grading, no glossy highlights, no "
-    "retouching, no portrait-mode blur."
+    "dull phone-camera colors, neutral white balance, flat everyday ambient "
+    "light that is slightly uneven and unflattering, slightly uneven "
+    "exposure, mild softness, subtle sensor noise, natural non-polished skin "
+    "with visible pores. The person is lit by the scene's own ordinary light "
+    "and grounded with a real contact shadow where the body and held objects "
+    "meet surfaces — not brightened, not relit flatteringly, not pasted on. "
+    "Not staged, not professional: no studio lighting, no soft flattering "
+    "key light, no cinematic grading, no glossy highlights, no retouching, "
+    "no portrait-mode blur."
 )
 
 REENGINEER_SWAP_TOOL: dict[str, Any] = {
@@ -671,14 +675,24 @@ def direct_reengineer_swap(
             "thrown away, so your framing anchors must cover ONLY the "
             "person, the held/foreground props and the camera distance/crop."
         )
-        light_rule = ("Describe Image 3's light (direction/quality) in a few "
-                      "words — the inserted person is lit by the NEW "
-                      "environment, never by the original scene's light.")
+        light_rule = (
+            "Describe Image 3's light the way it actually looks in an "
+            "ORDINARY phone snapshot — flat, uneven, everyday/ambient, "
+            "slightly harsh or dim, mixed/imperfect color temperature. NEVER "
+            "use flattering photographic words: no 'soft', 'diffused', "
+            "'even', 'flattering', 'golden', 'cinematic' or 'studio' light. "
+            "The inserted person and kept props are relit by exactly that "
+            "ordinary light, never by the original scene's light.")
     else:
         bg_role = ("There is no Image 3 — the scene's own background is "
                    "preserved exactly.")
-        light_rule = ("Mention the scene's actual light (direction/quality) "
-                      "in a few words so the inserted person is lit to match.")
+        light_rule = (
+            "Describe the scene's actual light the way it looks in an "
+            "ORDINARY phone snapshot — flat, uneven, everyday/ambient, "
+            "slightly harsh or dim, mixed/imperfect color temperature. NEVER "
+            "use flattering photographic words: no 'soft', 'diffused', "
+            "'even', 'flattering', 'golden', 'cinematic' or 'studio' light. "
+            "The inserted person is lit by exactly that ordinary light.")
     system = REENGINEER_SWAP_DIRECTOR_SYSTEM.format(
         bg_role=bg_role, outfit_directive=outfit, light_rule=light_rule)
 

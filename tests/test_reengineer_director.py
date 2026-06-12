@@ -74,12 +74,23 @@ def test_direct_reengineer_swap_happy_path(monkeypatch, tmp_path):
     for p in prompts.values():
         assert "unedited iPhone photo" in p
         assert "no studio lighting" in p
+        # Lighting realism (2026-06-12): the appended style clause carries
+        # the everyday-light + grounding cues so even a slip in the agent's
+        # light line is pushed back. The Director kept writing "soft diffused
+        # daylight" — flattering/produced — across every scene.
+        assert "no soft flattering key light" in p
+        assert "contact shadow" in p
+        assert "not pasted on" in p
     assert "appended to your prompt automatically" in seen["system"]
     # System prompt carries the verbatim identity + outfit + framing rules.
     assert "recognizable likeness" in seen["system"]
     assert "outfit from Image 1" in seen["system"]       # scene mode
     assert "do not zoom out" in seen["system"]
     assert "There is no Image 3" in seen["system"]       # no background
+    # The light rule forbids flattering photographic light (no-bg branch).
+    low = " ".join(seen["system"].lower().split())
+    assert "no 'soft', 'diffused'" in low
+    assert "ordinary phone snapshot" in low
 
 
 def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
@@ -98,8 +109,12 @@ def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
     assert out is not None
     assert "NEW ENVIRONMENT" in seen["system"]
     assert "STRICTLY FORBIDDEN" in seen["system"]        # no old-bg anchors
-    assert "lit by the NEW" in seen["system"]            # light from Image 3
     assert "a red hoodie" in seen["system"]
+    # The bg light rule also forbids flattering light and demands everyday
+    # ordinary-phone light relit from Image 3 (2026-06-12 lighting fix).
+    low = " ".join(seen["system"].lower().split())
+    assert "no 'soft', 'diffused'" in low
+    assert "relit by exactly that ordinary light" in low
     # The background image itself is in the vision content, before scenes.
     blocks = seen["messages"][0]["content"]
     texts = [b.get("text", "") for b in blocks]
