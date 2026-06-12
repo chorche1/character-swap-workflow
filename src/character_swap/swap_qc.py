@@ -140,9 +140,12 @@ Context flags you may receive:
   everything it does not mention by the normal rules above.
 
 Be decisive. Borderline-acceptable images PASS — only clear failures fail.
-When you fail, give a short concrete reason AND a one-sentence corrective
-instruction for the image model (e.g. "Make the face match the character
-reference exactly — do not retain the original person's facial features.").
+When you fail, START the reason with the violated rule's NAME in caps
+(e.g. "WRONG BACKGROUND: the original kitchen was kept") — the retry
+machinery routes repair vs full re-roll on it — then give a one-sentence
+corrective instruction for the image model (e.g. "Make the face match the
+character reference exactly — do not retain the original person's facial
+features.").
 """
 
 QC_TOOL: dict = {
@@ -174,13 +177,39 @@ class QCVerdict:
     corrective_hint: str
 
 
+# Failure classes whose flaw IS the image's geometry or content base — a
+# minimal-change edit of the failed image cannot fix what must be
+# REGENERATED, and the repair contract ("keep framing/background unchanged")
+# actively fights the correction (backlog #12, 2026-06-12). These skip
+# repair and go straight to a fresh re-roll with the corrective hint.
+# Deliberately repairable in place: WRONG HEADROOM (crop), WRONG BACKGROUND
+# SYMBOL (fix the symbol), WRONG GAZE/GESTURE, WRONG OUTFIT, WRONG PERSON
+# (face edit), SEVERE ARTIFACTS, OBVIOUS CUTOUT.
+_REROLL_MARKERS = (
+    "wrong background", "wrong framing", "wrong zoom",
+    "missing/extra people", "missing people", "extra people",
+    "broken image", "unmodified scene",
+)
+
+
+def needs_reroll(reason: str | None) -> bool:
+    """True when the QC failure class cannot be repaired by a minimal-change
+    edit of the failed image. The judge is instructed to lead the reason
+    with the violated rule's name, so substring routing is reliable."""
+    low = (reason or "").lower()
+    if "wrong background symbol" in low:     # the symbol IS edit-repairable
+        return False
+    return any(m in low for m in _REROLL_MARKERS)
+
+
 def repair_prompt(hint: str) -> str:
     """Minimal-change repair instruction for a QC-failed image.
 
     The first QC retry does NOT re-roll from the scene — it feeds the failed
     image itself back through the edit engine with this prompt, so everything
     that was already right is preserved and only the flagged flaw changes
-    (Hugo: "bilden ska ändras så lite som möjligt")."""
+    (Hugo: "bilden ska ändras så lite som möjligt"). Only for failure
+    classes that ARE fixable in place — see `needs_reroll`."""
     fix = hint.strip() or "the person's face must match the identity reference exactly"
     return (
         "Image 1 is an almost-correct generated photo that needs ONE repair. "
@@ -188,7 +217,8 @@ def repair_prompt(hint: str) -> str:
         f"Fix only this: {fix} "
         "Keep absolutely everything else in Image 1 unchanged — identical "
         "framing, crop, pose, body position, clothing, objects, background, "
-        "lighting, colors and photographic style. Change as little of the "
+        "lighting, colors and photographic style — EXCEPT where the fix "
+        "above explicitly requires a change. Change as little of the "
         "image as possible."
     )
 

@@ -330,8 +330,13 @@ async def _generate_one_variant(
                             char_id=jc.char_id, variant_id=variant.variant_id,
                             attempt=attempt, reason=verdict.reason)
                 hint = (verdict.corrective_hint or verdict.reason or "").strip()
-                if attempt == 1 and effective_model != "grok-image":
+                if (attempt == 1 and effective_model != "grok-image"
+                        and not swap_qc.needs_reroll(verdict.reason)):
                     # Repair mode: minimal-change edit of the failed image.
+                    # Skipped for geometry/content-base failures (wrong
+                    # background, wrong framing, broken image) — repair's
+                    # keep-everything contract fights those corrections
+                    # (backlog #12); they re-roll fresh below instead.
                     failed_copy = dest.with_name(dest.stem + ".qcfail.png")
                     await asyncio.to_thread(shutil.copyfile, dest, failed_copy)
                     attempt_scene = failed_copy

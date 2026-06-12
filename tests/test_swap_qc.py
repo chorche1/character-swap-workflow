@@ -218,6 +218,54 @@ def test_qc_non_rate_limit_error_skips_immediately(monkeypatch, tmp_path):
     assert sleeps == []
 
 
+def test_needs_reroll_routes_failure_classes():
+    """Backlog #12: geometry/content-base failures re-roll fresh; in-place
+    fixable classes keep the minimal-change repair."""
+    nr = swap_qc.needs_reroll
+    assert nr("WRONG BACKGROUND: the original kitchen was kept")
+    assert nr("WRONG FRAMING / ZOOM: clearly wider than the scene")
+    assert nr("BROKEN IMAGE: mostly black output")
+    assert nr("MISSING/EXTRA PEOPLE: a second person appeared")
+    # Repairable in place — must NOT re-roll:
+    assert not nr("WRONG BACKGROUND SYMBOL: flag lost its star canton")
+    assert not nr("WRONG HEADROOM: empty sky added above the head")
+    assert not nr("WRONG GAZE / GESTURE: stares into the camera")
+    assert not nr("WRONG PERSON: face is a blend of the two")
+    assert not nr("SEVERE ARTIFACTS: six fingers on the left hand")
+    assert not nr(None) and not nr("")
+
+
+def test_reroll_class_skips_repair_mode(monkeypatch, tmp_path):
+    """A WRONG BACKGROUND fail on attempt 1 must NOT go through repair (the
+    repair contract says 'keep background unchanged' — fighting the fix);
+    it re-rolls fresh from the original scene with the hint."""
+    job, jc, v = _job(tmp_path)
+    prompts: list = []
+    _stub(monkeypatch, job,
+          [QCVerdict(False, "WRONG BACKGROUND: original environment kept",
+                     "Replace the surroundings with the reference."),
+           QCVerdict(True, "", "")], prompts)
+    _run(job, jc, v)
+    assert v.qc_status == "passed"
+    assert len(prompts) == 2
+    assert prompts[1].startswith("BASE PROMPT")        # re-roll, not repair
+    assert "rejected by quality control" in prompts[1]
+    assert "almost-correct" not in prompts[1]
+
+
+def test_repairable_class_still_uses_repair_mode(monkeypatch, tmp_path):
+    job, jc, v = _job(tmp_path)
+    prompts: list = []
+    _stub(monkeypatch, job,
+          [QCVerdict(False, "WRONG HEADROOM: sky added above the head",
+                     "Crop away the added headroom."),
+           QCVerdict(True, "", "")], prompts)
+    _run(job, jc, v)
+    assert len(prompts) == 2
+    assert prompts[1].startswith("Image 1 is an almost-correct")
+    assert "EXCEPT where the fix" in prompts[1]
+
+
 def test_qc_prompt_covers_gaze_and_prop_precision():
     """Backlog #14+#15 (audit 2026-06-12): originals look down at the task
     but variants stare at camera (passed QC); 3 kiwi halves became a staged
