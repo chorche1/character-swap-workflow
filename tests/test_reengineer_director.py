@@ -116,6 +116,13 @@ def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
     # correct/wrong across cuts.
     assert "distinctive SYMBOL" in seen["system"]
     assert "blue star canton" in seen["system"]
+    # Backlog #14+#15: gaze/hand-state + prop count/state/container +
+    # foreground furniture are anchored per scene.
+    flat = " ".join(seen["system"].split())
+    assert "PERFORMANCE ANCHORS" in flat
+    assert "PROP PRECISION" in flat
+    assert "gaze direction" in flat
+    assert "foreground furniture" in flat
     # The bg light rule also forbids flattering light and demands everyday
     # ordinary-phone light relit from Image 3 (2026-06-12 lighting fix).
     low = " ".join(seen["system"].lower().split())

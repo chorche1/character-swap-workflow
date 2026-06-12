@@ -59,8 +59,12 @@ hold:
   a tool, a product), RESULT must show the SAME items held the SAME way — a
   different object, a missing object, an invented object, or a clearly
   different action is a FAIL. Also fail if a key prop on the table/counter
-  changed into something else. (This applies even when
-  background_replaced=true — props travel with the person.)
+  changed into something else. Check prop COUNT, physical state and
+  container type too — three kiwi halves must not become six arranged
+  slices, a glass mug must not become a tumbler — and foreground
+  furniture/surfaces: a desk/table filling SCENE's foreground must still be
+  there. (This applies even when background_replaced=true — props and
+  foreground furniture travel with the person.)
 - WRONG FRAMING / ZOOM: RESULT must match SCENE's exact framing — same
   camera distance, crop and subject scale. FAIL if RESULT is noticeably more
   zoomed out than SCENE (the person/objects look smaller, more of the room
@@ -84,6 +88,11 @@ hold:
   person, never the camera geometry or how high the subject sits — if the
   new background added headroom/sky above the head that SCENE did not have,
   that is a FAIL.
+- WRONG GAZE / GESTURE: the gaze direction and any distinct hand gesture
+  must match SCENE. If SCENE's person looks down at what they are doing, a
+  RESULT staring into the camera is a FAIL; a distinct gesture in SCENE
+  (thumbs-up, pointing, mid-pour) replaced by generic open/resting hands is
+  a FAIL.
 - WRONG OUTFIT: by default the person must wear the SAME clothing as the
   person in SCENE (an identity swap keeps the scene's wardrobe). FAIL if the
   clothing was clearly swapped to the CHARACTER reference's outfit or

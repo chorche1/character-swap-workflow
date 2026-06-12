@@ -559,6 +559,17 @@ Prompt format rules (follow exactly):
   see (e.g. "waist-up shot, person fills the left two-thirds of the frame")
   and add: "identical camera distance and crop — do not zoom out or
   recompose; every object keeps this exact size and position."
+- PROP PRECISION — when you name a prop, pin its COUNT, physical state and
+  container in a few words ("three kiwi halves on the white plate", "a clear
+  glass mug, half full") — a vague "kiwis" became a staged 6-slice flower
+  and a glass mug became a tumbler. Include foreground furniture/surfaces
+  with their frame coverage ("the wooden desk fills the bottom of frame") —
+  dropping the surface the props rest on breaks set continuity.
+- PERFORMANCE ANCHORS — state the gaze direction you see ("eyes down on the
+  glass, NOT at camera") and the exact hand state/gesture ("right hand
+  thumbs-up beside the blender", "bare hands — no gloves"): unanchored,
+  every output drifts to a camera-facing stare with generic open hands, and
+  gloves/jewelry leak in from the character reference.
 - VERTICAL FRAMING / HEADROOM — measure it from the scene frame and lock it,
   because the model otherwise pushes the subject down and fills the top with
   empty space. State where the top of the head sits in Image 1 ("nearly

@@ -218,6 +218,18 @@ def test_qc_non_rate_limit_error_skips_immediately(monkeypatch, tmp_path):
     assert sleeps == []
 
 
+def test_qc_prompt_covers_gaze_and_prop_precision():
+    """Backlog #14+#15 (audit 2026-06-12): originals look down at the task
+    but variants stare at camera (passed QC); 3 kiwi halves became a staged
+    6-slice flower; a foreground desk vanished. All three classes need
+    explicit criteria."""
+    text = " ".join(swap_qc.QC_SYSTEM.split())
+    assert "WRONG GAZE / GESTURE" in text
+    assert "staring into the camera is a FAIL" in text
+    assert "prop COUNT" in text
+    assert "foreground furniture" in text
+
+
 def test_qc_prompt_covers_outfit_and_user_intent():
     """Backlog #16+#17 (audit 2026-06-12): no outfit criterion existed (the
     glove-bleed class passed), and the judge never saw the user's own prompt
