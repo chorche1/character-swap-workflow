@@ -715,18 +715,17 @@ def _speech_secs(entry: dict) -> float:
 def _kling_duration(entry: dict) -> int:
     """Effective whole-second Kling duration for one scene entry.
 
-    A user-set `kling_secs` override (the editable "Kling s" field at the
-    gate, Hugo 2026-06-12: the speech-fitted auto values ran too long) wins
-    outright — clamped to Kling's [3, 15] but NOT extended for dialogue;
-    the user owns the tradeoff. Otherwise: the original scene length OR the
-    time the dialogue needs, whichever is longer, rounded UP. The final
-    build trims silence, so a generous auto clip costs a few Kling-seconds
-    but never chops the line."""
+    Priority: (1) the user's manual `kling_secs` override (the editable
+    field at the gate) — clamped to Kling's [3, 15]; (2) AUTO = the ORIGINAL
+    scene clip's length rounded UP to the next whole second (Hugo
+    2026-06-12 evening: the earlier speech-fitted extension produced clips
+    he found far too long). When the dialogue needs more time than the
+    clip gives, the gate shows a '⚠ replik ~Ns' hint instead of silently
+    extending — bumping the manual field is the user's call."""
     override = entry.get("kling_secs")
     if override:
         return _clamp_kling(float(override))
-    return _clamp_kling(max(float(entry.get("duration") or 0.0),
-                            _speech_secs(entry)))
+    return _clamp_kling(float(entry.get("duration") or 0.0))
 
 
 def _with_accent(prompt: str) -> str:

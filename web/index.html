@@ -1982,6 +1982,12 @@
                                  @change="reengineerSaveScene(r, sc)" />
                           <span x-text="reSceneVal(r, sc, 'kling_secs') ? 's (manuell)' : 's (auto ' + klingDuration(r, sc) + ')'"></span>
                         </label>
+                        <!-- Dialogue-vs-clip-length hint (the auto length no
+                             longer extends for speech — user's call): -->
+                        <span x-show="klingSpeechSecs(r, sc) > klingDuration(r, sc)"
+                              class="text-amber-500 cursor-help"
+                              :title="'Repliken behöver ca ' + Math.ceil(klingSpeechSecs(r, sc)) + ' s för att hinna sägas, men klippet är ' + klingDuration(r, sc) + ' s — höj Kling-fältet om slutet klipps.'"
+                              x-text="'⚠ replik ~' + Math.ceil(klingSpeechSecs(r, sc)) + 's'"></span>
                         <button x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
                                 class="text-indigo-500 hover:underline"
                                 title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"

@@ -1614,17 +1614,24 @@ function studio() {
     // the says-clause / speech field), whichever is longer, rounded UP and
     // clamped to [3, 15]. A pytest keeps the constants in sync.
     klingDuration(run, sc) {
-      // A manual override (the editable "Kling s" field) wins outright —
-      // clamped to [3, 15], never speech-extended (mirror of _kling_duration).
+      // A manual override (the editable "Kling s" field) wins outright;
+      // AUTO = the original scene clip's length, rounded UP (Hugo
+      // 2026-06-12 evening — no speech extension; mirror of _kling_duration).
       const override = Number(this.reSceneVal(run, sc, 'kling_secs')) || 0;
       if (override) return Math.max(3, Math.min(15, Math.ceil(override - 1e-9)));
       const dur = Number(this.reSceneVal(run, sc, 'duration')) || 0;
+      return Math.max(3, Math.min(15, Math.ceil(dur - 1e-9)));
+    },
+
+    // Seconds the dialogue needs to be spoken (words / 2.2 + 1.0 — mirror
+    // of _speech_secs). HINT only: shown as ⚠ at the gate when it exceeds
+    // the clip length, so the user can bump the Kling field deliberately.
+    klingSpeechSecs(run, sc) {
       const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
       const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]([^"”]+)["”]/gi)];
       const spoken = (m.map(x => x[1]).join(' ').trim() || String(sc.speech || '').trim());
       const words = spoken ? spoken.split(/\s+/).length : 0;
-      const speechSecs = words ? words / 2.2 + 1.0 : 0;
-      return Math.max(3, Math.min(15, Math.ceil(Math.max(dur, speechSecs) - 1e-9)));
+      return words ? words / 2.2 + 1.0 : 0;
     },
 
     // Gate coverage + cost preview (backlog #32): unapproved (char × scene)

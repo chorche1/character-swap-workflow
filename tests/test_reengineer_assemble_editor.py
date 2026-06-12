@@ -402,10 +402,11 @@ def test_reasm_body_clamps_target_wpm():
 
 # ------------------------------------------------- dialogue-fitted durations
 
-def test_kling_duration_rounds_up_and_fits_dialogue():
-    """REGRESSION (Hugo 2026-06-12 'runda upp + alltid plats för repliken'):
-    durations are whole seconds rounded UP, and a scene whose says-clause
-    needs more time than the original cut gets extended."""
+def test_kling_duration_is_scene_length_rounded_up():
+    """Hugo 2026-06-12 (evening, supersedes the morning speech-fit): AUTO
+    Kling length = the ORIGINAL scene clip's length rounded UP to the next
+    whole second — dialogue never extends it (the gate shows a ⚠ hint and
+    the manual field owns that tradeoff)."""
     short_scene_long_line = {
         "duration": 1.4,
         "motion_prompt": 'He smiles. The person says: "Put baking soda on '
@@ -413,26 +414,24 @@ def test_kling_duration_rounds_up_and_fits_dialogue():
                          'their customers would disappear overnight"',
         "speech": "",
     }
-    # 17 words / 2.2 wps + 1.0s margin = 8.7s → ceil 9 (original 1.4s loses).
-    assert runner_reengineer._kling_duration(short_scene_long_line) == 9
+    # ceil(1.4) = 2 → clamped to Kling's 3s floor; the 17-word line does
+    # NOT extend it (the ⚠ hint covers that).
+    assert runner_reengineer._kling_duration(short_scene_long_line) == 3
 
     no_dialogue = {"duration": 7.567, "motion_prompt": "He pours.", "speech": ""}
     assert runner_reengineer._kling_duration(no_dialogue) == 8   # plain ceil
 
-    # Falls back to the analyst's verbatim speech when no says-clause.
     speech_fallback = {"duration": 2.0, "motion_prompt": "He nods.",
                        "speech": "this little thing beats your multivitamin"}
-    # 6 words / 2.2 + 1.0 = 3.7 → 4
-    assert runner_reengineer._kling_duration(speech_fallback) == 4
+    assert runner_reengineer._kling_duration(speech_fallback) == 3   # ceil+floor
 
-    # Longer user-set duration always wins; Kling cap still applies.
     assert runner_reengineer._kling_duration(
         {"duration": 14.2, "motion_prompt": 'Says: "hi"', "speech": ""}) == 15
 
 
-def test_do_animate_uses_dialogue_fitted_durations(monkeypatch):
+def test_do_animate_uses_scene_length_durations(monkeypatch):
     """_do_animate's durations_by_scene must come from _kling_duration —
-    the Kling clip is the thing that must fit the line."""
+    the original scene length, rounded up."""
     job = _job()
 
     class _S:
@@ -450,13 +449,14 @@ def test_do_animate_uses_dialogue_fitted_durations(monkeypatch):
     monkeypatch.setattr(runner_reengineer.runner, "run_video_synthesis", noop)
 
     st = _state()
-    st["scenes"][0]["duration"] = 1.2
+    st["scenes"][0]["duration"] = 6.2
     st["scenes"][0]["motion_prompt"] = (
         'The person says: "one two three four five six seven eight nine ten '
         'eleven"')
     asyncio.run(runner_reengineer._do_animate("re_t", st))
-    # 11 words / 2.2 + 1.0 = 6.0 → 6 seconds, NOT ceil(1.2)=3.
-    assert job.durations_by_scene["s1"] == 6
+    # Scene length 6.2 → ceil 7 (dialogue does not extend — Hugo's evening
+    # directive; the manual kling_secs override is tested separately).
+    assert job.durations_by_scene["s1"] == 7
 
 
 def test_kling_duration_js_mirror_in_sync():
@@ -466,14 +466,17 @@ def test_kling_duration_js_mirror_in_sync():
     m = re.search(r"klingDuration\(run, sc\)\s*{(.*?)\n    },", js, re.S)
     assert m, "klingDuration not found in app.js"
     body = m.group(1)
+    assert "kling_secs" in body                  # manual override honored
+    assert "Math.ceil" in body and "Math.max(3, Math.min(15" in body
+    # The speech estimate lives in klingSpeechSecs (HINT only since the
+    # evening directive) — constants + the #7 attribution regex pinned there.
+    m2 = re.search(r"klingSpeechSecs\(run, sc\)\s*{(.*?)\n    },", js, re.S)
+    assert m2, "klingSpeechSecs not found in app.js"
+    hint = m2.group(1)
     wps = str(runner_reengineer._SPEECH_WORDS_PER_SEC)
     margin = str(runner_reengineer._SPEECH_MARGIN_SECS)
-    assert f"/ {wps} + {margin}" in body, "speech pace constants drifted"
-    assert "Math.ceil" in body and "Math.max(3, Math.min(15" in body
-    # Backlog #7: the dialogue regex must tolerate the attribution
-    # descriptor between `says` and the quote — pin the exact fragment on
-    # both sides (Python is the source of truth).
-    assert 'says[^"“”]{0,160}?' in body, "JS dialogue regex drifted"
+    assert f"/ {wps} + {margin}" in hint, "speech pace constants drifted"
+    assert 'says[^"“”]{0,160}?' in hint, "JS dialogue regex drifted"
     assert 'says[^"“”]{0,160}?' in runner_reengineer._DIALOGUE_RE.pattern
 
 
@@ -491,15 +494,18 @@ def test_speech_secs_parses_descriptor_attribution():
         "speech": "old short line",      # stale — must NOT win
         "duration": 1.2,
     }
-    # 11 words / 2.2 + 1.0 = 6.0 → 6, not ceil from the 3-word stale field.
-    assert runner_reengineer._kling_duration(entry) == 6
+    # 11 words / 2.2 + 1.0 = 6.0 — parsed from the EDITED says-clause, not
+    # the stale 3-word speech field. (Hint-only since the evening directive;
+    # _kling_duration itself is plain ceil(duration).)
+    assert runner_reengineer._speech_secs(entry) == pytest.approx(6.0)
+    assert runner_reengineer._kling_duration(entry) == 3   # ceil(1.2)→floor
 
 
 def test_speech_secs_still_parses_bare_says():
     entry = {"motion_prompt": 'He says: "one two three four five six seven '
                               'eight nine ten eleven"',
              "speech": "", "duration": 1.0}
-    assert runner_reengineer._kling_duration(entry) == 6
+    assert runner_reengineer._speech_secs(entry) == pytest.approx(6.0)
 
 
 def test_kling_suffix_js_mirrors_with_accent():
@@ -611,7 +617,7 @@ def test_kling_duration_manual_override_wins():
     long_line = ('The person says: "one two three four five six seven eight '
                  'nine ten eleven twelve thirteen fourteen fifteen sixteen"')
     entry = {"duration": 8.0, "motion_prompt": long_line, "speech": ""}
-    assert runner_reengineer._kling_duration(entry) == 9      # auto (speech)
+    assert runner_reengineer._kling_duration(entry) == 8      # auto = ceil(8.0)
     assert runner_reengineer._kling_duration(
         {**entry, "kling_secs": 5}) == 5                      # manual wins
     assert runner_reengineer._kling_duration(
