@@ -630,7 +630,14 @@ def _clamp_kling(secs: float) -> int:
 # a pytest keeps the constants in sync.
 _SPEECH_WORDS_PER_SEC = 2.2
 _SPEECH_MARGIN_SECS = 1.0
-_DIALOGUE_RE = re.compile(r'says\s*:?\s*["“]([^"”]+)["”]',
+# Tolerates the analyst's documented attribution idiom — 'The person says,
+# in a casual conversational tone with a natural American accent: "..."' —
+# i.e. up to 160 descriptor chars between `says` and the opening quote
+# (backlog #7, 2026-06-12: the old `says\s*:?\s*"` form never matched it, so
+# a dialogue EDITED at the gate fell back to the stale analyst speech field
+# and the clip kept the old, shorter duration — chopped lines through the
+# edit path). Mirrored in app.js klingDuration(); a pytest keeps them in sync.
+_DIALOGUE_RE = re.compile(r'says[^"“”]{0,160}?["“]([^"”]+)["”]',
                           re.IGNORECASE)
 
 

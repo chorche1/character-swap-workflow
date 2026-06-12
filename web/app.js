@@ -1612,7 +1612,7 @@ function studio() {
     klingDuration(run, sc) {
       const dur = Number(this.reSceneVal(run, sc, 'duration')) || 0;
       const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
-      const m = [...prompt.matchAll(/says\s*:?\s*["“]([^"”]+)["”]/gi)];
+      const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]([^"”]+)["”]/gi)];
       const spoken = (m.map(x => x[1]).join(' ').trim() || String(sc.speech || '').trim());
       const words = spoken ? spoken.split(/\s+/).length : 0;
       const speechSecs = words ? words / 2.2 + 1.0 : 0;

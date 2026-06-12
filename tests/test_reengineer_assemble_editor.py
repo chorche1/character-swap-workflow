@@ -468,7 +468,36 @@ def test_kling_duration_js_mirror_in_sync():
     margin = str(runner_reengineer._SPEECH_MARGIN_SECS)
     assert f"/ {wps} + {margin}" in body, "speech pace constants drifted"
     assert "Math.ceil" in body and "Math.max(3, Math.min(15" in body
-    assert 'says' in body                       # dialogue extraction guard
+    # Backlog #7: the dialogue regex must tolerate the attribution
+    # descriptor between `says` and the quote — pin the exact fragment on
+    # both sides (Python is the source of truth).
+    assert 'says[^"“”]{0,160}?' in body, "JS dialogue regex drifted"
+    assert 'says[^"“”]{0,160}?' in runner_reengineer._DIALOGUE_RE.pattern
+
+
+def test_speech_secs_parses_descriptor_attribution():
+    """Backlog #7 (audit 2026-06-12): the analyst's documented dialogue
+    idiom is 'The person says, in a casual conversational tone with a
+    natural American accent: "..."'. The old regex required the quote right
+    after `says` and never matched it — an edited line at the gate fell back
+    to the STALE analyst speech field, so the clip kept the old shorter
+    duration and Kling chopped the new line."""
+    entry = {
+        "motion_prompt": ('The person says, in a casual conversational tone '
+                          'with a natural American accent: "one two three '
+                          'four five six seven eight nine ten eleven"'),
+        "speech": "old short line",      # stale — must NOT win
+        "duration": 1.2,
+    }
+    # 11 words / 2.2 + 1.0 = 6.0 → 6, not ceil from the 3-word stale field.
+    assert runner_reengineer._kling_duration(entry) == 6
+
+
+def test_speech_secs_still_parses_bare_says():
+    entry = {"motion_prompt": 'He says: "one two three four five six seven '
+                              'eight nine ten eleven"',
+             "speech": "", "duration": 1.0}
+    assert runner_reengineer._kling_duration(entry) == 6
 
 
 def test_kling_suffix_js_mirrors_with_accent():
