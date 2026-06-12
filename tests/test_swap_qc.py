@@ -152,6 +152,72 @@ def test_qc_prompt_covers_prop_and_action_fidelity():
     assert "action" in text.lower()
 
 
+def _wire_inspect(monkeypatch, call_behavior):
+    """Stub the Anthropic layer under inspect_variant. `call_behavior(n)`
+    runs per API attempt (1-based) — raise to simulate errors."""
+    from character_swap.clients import anthropic_client
+    from character_swap.config import settings
+    monkeypatch.setattr(settings, "swap_qc_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "anthropic_api_key", "k", raising=False)
+    monkeypatch.setattr(anthropic_client, "_file_to_image_block",
+                        lambda p: {"type": "text", "text": str(p)})
+    calls: list = []
+
+    def fake_call(**kw):
+        calls.append(kw)
+        return call_behavior(len(calls))
+    monkeypatch.setattr(anthropic_client, "messages_with_tools", fake_call)
+    monkeypatch.setattr(
+        anthropic_client, "extract_tool_call",
+        lambda resp, name: {"passed": True, "reason": "",
+                            "corrective_hint": ""})
+    sleeps: list = []
+    monkeypatch.setattr(swap_qc.time, "sleep", lambda s: sleeps.append(s))
+    return calls, sleeps
+
+
+def _inspect(tmp_path):
+    return swap_qc.inspect_variant(scene_image=tmp_path / "s.png",
+                                   character_image=tmp_path / "c.png",
+                                   result_image=tmp_path / "r.png")
+
+
+def test_qc_retries_through_rate_limit_burst(monkeypatch, tmp_path):
+    """Backlog #4 (audit 2026-06-12): an Anthropic 429 burst disabled QC for
+    the whole batch — 21 images/clips shipped unchecked on 06-11. Rate
+    limits are transient: the judge call must back off and retry, not skip."""
+    def behavior(n):
+        if n <= 2:
+            raise RuntimeError("Error code: 429 - rate_limit_error")
+        return object()
+    calls, sleeps = _wire_inspect(monkeypatch, behavior)
+
+    verdict = _inspect(tmp_path)
+    assert verdict is not None and verdict.passed
+    assert len(calls) == 3
+    assert sleeps == [2.0, 8.0]
+
+
+def test_qc_persistent_rate_limit_skips_after_backoff(monkeypatch, tmp_path):
+    def behavior(n):
+        raise RuntimeError("overloaded_error (529)")
+    calls, sleeps = _wire_inspect(monkeypatch, behavior)
+
+    assert _inspect(tmp_path) is None       # never blocks the pipeline
+    assert len(calls) == 4                  # 1 + 3 retries
+    assert sleeps == [2.0, 8.0, 20.0]
+
+
+def test_qc_non_rate_limit_error_skips_immediately(monkeypatch, tmp_path):
+    def behavior(n):
+        raise ValueError("malformed something")
+    calls, sleeps = _wire_inspect(monkeypatch, behavior)
+
+    assert _inspect(tmp_path) is None
+    assert len(calls) == 1                  # no pointless retries
+    assert sleeps == []
+
+
 def test_qc_default_judge_is_sonnet():
     """The fine-grained scene-vs-result comparison needs the stronger vision
     model (wrong-prop images passed the Haiku judge live). Env-overridable

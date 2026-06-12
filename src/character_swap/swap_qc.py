@@ -16,8 +16,25 @@ failed) with qc_status="failed" + the reason, surfaced as a ⚠ chip in the UI
 """
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# Backlog #4 (2026-06-12): an Anthropic 429 burst used to disable QC for the
+# whole batch SILENTLY — 21 images/clips shipped unchecked on 06-11. Rate
+# limits are transient by definition, so the judge call retries with backoff
+# before giving up. QC runs OUTSIDE the image-gen semaphore and on a worker
+# thread, so sleeping here never stalls the generation lanes.
+_QC_RETRY_SLEEPS = (2.0, 8.0, 20.0)
+_RATE_LIMIT_MARKERS = ("rate_limit", "ratelimit", "429", "overloaded", "529")
+
+
+def _is_rate_limited(e: Exception) -> bool:
+    s = f"{type(e).__name__}: {e}".lower()
+    return any(m in s for m in _RATE_LIMIT_MARKERS)
 
 QC_SYSTEM = """\
 You are a strict quality inspector for a character-swap image pipeline.
@@ -192,17 +209,30 @@ def inspect_variant(
             {"type": "text", "text": "RESULT (inspect this):"},
             anthropic_client._file_to_image_block(result_image),
         ]
-        resp = anthropic_client.messages_with_tools(
-            system=QC_SYSTEM,
-            messages=[{"role": "user", "content": content}],
-            tools=[QC_TOOL],
-            tool_choice={"type": "tool", "name": "submit_inspection"},
-            max_tokens=400,
-            temperature=0.0,
-            model=settings.swap_qc_model,
-            job_id=job_id,
-            phase="swap_qc",
-        )
+        resp = None
+        for attempt in range(len(_QC_RETRY_SLEEPS) + 1):
+            try:
+                resp = anthropic_client.messages_with_tools(
+                    system=QC_SYSTEM,
+                    messages=[{"role": "user", "content": content}],
+                    tools=[QC_TOOL],
+                    tool_choice={"type": "tool", "name": "submit_inspection"},
+                    max_tokens=400,
+                    temperature=0.0,
+                    model=settings.swap_qc_model,
+                    job_id=job_id,
+                    phase="swap_qc",
+                )
+                break
+            except Exception as e:
+                if not _is_rate_limited(e) or attempt >= len(_QC_RETRY_SLEEPS):
+                    raise
+                delay = _QC_RETRY_SLEEPS[attempt]
+                logger.warning(
+                    "swap_qc rate-limited (attempt %d/%d) — backing off "
+                    "%.0fs: %s", attempt + 1, len(_QC_RETRY_SLEEPS) + 1,
+                    delay, e)
+                time.sleep(delay)
         data = anthropic_client.extract_tool_call(resp, "submit_inspection")
         if data is None or "passed" not in data:
             return None
@@ -211,5 +241,9 @@ def inspect_variant(
             reason=str(data.get("reason") or ""),
             corrective_hint=str(data.get("corrective_hint") or ""),
         )
-    except Exception:
+    except Exception as e:
+        # LOUD skip (backlog #4): the variant ships with qc_status="skipped",
+        # but the operator must be able to see WHY in the server log.
+        logger.warning("swap_qc unavailable — variant ships unchecked: %s: %s",
+                       type(e).__name__, e)
         return None
