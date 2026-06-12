@@ -10,7 +10,9 @@ for upload + submit. Submit returns the fal `request_id`; `wait_for_video`
 polls the queue and downloads the finished MP4 — matching the
 submit_video / wait_for_video two-phase shape the swap runner expects.
 
-API: https://fal.ai/models/fal-ai/kling-video/v3/standard/image-to-video
+API: https://fal.ai/models/fal-ai/kling-video/v3/{standard|pro}/image-to-video
+  Tier picked by settings.kling_v3_tier — "pro" (default since 2026-06-12)
+  renders 1080p; "standard" is the cheaper 720p tier. Same request schema.
   start_image_url  (required)  URL or data URI — we upload the local frame first
   prompt           (string)    motion prompt
   duration         (enum str)  "3".."15" seconds (default "5")
@@ -30,7 +32,14 @@ from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
 
 
-ENDPOINT = "fal-ai/kling-video/v3/standard/image-to-video"
+def _endpoint() -> str:
+    """Tier-resolved endpoint id. Submit and poll must use the SAME tier —
+    request_ids are endpoint-scoped at fal, so don't flip KLING_V3_TIER while
+    clips are in flight (a resumed poll on the other tier 404s → ↻ retry)."""
+    tier = (settings.kling_v3_tier or "pro").strip().lower()
+    if tier not in {"standard", "pro"}:
+        tier = "pro"
+    return f"fal-ai/kling-video/v3/{tier}/image-to-video"
 
 # fal Kling v3 duration is an enum of whole seconds 3..15.
 MIN_DURATION = 3
@@ -81,7 +90,7 @@ def submit_image_to_video(
     fal = _client()
     dur = clamp_duration(duration_secs)
     with call_log.record(
-        phase="kling_fal_submit", model=ENDPOINT, character="kling-v3",
+        phase="kling_fal_submit", model=_endpoint(), character="kling-v3",
         job_id=app_job_id, duration_secs=dur,
     ) as payload:
         try:
@@ -104,9 +113,9 @@ def submit_image_to_video(
             arguments["end_image_url"] = end_url
             payload["end_upload_url"] = end_url
         try:
-            handler = fal.submit(ENDPOINT, arguments=arguments)
+            handler = fal.submit(_endpoint(), arguments=arguments)
         except Exception as e:
-            raise RuntimeError(f"fal {ENDPOINT} submit failed: {e}") from e
+            raise RuntimeError(f"fal {_endpoint()} submit failed: {e}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id
         return request_id
@@ -128,12 +137,12 @@ def wait_for_video(
     interval = poll_secs or max(5, settings.video_poll_interval_secs)
 
     with call_log.record(
-        phase="kling_fal_wait", model=ENDPOINT, character="kling-v3",
+        phase="kling_fal_wait", model=_endpoint(), character="kling-v3",
         job_id=app_job_id,
     ):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            status = fal.status(ENDPOINT, request_id, with_logs=False)
+            status = fal.status(_endpoint(), request_id, with_logs=False)
             if isinstance(status, fal_client.Completed):
                 break
             time.sleep(interval)
@@ -141,7 +150,7 @@ def wait_for_video(
             raise RuntimeError(
                 f"fal Kling v3 job {request_id} timed out after {timeout}s"
             )
-        result = fal.result(ENDPOINT, request_id)
+        result = fal.result(_endpoint(), request_id)
 
     video = result.get("video") if isinstance(result, dict) else None
     if not video or not isinstance(video, dict) or not video.get("url"):

@@ -238,7 +238,19 @@ SWAP_STALL_TIMEOUT_SECS=600       # Reengineer image-phase watchdog: fail only w
 SWAP_PHASE_MAX_SECS=7200          # absolute image-phase backstop (replaces old fixed 30 min)
 VIDEO_DURATION_SECS=10
 VIDEO_ASPECT_RATIO=9:16
-VIDEO_RESOLUTION=720p
+VIDEO_RESOLUTION=720p             # Grok only — Kling tier is KLING_V3_TIER below
+KLING_V3_TIER=pro                 # fal Kling v3 tier: "pro" (1080p, default since
+                                  # 2026-06-12) or "standard" (720p, cheaper). Don't
+                                  # flip while clips are in flight — fal request_ids
+                                  # are endpoint-scoped, a resumed poll on the other
+                                  # tier 404s (the ↻ retry recovers).
+FFMPEG_CRF=16                     # every local re-encode in video_edit.py (trims,
+FFMPEG_PRESET=medium              # concat, time-stretch, ASS captions). Was hardcoded
+                                  # veryfast/CRF-20 → measured ~2-3 Mbps off a 21 Mbps
+                                  # Kling master at the FIRST hop (2026-06-12 audit).
+REMOTION_CRF=16                   # Remotion caption render quality (was Remotion
+REMOTION_JPEG_QUALITY=100         # defaults: CRF ~23 + JPEG-80 frame captures).
+                                  # Both are part of the render-cache SHA key.
 VIDEO_POLL_INTERVAL_SECS=12
 VIDEO_TIMEOUT_SECS=600
 HOST=127.0.0.1
@@ -300,7 +312,11 @@ src/character_swap/
                          GENERATION_PROMPT
 ├── video_edit.py      — ffmpeg primitives + Whisper + caption templates (ASS engine +
                          Remotion engine branch) + WPM helpers + time_stretch +
-                         extract_last_frame + apply_timeline (CapCut)
+                         extract_last_frame + apply_timeline (CapCut) +
+                         assemble_clips (2026-06-12: onset-trim + interior-silence
+                         trim + scale + concat in ONE encode — the shared Editor
+                         pipeline's first generation; every local encode uses
+                         _enc_v() = FFMPEG_CRF/FFMPEG_PRESET)
 ├── remotion_render.py — Python→Node bridge for the Remotion caption engine. Calls
                          `npx remotion render` as a subprocess; SHA-256 caches outputs
                          under `output/cache/remotion/<hash>.mp4`. Wrapped in

@@ -125,6 +125,26 @@ class Settings(BaseSettings):
     # improvises from the prompt. Set KLING_GENERATE_AUDIO=0 for silent clips
     # (the pre-2026-06-10 behavior, when audio was added downstream instead).
     kling_generate_audio: bool = Field(default=True, validation_alias="KLING_GENERATE_AUDIO")
+    # fal Kling v3 tier: "pro" (1080p output) or "standard" (720p, cheaper).
+    # Default PRO since 2026-06-12 (Hugo's call — quality over cost): the
+    # whole downstream chain targets a 1080-px short edge, and standard-tier
+    # 720p clips were being upscaled 1.5× into fake 1080p finals.
+    kling_v3_tier: str = Field(default="pro", validation_alias="KLING_V3_TIER")
+    # Local ffmpeg encode quality for EVERY intermediate/final re-encode in
+    # video_edit.py (trims, concat, time-stretch, ASS caption burn). A clip
+    # passes through 2-4 of these generations, so per-generation loss
+    # compounds: the old hardcoded veryfast/CRF-20 measured ~2-3 Mbps off a
+    # ~21 Mbps Kling master at the FIRST hop. CRF 16 + medium is near-
+    # transparent per generation at acceptable encode speed (2026-06-12).
+    ffmpeg_crf: int = Field(default=16, validation_alias="FFMPEG_CRF")
+    ffmpeg_preset: str = Field(default="medium", validation_alias="FFMPEG_PRESET")
+    # Remotion caption-render quality. Remotion's defaults (CRF 23-ish for
+    # h264 + JPEG-80 frame captures) were the last lossy hop — measured
+    # ~3.2 Mbps finals. JPEG 100 + CRF 16 makes the caption pass nearly
+    # transparent; render time impact is small next to the per-frame
+    # OffthreadVideo extraction.
+    remotion_crf: int = Field(default=16, validation_alias="REMOTION_CRF")
+    remotion_jpeg_quality: int = Field(default=100, validation_alias="REMOTION_JPEG_QUALITY")
     # TRUE 9:16 (0.5625) AND both dims divisible by 16 — gpt-image rejects sizes
     # that aren't (400 "must both be divisible by 16"; 1080 is NOT ÷16). 1008x1792
     # = exactly 9:16 (1008=16×63, 1792=16×112). The old 1024x1792 was ÷16 but

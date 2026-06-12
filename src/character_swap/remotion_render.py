@@ -126,6 +126,13 @@ def _hash_render_inputs(
             "size": st.st_size,
             "mtime": int(st.st_mtime),
         },
+        # Encode quality is part of the cache identity — without this, a
+        # quality bump (REMOTION_CRF/REMOTION_JPEG_QUALITY) would silently
+        # serve old lower-quality renders from the cache.
+        "encode": {
+            "crf": settings.remotion_crf,
+            "jpeg_quality": settings.remotion_jpeg_quality,
+        },
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:32]
@@ -274,6 +281,13 @@ def _render_locked(
                 # is too tight for a cold OffthreadVideo seek in the long
                 # concat videos Step-6 compile produces.
                 f"--timeout={max(30_000, settings.remotion_timeout_ms)}",
+                # Encode quality (2026-06-12): Remotion's defaults (h264 CRF
+                # ~23-equivalent + JPEG-80 frame captures) were the last lossy
+                # hop in the chain — measured ~3.2 Mbps 1080x1920 finals.
+                # CRF 16 + lossless-ish JPEG 100 captures make the caption
+                # pass nearly transparent.
+                f"--crf={settings.remotion_crf}",
+                f"--jpeg-quality={settings.remotion_jpeg_quality}",
                 "--log=info",
             ]
             entry["concurrency"] = max(1, settings.remotion_concurrency)

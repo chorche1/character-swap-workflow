@@ -141,50 +141,63 @@ async def run_editor_pipeline(
     `warn` is an optional async callback(message) for non-fatal step
     failures (currently: caption render) — callers surface it their own way.
     """
-    # Step 0.5: per-clip audio-onset trim — ALWAYS runs (Hugo 2026-06-11:
-    # every clip starts exactly when there's enough sound, independent of
-    # enable_trim, which governs interior pauses only). Each clip is cut at
-    # the start to the audio onset so the concatenated output has no
-    # inter-clip dead air.
-    no_lead: list[Path] = []
-    for i, p in enumerate(paths):
-        cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
-        try:
-            await asyncio.to_thread(
-                video_edit.trim_leading_silence, p, cut,
-                threshold_db=threshold_db,
-                min_silence_secs=0.05,  # very aggressive — exact start
-                job_id=edit_id,
-            )
-            no_lead.append(cut)
-        except (RuntimeError, ValueError):
-            no_lead.append(p)
-    paths = no_lead
-
-    # Step 1: concat per-scene MP4s into one.
+    # Steps 0.5 + 1 + 2 in ONE encode (2026-06-12): per-clip audio-onset trim
+    # (ALWAYS — Hugo 2026-06-11: every clip starts exactly when there's
+    # enough sound), interior/trailing silence trim (enable_trim), scale to
+    # the target canvas, and concat — a single libx264 generation instead of
+    # three. The old three-step chain lost a CRF generation per step; with a
+    # ~21 Mbps Kling master the FIRST hop alone measured ~2-3 Mbps.
     concat_out = edit_dir / "00-concat.mp4"
-    await asyncio.to_thread(
-        video_edit.concat_videos, paths, concat_out,
-        aspect_ratio=settings.video_aspect_ratio,
-    )
-    current = concat_out
+    try:
+        await asyncio.to_thread(
+            video_edit.assemble_clips, paths, concat_out,
+            aspect_ratio=settings.video_aspect_ratio,
+            enable_interior_trim=enable_trim,
+            threshold_db=threshold_db,
+            min_silence_secs=min_silence_secs,
+            pad_secs=pad_secs,
+            job_id=edit_id,
+        )
+        current = concat_out
+    except Exception:
+        # Reliability first: any failure in the combined pass falls back to
+        # the proven legacy chain (3 separate encodes, lower quality but
+        # battle-tested) rather than failing the build.
+        no_lead: list[Path] = []
+        for i, p in enumerate(paths):
+            cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_leading_silence, p, cut,
+                    threshold_db=threshold_db,
+                    min_silence_secs=0.05,  # very aggressive — exact start
+                    job_id=edit_id,
+                )
+                no_lead.append(cut)
+            except (RuntimeError, ValueError):
+                no_lead.append(p)
+        paths = no_lead
 
-    # Step 2: trim silences (optional — INTERIOR pauses only; the start
-    # was already cut to audio onset per clip in Step 0.5).
-    if enable_trim:
-        trimmed = edit_dir / "01-trimmed.mp4"
-        try:
-            await asyncio.to_thread(
-                video_edit.trim_silences, current, trimmed,
-                threshold_db=threshold_db,
-                min_silence_secs=min_silence_secs,
-                pad_secs=pad_secs, job_id=edit_id,
-            )
-            current = trimmed
-        except RuntimeError:
-            # Trim failed (e.g. no silences detected) — keep going with
-            # the un-trimmed source rather than failing the whole compile.
-            pass
+        await asyncio.to_thread(
+            video_edit.concat_videos, paths, concat_out,
+            aspect_ratio=settings.video_aspect_ratio,
+        )
+        current = concat_out
+
+        if enable_trim:
+            trimmed = edit_dir / "01-trimmed.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.trim_silences, current, trimmed,
+                    threshold_db=threshold_db,
+                    min_silence_secs=min_silence_secs,
+                    pad_secs=pad_secs, job_id=edit_id,
+                )
+                current = trimmed
+            except RuntimeError:
+                # Trim failed (e.g. no silences detected) — keep going with
+                # the un-trimmed source rather than failing the whole compile.
+                pass
 
     # Step 3: voice swap via ElevenLabs (optional — only when the caller
     # resolved a voice AND the key is configured).

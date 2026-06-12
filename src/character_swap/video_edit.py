@@ -211,6 +211,17 @@ def _run(args: list[str]) -> str:
 
 # --- 1. Silence-based jump-cut --------------------------------------------------------
 
+def _enc_v() -> list[str]:
+    """Shared libx264 args for EVERY local video re-encode in this module.
+    Settings-driven (FFMPEG_CRF=16 / FFMPEG_PRESET=medium by default,
+    2026-06-12): a clip passes through several of these generations before
+    delivery, so per-generation transparency beats encode speed — the old
+    hardcoded veryfast/CRF-20 measured ~2-3 Mbps off a ~21 Mbps Kling master
+    at the first hop alone."""
+    return ["-c:v", "libx264",
+            "-preset", settings.ffmpeg_preset, "-crf", str(settings.ffmpeg_crf)]
+
+
 def _probe_duration(input_path: Path) -> float:
     """Total duration in seconds.
 
@@ -368,7 +379,7 @@ def trim_to_first_word(input_path: Path, output_path: Path, words: list,
         _run([
             _ffmpeg(), "-y", "-i", str(input_path),
             "-ss", f"{first_start:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *_enc_v(),
             "-c:a", "aac", "-b:a", "192k",
             str(output_path),
         ])
@@ -441,7 +452,7 @@ def trim_leading_silence(input_path: Path, output_path: Path, *,
         _run([
             _ffmpeg(), "-y", "-i", str(input_path),
             "-ss", f"{start_offset:.3f}",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *_enc_v(),
             "-c:a", "aac", "-b:a", "192k",
             str(output_path),
         ])
@@ -487,7 +498,7 @@ def trim_silences(input_path: Path, output_path: Path, *,
             _ffmpeg(), "-y", "-i", str(input_path),
             "-filter_complex", filter_complex,
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *_enc_v(),
             "-c:a", "aac", "-b:a", "192k",
             str(output_path),
         ])
@@ -1283,7 +1294,7 @@ def render_captions(input_video: Path, output_video: Path, *,
         _run([
             _ffmpeg(), "-y", "-i", str(input_video),
             "-vf", f"subtitles='{ass_arg}':fontsdir='{fonts_arg}'",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *_enc_v(),
             "-c:a", "copy",
             str(output_video),
         ])
@@ -1401,7 +1412,7 @@ def time_stretch(input_path: Path, output_path: Path, *,
             # Passthrough: still re-encode to clean h264/aac so downstream
             # concat sees the same codec as a stretched clip would have.
             cmd = [_ffmpeg(), "-y", "-i", str(input_path),
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+                   *_enc_v()]
             if has_audio:
                 cmd += ["-c:a", "aac", "-b:a", "192k"]
             else:
@@ -1419,7 +1430,7 @@ def time_stretch(input_path: Path, output_path: Path, *,
                    f"[0:v]setpts=PTS/{speed_factor:.4f}[v];"
                    f"[0:a]atempo={speed_factor:.4f}[a]",
                    "-map", "[v]", "-map", "[a]",
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   *_enc_v(),
                    "-c:a", "aac", "-b:a", "192k",
                    str(output_path)]
         else:
@@ -1427,7 +1438,7 @@ def time_stretch(input_path: Path, output_path: Path, *,
                    "-filter_complex",
                    f"[0:v]setpts=PTS/{speed_factor:.4f}[v]",
                    "-map", "[v]",
-                   "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                   *_enc_v(),
                    "-an",
                    str(output_path)]
         _run(cmd)
@@ -1505,7 +1516,7 @@ def trim_range(input_path: Path, output_path: Path, *,
         args += ["-to", f"{end_secs:.3f}"]
     args += [
         "-i", str(input_path),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *_enc_v(),
         "-c:a", "aac", "-b:a", "192k",
         str(output_path),
     ]
@@ -1576,7 +1587,7 @@ def concat_videos(video_paths: list[Path], output_path: Path,
     if len(video_paths) == 1:
         # Just copy through; preserve or drop audio based on the single input.
         cmd = [_ffmpeg(), "-y", "-i", str(video_paths[0]),
-               "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+               *_enc_v()]
         if has_audio_flags[0]:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
@@ -1631,14 +1642,159 @@ def concat_videos(video_paths: list[Path], output_path: Path,
            "-map", "[outv]"]
     if any_audio:
         cmd += ["-map", "[outa]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                *_enc_v(),
                 "-c:a", "aac", "-b:a", "192k"]
     else:
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        cmd += [*_enc_v(),
                 "-an"]
     cmd += [str(output_path)]
     _run(cmd)
     return output_path
+
+
+def assemble_clips(video_paths: list[Path], output_path: Path, *,
+                   aspect_ratio: str = "9:16",
+                   enable_interior_trim: bool = True,
+                   threshold_db: float = -30.0,
+                   min_silence_secs: float = 0.30,
+                   pad_secs: float = 0.03,
+                   job_id: str | None = None) -> dict:
+    """Audio-onset trim + interior/trailing silence trim + scale + concat of
+    N clips in ONE libx264 generation (2026-06-12).
+
+    Replaces the old three-step chain (per-clip trim_leading_silence →
+    concat_videos → trim_silences) in the shared Editor pipeline — each step
+    was its own full re-encode, so a Kling master lost three CRF generations
+    before captions. Here all cutting happens as analysis (silencedetect,
+    no encode) and ONE filter_complex performs every trim, the scale/pad to
+    the target canvas, and the concat in a single encode.
+
+    Semantics match the old chain:
+      - Leading silence is ALWAYS cut per clip (audio onset, ≥0.05s lead) —
+        Hugo's universal entry-trim rule, independent of `enable_interior_trim`.
+      - `enable_interior_trim` collapses interior pauses ≥ `min_silence_secs`
+        (with `pad_secs` kept around each cut) and drops trailing silence —
+        the "Trim silences" toggle.
+      - Audio-less clips pass through whole; mixed sets get synth silence so
+        the concat layout stays uniform (same as concat_videos).
+    Boundary nuance vs the old chain: a pause spanning a clip boundary used
+    to be ONE detected silence in the merged file; here it's cut on each
+    side independently — same content removed, pad kept on both sides.
+    """
+    if not video_paths:
+        raise ValueError("assemble_clips: no inputs")
+
+    with record(phase="editor_assemble_clips", model="ffmpeg-single-encode",
+                character="editor", job_id=job_id) as entry:
+        has_audio_flags = [_has_audio_stream(p) for p in video_paths]
+        any_audio = any(has_audio_flags)
+
+        # ---- analysis only (no encodes): keep-ranges per clip -------------
+        # One silencedetect pass per clip at d=0.05 catches both the onset
+        # lead AND every interior pause; interior cutting only honors pauses
+        # ≥ min_silence_secs (filtered by length below).
+        keeps: list[list[tuple[float, float]]] = []
+        removed_total = 0.0
+        for p, has_audio in zip(video_paths, has_audio_flags):
+            duration = _probe_duration(p)
+            if duration <= 0:
+                # Probe failure (0.0 is _probe_duration's failure sentinel) —
+                # raising here engages run_editor_pipeline's legacy-chain
+                # fallback instead of silently trimming the clip to nothing.
+                raise RuntimeError(
+                    f"assemble_clips: could not probe duration of {p}")
+            if not has_audio:
+                keeps.append([(0.0, duration)])
+                continue
+            silences = _detect_silences(p, threshold_db, 0.05)
+            onset = (silences[0][1]
+                     if silences and silences[0][0] <= 0.05 else 0.0)
+            onset = min(onset, max(0.0, duration - 0.05))
+            if enable_interior_trim:
+                interior = [s for s in silences
+                            if (s[1] - s[0]) >= min_silence_secs]
+                keep = _invert_silences(interior, duration, pad_secs)
+                # The 0.05s onset pass catches short leads the interior
+                # filter ignores. Drop keeps that END before the onset (a
+                # sub-50ms head click + its pad would otherwise survive as
+                # the output's first segment), then clamp the first
+                # survivor's start — leading content before the onset is
+                # ALWAYS cut, matching trim_leading_silence's contract.
+                while keep and keep[0][1] <= onset:
+                    keep.pop(0)
+                if keep and keep[0][0] < onset:
+                    keep[0] = (onset, keep[0][1])
+                if not keep:   # all-silent clip: keep a 0.5s sliver
+                    keep = ([(onset, duration)]
+                            if duration - onset > 0.05
+                            else [(0.0, min(duration, 0.5))])
+            else:
+                keep = [(onset, duration)]
+            keeps.append(keep)
+            removed_total += duration - sum(e - s for s, e in keep)
+
+        n_segments = sum(len(k) for k in keeps)
+        entry["n_clips"] = len(video_paths)
+        entry["n_segments"] = n_segments
+        entry["removed_secs"] = round(removed_total, 2)
+
+        # ---- one filter_complex: trims + scale/pad + concat ----------------
+        inputs: list[str] = []
+        for p in video_paths:
+            inputs += ["-i", str(p)]
+        synth_idx: int | None = None
+        if any_audio and not all(has_audio_flags):
+            synth_idx = len(video_paths)
+            inputs += ["-f", "lavfi", "-i",
+                       "anullsrc=channel_layout=stereo:sample_rate=44100"]
+
+        target_w, target_h = _target_resolution(aspect_ratio)
+        parts: list[str] = []
+        seg_labels: list[str] = []
+        for i, keep in enumerate(keeps):
+            for j, (s, e) in enumerate(keep):
+                vlab, alab = f"v{i}_{j}", f"a{i}_{j}"
+                parts.append(
+                    f"[{i}:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS,"
+                    f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                    f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                    f"setsar=1,fps=30,format=yuv420p[{vlab}]"
+                )
+                if any_audio:
+                    if has_audio_flags[i]:
+                        parts.append(
+                            f"[{i}:a]atrim=start={s:.3f}:end={e:.3f},"
+                            f"asetpts=PTS-STARTPTS,aresample=44100,"
+                            f"aformat=channel_layouts=stereo[{alab}]"
+                        )
+                    else:
+                        parts.append(
+                            f"[{synth_idx}:a]atrim=start=0:end={e - s:.3f},"
+                            f"asetpts=PTS-STARTPTS[{alab}]"
+                        )
+                    seg_labels.append(f"[{vlab}][{alab}]")
+                else:
+                    seg_labels.append(f"[{vlab}]")
+
+        av = "v=1:a=1[outv][outa]" if any_audio else "v=1:a=0[outv]"
+        parts.append(f"{''.join(seg_labels)}concat=n={n_segments}:{av}")
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [_ffmpeg(), "-y", *inputs,
+               "-filter_complex", ";".join(parts),
+               "-map", "[outv]"]
+        if any_audio:
+            cmd += ["-map", "[outa]", *_enc_v(), "-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += [*_enc_v(), "-an"]
+        cmd += [str(output_path)]
+        _run(cmd)
+
+        out_duration = _probe_duration(output_path)
+        entry["duration"] = round(out_duration, 2)
+        return {"n_clips": len(video_paths), "n_segments": n_segments,
+                "duration": round(out_duration, 2),
+                "removed_secs": round(removed_total, 2)}
 
 
 def apply_timeline(input_path: Path, output_path: Path, *,
@@ -1699,7 +1855,7 @@ def apply_timeline(input_path: Path, output_path: Path, *,
             _ffmpeg(), "-y", "-i", str(input_path),
             "-filter_complex", filter_complex,
             "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *_enc_v(),
             "-c:a", "aac", "-b:a", "192k",
             str(output_path),
         ])
