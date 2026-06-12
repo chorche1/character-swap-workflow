@@ -1968,11 +1968,20 @@
                                  @input="reSceneEdit(r, sc, 'duration', $event.target.value)"
                                  @change="reengineerSaveScene(r, sc)" />
                         </label>
-                        <!-- effective whole-second Kling duration: rounded UP,
-                             extended so the says-clause always fits -->
-                        <span class="text-neutral-400 dark:text-neutral-500"
-                              :title="'Rundas upp till hela sekunder och förlängs vid behov så repliken hinner sägas (' + klingDuration(r, sc) + ' s skickas till Kling)'"
-                              x-text="'→ Kling: ' + klingDuration(r, sc) + ' s'"></span>
+                        <!-- effective whole-second Kling duration. Editable
+                             (Hugo 2026-06-12): a manual value overrides the
+                             speech-fitted auto outright; empty = auto. -->
+                        <label class="flex items-center gap-1 text-neutral-400 dark:text-neutral-500"
+                               :title="'Klipplängden som skickas till Kling (3–15 s). Tomt = auto: rundas upp och förlängs så repliken hinner sägas. Just nu skickas ' + klingDuration(r, sc) + ' s.'">
+                          → Kling
+                          <input type="number" min="3" max="15" step="1"
+                                 class="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                 :placeholder="klingDuration(r, sc)"
+                                 :value="reSceneVal(r, sc, 'kling_secs') || ''"
+                                 @input="reSceneEdit(r, sc, 'kling_secs', $event.target.value)"
+                                 @change="reengineerSaveScene(r, sc)" />
+                          <span x-text="reSceneVal(r, sc, 'kling_secs') ? 's (manuell)' : 's (auto ' + klingDuration(r, sc) + ')'"></span>
+                        </label>
                         <button x-show="reEdit[r.re_id] && ['done','partial_success','failed'].includes(r.status)"
                                 class="text-indigo-500 hover:underline"
                                 title="Ny tagning av scenens klipp för ALLA karaktärer (samma prompt)"
@@ -2026,6 +2035,19 @@
                                 :title="'Content-policy fallback to ' + v.fallback_model">⇄</span>
                         </div>
                       </template>
+                    </template>
+                  </div>
+                  <!-- Upload your OWN image for this scene (Hugo 2026-06-12):
+                       lands as a READY variant (QC skipped) and auto-approves,
+                       replacing the previous approval on this scene. -->
+                  <div class="flex gap-2 mt-1 flex-wrap">
+                    <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-up-'+sc.idx+'-'+cid">
+                      <label class="text-[10px] text-indigo-500 hover:underline cursor-pointer"
+                             :title="'Ersätt med en egen bild för ' + jc.name + ' i denna scen — godkänns direkt (ingen QC)'">
+                        ⬆ <span x-text="'Egen bild' + (Object.keys(r.job?.characters || {}).length > 1 ? ' (' + jc.name + ')' : '')"></span>
+                        <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                               @change="reengineerUploadOwnImage(r, cid, sc, $event)" />
+                      </label>
                     </template>
                   </div>
                   <!-- per-(scene × character) clips — edit mode on finished runs -->

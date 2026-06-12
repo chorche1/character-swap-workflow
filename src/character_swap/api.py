@@ -1567,6 +1567,80 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
     return _job_to_dict(job)
 
 
+@app.post("/api/jobs/{job_id}/characters/{char_id}/variants/upload")
+async def upload_own_variant(job_id: str, char_id: str,
+                             file: UploadFile,
+                             scene_id: str | None = Form(None),
+                             approve: bool = Form(True)) -> dict:
+    """Hugo 2026-06-12: drop in an image created ELSEWHERE as a variant for
+    one (character × scene) slot. The upload lands as a READY variant with
+    qc_status='skipped' (the user chose it deliberately — no judge) and, by
+    default, is auto-approved for its scene, replacing any previous approval
+    there. Locks mirror retry_variant: plain Swap jobs freeze once movement
+    is submitted; reengineer-origin jobs stay editable."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if job.movement_prompt and not job.from_reengineer:
+        raise HTTPException(409, "Movement prompt already submitted; variants are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in job")
+    scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+    sid = scene_id or scene_ids[0]
+    if sid not in scene_ids:
+        raise HTTPException(400, f"Unknown scene_id '{sid}' for this job")
+    ext = _safe_ext(file.filename or "")
+    if ext.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise HTTPException(400, "Image uploads only (png/jpg/jpeg/webp)")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    variant_id = _short_id("v_")
+    dest = settings.output_dir / job_id / char_id / f"variant_{variant_id}{ext}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+
+    variant = GeneratedImage(
+        variant_id=variant_id, path=str(dest),
+        prompt="(user-uploaded image)", scene_id=sid,
+        status=VariantStatus.READY,
+        qc_status="skipped",
+        qc_reason="user-uploaded image — QC not run",
+    )
+    jc.images.append(variant)
+    if approve:
+        # One approval per (char, scene): the upload replaces any previous
+        # approval on THIS scene, approvals on other scenes are untouched.
+        scene_of = {v.variant_id: (v.scene_id or scene_ids[0])
+                    for v in jc.images}
+        approved_ids = list(jc.approved_variant_ids or [])
+        if not approved_ids and jc.approved_variant_id:
+            approved_ids = [jc.approved_variant_id]
+        approved_ids = [vid for vid in approved_ids
+                        if scene_of.get(vid) != sid]
+        approved_ids.append(variant_id)
+        order = {v.variant_id: i for i, v in enumerate(jc.images)}
+        approved_ids.sort(key=lambda x: order.get(x, len(jc.images)))
+        jc.approved_variant_ids = approved_ids
+        jc.approved_variant_id = approved_ids[0]
+        if jc.status == CharStatus.AWAITING_APPROVAL:
+            jc.status = CharStatus.APPROVED
+    jc.updated_at = datetime.utcnow()
+    job.characters[char_id] = jc
+    s.update_job(job)
+    await events.publish(job_id, {
+        "kind": "variant.ready", "job_id": job_id, "char_id": char_id,
+        "variant_id": variant_id, "path": str(dest),
+        "ts": datetime.utcnow().isoformat() + "Z"})
+    return {"ok": True, "variant_id": variant_id, "scene_id": sid,
+            "job": _job_to_dict(job)}
+
+
 class RegenSceneBody(BaseModel):
     # Optional prompt override for this scene's fresh variants. None / empty →
     # use the same precedence as initial generation (Director → enriched →
@@ -4444,6 +4518,10 @@ def _mark_finals_stale(state: dict) -> None:
 class ReSceneEditBody(BaseModel):
     motion_prompt: str | None = None
     duration: float | None = None
+    # Manual Kling clip length (Hugo 2026-06-12): overrides the speech-
+    # fitted auto duration outright. 0 (or negative) clears the override
+    # back to auto.
+    kling_secs: float | None = None
     # Explicit dirty mark — the frontend sets it after approve-swaps /
     # variant-regens on an already-animated scene (new image ≠ old clip).
     dirty: bool | None = None
@@ -4469,6 +4547,14 @@ async def reengineer_edit_scene(re_id: str, idx: int, body: ReSceneEditBody) -> 
         if dur != entry.get("duration"):
             entry["duration"] = dur
             changed = True
+    if body.kling_secs is not None:
+        if body.kling_secs <= 0:                      # clear → back to auto
+            changed = entry.pop("kling_secs", None) is not None or changed
+        else:
+            ks = max(3.0, min(15.0, float(body.kling_secs)))
+            if ks != entry.get("kling_secs"):
+                entry["kling_secs"] = ks
+                changed = True
     if body.dirty:
         entry["dirty"] = True
 

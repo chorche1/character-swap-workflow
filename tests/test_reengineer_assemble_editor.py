@@ -600,3 +600,42 @@ def test_panel_ui_has_caption_size_control():
             "index.html").read_text(encoding="utf-8")
     assert "reAsmSettings.captionSize" in html
     assert "Caption-storlek" in html
+
+
+# --- manual Kling clip length (Hugo 2026-06-12) -------------------------------
+
+
+def test_kling_duration_manual_override_wins():
+    """A user-set kling_secs beats BOTH the scene length and the speech
+    fit — clamped to Kling's [3, 15], never extended."""
+    long_line = ('The person says: "one two three four five six seven eight '
+                 'nine ten eleven twelve thirteen fourteen fifteen sixteen"')
+    entry = {"duration": 8.0, "motion_prompt": long_line, "speech": ""}
+    assert runner_reengineer._kling_duration(entry) == 9      # auto (speech)
+    assert runner_reengineer._kling_duration(
+        {**entry, "kling_secs": 5}) == 5                      # manual wins
+    assert runner_reengineer._kling_duration(
+        {**entry, "kling_secs": 20}) == 15                    # clamped
+    assert runner_reengineer._kling_duration(
+        {**entry, "kling_secs": 1}) == 3                      # clamped
+
+
+def test_edit_scene_endpoint_sets_and_clears_kling_override(monkeypatch):
+    box = _wire_api(monkeypatch)
+    out = asyncio.run(api.reengineer_edit_scene(
+        "re_t", 0, api.ReSceneEditBody(kling_secs=20)))
+    assert box["saved"]["scenes"][0]["kling_secs"] == 15.0    # clamped
+    # 0 clears the override back to auto.
+    asyncio.run(api.reengineer_edit_scene(
+        "re_t", 0, api.ReSceneEditBody(kling_secs=0)))
+    assert "kling_secs" not in box["saved"]["scenes"][0]
+
+
+def test_kling_override_ui_wired():
+    js = _APP_JS.read_text(encoding="utf-8")
+    body = js.split("klingDuration(run, sc)")[1][:900]
+    assert "kling_secs" in body                    # JS mirror honors override
+    html = (Path(__file__).resolve().parents[1] / "web" /
+            "index.html").read_text(encoding="utf-8")
+    assert "reSceneVal(r, sc, 'kling_secs')" in html
+    assert "reengineerUploadOwnImage" in html      # own-image upload button

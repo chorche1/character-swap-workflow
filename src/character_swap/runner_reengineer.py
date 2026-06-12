@@ -713,10 +713,18 @@ def _speech_secs(entry: dict) -> float:
 
 
 def _kling_duration(entry: dict) -> int:
-    """Effective whole-second Kling duration for one scene entry: the
-    original scene length OR the time the dialogue needs, whichever is
-    longer, rounded UP. The final build trims silence, so a generous clip
-    costs a few Kling-seconds but never chops the line."""
+    """Effective whole-second Kling duration for one scene entry.
+
+    A user-set `kling_secs` override (the editable "Kling s" field at the
+    gate, Hugo 2026-06-12: the speech-fitted auto values ran too long) wins
+    outright — clamped to Kling's [3, 15] but NOT extended for dialogue;
+    the user owns the tradeoff. Otherwise: the original scene length OR the
+    time the dialogue needs, whichever is longer, rounded UP. The final
+    build trims silence, so a generous auto clip costs a few Kling-seconds
+    but never chops the line."""
+    override = entry.get("kling_secs")
+    if override:
+        return _clamp_kling(float(override))
     return _clamp_kling(max(float(entry.get("duration") or 0.0),
                             _speech_secs(entry)))
 

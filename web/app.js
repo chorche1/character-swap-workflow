@@ -1614,6 +1614,10 @@ function studio() {
     // the says-clause / speech field), whichever is longer, rounded UP and
     // clamped to [3, 15]. A pytest keeps the constants in sync.
     klingDuration(run, sc) {
+      // A manual override (the editable "Kling s" field) wins outright —
+      // clamped to [3, 15], never speech-extended (mirror of _kling_duration).
+      const override = Number(this.reSceneVal(run, sc, 'kling_secs')) || 0;
+      if (override) return Math.max(3, Math.min(15, Math.ceil(override - 1e-9)));
       const dur = Number(this.reSceneVal(run, sc, 'duration')) || 0;
       const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
       const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]([^"”]+)["”]/gi)];
@@ -1688,6 +1692,10 @@ function studio() {
           && draft.motion_prompt !== sc.motion_prompt) body.motion_prompt = draft.motion_prompt;
       if (draft.duration !== undefined
           && Number(draft.duration) !== sc.duration) body.duration = Number(draft.duration);
+      if (draft.kling_secs !== undefined
+          && Number(draft.kling_secs || 0) !== (sc.kling_secs || 0)) {
+        body.kling_secs = Number(draft.kling_secs) || 0;   // 0 = clear → auto
+      }
       if (!Object.keys(body).length) {
         const { [key]: _, ...rest } = this.reSceneDrafts;
         this.reSceneDrafts = rest;
@@ -1701,6 +1709,28 @@ function studio() {
       this._spliceReengineerView(await r.json());
       const { [key]: _, ...rest } = this.reSceneDrafts;
       this.reSceneDrafts = rest;
+    },
+
+    // Upload an image created ELSEWHERE as a variant for one (char × scene)
+    // slot (Hugo 2026-06-12). Server marks it READY (QC skipped) and
+    // auto-approves it for the scene, replacing the previous approval.
+    async reengineerUploadOwnImage(run, charId, sc, ev) {
+      const f = ev.target.files?.[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('scene_id', sc.scene_id);
+      const r = await fetch(`/api/jobs/${run.job_id}/characters/${charId}/variants/upload`,
+                            { method: 'POST', body: fd });
+      ev.target.value = '';
+      if (!r.ok) {
+        this.notifyError('Uppladdningen misslyckades: ' + await r.text());
+        return;
+      }
+      const data = await r.json();
+      if (data.job) run = Object.assign(run, { job: data.job });
+      await this._reMarkVariantSceneDirty(run, charId, data.variant_id);
+      this.notify('info', 'Egen bild uppladdad och godkänd för scenen.');
     },
 
     // After approve-swaps / image-regens on an ALREADY-ANIMATED scene, the
