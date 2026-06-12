@@ -168,6 +168,41 @@ def test_remotion_cache_key_includes_encode_quality(monkeypatch, tmp_path):
     assert k1 != k2
 
 
+def test_assemble_joins_get_head_breathing_room(tmp_path):
+    """Backlog #30: clips after the first keep a ~0.12s pre-roll before the
+    audio onset — joins stopped slamming into the first phoneme. The final's
+    FIRST clip stays tight (exact-start contract)."""
+    c1 = _clip(tmp_path / "a.mp4", lead_silence=1.0, tone_secs=1.5)
+    c2 = _clip(tmp_path / "b.mp4", lead_silence=1.0, tone_secs=1.5)
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([c1, c2], out, enable_interior_trim=True,
+                              threshold_db=-30.0)
+    dur = video_edit._probe_duration(out)
+    # Two ~1.5s tones + clip-2's 0.12s head pre-roll (tails are bounded by
+    # the source — these synth clips end at the tone). Old: ~3.0s.
+    assert 3.08 < dur < 3.6
+
+
+def test_assemble_keeps_natural_tail_after_last_sound(tmp_path):
+    """Backlog #30 (tail): trailing silence is kept up to ~0.25s after the
+    last sound instead of cutting at last-word + 0.03s pad."""
+    body = _clip(tmp_path / "body.mp4", tone_secs=1.5)
+    tail = _clip(tmp_path / "tail.mp4", tone_secs=1.0, silent=True)
+    listfile = tmp_path / "cat.txt"
+    listfile.write_text(f"file '{body}'\nfile '{tail}'\n")
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-y", "-f", "concat", "-safe",
+                    "0", "-i", str(listfile), "-c:v", "libx264", "-c:a",
+                    "aac", str(src)], check=True, capture_output=True)
+
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([src], out, enable_interior_trim=True,
+                              threshold_db=-30.0)
+    dur = video_edit._probe_duration(out)
+    # Old: ~1.5 + 0.03 pad. New: + ~0.25 natural tail.
+    assert 1.62 < dur < 2.1
+
+
 def test_adaptive_silence_threshold_math():
     """Backlog #37: threshold tracks the clip's integrated loudness — 16 LU
     below speech level, clamped to [-45, -25]."""

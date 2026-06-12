@@ -1243,6 +1243,14 @@ def _format_ts(t: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
+# Breathing room at scene joins (backlog #30, 2026-06-12): Kling masters end
+# ≤0.14s after the last word and the onset trim cut the next clip to the
+# first phoneme — every join felt like a hard jump cut. Clips after the
+# first keep a short pre-roll before the audio onset, and every clip keeps a
+# short tail after its last sound (bounded by the source material).
+_JOIN_HEAD_SECS = 0.12
+_JOIN_TAIL_SECS = 0.25
+
 # A caption card never spans a real pause or scene join (backlog #21,
 # 2026-06-12): a gap longer than this between consecutive words starts a new
 # card — otherwise the next scene's words sat on screen seconds early.
@@ -1826,6 +1834,12 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
             onset = (silences[0][1]
                      if silences and silences[0][0] <= 0.05 else 0.0)
             onset = min(onset, max(0.0, duration - 0.05))
+            # Breathing room (backlog #30): clips after the first keep a
+            # short pre-roll before the onset so the join doesn't slam into
+            # the first phoneme. The final's FIRST clip stays tight (the
+            # hook), matching the exact-start contract.
+            if ci > 0:
+                onset = max(0.0, onset - _JOIN_HEAD_SECS)
             if enable_interior_trim:
                 interior = [s for s in silences
                             if (s[1] - s[0]) >= min_silence_secs]
@@ -1838,12 +1852,19 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                 # ALWAYS cut, matching trim_leading_silence's contract.
                 while keep and keep[0][1] <= onset:
                     keep.pop(0)
-                if keep and keep[0][0] < onset:
+                if keep:
+                    # First keep starts exactly at the (head-adjusted) onset:
+                    # clamps pre-onset pad on the first clip (exact-start
+                    # contract) AND grants later clips their #30 pre-roll.
                     keep[0] = (onset, keep[0][1])
                 if not keep:   # all-silent clip: keep a 0.5s sliver
                     keep = ([(onset, duration)]
                             if duration - onset > 0.05
                             else [(0.0, min(duration, 0.5))])
+                # Breathing room (backlog #30): a short natural tail after
+                # the clip's last sound — never cut at last-word + pad.
+                last_s, last_e = keep[-1]
+                keep[-1] = (last_s, min(duration, last_e + _JOIN_TAIL_SECS))
             else:
                 keep = [(onset, duration)]
             keeps.append(keep)
