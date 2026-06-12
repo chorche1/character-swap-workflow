@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import threading
@@ -266,12 +267,17 @@ def _render_locked(
         # reads it with `--props=<path>`.
         props_path = output_video.parent / f".remotion-props-{cache_key}.json"
         props_path.write_text(json.dumps(real_props), encoding="utf-8")
+        # Backlog #8 (2026-06-12): render to a .partial temp file and
+        # promote atomically on success. Rendering straight to cache_path
+        # meant a failed/killed render left a truncated MP4 at the cache
+        # key — served as a successful render on every future hit.
+        partial_path = cache_path.with_name(cache_path.name + ".partial.mp4")
         try:
             cmd = [
                 "npx", "--prefix", str(remotion_dir),
                 "remotion", "render",
                 composition_id,
-                str(cache_path),
+                str(partial_path),
                 f"--props={props_path}",
                 # Tabs-per-render × the process-wide gate is the real
                 # parallelism budget: 4 × 2 = 8 Chrome tabs on an 18-core
@@ -291,16 +297,28 @@ def _render_locked(
                 "--log=info",
             ]
             entry["concurrency"] = max(1, settings.remotion_concurrency)
-            proc = subprocess.run(
-                cmd, cwd=str(remotion_dir),
-                capture_output=True, text=True,
-            )
+            try:
+                # Whole-subprocess backstop (backlog #11): a hung headless
+                # Chrome used to hold one of the gate slots forever.
+                # subprocess.run KILLS the child on timeout before raising.
+                proc = subprocess.run(
+                    cmd, cwd=str(remotion_dir),
+                    capture_output=True, text=True,
+                    timeout=max(60, settings.remotion_render_timeout_secs),
+                )
+            except subprocess.TimeoutExpired as e:
+                raise RuntimeError(
+                    f"remotion render timed out after {e.timeout:.0f}s — "
+                    "Chrome killed, gate slot released") from e
             if proc.returncode != 0:
                 detail = (proc.stderr or proc.stdout or "").strip()[-2000:]
                 raise RuntimeError(
                     f"remotion render failed (exit {proc.returncode}): {detail}"
                 )
+            # Success → promote atomically into the cache.
+            os.replace(partial_path, cache_path)
         finally:
+            partial_path.unlink(missing_ok=True)
             props_path.unlink(missing_ok=True)
             httpd.shutdown()
             httpd.server_close()

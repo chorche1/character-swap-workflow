@@ -84,6 +84,71 @@ def test_render_cmd_uses_settings_concurrency_and_timeout(render_env, monkeypatc
     assert "--concurrency=1" not in cmd
 
 
+def test_failed_render_never_poisons_the_cache(render_env, monkeypatch):
+    """Backlog #8 (2026-06-12): the render used to write straight to the
+    cache key — a failed/killed Chrome left a truncated MP4 there, served
+    as a successful render on every future hit. Now it renders to a
+    .partial temp and promotes atomically only on success."""
+    def dying_run(cmd, **_kw):
+        _cache_mp4_arg(cmd).write_bytes(b"truncated-by-crash")
+        return SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
+
+    monkeypatch.setattr(remotion_render.subprocess, "run", dying_run)
+    inp = _make_input(render_env, "in.mp4")
+    with pytest.raises(RuntimeError, match="remotion render failed"):
+        remotion_render.render_remotion(
+            inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
+            props={"accent": "#8B5CF6"}, words=WORDS)
+    # Nothing at the cache key, no orphaned .partial either.
+    assert list(remotion_render._cache_dir().iterdir()) == []
+
+    # The same render retried after the transient failure succeeds cleanly
+    # (cache miss, not a poisoned hit).
+    def good_run(cmd, **_kw):
+        _cache_mp4_arg(cmd).write_bytes(b"fake")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(remotion_render.subprocess, "run", good_run)
+    summary = remotion_render.render_remotion(
+        inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
+        props={"accent": "#8B5CF6"}, words=WORDS)
+    assert summary["cached"] is False
+    assert (render_env / "out.mp4").read_bytes() == b"fake"
+
+
+def test_render_subprocess_timeout_kills_and_releases_gate(render_env, monkeypatch):
+    """Backlog #11 (2026-06-12): no subprocess timeout meant a hung headless
+    Chrome held 1 of the 2 gate slots forever. The run is now bounded by
+    settings.remotion_render_timeout_secs; on expiry the child is killed,
+    the cache stays clean and the gate slot is released."""
+    monkeypatch.setattr(settings, "remotion_render_timeout_secs", 60)
+    seen_timeouts: list[float] = []
+
+    def hung_run(cmd, **kw):
+        seen_timeouts.append(kw.get("timeout"))
+        raise remotion_render.subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+
+    monkeypatch.setattr(remotion_render.subprocess, "run", hung_run)
+    inp = _make_input(render_env, "in.mp4")
+    with pytest.raises(RuntimeError, match="timed out"):
+        remotion_render.render_remotion(
+            inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
+            props={"accent": "#8B5CF6"}, words=WORDS)
+    assert seen_timeouts == [60]
+    assert list(remotion_render._cache_dir().iterdir()) == []
+
+    # Gate slot was released: the next render goes straight through.
+    def good_run(cmd, **_kw):
+        _cache_mp4_arg(cmd).write_bytes(b"fake")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(remotion_render.subprocess, "run", good_run)
+    summary = remotion_render.render_remotion(
+        inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
+        props={"accent": "#8B5CF6"}, words=WORDS)
+    assert summary["cached"] is False
+
+
 def test_gate_caps_simultaneous_render_subprocesses(render_env, monkeypatch):
     """8 parallel render calls never run more than the configured 2 at once."""
     monkeypatch.setattr(settings, "remotion_max_concurrent_renders", 2)

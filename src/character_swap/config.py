@@ -113,6 +113,11 @@ class Settings(BaseSettings):
         default=2, validation_alias="REMOTION_MAX_CONCURRENT_RENDERS")
     remotion_concurrency: int = Field(default=4, validation_alias="REMOTION_CONCURRENCY")
     remotion_timeout_ms: int = Field(default=120_000, validation_alias="REMOTION_TIMEOUT_MS")
+    # Whole-subprocess backstop (backlog #11, 2026-06-12): without it a hung
+    # headless Chrome held 1 of the 2 gate slots FOREVER. 30 min is ~4x the
+    # worst measured contended render (430s) — generous, but finite.
+    remotion_render_timeout_secs: int = Field(
+        default=1800, validation_alias="REMOTION_RENDER_TIMEOUT_SECS")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
