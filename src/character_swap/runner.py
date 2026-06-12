@@ -218,6 +218,9 @@ async def _generate_one_variant(
     # no-silent-cross-provider-fallback doctrine (pipeline.generate_variant
     # docstring): content rejections ONLY, recorded on
     # `variant.fallback_model`, emitted as `variant.fallback`, ⇄ chip in UI.
+    # OPT-IN since 2026-06-12 (SWAP_MODERATION_FALLBACK=1): Hugo's "100% GPT
+    # Image 2" directive — by default a rejected slot fails with the
+    # moderation reason instead of switching engines.
     effective_model = _swap_image_model(job)
     try:
         for attempt in range(1, max_attempts + 1):
@@ -249,7 +252,8 @@ async def _generate_one_variant(
                         pipeline.generate_variant,
                         model=effective_model, **gen_kwargs)
                 except Exception as e:
-                    if not (content_policy.is_content_rejection(e)
+                    if not (settings.swap_moderation_fallback
+                            and content_policy.is_content_rejection(e)
                             and effective_model != "nbp-swap"
                             and _model_provider(effective_model) != "fal"
                             and settings.has_provider("fal")):

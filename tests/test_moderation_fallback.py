@@ -9,6 +9,12 @@ nbp-swap — recorded on `variant.fallback_model`, emitted as a
 `variant.fallback` event, ⇄ chip in the UI. Measured rationale: 49% of
 gpt-image-2 swap calls were safety rejections burning ~131s each, while
 nbp-swap had 0 moderation failures on the same scenes.
+
+OPT-IN since 2026-06-12 (Hugo's "100% GPT Image 2" directive): the rescue is
+gated behind SWAP_MODERATION_FALLBACK (default OFF). By default a rejected
+slot FAILS with the moderation reason — no engine switch. The tests below
+enable the flag explicitly via _wire(); the default-off behavior has its own
+regression test at the bottom.
 """
 from __future__ import annotations
 
@@ -48,8 +54,11 @@ def _job(tmp_path, image_model="gpt-image"):
     return job, jc, v
 
 
-def _wire(monkeypatch, gen_behavior, *, fal_configured=True):
+def _wire(monkeypatch, gen_behavior, *, fal_configured=True,
+          fallback_enabled=True):
     """gen_behavior(model, kw) is called per generation attempt."""
+    monkeypatch.setattr(settings, "swap_moderation_fallback",
+                        fallback_enabled, raising=False)
     models_called: list[str] = []
     events: list[tuple[str, dict]] = []
 
@@ -170,3 +179,28 @@ def test_fallback_failure_error_names_both_engines(monkeypatch, tmp_path):
     assert v.status == VariantStatus.FAILED
     assert "fallback(nbp-swap)" in (v.error or "")
     assert "nbp also exploded" in (v.error or "")
+
+
+def test_default_is_no_fallback_100_percent_gpt(monkeypatch, tmp_path):
+    """Hugo's 2026-06-12 directive: with SWAP_MODERATION_FALLBACK unset
+    (default OFF), a content rejection FAILS the slot with the moderation
+    reason — nbp-swap is never called, no fallback event, no engine switch."""
+    job, jc, v = _job(tmp_path)
+
+    def behavior(model, kw):
+        raise _PolicyError()
+    models, events = _wire(monkeypatch, behavior, fallback_enabled=False)
+
+    _run(job, jc, v)
+    assert models == ["gpt-image"]          # exactly one attempt, one engine
+    assert v.status == VariantStatus.FAILED
+    assert v.fallback_model is None
+    assert "safety system" in (v.error or "")
+    assert "variant.fallback" not in [k for k, _ in events]
+
+
+def test_default_off_matches_field_default():
+    """The pydantic field default itself is False — guards against a future
+    .env or refactor silently re-enabling the cross-engine rescue."""
+    from character_swap.config import Settings
+    assert Settings.model_fields["swap_moderation_fallback"].default is False

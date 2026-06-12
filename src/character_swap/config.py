@@ -221,6 +221,14 @@ class Settings(BaseSettings):
     # $0.01/call) — noise next to the image+video spend it protects. Set
     # SWAP_QC_MODEL=claude-haiku-4-5-20251001 to go back to the cheap judge.
     swap_qc_enabled: bool = Field(default=True, validation_alias="SWAP_QC")
+    # Cross-engine rescue when the chosen swap engine rejects on content
+    # policy (after the softening ladder): retry the slot once on the
+    # fal-hosted nbp-swap. OFF by default since 2026-06-12 — Hugo's "100%
+    # GPT Image 2" directive: a rejected slot now fails loudly with the
+    # moderation reason instead of shipping another model's look. Set
+    # SWAP_MODERATION_FALLBACK=1 to restore the old rescue behavior.
+    swap_moderation_fallback: bool = Field(
+        default=False, validation_alias="SWAP_MODERATION_FALLBACK")
     swap_qc_model: str = Field(default="claude-sonnet-4-6",
                                validation_alias="SWAP_QC_MODEL")
     swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
