@@ -244,6 +244,11 @@ KLING_V3_TIER=pro                 # fal Kling v3 tier: "pro" (1080p, default sin
                                   # flip while clips are in flight — fal request_ids
                                   # are endpoint-scoped, a resumed poll on the other
                                   # tier 404s (the ↻ retry recovers).
+KLING_NEGATIVE_PROMPT="blur, distort, low quality, morphing face, frozen lips, warping fingers, extra limbs"
+                                  # sent with every Kling submit (research 2026-06-12:
+                                  # talking-head negative set; 5-8 terms beats long
+                                  # lists). Empty → fal's own default. cfg_scale and
+                                  # shot_type stay at fal defaults deliberately.
 FFMPEG_CRF=16                     # every local re-encode in video_edit.py (trims,
 FFMPEG_PRESET=medium              # concat, time-stretch, ASS captions). Was hardcoded
                                   # veryfast/CRF-20 → measured ~2-3 Mbps off a 21 Mbps

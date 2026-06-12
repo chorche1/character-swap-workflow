@@ -625,10 +625,14 @@ def _kling_duration(entry: dict) -> int:
 
 
 def _with_accent(prompt: str) -> str:
-    """Kling synthesizes the voice from the prompt — enforce accent AND clear
-    pronunciation centrally so every clip speaks American English with each
-    word pronounced correctly, even if a scene's agent-written prompt forgot
-    to say so (Hugo, 2026-06-11; garbled words like "baking goda" observed)."""
+    """Kling synthesizes voice AND ambience from the prompt — enforce three
+    guarantees centrally, even if a scene's agent-written prompt forgot them:
+    American accent + clear pronunciation (Hugo 2026-06-11; garbled words
+    like "baking goda" observed) and NO music bed (research 2026-06-12:
+    generate_audio invents background music unless told otherwise; there is
+    no API switch, suppression is prompt-level). Each clause is skipped when
+    the prompt already covers it. Mirrored in app.js klingSuffix() —
+    a pytest keeps the clause strings byte-identical."""
     out = prompt
     if "american" not in out.lower():
         out = (out.rstrip() + " The person speaks fluent American English "
@@ -636,6 +640,9 @@ def _with_accent(prompt: str) -> str:
     if "pronounc" not in out.lower():
         out = (out.rstrip() + " Every word is pronounced clearly, correctly "
                "and distinctly.")
+    if "music" not in out.lower():
+        out = (out.rstrip() + " No background music — natural ambient room "
+               "sound only.")
     return out
 
 
@@ -878,9 +885,11 @@ ADDED_SCENE_PROMPT = (
 
 
 def _speech_clause(spoken: str) -> str:
-    return (f' The person says: "{spoken}" with natural lip-sync and a casual, '
-            'conversational delivery in fluent American English with a natural '
-            'American accent, pronouncing every word clearly and correctly.')
+    """Dialogue attribution per Kling's documented idiom: tone + accent
+    folded INTO the attribution (research 2026-06-12 — descriptor style is
+    what official guides show; trailing meta-instructions are not)."""
+    return (' The person says, in a casual conversational tone with a '
+            f'natural American accent: "{spoken}"')
 
 
 def _sync_movement_from_state(job: Job, state: dict,

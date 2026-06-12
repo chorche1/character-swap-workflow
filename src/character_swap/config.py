@@ -125,6 +125,15 @@ class Settings(BaseSettings):
     # improvises from the prompt. Set KLING_GENERATE_AUDIO=0 for silent clips
     # (the pre-2026-06-10 behavior, when audio was added downstream instead).
     kling_generate_audio: bool = Field(default=True, validation_alias="KLING_GENERATE_AUDIO")
+    # Kling v3 negative prompt (research 2026-06-12). Without it fal applies
+    # only "blur, distort, and low quality"; this default adds the
+    # talking-head terms practitioners converge on (5-8 terms beats long
+    # lists; earlier terms weigh more). KLING_NEGATIVE_PROMPT= (empty)
+    # falls back to fal's own default.
+    kling_negative_prompt: str = Field(
+        default=("blur, distort, low quality, morphing face, frozen lips, "
+                 "warping fingers, extra limbs"),
+        validation_alias="KLING_NEGATIVE_PROMPT")
     # fal Kling v3 tier: "pro" (1080p output) or "standard" (720p, cheaper).
     # Default PRO since 2026-06-12 (Hugo's call — quality over cost): the
     # whole downstream chain targets a 1080-px short edge, and standard-tier

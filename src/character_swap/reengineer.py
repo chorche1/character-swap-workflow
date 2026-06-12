@@ -203,32 +203,45 @@ a clip by an image-to-video model (Kling v3) that also generates NATIVE
 AUDIO — including the person's voice when the prompt contains dialogue.
 
 For EVERY scene, write:
-1. motion_prompt — an imperative direction for the video model describing
-   what happens in the original clip. THE ACTION IS THE MOST IMPORTANT PART:
-   compare the three frames and describe the PHYSICAL ACTION that unfolds
-   across them — what the hands do, what object moves where, and the
-   direction of the movement (pours X over Y, lifts X toward Y, drops X
-   into Y, tilts/stirs/presses). The generated clip's motion must line up
-   EXACTLY with the original footage, so never reduce a dynamic action to a
-   static pose: if the frames show a pour in progress or completed residue
-   (foam, fizz, spilled powder), the prompt must contain the pouring action
-   itself, not just "holds/displays the result". Also include the gesture
-   energy and the camera behavior (static / hand-held wobble / slow
-   push-in). Stay true to the ORIGINAL footage — same action, same energy.
-   The clip must look like ordinary hand-held UGC phone footage, NOT
-   cinematic. Do not describe the person's appearance (they are being
-   replaced); refer to them as "the person". If the scene has dialogue,
-   include it VERBATIM as: The person says: "<dialogue>" — with natural
-   lip-sync and a casual, conversational delivery in fluent American
-   English with a natural American accent, pronouncing every word clearly
-   and correctly.
+1. motion_prompt — an imperative direction for the video model, built EXACTLY
+   like this (Kling's official image-to-video formula is subject + movement —
+   the start image already supplies the scene):
+   a) SUBJECT ANCHOR, one short clause: "the person" plus only the prop(s)
+      their hands touch (e.g. "The person, holding kiwi slices in cupped
+      hands,"). NEVER describe the environment, background, location,
+      lighting or the person's appearance — the start image carries all of
+      that, and (officially documented) text that deviates from the image
+      causes camera cuts; the start image's background may even differ from
+      these frames.
+   b) THE PHYSICAL ACTION — the most important part: compare the three
+      frames and describe the action that unfolds across them with strong
+      concrete verbs — what the hands do, what object moves where, the
+      direction (pours X over Y, lifts X toward Y, drops X into Y,
+      tilts/stirs/presses). ONE hero action per scene; give it an endpoint
+      ("…then holds them toward the camera"). Keep hands anchored to
+      objects, never free-floating. Never reduce a dynamic action to a
+      static pose: if the frames show a pour in progress or its residue
+      (foam, fizz, spilled powder), the prompt must contain the pouring
+      action itself, not just "holds/displays the result".
+   c) CAMERA, one behavior only: "Handheld phone footage with subtle
+      micro-shake, static framing." (or "Static camera, background remains
+      static." when the original is tripod-still). Not cinematic.
+   d) DIALOGUE last, with the delivery folded into the attribution:
+      The person says, in a casual conversational tone with a natural
+      American accent: "<dialogue>"
+   Target 30-60 words BEFORE the dialogue quote — shorter is better; the
+   image replaces description.
 2. speech — the dialogue line alone (empty string if the scene has no speech).
 3. summary — one short line describing the scene for a UI list.
 
 Rules:
 - Use the spoken words EXACTLY as transcribed; do not paraphrase dialogue.
-- Keep motion_prompt under 120 words.
-- Never add scene elements that are not visible in the frames.
+  Exception: write digits, units and abbreviations as spoken words
+  ("forty-two" not "42", "doctor" not "Dr.") — the voice engine reads
+  digit characters one by one. lowercase dialogue except proper nouns and
+  true acronyms.
+- Never add scene elements that are not visible in the frames; movement
+  must be physically plausible from the middle frame.
 - The voice should match the demographic of the REPLACEMENT character, so
   describe the voice generically ("a natural middle-aged male voice" style
   hints belong to the pipeline, not you) — just mark the dialogue.
@@ -329,10 +342,8 @@ def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[
     out: list[ScenePlan] = []
     for i, (a, b) in enumerate(spans):
         spoken = words_in_span(words, a, b)
-        speech = (f' The person says: "{spoken}" with natural lip-sync and a casual, '
-                  'conversational delivery in fluent American English with a natural '
-                  'American accent, pronouncing every word clearly and correctly.'
-                  ) if spoken else ""
+        speech = (' The person says, in a casual conversational tone with a '
+                  f'natural American accent: "{spoken}"') if spoken else ""
         out.append(ScenePlan(
             idx=i,
             motion_prompt=("Ordinary hand-held UGC phone footage: the person continues the "

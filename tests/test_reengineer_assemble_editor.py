@@ -480,13 +480,19 @@ def test_kling_suffix_js_mirrors_with_accent():
     assert m, "klingSuffix not found in app.js"
     body = m.group(0)
     clauses = re.findall(r"const clause = '([^']+)';", body)
-    assert len(clauses) == 2
+    assert len(clauses) == 3
 
-    accent, pronounce = clauses
+    accent, pronounce, music = clauses
     # Byte-identical with the Python source of truth:
-    assert runner_reengineer._with_accent("x") == "x" + accent + pronounce
-    assert runner_reengineer._with_accent("") == accent + pronounce
+    assert runner_reengineer._with_accent("x") == "x" + accent + pronounce + music
+    assert runner_reengineer._with_accent("") == accent + pronounce + music
     # Same guards (case-insensitive substring checks) on both sides.
-    assert "american" in body and "pronounc" in body
-    p = runner_reengineer._with_accent("An American narrator pronounces this.")
-    assert p == "An American narrator pronounces this."
+    assert "american" in body and "pronounc" in body and "music" in body
+    p = runner_reengineer._with_accent(
+        "An American narrator pronounces this. No music.")
+    assert p == "An American narrator pronounces this. No music."
+    # The new analyst attribution covers accent+pronunciation… the central
+    # layer still adds ONLY the music guarantee.
+    attributed = ('The person says, in a casual conversational tone with a '
+                  'natural American accent: "hi there folks, pronounced well"')
+    assert runner_reengineer._with_accent(attributed) == attributed + music

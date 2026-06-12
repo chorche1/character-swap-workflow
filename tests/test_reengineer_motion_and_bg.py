@@ -64,7 +64,7 @@ def test_analyst_sees_three_chronological_frames(monkeypatch, tmp_path):
     # The system prompt demands the action arc, not a static pose.
     assert "PHYSICAL ACTION" in seen["system"]
     flat = " ".join(seen["system"].split())
-    assert "never reduce a dynamic action to a static pose" in flat
+    assert "reduce a dynamic action to a static pose" in flat
 
 
 def test_analyst_single_frame_fallback(monkeypatch, tmp_path):

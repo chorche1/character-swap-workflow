@@ -89,6 +89,39 @@ def test_kling_v3_defaults_to_pro_tier(monkeypatch):
     assert fal_kling._endpoint() == "fal-ai/kling-video/v3/pro/image-to-video"
 
 
+def test_kling_submit_sends_talking_head_negative_prompt(monkeypatch, tmp_path):
+    """Research 2026-06-12: a 5-8-term talking-head negative_prompt is sent
+    with every Kling submit; empty setting → field omitted (fal's own
+    default applies)."""
+
+    class _Handler:
+        request_id = "req-1"
+
+    class _Fal:
+        def upload_file(self, p):
+            return "https://fal/u.png"
+
+        def submit(self, endpoint, arguments):
+            seen.update(arguments)
+            return _Handler()
+
+    seen: dict = {}
+    monkeypatch.setattr(fal_kling, "_client", lambda: _Fal())
+    img = tmp_path / "f.png"
+    img.write_bytes(b"x")
+
+    fal_kling.submit_image_to_video(image=img, prompt="p", duration_secs=5)
+    assert seen["negative_prompt"] == settings.kling_negative_prompt
+    assert "morphing face" in seen["negative_prompt"]
+    assert "frozen lips" in seen["negative_prompt"]
+
+    seen.clear()
+    monkeypatch.setattr(type(settings), "kling_negative_prompt",
+                        property(lambda self: "  "), raising=False)
+    fal_kling.submit_image_to_video(image=img, prompt="p", duration_secs=5)
+    assert "negative_prompt" not in seen        # fal default applies
+
+
 def test_kling_v3_tier_default_is_pro():
     # Assert the FIELD default, not the live instance — Hugo's .env may
     # legitimately override KLING_V3_TIER, and the suite must stay green.

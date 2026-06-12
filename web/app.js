@@ -1634,6 +1634,11 @@ function studio() {
       }
       if (!out.toLowerCase().includes('pronounc')) {
         const clause = ' Every word is pronounced clearly, correctly and distinctly.';
+        out = out.replace(/\s+$/, '') + clause;
+        suffix += clause;
+      }
+      if (!out.toLowerCase().includes('music')) {
+        const clause = ' No background music — natural ambient room sound only.';
         suffix += clause;
       }
       return suffix.trim();

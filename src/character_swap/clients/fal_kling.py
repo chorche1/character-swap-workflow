@@ -105,6 +105,14 @@ def submit_image_to_video(
             "duration": str(dur),           # fal expects the enum as a string
             "generate_audio": generate_audio,
         }
+        # Talking-head negative prompt (research 2026-06-12). Empty setting →
+        # field omitted → fal's own default ("blur, distort, and low
+        # quality") applies. cfg_scale/shot_type stay at fal defaults
+        # (0.5 / "customize") — right for a single-take clip per the same
+        # research; multi_prompt would insert hard CUTS, never use it here.
+        neg = (settings.kling_negative_prompt or "").strip()
+        if neg:
+            arguments["negative_prompt"] = neg[:2500]
         if end_image is not None:
             try:
                 end_url = fal.upload_file(str(end_image))
