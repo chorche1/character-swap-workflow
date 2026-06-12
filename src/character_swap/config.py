@@ -126,6 +126,11 @@ class Settings(BaseSettings):
     loudnorm_enabled: bool = Field(default=True, validation_alias="LOUDNORM_ENABLED")
     loudnorm_target_lufs: float = Field(
         default=-14.0, validation_alias="LOUDNORM_TARGET_LUFS")
+    # Per-clip silencedetect threshold derived from measured loudness
+    # (backlog #37): silence ≈ 16 LU below the clip's integrated level,
+    # clamped to [-45, -25] dB. Off → the flow's fixed threshold_db.
+    adaptive_silence_threshold: bool = Field(
+        default=True, validation_alias="ADAPTIVE_SILENCE_THRESHOLD")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")

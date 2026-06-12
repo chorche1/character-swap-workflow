@@ -289,6 +289,15 @@ def _measure_clip_loudness(input_path: Path) -> tuple[float, float] | None:
     return loudness, true_peak
 
 
+def _adaptive_silence_threshold(input_i: float) -> float:
+    """Per-clip silencedetect threshold derived from the clip's measured
+    integrated loudness (backlog #37, 2026-06-12): a fixed -30 dB threshold
+    ate quiet speech on low-level Kling clips and missed pauses on hot ones.
+    Speech sits near the integrated level, so silence is ~16 LU below it,
+    clamped to a sane window."""
+    return min(-25.0, max(-45.0, input_i - 16.0))
+
+
 def _clip_gain_db(input_i: float, input_tp: float, target_i: float,
                   *, max_gain: float = 12.0, tp_ceiling: float = -1.0) -> float:
     """Static volume gain bringing a clip to the target integrated loudness
@@ -1780,13 +1789,22 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
         has_audio_flags = [_has_audio_stream(p) for p in video_paths]
         any_audio = any(has_audio_flags)
 
+        # ---- one loudness measurement per clip (analysis only) ------------
+        # Feeds BOTH the static equalization gain (backlog #10) and the
+        # per-clip adaptive silence threshold (backlog #37).
+        measured: list[tuple[float, float] | None] = [None] * len(video_paths)
+        if any_audio and (settings.loudnorm_enabled
+                          or settings.adaptive_silence_threshold):
+            measured = [_measure_clip_loudness(p) if has_audio else None
+                        for p, has_audio in zip(video_paths, has_audio_flags)]
+
         # ---- analysis only (no encodes): keep-ranges per clip -------------
         # One silencedetect pass per clip at d=0.05 catches both the onset
         # lead AND every interior pause; interior cutting only honors pauses
         # ≥ min_silence_secs (filtered by length below).
         keeps: list[list[tuple[float, float]]] = []
         removed_total = 0.0
-        for p, has_audio in zip(video_paths, has_audio_flags):
+        for ci, (p, has_audio) in enumerate(zip(video_paths, has_audio_flags)):
             duration = _probe_duration(p)
             if duration <= 0:
                 # Probe failure (0.0 is _probe_duration's failure sentinel) —
@@ -1797,7 +1815,14 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
             if not has_audio:
                 keeps.append([(0.0, duration)])
                 continue
-            silences = _detect_silences(p, threshold_db, 0.05)
+            # Fixed thresholds ate quiet speech on low-level clips and
+            # missed pauses on hot ones (backlog #37) — when the clip's
+            # loudness is known, the threshold tracks it instead.
+            thr = threshold_db
+            if (settings.adaptive_silence_threshold
+                    and measured[ci] is not None):
+                thr = _adaptive_silence_threshold(measured[ci][0])
+            silences = _detect_silences(p, thr, 0.05)
             onset = (silences[0][1]
                      if silences and silences[0][0] <= 0.05 else 0.0)
             onset = min(onset, max(0.0, duration - 0.05))
@@ -1836,16 +1861,11 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
         # capped at -1 dBTP. LOUDNORM_ENABLED=0 restores untouched audio.
         gains: list[float] = [0.0] * len(video_paths)
         if settings.loudnorm_enabled and any_audio:
-            for gi, (p, has_audio) in enumerate(
-                    zip(video_paths, has_audio_flags)):
-                if not has_audio:
-                    continue
-                measured = _measure_clip_loudness(p)
-                if measured is None:
+            for gi, m in enumerate(measured):
+                if m is None:
                     continue
                 gains[gi] = round(_clip_gain_db(
-                    measured[0], measured[1],
-                    settings.loudnorm_target_lufs), 2)
+                    m[0], m[1], settings.loudnorm_target_lufs), 2)
             entry["loudnorm_gains_db"] = list(gains)
 
         # ---- one filter_complex: trims + scale/pad + concat ----------------

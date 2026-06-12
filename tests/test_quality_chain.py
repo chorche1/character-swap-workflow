@@ -168,6 +168,35 @@ def test_remotion_cache_key_includes_encode_quality(monkeypatch, tmp_path):
     assert k1 != k2
 
 
+def test_adaptive_silence_threshold_math():
+    """Backlog #37: threshold tracks the clip's integrated loudness — 16 LU
+    below speech level, clamped to [-45, -25]."""
+    t = video_edit._adaptive_silence_threshold
+    assert t(-14.0) == -30.0          # social-target speech → classic -30
+    assert t(-25.0) == -41.0          # quiet clip → deeper threshold
+    assert t(-40.0) == -45.0          # clamp floor
+    assert t(-5.0) == -25.0           # clamp ceiling
+
+
+def test_assemble_quiet_clip_speech_survives_adaptive_threshold(tmp_path, monkeypatch):
+    """A clip whose speech sits near the fixed -30 dB threshold used to be
+    'all silence' — trimmed to a 0.5s sliver. With the adaptive threshold
+    the tone survives."""
+    loud = _clip(tmp_path / "loud.mp4", tone_secs=3.0)
+    quiet = tmp_path / "quiet.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-y", "-i", str(loud),
+         "-af", "volume=-26dB", "-c:v", "copy", "-c:a", "aac", str(quiet)],
+        check=True, capture_output=True)
+    monkeypatch.setattr(settings, "adaptive_silence_threshold", True,
+                        raising=False)
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([quiet], out, enable_interior_trim=True,
+                              threshold_db=-30.0)
+    # The whole ~3s tone survives (vs the 0.5s all-silent sliver).
+    assert video_edit._probe_duration(out) > 2.0
+
+
 def test_clip_gain_math():
     """Backlog #10: static per-clip gain — target-seeking, true-peak-capped,
     clamped to ±12 dB."""
@@ -227,6 +256,8 @@ def test_assemble_loudnorm_disabled_keeps_audio_untouched(tmp_path, monkeypatch)
          str(tmp_path / "q2.mp4")], check=True, capture_output=True)
     assert sub.returncode == 0
     monkeypatch.setattr(settings, "loudnorm_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "adaptive_silence_threshold", False,
+                        raising=False)
     calls = []
     real_measure = video_edit._measure_clip_loudness
     monkeypatch.setattr(video_edit, "_measure_clip_loudness",
@@ -234,7 +265,7 @@ def test_assemble_loudnorm_disabled_keeps_audio_untouched(tmp_path, monkeypatch)
 
     video_edit.assemble_clips([tmp_path / "q2.mp4"], tmp_path / "out.mp4",
                               enable_interior_trim=False)
-    assert calls == []                  # opt-out: no analysis, no gain
+    assert calls == []                  # both opt-outs: no analysis at all
 
 
 def _fps(p: Path) -> float:
