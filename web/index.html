@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Character Swap Studio</title>
+  <!-- PWA / iPhone home-screen app (2026-06-12): standalone display, dark
+       theme, icons — 'Lägg till på hemskärmen' i Safari ger app-känsla. -->
+  <link rel="manifest" href="/files/web/static/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/files/web/static/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0a0a0a" />
   <script>
     window.tailwind = window.tailwind || {};
     // Dark mode is the only available theme — force the class on at boot.
@@ -26,6 +33,26 @@
       background: rgb(17 24 39); color: white; font-weight: 600; font-size: 0.9rem;
     }
     .dark .step-num { background: rgb(243 244 246); color: rgb(17 24 39); }
+    /* ---------- Mobile / touch (2026-06-12: full iPhone support) -------- */
+    /* iOS Safari zooms the page when focusing inputs with font-size < 16px
+       — bump every text-entry control on small screens. */
+    @media (max-width: 767px) {
+      input:not([type=checkbox]):not([type=radio]):not([type=file]),
+      select, textarea { font-size: 16px !important; }
+      .variant-strip { grid-auto-columns: 11rem; }
+    }
+    /* Touch devices have no hover: every hover-revealed control (project
+       menus, variant ✓/✕↻/✎↻, library buttons, timeline trim handles) is
+       always visible. */
+    @media (hover: none) {
+      [class*="hover:opacity-100"] { opacity: 1 !important; }
+      /* Drag affordances need thumb-sized targets. */
+      [class*="cursor-ew-resize"] { min-width: 14px !important; }
+      [class*="cursor-grab"] { min-width: 20px !important; min-height: 20px !important; }
+    }
+    /* Notch / home-indicator breathing room in standalone (PWA) mode. */
+    body { padding-bottom: env(safe-area-inset-bottom); }
+
     .variant-strip {
       display: grid; grid-auto-flow: column; grid-auto-columns: 14rem; gap: 0.75rem;
       overflow-x: auto; padding-bottom: 0.5rem;
@@ -51,8 +78,15 @@
 
 <div x-data="studio()" x-init="init()" x-cloak class="flex min-h-screen">
 
-  <!-- SIDEBAR -->
-  <aside class="hidden md:flex flex-col w-64 shrink-0 border-r border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+  <!-- SIDEBAR (md+: static column · mobile: slide-over drawer, 2026-06-12) -->
+  <div x-show="mobileNav" x-transition.opacity @click="mobileNav = false"
+       class="fixed inset-0 bg-black/50 z-40 md:hidden"></div>
+  <aside class="flex flex-col w-72 md:w-64 shrink-0 border-r border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 fixed md:static inset-y-0 left-0 z-50 transform transition-transform duration-200 md:translate-x-0"
+         :class="mobileNav ? 'translate-x-0' : '-translate-x-full md:translate-x-0'"
+         style="padding-top: env(safe-area-inset-top)">
+    <button class="md:hidden absolute top-2 right-2 z-10 w-9 h-9 rounded-lg text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+            style="top: calc(env(safe-area-inset-top) + 8px)"
+            @click="mobileNav = false">✕</button>
     <div class="p-4 border-b border-neutral-200 dark:border-neutral-800 space-y-2">
       <button @click="newJob()"
               class="w-full px-3 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium hover:opacity-90">
@@ -80,7 +114,8 @@
         <span class="font-mono" x-text="formatBytes(disk?.output_bytes)"></span>
       </div>
     </div>
-    <div class="flex-1 overflow-y-auto sidebar-scroll p-2">
+    <div class="flex-1 overflow-y-auto sidebar-scroll p-2"
+         @click="if (window.innerWidth < 768 && $event.target.closest('[data-job-row], a, button')) mobileNav = false">
       <template x-if="jobsList.length === 0 && projects.length === 0">
         <div class="text-xs text-neutral-400 dark:text-neutral-500 p-3 text-center">
           No jobs yet — drop a scene to start.
@@ -225,7 +260,11 @@
   </aside>
 
   <!-- MAIN -->
-  <main class="flex-1 min-w-0 px-6 py-10 space-y-10 max-w-6xl mx-auto w-full">
+  <main class="flex-1 min-w-0 px-3 py-4 md:px-6 md:py-10 space-y-6 md:space-y-10 max-w-6xl mx-auto w-full">
+    <!-- Mobile: open the jobs/projects drawer. -->
+    <button class="md:hidden fixed left-3 z-30 w-11 h-11 rounded-xl bg-neutral-900/90 border border-neutral-700 text-neutral-200 text-lg shadow-lg backdrop-blur"
+            style="top: calc(env(safe-area-inset-top) + 10px)"
+            @click="mobileNav = true" title="Jobb & projekt">☰</button>
 
     <div x-show="!health.openai_key || !health.xai_key"
          class="rounded-lg border border-red-300 dark:border-red-800 bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-200 px-4 py-3 text-sm">
@@ -240,7 +279,7 @@
     <!-- header -->
     <header class="flex items-center justify-between">
       <div>
-        <h1 class="text-3xl font-semibold tracking-tight">Character Swap Studio</h1>
+        <h1 class="text-xl md:text-3xl font-semibold tracking-tight pl-12 md:pl-0">Character Swap Studio</h1>
         <p class="text-neutral-500 dark:text-neutral-400 text-sm mt-1">
           Drop a scene. Pick characters. Generate, approve, edit, animate.
         </p>
@@ -291,7 +330,7 @@
     </header>
 
     <!-- TAB NAVIGATION -->
-    <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 -mb-2">
+    <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 -mb-2 overflow-x-auto whitespace-nowrap">
       <template x-for="t in [
           {slug: 'chat',   label: '💬 Chat'},
           {slug: 'swap',   label: 'Swap'},
@@ -311,7 +350,7 @@
     <!-- ================= CHAT TAB (Claude-driven agent over all tabs) ================= -->
     <div x-show="activeTab === 'chat'"
          x-init="$watch('activeTab', t => { if (t === 'chat') initChat() })"
-         class="grid grid-cols-12 gap-4 h-[calc(100vh-12rem)]">
+         class="grid grid-cols-12 gap-4 h-[calc(100vh-12rem)] supports-[height:100dvh]:h-[calc(100dvh-12rem)]">
 
       <!-- Sidebar: chat sessions -->
       <aside class="col-span-3 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 p-3 overflow-y-auto">
@@ -2868,7 +2907,7 @@
 
             <!-- LEFT: video preview with live caption overlay -->
             <div class="bg-neutral-950 relative flex items-center justify-center p-4">
-              <div class="studio-preview relative w-full max-w-[360px] mx-auto"
+              <div class="studio-preview relative w-full max-w-full sm:max-w-[360px] mx-auto"
                    style="aspect-ratio: 9 / 16;">
                 <!-- ASS / legacy CSS-approximation preview -->
                 <video x-show="!useRemotionPlayer()"
@@ -3779,7 +3818,8 @@
                   </span>
                 </div>
                 <div class="cap-tl-track relative h-14 select-none rounded-md bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 cursor-pointer overflow-hidden"
-                     @mousedown.self="seekTimeline($event)">
+                     @mousedown.self="seekTimeline($event)"
+                     @touchstart.self.passive="seekTimeline($event)">
                   <!-- Card rectangles, positioned by start/end. The body is
                        draggable to shift the whole block; the left/right
                        edge handles retime the first/last word. -->
@@ -3979,11 +4019,13 @@
                     <div class="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-white/60 hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity"
                          :class="timeline.selectedIdx === i ? 'opacity-100' : ''"
                          @mousedown="startHandleDrag($event, i, 'left')"
+                         @touchstart.stop.prevent="startHandleDrag($event, i, 'left')"
                          @click.stop=""></div>
                     <!-- right trim handle -->
                     <div class="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-white/60 hover:bg-white opacity-0 group-hover:opacity-100 transition-opacity"
                          :class="timeline.selectedIdx === i ? 'opacity-100' : ''"
                          @mousedown="startHandleDrag($event, i, 'right')"
+                         @touchstart.stop.prevent="startHandleDrag($event, i, 'right')"
                          @click.stop=""></div>
 
                     <!-- per-segment controls (visible when selected) -->
@@ -4062,9 +4104,12 @@
   <!-- (removed: bottom-right "In flight" toast — redundant with OS notifications + the per-tab grids) -->
 
   <!-- RIGHT-SIDE CHARACTER LIBRARY -->
+  <div x-show="showCharLib" x-transition.opacity @click="toggleCharLib()"
+       class="fixed inset-0 bg-black/50 z-40 md:hidden"></div>
   <aside x-show="showCharLib"
          x-transition.opacity
-         class="hidden md:flex flex-col w-72 shrink-0 border-l border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900">
+         class="flex flex-col w-80 max-w-[85vw] md:w-72 shrink-0 border-l border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900 fixed md:static inset-y-0 right-0 z-50 md:z-auto"
+         style="padding-top: env(safe-area-inset-top)">
     <div class="p-3 border-b border-neutral-200 dark:border-neutral-800 space-y-2">
       <div class="flex items-center justify-between">
         <h3 class="text-sm font-semibold">Character library</h3>

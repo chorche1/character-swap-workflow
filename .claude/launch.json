@@ -2,38 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "character-swap",
+      "name": "character-swap-preview",
       "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
-      "runtimeArgs": [
-        "run",
-        "character-swap",
-        "serve",
-        "--no-open"
-      ],
-      "port": 8000
-    },
-    {
-      "name": "character-swap-8010",
-      "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
-      "runtimeArgs": [
-        "run",
-        "character-swap",
-        "serve",
-        "--port",
-        "8010",
-        "--no-open"
-      ],
-      "port": 8010
-    },
-    {
-      "name": "static-verify",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": [
-        "-m",
-        "http.server",
-        "8765"
-      ],
-      "port": 8765
+      "runtimeArgs": ["run", "character-swap", "serve", "--no-open", "--port", "8055"],
+      "port": 8055
     }
   ]
 }

@@ -322,6 +322,7 @@ function studio() {
     swapGlobalDefaultPrompt: '',    // always the global pipeline.GENERATION_PROMPT
     swapProjectDefaultPrompt: '',   // current project's override, if any
     showCharLib: false,
+    mobileNav: false,          // <md: jobs sidebar as slide-over drawer
     expandedCharId: null,
     charGalleries: {},
     charLibFilter: '',
@@ -2916,7 +2917,8 @@ function studio() {
       this._tlDrag = {
         kind: side,                 // 'left' or 'right'
         segIdx: idx,
-        startX: event.clientX,
+        // Touch events carry coordinates on touches[0] (mobile 2026-06-12).
+        startX: event.clientX ?? event.touches?.[0]?.clientX ?? 0,
         origStart: seg.start,
         origEnd: seg.end,
         scale,
@@ -2926,7 +2928,9 @@ function studio() {
       this._tlOnMove = (ev) => {
         const d = this._tlDrag;
         if (!d) return;
-        const dxPx = ev.clientX - d.startX;
+        const x = ev.clientX ?? ev.touches?.[0]?.clientX;
+        if (x === undefined) return;
+        const dxPx = x - d.startX;
         const dt = dxPx / d.scale;
         const s = this.timeline.segments[d.segIdx];
         if (!s) return;
@@ -2941,11 +2945,15 @@ function studio() {
         this._tlDrag = null;
         window.removeEventListener('mousemove', this._tlOnMove);
         window.removeEventListener('mouseup', this._tlOnUp);
+        window.removeEventListener('touchmove', this._tlOnMove);
+        window.removeEventListener('touchend', this._tlOnUp);
         this._tlOnMove = null;
         this._tlOnUp = null;
       };
       window.addEventListener('mousemove', this._tlOnMove);
       window.addEventListener('mouseup', this._tlOnUp);
+      window.addEventListener('touchmove', this._tlOnMove, { passive: true });
+      window.addEventListener('touchend', this._tlOnUp);
     },
 
     // Click anywhere on the track to move the playhead (in output time).
@@ -2953,7 +2961,10 @@ function studio() {
       const trackEl = this.$refs.timelineTrack;
       if (!trackEl) return;
       const r = trackEl.getBoundingClientRect();
-      const xPx = event.clientX - r.left;
+      const cx = event.clientX ?? event.touches?.[0]?.clientX
+        ?? event.changedTouches?.[0]?.clientX;
+      if (cx === undefined) return;
+      const xPx = cx - r.left;
       const ratio = Math.min(1, Math.max(0, xPx / r.width));
       const total = this.timelineOutputDuration();
       const outT = ratio * total;
