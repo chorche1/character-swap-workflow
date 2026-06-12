@@ -588,6 +588,14 @@ def _auto_approve(job: Job) -> None:
 
 # --------------------------------------------------------------------------- phase 2: animate
 
+# In-process guard against duplicate animation triggers (double-click,
+# second tab): a second animate/reanimate for the same run while one is in
+# flight would submit a SECOND full Kling batch — double billing. Mirrors
+# _ASSEMBLING below. Cleared on process restart, so the crash-recovery
+# re-trigger from status "animating" still works.
+_ANIMATING: set[str] = set()
+
+
 async def animate(re_id: str) -> None:
     """Submit movement with the agent's per-scene prompts + durations, then
     watch the video phase and assemble. Called automatically in auto mode, or
@@ -595,11 +603,18 @@ async def animate(re_id: str) -> None:
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return
+    if re_id in _ANIMATING:
+        _log.warning("reengineer %s: animation already in flight — "
+                     "ignoring duplicate trigger", re_id)
+        return
+    _ANIMATING.add(re_id)
     try:
         await _do_animate(re_id, state)
     except Exception as e:
         _log.exception("reengineer %s animate failed", re_id)
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        _ANIMATING.discard(re_id)
 
 
 def _clamp_kling(secs: float) -> int:
@@ -986,7 +1001,32 @@ async def reanimate(re_id: str, idxs: list[int], *,
     scenes without a clip yet (added/duplicated) get their first via
     generate_more_videos. NEVER assembles — the user rebuilds behind the
     explicit button. `clear_dirty=False` for plain redos (the scene's prompt
-    wasn't the reason for the redo)."""
+    wasn't the reason for the redo).
+
+    Wrapped like animate(): the duplicate-trigger guard stops double Kling
+    billing, and ANY exception flips the run to `failed` instead of
+    stranding it in `reanimating` (which blocked every edit endpoint —
+    reanimate used to be the only phase entry-point without a try/except)."""
+    if re_id in _ANIMATING:
+        _log.warning("reengineer %s: animation already in flight — "
+                     "ignoring duplicate trigger", re_id)
+        return
+    _ANIMATING.add(re_id)
+    try:
+        await _do_reanimate(re_id, idxs, char_id=char_id,
+                            clear_dirty=clear_dirty)
+    except Exception as e:
+        _log.exception("reengineer %s reanimate failed", re_id)
+        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}",
+                resume_status=None, reanimate_idxs=None,
+                reanimate_clear_dirty=None)
+    finally:
+        _ANIMATING.discard(re_id)
+
+
+async def _do_reanimate(re_id: str, idxs: list[int], *,
+                        char_id: str | None,
+                        clear_dirty: bool) -> None:
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return

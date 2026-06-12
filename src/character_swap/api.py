@@ -4342,6 +4342,8 @@ async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks,
         raise HTTPException(409, "run has no underlying job yet")
     if state.get("status") not in {"awaiting_approval", "failed", "animating"}:
         raise HTTPException(409, f"cannot animate from status '{state.get('status')}'")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
     if _store_assemble_settings(state, body):
         _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.animate, re_id)
@@ -4689,6 +4691,8 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     state = _editable_reengineer_state(
         re_id, statuses={"done", "partial_success", "failed"})
     _reengineer_entry(state, idx)
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
     char_id = body.char_id if body else None
     background_tasks.add_task(_run_async, runner_reengineer.reanimate,
                               re_id, [idx], char_id=char_id, clear_dirty=False)
@@ -4714,6 +4718,8 @@ async def reengineer_animate_scenes(re_id: str,
     idxs = [i for i in idxs if 0 <= i < len(entries)]
     if not idxs:
         raise HTTPException(400, "no dirty scenes to re-animate")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
 
     # Surface unapproved (entry × char) pairs so the UI can warn up front.
     skipped: list[dict] = []
