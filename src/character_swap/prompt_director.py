@@ -532,6 +532,13 @@ Prompt format rules (follow exactly):
   see (e.g. "waist-up shot, person fills the left two-thirds of the frame")
   and add: "identical camera distance and crop — do not zoom out or
   recompose; every object keeps this exact size and position."
+- VERTICAL FRAMING / HEADROOM — measure it from the scene frame and lock it,
+  because the model otherwise pushes the subject down and fills the top with
+  empty space. State where the top of the head sits in Image 1 ("nearly
+  touches the top edge, almost no headroom" / "a hand's-width of space above
+  the head") and where the body is cropped at the bottom, then add: "keep
+  the head at this same height in the frame — add no empty space, sky or
+  scenery above it."
 - {light_rule}
 - Do NOT write any photographic-style/grading language (no "cinematic",
   "professional", "high quality", camera/lens jargon) — a fixed organic
@@ -651,12 +658,18 @@ def direct_reengineer_swap(
             "surroundings are replaced with Image 3's location, name 1-2 of "
             "Image 3's actual visible features so the model targets THAT "
             "environment, and say the person plus kept objects are relit "
-            "entirely with Image 3's light. STRICTLY FORBIDDEN: naming or "
-            "describing ANYTHING visible only in the scene frame's original "
-            "background (buildings, walls, sky, signage, flags, location) — "
-            "the original environment is being thrown away, so your framing "
-            "anchors must cover ONLY the person, the held/foreground props "
-            "and the camera distance/crop."
+            "entirely with Image 3's light. CRITICAL framing rule (fold it "
+            "into your framing-anchor sentence, do NOT add a separate "
+            "clause): only Image 3's LOOK is borrowed — the framing, crop, "
+            "subject scale and subject position stay exactly as Image 1, and "
+            "Image 3 is cropped behind the subject to fit Image 1's framing, "
+            "so the subject must NOT shrink or move and Image 3's headroom / "
+            "horizon / open sky must NOT appear above the head. STRICTLY "
+            "FORBIDDEN: naming or describing ANYTHING visible only in the "
+            "scene frame's original background (buildings, walls, sky, "
+            "signage, flags, location) — the original environment is being "
+            "thrown away, so your framing anchors must cover ONLY the "
+            "person, the held/foreground props and the camera distance/crop."
         )
         light_rule = ("Describe Image 3's light (direction/quality) in a few "
                       "words — the inserted person is lit by the NEW "

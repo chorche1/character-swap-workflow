@@ -338,7 +338,12 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
                    "relight the person and the kept objects entirely with "
                    "Image 3's light — matching its direction, color "
                    "temperature, shadows, white balance and grain so "
-                   "everything reads as one photo taken there.")
+                   "everything reads as one photo taken there. Only Image 3's "
+                   "LOOK is borrowed: crop Image 3 behind the subject to fit "
+                   "Image 2's framing — do NOT adopt Image 3's headroom, "
+                   "horizon or open sky, and do NOT add any empty space or "
+                   "scenery above the head that Image 2 does not have; the "
+                   "subject keeps Image 2's exact vertical placement and size.")
     return (
         f"{roles}\n{scene_keep}{bg_part}\n"
         "Replace the person in Image 2 with the person from Image 1. The face "

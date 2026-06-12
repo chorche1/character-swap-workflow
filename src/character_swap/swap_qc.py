@@ -50,9 +50,17 @@ hold:
   is visible, new space appears at the edges) or noticeably more zoomed in,
   or if a key object sits at a clearly different position or size in the
   frame. Compare how much of the frame the person's body and the held
-  objects occupy in SCENE vs RESULT. (background_replaced=true changes WHAT
-  is behind the person, not the camera geometry — framing must still match
-  SCENE.)
+  objects occupy in SCENE vs RESULT.
+- WRONG HEADROOM / VERTICAL FRAMING: pay special attention to the space
+  ABOVE the head. FAIL if RESULT has clearly MORE empty space / sky /
+  scenery above the subject's head than SCENE does — i.e. the head sits
+  lower in the frame and the subject is pushed down into the bottom portion,
+  with dead space added at the top. The top of the head must sit at roughly
+  the same height in RESULT as in SCENE. This holds EVEN when
+  background_replaced=true: a replaced background changes WHAT is behind the
+  person, never the camera geometry or how high the subject sits — if the
+  new background added headroom/sky above the head that SCENE did not have,
+  that is a FAIL.
 - MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
   SCENE nor CHARACTER.
 - BROKEN IMAGE: fully or mostly black/blank/censored output, heavy

@@ -184,3 +184,18 @@ def test_gpt_id_swap_prompt_locks_framing():
         assert "Do NOT zoom out" in p
         assert "exact same SIZE relative to the frame" in p
         assert "frame edges cut off stays cut off" in p
+
+
+def test_gpt_id_swap_background_does_not_import_headroom():
+    """Hugo 2026-06-12: with a replacement background the model pushed the
+    subject down and filled the top with the new background's sky/scenery
+    (dead space above the head). The background branch must lock vertical
+    framing to the SCENE (Image 2), not adopt Image 3's headroom."""
+    p = pipeline.build_gpt_id_swap_prompt("scene", background=True)
+    low = p.lower()
+    assert "do not adopt image 3's headroom" in low
+    assert "above the head" in low
+    assert "vertical placement" in low
+    # The plain (no-bg) prompt should NOT carry the bg-specific clause.
+    assert "do not adopt image 3's headroom" not in \
+        pipeline.build_gpt_id_swap_prompt("scene", background=False).lower()

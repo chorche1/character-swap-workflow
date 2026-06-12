@@ -169,3 +169,18 @@ def test_qc_prompt_covers_framing_and_zoom():
     assert "WRONG FRAMING" in text
     assert "zoomed out" in text
     assert "subject scale" in text
+
+
+def test_qc_prompt_covers_headroom_drift():
+    """Regression guard (Hugo 2026-06-12): with a replaced background the
+    swap pushed the subject down and added the new background's sky/scenery
+    above the head (dead space at top) — and it PASSED QC because the judge
+    went lenient on edges when background_replaced=true. The judge must flag
+    added headroom even when the background is replaced."""
+    text = swap_qc.QC_SYSTEM
+    assert "WRONG HEADROOM" in text
+    assert "above the" in text.lower()
+    # The headroom rule must explicitly survive a replaced background.
+    low = text.lower()
+    h = low.index("wrong headroom")
+    assert "background_replaced=true" in low[h:h + 700]

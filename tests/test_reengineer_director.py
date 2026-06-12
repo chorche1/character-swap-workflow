@@ -106,6 +106,27 @@ def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
     assert any("REPLACEMENT BACKGROUND" in t for t in texts)
     assert str(bg) in texts                              # the encoded image
     assert texts.index(str(bg)) < texts.index("SCENE s1:")
+    # Framing comes from Image 1, not the new background — the bg is cropped
+    # to fit the scene, never importing its headroom/sky above the head
+    # (2026-06-12: the doctor scene got the backyard's trees/house dumped
+    # above the subject's head). Stated as an instruction the Director folds
+    # in — NOT a mandated verbatim literal, to stay under the ~120w cap.
+    low = " ".join(seen["system"].lower().split())
+    assert "cropped behind the subject to fit image 1's framing" in low
+    assert "headroom / horizon / open sky must not appear above the head" in low
+
+
+def test_director_system_locks_vertical_headroom():
+    """The Director system prompt always carries the explicit headroom /
+    vertical-placement anchor — the recurring 'subject pushed down, dead
+    space above the head' drift (Hugo 2026-06-12)."""
+    sys_bg = prompt_director.REENGINEER_SWAP_DIRECTOR_SYSTEM.format(
+        bg_role="X", outfit_directive="Y", light_rule="Z")
+    assert "VERTICAL FRAMING / HEADROOM" in sys_bg
+    low = " ".join(sys_bg.lower().split())          # flatten wrapped lines
+    assert "headroom" in low
+    assert "keep the head at this same height in the frame" in low
+    assert "add no empty space, sky or scenery above it" in low
 
 
 @pytest.mark.parametrize("case", ["no_scenes", "bad_payload", "exception",
