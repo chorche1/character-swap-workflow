@@ -251,11 +251,20 @@ async def run_editor_pipeline(
             current = swapped
             voice_applied = True
             tmp_audio_in.unlink(missing_ok=True)
-        except Exception:
+        except Exception as voice_err:
             # Voice swap is the most fragile step (network / quota /
             # bad audio). Don't fail the whole compile — captions +
-            # WPM still produce a usable MP4 without it.
-            pass
+            # WPM still produce a usable MP4 without it. But NEVER
+            # silently (backlog #26): the cause is logged + surfaced as
+            # a warning; account-level errors trip the client breaker so
+            # sibling characters in the batch fail fast instead of
+            # repeating the doomed upload (measured 15/17 lifetime fails,
+            # all the same subscription error).
+            logger.warning("%s: voice swap skipped: %s: %s", edit_id,
+                           type(voice_err).__name__, voice_err)
+            if warn is not None:
+                await warn(f"voice swap skipped ({type(voice_err).__name__}: "
+                           f"{str(voice_err)[:200]})")
 
     # Step 4a: transcribe. Needed for: captions, WPM normalize, AND the
     # Resolve-export flow (SRT generated from words.json). `enable_transcribe`

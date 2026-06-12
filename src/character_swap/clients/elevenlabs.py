@@ -11,6 +11,7 @@ surfaces. Endpoints used:
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -37,6 +38,47 @@ _RETRY_EXCS = (
 
 class ElevenLabsError(Exception):
     pass
+
+
+class ElevenLabsAccountError(ElevenLabsError):
+    """Non-retryable ACCOUNT-level error: the subscription lacks the
+    feature, the key is unauthorized, or quota/payment is exhausted.
+    Backlog #26 (2026-06-12): 15/17 lifetime voice-changer calls failed
+    with the SAME subscription error, repeated for every character in a
+    compile batch — each one a wasted upload."""
+
+
+_ACCOUNT_ERROR_MARKERS = (
+    "subscription", "unauthorized", "permission", "payment",
+    "quota_exceeded", "missing_permissions",
+)
+# Process-wide breaker: after one account-level rejection, sibling calls in
+# the same batch fail FAST with the same actionable message. Account fixes
+# are human-speed — 30 min or a restart clears it.
+_ACCOUNT_BLOCK_SECS = 1800.0
+_account_block: dict = {"until": 0.0, "reason": ""}
+
+
+def _classify_http_error(status_code: int, body: str) -> type[ElevenLabsError]:
+    low = (body or "").lower()
+    if status_code in {401, 402, 403} or any(
+            m in low for m in _ACCOUNT_ERROR_MARKERS):
+        return ElevenLabsAccountError
+    return ElevenLabsError
+
+
+def _check_account_block(feature: str) -> None:
+    remaining = _account_block["until"] - time.monotonic()
+    if remaining > 0:
+        raise ElevenLabsAccountError(
+            f"ElevenLabs {feature} paused ({int(remaining)}s left): "
+            f"{_account_block['reason']} — fix the subscription/key at "
+            "elevenlabs.io, then retry")
+
+
+def _trip_account_block(reason: str) -> None:
+    _account_block["until"] = time.monotonic() + _ACCOUNT_BLOCK_SECS
+    _account_block["reason"] = reason[:300]
 
 
 def _require_elevenlabs() -> None:
@@ -136,6 +178,7 @@ def voice_changer(
     Re-renders the source audio as the target voice. Emotion + intonation +
     timing of the source are preserved. Returns mp3 bytes."""
     _require_elevenlabs()
+    _check_account_block("voice changer")
     with record(phase="elevenlabs_vc", model=model_id,
                 character="—", job_id=app_job_id) as entry:
         with source_audio.open("rb") as f, httpx.Client(timeout=180) as c:
@@ -148,6 +191,10 @@ def voice_changer(
                 files=files, data=data,
             )
             if r.status_code >= 400:
-                raise ElevenLabsError(f"Voice changer failed ({r.status_code}): {r.text[:300]}")
+                exc = _classify_http_error(r.status_code, r.text)
+                msg = f"Voice changer failed ({r.status_code}): {r.text[:300]}"
+                if exc is ElevenLabsAccountError:
+                    _trip_account_block(msg)
+                raise exc(msg)
             entry["request_id"] = r.headers.get("x-request-id")
             return r.content
