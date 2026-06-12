@@ -233,7 +233,8 @@ function studio() {
     // preset values for those). Defaults keep Kling's voice + pacing.
     reAsmSettings: (() => {
       const defaults = {
-        template: 'capcut-purple-pill',
+        template: 'capcut-bluebox',     // Hugo 2026-06-12: bluebox @ 68 is
+        captionSize: 68,                // the Reengineer-final standard
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
@@ -1530,6 +1531,9 @@ function studio() {
       const s = this.reAsmSettings;
       return {
         template: s.template,
+        // Caption size rides as a style override (works for both caption
+        // engines). Clamped so a typo can't render unreadable captions.
+        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 68)) },
         enable_trim: !!s.enableTrim,
         enable_captions: !!s.enableCaptions,
         enable_wpm_normalize: !!s.enableWpmNormalize,

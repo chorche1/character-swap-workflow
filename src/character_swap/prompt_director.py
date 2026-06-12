@@ -582,6 +582,11 @@ Prompt format rules (follow exactly):
   thumbs-up beside the blender", "bare hands — no gloves"): unanchored,
   every output drifts to a camera-facing stare with generic open hands, and
   gloves/jewelry leak in from the character reference.
+- OUTFIT ANCHOR — name the scene outfit's visible pieces AND colors in a few
+  words ("white open-collar shirt under a grey pinstripe suit"): unanchored,
+  single scenes invent role-typical wardrobe (a doctor got blue scrubs in
+  ONE scene while every other scene wore the white shirt) and the final
+  flickers at that cut.
 - VERTICAL FRAMING / HEADROOM — measure it from the scene frame and lock it,
   because the model otherwise pushes the subject down and fills the top with
   empty space. State where the top of the head sits in Image 1 ("nearly

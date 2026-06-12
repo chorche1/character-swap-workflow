@@ -2115,6 +2115,12 @@
                          :disabled="!reAsmSettings.enableWpmNormalize"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
+                <label :class="reAsmSettings.enableCaptions ? '' : 'opacity-40'">Caption-storlek
+                  <input type="number" min="24" max="200" step="2"
+                         x-model.number="reAsmSettings.captionSize"
+                         :disabled="!reAsmSettings.enableCaptions"
+                         class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+                </label>
               </div>
               <div class="flex flex-wrap items-center gap-3">
                 <label class="flex items-center gap-1">

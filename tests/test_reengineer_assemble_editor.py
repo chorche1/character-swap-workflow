@@ -104,7 +104,9 @@ def test_assemble_passes_full_clips_with_kling_defaults(tmp_path, monkeypatch):
     assert len(calls) == 1
     kw = calls[0]
     assert kw["paths"] == [str(clip)]                  # full clip, uncut
-    assert kw["template"] == "capcut-purple-pill"
+    # Hugo 2026-06-12: capcut-bluebox @ size 68 is the Reengineer standard.
+    assert kw["template"] == "capcut-bluebox"
+    assert kw["overrides"] == {"size": 68}
     assert kw["enable_trim"] is True
     assert kw["enable_captions"] is True
     assert kw["enable_wpm_normalize"] is False         # Kling pacing kept
@@ -569,3 +571,32 @@ def test_do_animate_uses_freshest_scenes_not_snapshot(monkeypatch, tmp_path):
     assert on_disk["scenes"][0]["motion_prompt"] == 'She says: "the edited line"'
     assert "dirty" not in on_disk["scenes"][0]
     assert on_disk["status"] == "animating"
+
+
+def test_assemble_caption_size_override_from_panel(tmp_path, monkeypatch):
+    """The ⚙ panel's caption size rides as overrides.size and beats the
+    68 default (Hugo 2026-06-12)."""
+    clip = tmp_path / "kling.mp4"
+    clip.write_bytes(b"x")
+    job = _job(clip=str(clip))
+    updates, calls = _wire_assemble(monkeypatch, tmp_path, job)
+    st = _state()
+    st["assemble_settings"] = {"overrides": {"size": 92}}
+
+    asyncio.run(runner_reengineer._do_assemble("re_t", st))
+    assert calls[0]["overrides"] == {"size": 92}
+    assert calls[0]["template"] == "capcut-bluebox"    # default unaffected
+
+
+def test_panel_ui_has_caption_size_control():
+    """Backlog follow-up (Hugo 2026-06-12): bluebox default + selectable
+    caption size 68 in the ⚙ Slutvideo panel."""
+    js = _APP_JS.read_text(encoding="utf-8")
+    assert "template: 'capcut-bluebox'" in js
+    assert "captionSize: 68" in js
+    body = js.split("_reAsmBody()")[1][:1200]
+    assert "overrides: { size:" in body
+    html = (Path(__file__).resolve().parents[1] / "web" /
+            "index.html").read_text(encoding="utf-8")
+    assert "reAsmSettings.captionSize" in html
+    assert "Caption-storlek" in html
