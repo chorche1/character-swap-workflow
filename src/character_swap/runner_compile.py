@@ -22,6 +22,7 @@ the UI can show partial completion.
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import shutil
 from datetime import datetime
@@ -32,6 +33,8 @@ from character_swap import events, video_edit
 from character_swap.config import settings
 from character_swap.models import CharStatus, Job, JobCharacter, VideoStatus
 from character_swap.state import store
+
+logger = logging.getLogger(__name__)
 
 
 async def _emit(job_id: str, kind: str, char_id: str | None = None, **data) -> None:
@@ -170,10 +173,21 @@ async def run_editor_pipeline(
             job_id=edit_id,
         )
         current = concat_out
-    except Exception:
+    except Exception as assemble_err:
         # Reliability first: any failure in the combined pass falls back to
         # the proven legacy chain (3 separate encodes, lower quality but
-        # battle-tested) rather than failing the build.
+        # battle-tested) rather than failing the build. NEVER silently
+        # (backlog #27): the quality cliff + the original exception must be
+        # visible — in the log AND as a warning on the result.
+        logger.warning(
+            "%s: assemble_clips failed (%s: %s) — falling back to the "
+            "legacy 3-encode chain (lower quality)", edit_id,
+            type(assemble_err).__name__, assemble_err)
+        if warn is not None:
+            await warn("single-encode assemble failed "
+                       f"({type(assemble_err).__name__}: "
+                       f"{str(assemble_err)[:200]}) — legacy multi-encode "
+                       "chain used; final has extra encode generations")
         no_lead: list[Path] = []
         for i, p in enumerate(paths):
             cut = edit_dir / f"scene-{i:02d}-noLead.mp4"
@@ -398,7 +412,10 @@ async def _compile_one_character(
                     char_id=char_id, message=scene_warning)
 
     try:
+        pipeline_warnings: list[str] = []
+
         async def _warn(message: str) -> None:
+            pipeline_warnings.append(message)
             await _emit(job_id, "char.compile_warning",
                         char_id=char_id, message=message)
 
@@ -418,17 +435,20 @@ async def _compile_one_character(
         compiled_final = compiled_dir / f"{char_id}.mp4"
         shutil.copyfile(result.final, compiled_final)
 
+        all_warnings = ([scene_warning] if scene_warning else []) \
+            + pipeline_warnings
+        combined_warning = "; ".join(all_warnings) or None
         _persist_jc(job, jc,
                     compiled_video_path=str(compiled_final),
                     compile_status="done",
                     compile_error=None,
-                    compile_warning=scene_warning)
+                    compile_warning=combined_warning)
         await _emit(job_id, "char.compile_done",
                     char_id=char_id, edit_id=edit_id,
                     output_path=str(compiled_final),
                     voice_id=effective_voice_id,
                     voice_applied=result.voice_applied,
-                    warning=scene_warning)
+                    warning=combined_warning)
     except Exception as e:
         _persist_jc(job, jc,
                     compile_status="failed",

@@ -367,13 +367,22 @@ def test_run_editor_pipeline_falls_back_to_legacy_chain(tmp_path, monkeypatch):
         video_edit, "transcribe_words",
         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("no whisper")))
 
+    warnings: list[str] = []
+
+    async def warn(msg: str) -> None:
+        warnings.append(msg)
+
     result = asyncio.run(runner_compile.run_editor_pipeline(
         [a], edit_id="ed_t", edit_dir=edit_dir,
         template="minimal", overrides=None,
         enable_trim=False, enable_captions=False,
         enable_wpm_normalize=False, target_wpm=190.0,
         threshold_db=-30.0, min_silence_secs=0.30, pad_secs=0.03,
-        voice_id=None, enable_transcribe=False,
+        voice_id=None, enable_transcribe=False, warn=warn,
     ))
     assert "trim" in legacy_calls and "concat" in legacy_calls
     assert result.final.exists()
+    # Backlog #27: the quality cliff is LOUD — the fallback reports itself
+    # with the original exception through the warn channel.
+    assert any("legacy" in w and "combined pass failed" in w
+               for w in warnings)
