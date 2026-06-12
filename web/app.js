@@ -1619,6 +1619,29 @@ function studio() {
       return Math.max(3, Math.min(15, Math.ceil(Math.max(dur, speechSecs) - 1e-9)));
     },
 
+    // Gate coverage + cost preview (backlog #32): unapproved (char × scene)
+    // slots silently vanish from the finals — surface exactly what the
+    // animate click will generate and bill BEFORE the expensive step.
+    reGateCoverage(r) {
+      const chars = Object.values(r.job?.characters || {});
+      const scenes = r.scenes || [];
+      const firstSid = (scenes[0] || {}).scene_id;
+      let approved = 0, total = 0, secs = 0;
+      const missing = [];
+      for (const sc of scenes) {
+        for (const jc of chars) {
+          total += 1;
+          const appr = new Set([...(jc.approved_variant_ids || []),
+                                ...(jc.approved_variant_id ? [jc.approved_variant_id] : [])]);
+          const ok = (jc.images || []).some(v =>
+            appr.has(v.variant_id) && (v.scene_id || firstSid) === sc.scene_id);
+          if (ok) { approved += 1; secs += this.klingDuration(r, sc); }
+          else missing.push((jc.name || jc.char_id) + ' × scen ' + (sc.idx + 1));
+        }
+      }
+      return { approved, total, secs, missing };
+    },
+
     // EXACT mirror of runner_reengineer._with_accent: the only thing the
     // backend adds to a Reengineer motion prompt before it reaches Kling.
     // Shown live under the gate textarea so "the prompt you see" + this

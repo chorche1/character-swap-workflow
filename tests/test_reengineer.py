@@ -380,3 +380,19 @@ def test_snap_merges_degenerate_spans():
     assert out[0][0] == 0.0 and out[-1][1] == 4.0
     assert all(b - a >= 0.3 for a, b in out)
     assert all(out[i][1] == out[i + 1][0] for i in range(len(out) - 1))
+
+
+def test_gate_coverage_preview_wired(backlog_32=None):
+    """Backlog #32: the gate shows coverage (approved/total slots) + the
+    Kling seconds the animate click will bill, and names skipped slots."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "reGateCoverage(r)" in js
+    for field in ("approved", "total", "secs", "missing"):
+        assert field in js.split("reGateCoverage(r)")[1][:1400]
+    # Billing math rides on the SAME klingDuration mirror the gate shows.
+    assert "this.klingDuration(r, sc)" in js.split("reGateCoverage(r)")[1][:1400]
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    assert "reGateCoverage(r).missing" in html
+    assert "Kling-sekunder" in html
