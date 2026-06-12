@@ -69,6 +69,10 @@ from character_swap.state import store
 _log = logging.getLogger("reengineer")
 
 _POLL_SECS = 4.0
+# Analyst "low-fps video" sampling (Hugo 2026-06-12): ~2.5 fps per scene,
+# 3-8 frames each, ≤ ~90 images per run (Anthropic caps requests at 100).
+_ANALYST_FRAMES_PER_SEC = 2.5
+_ANALYST_TOTAL_FRAME_BUDGET = 90
 # Generous ceiling so a hung provider can't spin the video watcher forever.
 # (The swap phase uses a PROGRESS-based watchdog instead — see
 # _watch_swap_phase + settings.swap_stall_timeout_secs.)
@@ -290,31 +294,44 @@ async def _analyze(re_id: str, state: dict, source: Path,
 
     # --- frames (bounded parallel ffmpeg extracts) -------------------------
     # Per scene: the MID frame stays the canonical scene asset (swap input),
-    # but the analyst ALSO gets an early + late frame so it can see the
-    # scene's MOTION — a single frame reduced "pours baking soda over the
-    # kiwis" to a static "holds kiwis" prompt (Hugo 2026-06-12: the motions
-    # must line up exactly with the original).
+    # but the analyst gets a DENSE timestamped frame sequence so it reads
+    # each scene like a low-fps VIDEO — a single frame reduced "pours baking
+    # soda over the kiwis" to a static "holds kiwis" prompt, and 3 fixed
+    # samples still left 2-3s gaps on long scenes where a quick action could
+    # hide (Hugo 2026-06-12). ~2.5 fps per scene — denser than Gemini's
+    # native 1 fps video sampling — capped per scene AND in total so a
+    # 20-scene run stays under the Anthropic 100-images-per-request limit.
     frame_sem = asyncio.Semaphore(4)
+    per_scene_cap = max(3, min(8, _ANALYST_TOTAL_FRAME_BUDGET
+                               // max(1, len(spans))))
 
-    async def _extract(i: int, a: float, b: float, frac: float,
-                       tag: str) -> Path:
-        suffix = "" if tag == "mid" else f"-{tag}"
-        dest = run_dir / "scenes" / f"scene-{i:02d}{suffix}.png"
+    async def _extract_at(i: int, t_abs: float, dest: Path) -> Path:
         async with frame_sem:
-            await asyncio.to_thread(
-                reengineer.extract_frame, source, a + (b - a) * frac, dest)
+            await asyncio.to_thread(reengineer.extract_frame, source,
+                                    t_abs, dest)
         return dest
 
-    async def _extract_triplet(i: int, a: float, b: float) -> list[Path]:
-        return list(await asyncio.gather(
-            _extract(i, a, b, 0.15, "early"),
-            _extract(i, a, b, 0.50, "mid"),
-            _extract(i, a, b, 0.85, "late"),
-        ))
+    async def _extract_sequence(i: int, a: float,
+                                b: float) -> list[tuple[Path, float]]:
+        dur = max(0.1, b - a)
+        k = max(3, min(per_scene_cap, math.ceil(dur * _ANALYST_FRAMES_PER_SEC)))
+        # Sample midpoints of k equal slices — never exactly on a cut.
+        offsets = [dur * (j + 0.5) / k for j in range(k)]
+        mid_j = min(range(k), key=lambda j: abs(offsets[j] - dur / 2))
+        tasks = []
+        for j, off in enumerate(offsets):
+            # The frame closest to 50% IS the canonical scene asset.
+            name = (f"scene-{i:02d}.png" if j == mid_j
+                    else f"scene-{i:02d}-t{j}.png")
+            tasks.append(_extract_at(i, a + off, run_dir / "scenes" / name))
+        paths = list(await asyncio.gather(*tasks))
+        return list(zip(paths, offsets))
 
-    triplets = list(await asyncio.gather(
-        *[_extract_triplet(i, a, b) for i, (a, b) in enumerate(spans)]))
-    frames = [t[1] for t in triplets]          # canonical mid frames
+    sequences = list(await asyncio.gather(
+        *[_extract_sequence(i, a, b) for i, (a, b) in enumerate(spans)]))
+    # Canonical mid frame per scene (the swap input) = the scene-XX.png slot.
+    frames = [next(p for p, _ in seq if p.name == f"scene-{i:02d}.png")
+              for i, seq in enumerate(sequences)]
 
     if cached_words is not None:
         words = cached_words
@@ -326,7 +343,7 @@ async def _analyze(re_id: str, state: dict, source: Path,
     plans = await asyncio.to_thread(
         reengineer.analyze_scenes,
         frames=frames, spans=spans, words=words, re_id=re_id,
-        motion_frames=triplets,
+        motion_frames=sequences,
     ) or reengineer.fallback_plans(spans, words)
 
     # --- register frames as scenes + persist the plan ---------------------

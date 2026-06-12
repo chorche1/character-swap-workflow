@@ -195,12 +195,18 @@ class ScenePlan:
 
 REENGINEER_ANALYST_SYSTEM = """\
 You are a video reverse-engineer for a character-swap pipeline. You see, for
-each SCENE of a reference UGC-style video: THREE frames in chronological
-order (early → middle → late in the scene) and the words spoken during that
-scene (from Whisper). The original person in every frame will be REPLACED by
-a different person, and the scene's MIDDLE frame will then be animated into
-a clip by an image-to-video model (Kling v3) that also generates NATIVE
-AUDIO — including the person's voice when the prompt contains dialogue.
+each SCENE of a reference UGC-style video: a chronological FRAME SEQUENCE
+sampled from the actual clip at ~2.5 frames/second (each frame labeled with
+its timestamp into the scene) and the words spoken during that scene (from
+Whisper). READ EACH SEQUENCE AS A VIDEO, not as separate photos: compare
+consecutive frames to infer the motion's direction, speed and order, and
+look for STATE CHANGES between frames (an object moved, a container
+emptier, residue/foam appeared, a hand changed grip) — an action can start
+and finish between two samples, and it still must be described. The
+original person will be REPLACED by a different person, and the frame
+closest to the scene's midpoint will then be animated into a clip by an
+image-to-video model (Kling v3) that also generates NATIVE AUDIO —
+including the person's voice when the prompt contains dialogue.
 
 For EVERY scene, write:
 1. motion_prompt — an imperative direction for the video model, built EXACTLY
@@ -213,16 +219,18 @@ For EVERY scene, write:
       that, and (officially documented) text that deviates from the image
       causes camera cuts; the start image's background may even differ from
       these frames.
-   b) THE PHYSICAL ACTION — the most important part: compare the three
-      frames and describe the action that unfolds across them with strong
-      concrete verbs — what the hands do, what object moves where, the
-      direction (pours X over Y, lifts X toward Y, drops X into Y,
-      tilts/stirs/presses). ONE hero action per scene; give it an endpoint
-      ("…then holds them toward the camera"). Keep hands anchored to
-      objects, never free-floating. Never reduce a dynamic action to a
-      static pose: if the frames show a pour in progress or its residue
-      (foam, fizz, spilled powder), the prompt must contain the pouring
-      action itself, not just "holds/displays the result".
+   b) THE PHYSICAL ACTION — the most important part: play the frame
+      sequence through in your head and describe the action that unfolds
+      across it with strong concrete verbs — what the hands do, what object
+      moves where, the direction (pours X over Y, lifts X toward Y, drops X
+      into Y, tilts/stirs/presses), in the ORDER the timestamps show. ONE
+      hero action per scene; give it an endpoint ("…then holds them toward
+      the camera"). Keep hands anchored to objects, never free-floating.
+      Never reduce a dynamic action to a static pose: if any frames show an
+      action in progress or its residue (foam, fizz, spilled powder, a
+      moved object), the prompt must contain the action itself, not just
+      "holds/displays the result" — even when the action happened between
+      two samples.
    c) CAMERA, one behavior only: "Handheld phone footage with subtle
       micro-shake, static framing." (or "Static camera, background remains
       static." when the original is tripod-still). Not cinematic.
@@ -241,7 +249,8 @@ Rules:
   digit characters one by one. lowercase dialogue except proper nouns and
   true acronyms.
 - Never add scene elements that are not visible in the frames; movement
-  must be physically plausible from the middle frame.
+  must be physically plausible from the frame nearest the scene midpoint
+  (that exact frame is what gets animated).
 - The voice should match the demographic of the REPLACEMENT character, so
   describe the voice generically ("a natural middle-aged male voice" style
   hints belong to the pipeline, not you) — just mark the dialogue.
@@ -283,37 +292,38 @@ def analyze_scenes(
     spans: list[tuple[float, float]],
     words: list[Word],
     re_id: str,
-    motion_frames: list[list[Path]] | None = None,
+    motion_frames: list[list[tuple[Path, float]]] | None = None,
 ) -> list[ScenePlan] | None:
     """ONE Claude vision call: per-scene motion+speech plan. None on any
     failure — the caller falls back to transcript-derived prompts.
 
-    `motion_frames` (one chronological [early, mid, late] list per scene)
-    lets the analyst SEE the action unfold — a single frame collapsed
-    dynamic actions ("pours baking soda over the kiwis") into static poses
-    ("holds kiwis"), and the generated clip's motion then didn't line up
-    with the original (Hugo 2026-06-12). Falls back to the single
-    representative frame per scene when omitted."""
+    `motion_frames` (one chronological [(frame, offset_secs), ...] sequence
+    per scene, ~2.5 fps) lets the analyst read each scene like a low-fps
+    VIDEO — a single frame collapsed dynamic actions ("pours baking soda
+    over the kiwis") into static poses ("holds kiwis"), and sparse fixed
+    samples left multi-second gaps where a quick action could hide (Hugo
+    2026-06-12). Falls back to the single representative frame per scene
+    when omitted."""
     try:
         from character_swap.clients import anthropic_client
         content: list[dict] = [
             {"type": "text",
-             "text": f"Reference video, {len(frames)} scenes. For each scene you "
-                     "get chronological frames and the transcript span."},
+             "text": f"Reference video, {len(frames)} scenes. Each scene is "
+                     "shown as a chronological frame sequence sampled from "
+                     "the actual clip (timestamps are seconds into the "
+                     "scene) — read it as a low-fps VIDEO."},
         ]
         for i, (frame, (a, b)) in enumerate(zip(frames, spans)):
             spoken = words_in_span(words, a, b)
             content.append({"type": "text",
                             "text": f"SCENE {i} [{a:.1f}s – {b:.1f}s] spoken: "
                                     f"{spoken or '(silent)'}"})
-            triplet = (motion_frames[i]
-                       if motion_frames and i < len(motion_frames)
-                       and motion_frames[i] else [frame])
-            labels = (["early:", "middle:", "late:"]
-                      if len(triplet) > 1 else [""])
-            for label, fp in zip(labels, triplet):
-                if label:
-                    content.append({"type": "text", "text": label})
+            seq = (motion_frames[i]
+                   if motion_frames and i < len(motion_frames)
+                   and motion_frames[i] else [(frame, None)])
+            for fp, off in seq:
+                if off is not None and len(seq) > 1:
+                    content.append({"type": "text", "text": f"t=+{off:.1f}s:"})
                 content.append(anthropic_client._file_to_image_block(fp))
         resp = anthropic_client.messages_with_tools(
             system=REENGINEER_ANALYST_SYSTEM,

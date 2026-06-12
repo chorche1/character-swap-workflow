@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from character_swap import reengineer, runner_reengineer, swap_qc
 from character_swap.video_edit import Word
 
@@ -33,7 +35,9 @@ def _stub_anthropic(monkeypatch, module, payload):
     return seen
 
 
-def test_analyst_sees_three_chronological_frames(monkeypatch, tmp_path):
+def test_analyst_sees_timestamped_frame_sequence(monkeypatch, tmp_path):
+    """The analyst reads each scene as a low-fps VIDEO: a chronological
+    frame sequence labeled with seconds-into-the-scene timestamps."""
     from character_swap.clients import anthropic_client
     seen: dict = {}
 
@@ -48,23 +52,25 @@ def test_analyst_sees_three_chronological_frames(monkeypatch, tmp_path):
     monkeypatch.setattr(anthropic_client, "_file_to_image_block",
                         lambda p, **k: {"type": "text", "text": f"IMG:{p}"})
 
-    early, mid, late = (tmp_path / "e.png", tmp_path / "m.png",
-                        tmp_path / "l.png")
+    seq = [(tmp_path / f"f{j}.png", j * 0.4) for j in range(5)]
     out = reengineer.analyze_scenes(
-        frames=[mid], spans=[(0.0, 3.0)],
+        frames=[seq[2][0]], spans=[(0.0, 2.0)],
         words=[Word(text="hi", start=0.1, end=0.3)], re_id="re_t",
-        motion_frames=[[early, mid, late]],
+        motion_frames=[seq],
     )
     assert out is not None
     texts = [b.get("text", "") for b in seen["messages"][0]["content"]]
-    # All three frames, chronologically labeled.
-    assert "early:" in texts and "middle:" in texts and "late:" in texts
-    e_i, m_i, l_i = (texts.index(f"IMG:{p}") for p in (early, mid, late))
-    assert e_i < m_i < l_i
+    # Every frame present, chronological, timestamp-labeled.
+    idxs = [texts.index(f"IMG:{p}") for p, _ in seq]
+    assert idxs == sorted(idxs)
+    assert "t=+0.0s:" in texts and "t=+1.6s:" in texts
+    assert any("read it as a low-fps VIDEO" in t for t in texts)
     # The system prompt demands the action arc, not a static pose.
     assert "PHYSICAL ACTION" in seen["system"]
     flat = " ".join(seen["system"].split())
     assert "reduce a dynamic action to a static pose" in flat
+    assert "READ EACH SEQUENCE AS A VIDEO" in seen["system"]
+    assert "between two samples" in flat     # actions hiding between frames
 
 
 def test_analyst_single_frame_fallback(monkeypatch, tmp_path):
@@ -87,9 +93,7 @@ def test_analyst_single_frame_fallback(monkeypatch, tmp_path):
     assert "early:" not in texts and "late:" not in texts
 
 
-def test_analyze_extracts_triplet_per_scene(monkeypatch, tmp_path):
-    """_analyze pulls early/mid/late frames at 15/50/85% of each span and
-    keeps the MID frame as the canonical scene asset."""
+def _wire_analyze(monkeypatch, tmp_path, spans):
     extracted: list[tuple[float, str]] = []
 
     def fake_extract(video, at, dest):
@@ -100,7 +104,7 @@ def test_analyze_extracts_triplet_per_scene(monkeypatch, tmp_path):
     monkeypatch.setattr(runner_reengineer.reengineer, "extract_frame",
                         fake_extract)
     monkeypatch.setattr(runner_reengineer.reengineer, "detect_scenes",
-                        lambda *a, **kw: [(0.0, 2.0)])
+                        lambda *a, **kw: spans)
     captured: dict = {}
 
     def fake_analyze(**kw):
@@ -112,17 +116,44 @@ def test_analyze_extracts_triplet_per_scene(monkeypatch, tmp_path):
                         lambda f: ("sc_x", f))
     words_file = tmp_path / "words.json"
     words_file.write_text('[{"text": "hi", "start": 0.1, "end": 0.3}]')
+    return extracted, captured
 
+
+def test_analyze_samples_dense_timestamped_sequence(monkeypatch, tmp_path):
+    """_analyze samples ~2.5 fps per scene (min 3, max 8 frames), keeps the
+    frame nearest the midpoint as the canonical scene-XX.png asset, and
+    passes (path, offset) sequences to the analyst."""
+    extracted, captured = _wire_analyze(monkeypatch, tmp_path,
+                                        [(0.0, 2.0), (2.0, 9.0)])
     asyncio.run(runner_reengineer._analyze(
         "re_t", {"scene_sensitivity": "high"}, tmp_path / "src.mp4", tmp_path))
 
-    times = sorted(t for t, _ in extracted)
-    assert times == [0.3, 1.0, 1.7]                  # 15% / 50% / 85%
     mf = captured["motion_frames"]
-    assert len(mf) == 1 and len(mf[0]) == 3
-    assert mf[0][1].name == "scene-00.png"           # mid = canonical asset
-    assert {p.name for p in mf[0]} == {"scene-00-early.png", "scene-00.png",
-                                       "scene-00-late.png"}
+    # 2.0s scene → ceil(2*2.5)=5 frames; 7.0s scene → ceil(17.5)→capped 8.
+    assert [len(seq) for seq in mf] == [5, 8]
+    # Offsets are chronological midpoints of equal slices.
+    offs0 = [off for _, off in mf[0]]
+    assert offs0 == sorted(offs0) and offs0[0] == pytest.approx(0.2)
+    # Exactly one canonical asset per scene, at the slot nearest 50%.
+    names0 = [p.name for p, _ in mf[0]]
+    assert names0.count("scene-00.png") == 1
+    assert names0[2] == "scene-00.png"              # middle of 5
+    assert any(p.name == "scene-01.png" for p, _ in mf[1])
+    # The canonical frames list is exactly the scene-XX.png slots.
+    # (fallback_plans path → entries registered from those frames)
+
+
+def test_analyze_frame_budget_scales_down_for_many_scenes(monkeypatch, tmp_path):
+    """20 scenes → per-scene cap drops (90-image budget / Anthropic's
+    100-images-per-request limit) instead of 20×8=160 frames."""
+    spans = [(float(i), float(i) + 6.0) for i in range(20)]
+    extracted, captured = _wire_analyze(monkeypatch, tmp_path, spans)
+    asyncio.run(runner_reengineer._analyze(
+        "re_t", {"scene_sensitivity": "high"}, tmp_path / "src.mp4", tmp_path))
+    mf = captured["motion_frames"]
+    assert len(mf) == 20
+    assert all(len(seq) == 4 for seq in mf)          # 90 // 20 = 4
+    assert sum(len(seq) for seq in mf) <= 90
 
 
 def test_qc_receives_replacement_background(monkeypatch, tmp_path):
