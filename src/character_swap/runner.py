@@ -28,6 +28,18 @@ from character_swap.state import store
 
 logger = logging.getLogger(__name__)
 
+# Jobs hard-cancelled mid-generation (backlog #25, 2026-06-12: deleting an
+# active Reengineer run left its swap job generating — and billing — with no
+# parent). New attempts check this set and fail their slot instead of
+# calling the provider. Process-lifetime: after a restart the resume path
+# marks stranded slots failed anyway.
+_CANCELLED_JOBS: set[str] = set()
+
+
+def cancel_job_generation(job_id: str) -> None:
+    """Stop all FUTURE provider calls for a job (in-flight HTTP finishes)."""
+    _CANCELLED_JOBS.add(job_id)
+
 
 def _output_dir(job_id: str, char_id: str) -> Path:
     return settings.output_dir / job_id / char_id
@@ -227,6 +239,8 @@ async def _generate_one_variant(
     effective_model = _swap_image_model(job)
     try:
         for attempt in range(1, max_attempts + 1):
+            if job.job_id in _CANCELLED_JOBS:
+                raise RuntimeError("job cancelled (parent run deleted)")
             variant.qc_attempts = attempt
             async with sem:
                 # Promote char status the first time we actually start work.
@@ -822,6 +836,11 @@ async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
     duration_secs: int | None = None, end_image: Path | None = None,
 ) -> None:
+    if job.job_id in _CANCELLED_JOBS:
+        video.status = VideoStatus.ERROR
+        video.error = "job cancelled (parent run deleted)"
+        _replace_video(job, jc, video)
+        return
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
 

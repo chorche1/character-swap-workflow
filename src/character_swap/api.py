@@ -4375,9 +4375,24 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
 @app.delete("/api/reengineer/{re_id}")
 async def reengineer_delete(re_id: str) -> dict:
     from character_swap import reengineer as reengineer_mod
+    from character_swap import runner as runner_mod, runner_reengineer
     work = settings.output_dir / "reengineer" / re_id
     if not work.exists():
         raise HTTPException(404, "re_id not found")
+    state = reengineer_mod.load_state(re_id) or {}
+    # Tombstone FIRST (backlog #25): in-process watchers hold the state dict
+    # in memory — without this their next save resurrected a ghost
+    # state.json after the rmtree, and the orphaned swap job kept
+    # generating/billing with no parent.
+    reengineer_mod.mark_deleted(re_id)
+    runner_reengineer._ANIMATING.discard(re_id)
+    runner_reengineer._ASSEMBLING.discard(re_id)
+    job_id = state.get("job_id")
+    if job_id:
+        job = store().get_job(job_id)
+        if job is not None and (job.origin or "") == f"reengineer:{re_id}":
+            # Stop future provider calls; the job row stays as history.
+            runner_mod.cancel_job_generation(job_id)
     shutil.rmtree(work, ignore_errors=True)
     return {"ok": True, "re_id": re_id}
 

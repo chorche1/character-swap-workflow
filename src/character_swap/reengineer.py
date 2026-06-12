@@ -70,7 +70,28 @@ def load_state(re_id: str) -> dict | None:
         return None
 
 
+# Tombstones for hard-deleted runs (backlog #25, 2026-06-12): in-process
+# watchers/tasks hold the state dict in memory — after DELETE rmtree'd the
+# run dir, their next save_state() RESURRECTED a ghost state.json. A
+# deleted re_id refuses all further writes. Process-lifetime only — after a
+# restart the dir is gone and nothing references the run.
+_DELETED_RUNS: set[str] = set()
+
+
+def mark_deleted(re_id: str) -> None:
+    _DELETED_RUNS.add(re_id)
+
+
+def is_deleted(re_id: str) -> bool:
+    return re_id in _DELETED_RUNS
+
+
 def save_state(state: dict) -> None:
+    re_id = state.get("re_id")
+    if re_id in _DELETED_RUNS:
+        logger.info("reengineer %s: refusing state write — run was deleted",
+                    re_id)
+        return
     p = state_path(state["re_id"])
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
