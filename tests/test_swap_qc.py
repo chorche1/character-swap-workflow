@@ -171,6 +171,16 @@ def test_qc_prompt_covers_framing_and_zoom():
     assert "subject scale" in text
 
 
+def test_qc_checks_background_symbols():
+    """Backlog #3 (audit 2026-06-12): the US flag rendered without its blue
+    star canton in 3/6 post-fix scenes and every variant passed QC — the
+    judge never inspected background symbols. With a BACKGROUND image the
+    judge must fail defaced/incomplete distinctive symbols."""
+    text = " ".join(swap_qc.QC_SYSTEM.split())
+    assert "WRONG BACKGROUND SYMBOL" in text
+    assert "blue star canton" in text
+
+
 def test_qc_zoom_anchor_survives_replaced_background():
     """Backlog #2 (audit 2026-06-12): clearly wider variants passed QC when
     background_replaced=true — with a new environment the judge had nothing

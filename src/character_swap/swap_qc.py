@@ -87,7 +87,13 @@ Context flags you may receive:
   show SCENE's original environment instead of BACKGROUND's (the original
   location/walls/buildings were kept), or an unrelated third environment
   matching neither. RESULT does not need to be a pixel match of BACKGROUND —
-  same recognizable location/setting type and light is a PASS.
+  same recognizable location/setting type and light is a PASS. EXCEPTION —
+  distinctive symbols: when BACKGROUND contains a distinctive symbol (a
+  flag, a logo, a lettered sign) and RESULT renders it clearly visible, its
+  key identifying features must be intact — a US flag must show its blue
+  star canton, not stripes alone; a logo must not be half-invented. FAIL
+  (WRONG BACKGROUND SYMBOL) on a defaced or incomplete rendering of such a
+  symbol.
 - outfit_from_character=true: the RESULT's clothing is SUPPOSED to come from
   CHARACTER, not SCENE. Do not fail for changed clothing.
 

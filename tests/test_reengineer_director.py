@@ -110,6 +110,12 @@ def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
     assert "NEW ENVIRONMENT" in seen["system"]
     assert "STRICTLY FORBIDDEN" in seen["system"]        # no old-bg anchors
     assert "a red hoodie" in seen["system"]
+    # Backlog #3 (2026-06-12): distinctive symbols in the replacement
+    # background must be anchored by their key parts — the US flag lost its
+    # blue star canton in 3/6 post-fix scenes (re_c5fb4bfcd2) and flickered
+    # correct/wrong across cuts.
+    assert "distinctive SYMBOL" in seen["system"]
+    assert "blue star canton" in seen["system"]
     # The bg light rule also forbids flattering light and demands everyday
     # ordinary-phone light relit from Image 3 (2026-06-12 lighting fix).
     low = " ".join(seen["system"].lower().split())
