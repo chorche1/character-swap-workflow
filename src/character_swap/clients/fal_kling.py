@@ -32,6 +32,47 @@ from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
 
 
+class FalAccountError(RuntimeError):
+    """Non-retryable ACCOUNT-level fal error: balance exhausted / account
+    locked. Backlog #6 (2026-06-12): calls.jsonl showed 47 doomed Kling
+    submits fired in 6 minutes, every one failing with the same 'Exhausted
+    balance / User is locked' — each clip slot burned an upload + submit on
+    an account that could not accept work."""
+
+
+_ACCOUNT_ERROR_MARKERS = (
+    "exhausted balance", "user is locked", "insufficient credits",
+    "insufficient balance", "payment required",
+)
+
+# Process-wide circuit breaker: after one account-level rejection, sibling
+# submits fail FAST with the same actionable message instead of re-burning
+# uploads/submits for the whole batch. Cleared by time (account fixes are
+# human-speed) or process restart; the ↻ retry-all-failed button recovers
+# the failed clips after a top-up.
+_ACCOUNT_BLOCK_SECS = 600.0
+_account_block: dict = {"until": 0.0, "reason": ""}
+
+
+def _is_account_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return any(m in s for m in _ACCOUNT_ERROR_MARKERS)
+
+
+def _check_account_block() -> None:
+    remaining = _account_block["until"] - time.monotonic()
+    if remaining > 0:
+        raise FalAccountError(
+            f"fal submits paused ({int(remaining)}s left): "
+            f"{_account_block['reason']} — fix billing at "
+            "fal.ai/dashboard/billing, then retry the failed clips")
+
+
+def _trip_account_block(e: Exception) -> None:
+    _account_block["until"] = time.monotonic() + _ACCOUNT_BLOCK_SECS
+    _account_block["reason"] = str(e)[:300]
+
+
 def _endpoint() -> str:
     """Tier-resolved endpoint id. Submit and poll must use the SAME tier —
     request_ids are endpoint-scoped at fal, so don't flip KLING_V3_TIER while
@@ -87,6 +128,7 @@ def submit_image_to_video(
 
     `end_image` (optional) is uploaded as `end_image_url` so the clip
     interpolates from the start frame to this final frame."""
+    _check_account_block()
     fal = _client()
     dur = clamp_duration(duration_secs)
     with call_log.record(
@@ -96,6 +138,10 @@ def submit_image_to_video(
         try:
             start_url = fal.upload_file(str(image))
         except Exception as e:
+            if _is_account_error(e):
+                _trip_account_block(e)
+                raise FalAccountError(
+                    f"fal account cannot accept work: {e}") from e
             raise RuntimeError(f"fal.upload_file failed: {e}") from e
         payload["upload_url"] = start_url
 
@@ -123,6 +169,10 @@ def submit_image_to_video(
         try:
             handler = fal.submit(_endpoint(), arguments=arguments)
         except Exception as e:
+            if _is_account_error(e):
+                _trip_account_block(e)
+                raise FalAccountError(
+                    f"fal account cannot accept work: {e}") from e
             raise RuntimeError(f"fal {_endpoint()} submit failed: {e}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id
