@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 from pathlib import Path
 
 import httpx
@@ -35,12 +36,13 @@ class JobTimeout(GrokError):
     pass
 
 
+# httpx.TransportError is the base of ConnectError/ReadError/WriteError/
+# the Timeout family/RemoteProtocolError — the old explicit list missed
+# httpx.ReadError (connection reset) and ssl.SSLError ('bad_record_mac'),
+# which burned 45+ generations with no retry (backlog #34, 2026-06-12).
 _RETRY_EXCS = (
-    httpx.ConnectError,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
-    httpx.RemoteProtocolError,
+    httpx.TransportError,
+    ssl.SSLError,
 )
 
 

@@ -11,6 +11,7 @@ surfaces. Endpoints used:
 from __future__ import annotations
 
 import json
+import ssl
 import time
 from pathlib import Path
 
@@ -27,12 +28,11 @@ from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
 
 _BASE_URL = "https://api.elevenlabs.io/v1"
+# TransportError is the base of the whole connect/read/write/timeout family;
+# the old explicit list missed ReadError + ssl.SSLError (backlog #34).
 _RETRY_EXCS = (
-    httpx.ConnectError,
-    httpx.ReadTimeout,
-    httpx.WriteTimeout,
-    httpx.PoolTimeout,
-    httpx.RemoteProtocolError,
+    httpx.TransportError,
+    ssl.SSLError,
 )
 
 

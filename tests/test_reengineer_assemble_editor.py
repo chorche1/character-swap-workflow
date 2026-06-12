@@ -525,3 +525,47 @@ def test_kling_suffix_js_mirrors_with_accent():
     attributed = ('The person says, in a casual conversational tone with a '
                   'natural American accent: "hi there folks, pronounced well"')
     assert runner_reengineer._with_accent(attributed) == attributed + music
+
+
+def test_do_animate_uses_freshest_scenes_not_snapshot(monkeypatch, tmp_path):
+    """Backlog #35 (2026-06-12): a prompt edit saved between the animate
+    trigger and _do_animate's body was (a) ignored for the Kling prompts and
+    (b) clobbered by the stale-snapshot write-back. _do_animate must re-read
+    the on-disk state both at entry and before writing scenes back."""
+    from character_swap import reengineer
+    from character_swap.config import settings
+    monkeypatch.setattr(settings, "output_dir", tmp_path, raising=False)
+    (tmp_path / "reengineer" / "re_t").mkdir(parents=True)
+
+    job = _job()
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def update_job(self, j):
+            pass
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+
+    async def noop(*a, **kw):
+        return None
+    monkeypatch.setattr(runner_reengineer, "_watch_video_phase", noop)
+    monkeypatch.setattr(runner_reengineer.runner, "run_video_synthesis", noop)
+
+    # On disk: the user's EDITED prompt (+ dirty flag from the edit).
+    fresh = _state(status="awaiting_approval")
+    fresh["scenes"][0]["motion_prompt"] = 'She says: "the edited line"'
+    fresh["scenes"][0]["dirty"] = True
+    reengineer.save_state(fresh)
+
+    # The trigger captured a STALE snapshot before the edit landed.
+    stale = _state(status="awaiting_approval")
+    asyncio.run(runner_reengineer._do_animate("re_t", stale))
+
+    # Kling gets the edited text (with the central suffix appended)...
+    assert job.movement_prompts["s1"].startswith('She says: "the edited line"')
+    # ...and the write-back kept the edited scenes (dirty cleared).
+    on_disk = reengineer.load_state("re_t")
+    assert on_disk["scenes"][0]["motion_prompt"] == 'She says: "the edited line"'
+    assert "dirty" not in on_disk["scenes"][0]
+    assert on_disk["status"] == "animating"

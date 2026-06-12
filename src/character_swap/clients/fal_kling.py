@@ -215,9 +215,29 @@ def wait_for_video(
         raise RuntimeError(f"fal Kling v3 response missing video.url; got {result!r}")
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with httpx.stream("GET", video["url"], timeout=180, follow_redirects=True) as r:
-        r.raise_for_status()
-        with dest.open("wb") as f:
-            for chunk in r.iter_bytes(chunk_size=65536):
-                f.write(chunk)
+    _download(video["url"], dest)
     return dest
+
+
+def _download(url: str, dest: Path, *, attempts: int = 3) -> None:
+    """Download with transient-error retries (backlog #34): a connection
+    reset / SSL hiccup on the FINISHED clip's download used to fail the
+    whole (already billed) generation."""
+    import ssl
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            with httpx.stream("GET", url, timeout=180,
+                              follow_redirects=True) as r:
+                r.raise_for_status()
+                with dest.open("wb") as f:
+                    for chunk in r.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+            return
+        except (httpx.TransportError, ssl.SSLError) as e:
+            last = e
+            dest.unlink(missing_ok=True)
+            if i < attempts - 1:
+                time.sleep(2.0 * (i + 1))
+    raise RuntimeError(
+        f"download failed after {attempts} attempts: {last}") from last

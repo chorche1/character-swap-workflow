@@ -94,3 +94,67 @@ def test_account_error_on_upload_also_trips(monkeypatch, tmp_path):
     with pytest.raises(fal_kling.FalAccountError, match="paused"):
         _submit(tmp_path)
     assert len(uploads) == 1
+
+
+# --- transient-error retries on download (backlog #34) -----------------------
+
+
+def test_download_retries_transient_errors(monkeypatch, tmp_path):
+    import httpx
+
+    calls: list = []
+    sleeps: list = []
+    monkeypatch.setattr(fal_kling.time, "sleep", lambda s: sleeps.append(s))
+
+    class FakeStream:
+        def __init__(self, fail: bool):
+            self.fail = fail
+
+        def __enter__(self):
+            if self.fail:
+                raise httpx.ReadError("connection reset")
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size):
+            yield b"clip"
+
+    def fake_stream(method, url, **kw):
+        calls.append(url)
+        return FakeStream(fail=len(calls) <= 2)
+    monkeypatch.setattr(fal_kling.httpx, "stream", fake_stream)
+
+    dest = tmp_path / "v.mp4"
+    fal_kling._download("https://x/clip.mp4", dest)
+    assert len(calls) == 3                  # 2 resets ridden out
+    assert sleeps == [2.0, 4.0]
+    assert dest.read_bytes() == b"clip"
+
+
+def test_download_gives_up_after_attempts(monkeypatch, tmp_path):
+    import httpx
+    monkeypatch.setattr(fal_kling.time, "sleep", lambda s: None)
+
+    def always_reset(method, url, **kw):
+        raise httpx.ReadError("reset")
+    monkeypatch.setattr(fal_kling.httpx, "stream", always_reset)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="download failed after 3"):
+        fal_kling._download("https://x/clip.mp4", tmp_path / "v.mp4")
+
+
+def test_retry_excs_cover_read_and_ssl_errors():
+    """Backlog #34: 'SSL bad_record_mac' / connection-reset ReadErrors burned
+    45+ generations — the explicit exception lists missed both classes."""
+    import ssl
+    import httpx
+    from character_swap.clients import elevenlabs, grok
+    for excs in (grok._RETRY_EXCS, elevenlabs._RETRY_EXCS):
+        assert any(issubclass(httpx.ReadError, e) for e in excs)
+        assert any(issubclass(ssl.SSLError, e) for e in excs)

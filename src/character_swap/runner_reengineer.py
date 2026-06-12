@@ -706,6 +706,11 @@ def _with_accent(prompt: str) -> str:
 
 
 async def _do_animate(re_id: str, state: dict) -> None:
+    # Backlog #35 (2026-06-12): always animate the FRESHEST scenes. The
+    # caller loaded `state` at trigger time — a prompt edit saved between
+    # the trigger and this point would otherwise be ignored here and then
+    # CLOBBERED by the snapshot write-back below.
+    state = reengineer.load_state(re_id) or state
     s = store()
     job = s.get_job(state["job_id"])
     if job is None:
@@ -738,9 +743,12 @@ async def _do_animate(re_id: str, state: dict) -> None:
     await events.publish(job.job_id, {"kind": "movement.set", "job_id": job.job_id})
 
     # Full animate covers every scene — any edit-mode dirty flags are moot.
-    for e in state["scenes"]:
+    # Re-read before writing back (backlog #35): edits saved while the job
+    # fields were being prepared must survive — never write the snapshot.
+    current = reengineer.load_state(re_id) or state
+    for e in current.get("scenes") or []:
         e.pop("dirty", None)
-    _update(re_id, status="animating", scenes=state["scenes"])
+    _update(re_id, status="animating", scenes=current.get("scenes") or [])
     video_task = asyncio.create_task(runner.run_video_synthesis(job.job_id))
     await _watch_video_phase(re_id, job.job_id)
     await video_task
