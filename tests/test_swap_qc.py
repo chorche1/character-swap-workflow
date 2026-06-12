@@ -218,6 +218,55 @@ def test_qc_non_rate_limit_error_skips_immediately(monkeypatch, tmp_path):
     assert sleeps == []
 
 
+def test_qc_prompt_covers_outfit_and_user_intent():
+    """Backlog #16+#17 (audit 2026-06-12): no outfit criterion existed (the
+    glove-bleed class passed), and the judge never saw the user's own prompt
+    so swap-with-modifications jobs were false-failed and 'repaired' back."""
+    text = " ".join(swap_qc.QC_SYSTEM.split())
+    assert "WRONG OUTFIT" in text
+    assert "custom_outfit=" in text
+    assert "USER INTENT" in text
+    assert "NEVER fail a deviation the user intent clearly requests" in text
+
+
+def test_qc_passes_outfit_and_intent_to_judge(monkeypatch, tmp_path):
+    calls, _ = _wire_inspect(monkeypatch, lambda n: object())
+    verdict = swap_qc.inspect_variant(
+        scene_image=tmp_path / "s.png", character_image=tmp_path / "c.png",
+        result_image=tmp_path / "r.png",
+        outfit_text="a red hoodie",
+        user_intent="swap the person but give them sunglasses")
+    assert verdict is not None
+    (call,) = calls
+    first_text = call["messages"][0]["content"][0]["text"]
+    assert 'custom_outfit="a red hoodie"' in first_text
+    assert "USER INTENT" in first_text
+    assert "sunglasses" in first_text
+
+
+def test_qc_runner_derives_outfit_from_job_field(monkeypatch, tmp_path):
+    """The outfit flag must come from Job.outfit_mode, not just the legacy
+    prompt sniff (backlog #16)."""
+    import asyncio
+    from character_swap import runner
+    from character_swap.models import Job as J
+
+    job, jc, v = _job(tmp_path)
+    job.outfit_mode = "character"
+    job.prompt = "anything"
+    seen: dict = {}
+
+    def fake_inspect(**kw):
+        seen.update(kw)
+        return QCVerdict(True, "", "")
+    prompts: list = []
+    _stub(monkeypatch, job, [], prompts)
+    monkeypatch.setattr(runner.swap_qc, "inspect_variant", fake_inspect)
+    _run(job, jc, v)
+    assert seen["outfit_from_character"] is True
+    assert seen["user_intent"] == "anything"
+
+
 def test_qc_default_judge_is_sonnet():
     """The fine-grained scene-vs-result comparison needs the stronger vision
     model (wrong-prop images passed the Haiku judge live). Env-overridable

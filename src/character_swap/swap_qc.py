@@ -84,6 +84,12 @@ hold:
   person, never the camera geometry or how high the subject sits — if the
   new background added headroom/sky above the head that SCENE did not have,
   that is a FAIL.
+- WRONG OUTFIT: by default the person must wear the SAME clothing as the
+  person in SCENE (an identity swap keeps the scene's wardrobe). FAIL if the
+  clothing was clearly swapped to the CHARACTER reference's outfit or
+  invented — including partial bleed like gloves, hats or jackets copied
+  from the CHARACTER photo that the SCENE person does not wear. The context
+  flags below INVERT this rule when set.
 - MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
   SCENE nor CHARACTER.
 - BROKEN IMAGE: fully or mostly black/blank/censored output, heavy
@@ -112,7 +118,17 @@ Context flags you may receive:
   (WRONG BACKGROUND SYMBOL) on a defaced or incomplete rendering of such a
   symbol.
 - outfit_from_character=true: the RESULT's clothing is SUPPOSED to come from
-  CHARACTER, not SCENE. Do not fail for changed clothing.
+  CHARACTER, not SCENE. Do not fail for changed clothing — instead FAIL
+  (WRONG OUTFIT) if the clothing clearly does NOT match the CHARACTER
+  reference's outfit (e.g. the scene person's clothes were kept).
+- custom_outfit="...": the person is SUPPOSED to wear the described outfit —
+  FAIL (WRONG OUTFIT) if the clothing clearly does not match the
+  description; ignore both SCENE's and CHARACTER's wardrobe in that case.
+- USER INTENT (optional text block before the images): the user's own prompt
+  for this job. It is AUTHORITATIVE and may explicitly request deviations
+  from SCENE — different clothing, added/removed props, a changed action or
+  expression. NEVER fail a deviation the user intent clearly requests; judge
+  everything it does not mention by the normal rules above.
 
 Be decisive. Borderline-acceptable images PASS — only clear failures fail.
 When you fail, give a short concrete reason AND a one-sentence corrective
@@ -176,6 +192,8 @@ def inspect_variant(
     background_replaced: bool = False,
     background_image: Path | None = None,
     outfit_from_character: bool = False,
+    outfit_text: str | None = None,
+    user_intent: str | None = None,
     job_id: str | None = None,
 ) -> QCVerdict | None:
     """ONE cheap vision call: does the generated swap pass? None when QC is
@@ -193,8 +211,14 @@ def inspect_variant(
         from character_swap.clients import anthropic_client
         flags = (f"background_replaced={'true' if background_replaced else 'false'}, "
                  f"outfit_from_character={'true' if outfit_from_character else 'false'}")
+        if outfit_text:
+            flags += f', custom_outfit="{outfit_text[:200]}"'
+        intent_block = (
+            f"USER INTENT (authoritative — do not fail deviations it "
+            f"requests):\n{user_intent.strip()[:600]}\n\n" if user_intent
+            and user_intent.strip() else "")
         content = [
-            {"type": "text", "text": f"Context flags: {flags}\nSCENE:"},
+            {"type": "text", "text": f"{intent_block}Context flags: {flags}\nSCENE:"},
             anthropic_client._file_to_image_block(scene_image),
             {"type": "text", "text": "CHARACTER:"},
             anthropic_client._file_to_image_block(character_image),

@@ -286,8 +286,19 @@ async def _generate_one_variant(
                 # result that kept the ORIGINAL background passed QC
                 # (observed 2026-06-12, scene 1 of re_10fe66db8b).
                 background_image=extra_ref,
-                outfit_from_character=bool(job.prompt and
-                                           "own outfit from Image 2" in job.prompt),
+                # Primary signal is the job's outfit_mode field; the prompt
+                # sniff survives only for legacy jobs created before the
+                # field existed (backlog #16 — the sniff alone was fragile).
+                outfit_from_character=(
+                    job.outfit_mode == "character"
+                    or bool(job.prompt
+                            and "own outfit from Image 2" in job.prompt)),
+                outfit_text=(job.outfit_text
+                             if job.outfit_mode == "custom" else None),
+                # The user's own prompt may request deviations from the
+                # scene (backlog #17): without it the judge false-failed
+                # swap-with-modifications jobs and 'repaired' them back.
+                user_intent=job.prompt,
                 job_id=job.job_id,
             )
             if verdict is None:
