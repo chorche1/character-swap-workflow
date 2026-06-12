@@ -900,6 +900,47 @@ def _assemble_settings(state: dict) -> dict:
     return cfg
 
 
+# Coverage-wait knobs for assembly (2026-06-12, re_57266cfec0): the video
+# watcher fired while scene 5's clip was still finishing — the final shipped
+# with 5/6 scenes and NO hint. Collection now waits (bounded) for every
+# approved scene's clip, and anything still missing becomes a loud warning.
+_ASSEMBLE_COVERAGE_WAIT_SECS = 120.0
+_ASSEMBLE_COVERAGE_POLL_SECS = 5.0
+
+
+def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str], bool]:
+    """(clips, missing, waitable) for one character, in state-scene order.
+
+    A scene is EXPECTED when the character has an approved variant for it.
+    `missing` names expected scenes without a DONE clip on disk; `waitable`
+    is True when at least one missing scene's clip is plausibly still
+    coming (row in flight, or no row yet — rows can lag), so the caller may
+    poll again instead of building an incomplete final."""
+    clips: list[Path] = []
+    missing: list[str] = []
+    waitable = False
+    for e in state["scenes"]:
+        vid_variant = _approved_variant_for(jc, e["scene_id"])
+        if vid_variant is None:
+            continue                      # never animated — not expected
+        video = next((vv for vv in jc.videos
+                      if vv.status == VideoStatus.DONE
+                      and vv.source_variant_id == vid_variant
+                      and vv.final_video_path
+                      and Path(vv.final_video_path).exists()), None)
+        if video is not None:
+            clips.append(Path(video.final_video_path))
+            continue
+        missing.append(f"scen {e['idx'] + 1}")
+        rows = [vv for vv in jc.videos
+                if vv.source_variant_id == vid_variant]
+        if not rows or any(vv.status in {VideoStatus.PENDING,
+                                         VideoStatus.PROCESSING}
+                           for vv in rows):
+            waitable = True
+    return clips, missing, waitable
+
+
 async def _do_assemble(re_id: str, state: dict) -> None:
     _update(re_id, status="assembling")
     job = store().get_job(state["job_id"])
@@ -915,19 +956,34 @@ async def _do_assemble(re_id: str, state: dict) -> None:
             # original scene duration chopped Kling's spoken lines mid-word
             # (scenes are often 1-2s where the line takes 5-10s) — pacing is
             # tightened by the Editor pass cutting SILENCE instead.
-            clips: list[Path] = []
-            for e in state["scenes"]:
-                vid_variant = _approved_variant_for(jc, e["scene_id"])
-                video = next((vv for vv in jc.videos
-                              if vv.status == VideoStatus.DONE
-                              and vv.source_variant_id == vid_variant
-                              and vv.final_video_path
-                              and Path(vv.final_video_path).exists()), None)
-                if video is not None:
-                    clips.append(Path(video.final_video_path))
+            # COVERAGE WAIT (2026-06-12): never build while an approved
+            # scene's clip is plausibly still finishing — re_57266cfec0
+            # shipped a 5/6-scene final because the watcher fired 3s early.
+            deadline = (asyncio.get_event_loop().time()
+                        + _ASSEMBLE_COVERAGE_WAIT_SECS)
+            jc_now = jc
+            while True:
+                clips, missing, waitable = _collect_clips(state, jc_now)
+                if (not missing or not waitable
+                        or asyncio.get_event_loop().time() > deadline):
+                    break
+                _log.info("reengineer %s %s: waiting for clip(s) still "
+                          "finishing: %s", re_id, cid, ", ".join(missing))
+                await asyncio.sleep(_ASSEMBLE_COVERAGE_POLL_SECS)
+                fresh_job = store().get_job(state["job_id"])
+                if fresh_job is not None and cid in fresh_job.characters:
+                    jc_now = fresh_job.characters[cid]
             if not clips:
                 finals[cid] = {"status": "failed", "error": "no finished clips"}
                 return
+            coverage_warning = None
+            if missing:
+                coverage_warning = ("finalen saknar " + str(len(missing))
+                                    + " scen(er): " + ", ".join(missing)
+                                    + " — inget färdigt klipp; ta om scenen "
+                                    + "och bygg ihop igen")
+                _log.error("reengineer %s %s: %s", re_id, cid,
+                           coverage_warning)
 
             # One editor edit_id per character so the result also shows up
             # in the Editor tab (re-render captions etc. without re-billing).
@@ -940,7 +996,8 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 
             # Non-fatal step failures (caption render is the known one) must
             # be LOUD: logged + surfaced on the final's card via finals[cid].
-            warnings: list[str] = []
+            warnings: list[str] = ([coverage_warning] if coverage_warning
+                                   else [])
 
             async def _warn(message: str) -> None:
                 _log.warning("reengineer %s %s: %s", re_id, cid, message)
