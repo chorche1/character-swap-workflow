@@ -453,6 +453,15 @@ def direct_movement(
     if not scenes:
         return None
 
+    # Backlog #28 (2026-06-12): the payload was unbounded — the scene ref
+    # plus EVERY approved variant per scene; 64% of director_movement calls
+    # died with RequestTooLargeError on multi-character jobs. The prompt is
+    # per-SCENE, so ONE approved variant per scene (the actual start frame)
+    # carries all the signal; a global image budget keeps big runs inside
+    # the API limits, shedding variant images before scene refs.
+    _MAX_IMAGES = 60
+    n_images = 0
+    n_dropped = 0
     content: list[dict] = [
         {"type": "text", "text": "USER PROMPT PER SCENE:"},
     ]
@@ -462,24 +471,35 @@ def direct_movement(
         # The scene reference (starting composition).
         try:
             content.append(anthropic_client._file_to_image_block(scene_path))
+            n_images += 1
         except Exception as e:
             logger.warning("director_movement: failed to encode scene %s: %s",
                            scene_id, e)
             return None
-        # Each approved variant (what the video model will actually start from).
-        for ap in approved_paths or []:
+        # ONE approved variant — what the video model will actually start
+        # from. The rest are near-duplicates for a per-scene prompt.
+        kept = list(approved_paths or [])[:1]
+        n_dropped += max(0, len(approved_paths or []) - len(kept))
+        if n_images + len(scenes) - 1 >= _MAX_IMAGES:
+            n_dropped += len(kept)
+            kept = []
+        for ap in kept:
             content.append({
                 "type": "text",
                 "text": f"approved variant for scene {scene_id} (this is the actual start frame):",
             })
             try:
                 content.append(anthropic_client._file_to_image_block(ap))
+                n_images += 1
             except Exception as e:
                 logger.warning(
                     "director_movement: failed to encode approved variant for %s: %s",
                     scene_id, e,
                 )
                 return None
+    if n_dropped:
+        logger.info("director_movement: payload capped — %d images sent, "
+                    "%d approved-variant images dropped", n_images, n_dropped)
 
     content.append({
         "type": "text",
