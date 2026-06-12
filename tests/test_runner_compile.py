@@ -206,9 +206,14 @@ def test_compile_persists_missing_scene_warning(monkeypatch, tmp_path):
     monkeypatch.setattr(runner_compile, "_emit", fake_emit)
 
     final = tmp_path / "result.mp4"; final.write_text("final")
+    job.movement_prompts = {"sc1": 'The person says, in a calm tone: '
+                                   '"hello there" while smiling',
+                            "sc2": 'He says: "second line"'}
 
     async def fake_pipeline(paths, **kw):
         assert paths == [v1]                       # only the existing scene
+        # Backlog #20: known dialogue rides along as the Whisper bias hint.
+        assert kw["script_hint"] == "hello there second line"
         return runner_compile.EditorResult(final=final, voice_applied=False)
     monkeypatch.setattr(runner_compile, "run_editor_pipeline", fake_pipeline)
 

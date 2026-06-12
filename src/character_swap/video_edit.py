@@ -635,11 +635,18 @@ def _extract_audio(video_path: Path) -> Path:
     return audio_path
 
 
-def transcribe_words(video_path: Path, *, job_id: str | None = None) -> list[Word]:
+def transcribe_words(video_path: Path, *, job_id: str | None = None,
+                     script_hint: str | None = None) -> list[Word]:
     """Run OpenAI Whisper on the video's audio. Returns word-level timestamps.
 
     Uses `whisper-1` (current OpenAI Whisper API model) with
     response_format=verbose_json + timestamp_granularities=['word'].
+
+    `script_hint` (backlog #20, 2026-06-12): when the EXACT spoken script is
+    already known (Reengineer dialogue, Step-6 movement-prompt lines), it is
+    passed as Whisper's `prompt` so the transcription is biased toward the
+    real wording — mis-hearings used to be burned into captions verbatim.
+    Whisper only reads the prompt's final ~224 tokens, hence the char cap.
 
     Returns `[]` (empty word list) for video-only inputs with no audio track
     — Higgsfield Supercomputer clips are typically silent. Callers that fan
@@ -650,6 +657,9 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None) -> list[Wor
         return []
     audio_path = _extract_audio(video_path)
     client = openai_image._client()  # reuses settings.openai_api_key + auth
+    extra: dict = {}
+    if script_hint and script_hint.strip():
+        extra["prompt"] = script_hint.strip()[-800:]
     with record(phase="editor_transcribe", model="whisper-1",
                 character="editor", job_id=job_id):
         with audio_path.open("rb") as f:
@@ -658,6 +668,7 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None) -> list[Wor
                 file=f,
                 response_format="verbose_json",
                 timestamp_granularities=["word"],
+                **extra,
             )
     # The SDK returns an object; words live on `result.words` (list of dicts).
     words: list[Word] = []

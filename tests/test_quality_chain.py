@@ -344,6 +344,42 @@ def test_assemble_clips_collapses_interior_pause_only_when_enabled(tmp_path):
     assert d_off - d_on == pytest.approx(1.5, abs=0.5)  # pause cut when ON
 
 
+def test_transcribe_words_passes_script_hint(tmp_path, monkeypatch):
+    """Backlog #20: when the exact dialogue is known it rides as Whisper's
+    `prompt` (last 800 chars), biasing transcription toward the real wording
+    instead of burning mis-hearings into captions."""
+    monkeypatch.setattr(video_edit, "_has_audio_stream", lambda p: True)
+    audio = tmp_path / "a.wav"
+
+    def fake_extract(p):
+        audio.write_bytes(b"RIFF")     # recreate — the real path is cleaned up
+        return audio
+    monkeypatch.setattr(video_edit, "_extract_audio", fake_extract)
+    captured: dict = {}
+
+    class FakeTranscriptions:
+        def create(self, **kw):
+            captured.update(kw)
+            return type("R", (), {"words": []})()
+
+    class FakeClient:
+        audio = type("A", (), {"transcriptions": FakeTranscriptions()})()
+    monkeypatch.setattr(video_edit.openai_image, "_client",
+                        lambda: FakeClient())
+
+    video_edit.transcribe_words(tmp_path / "v.mp4",
+                                script_hint="  mix the apple cider vinegar ")
+    assert captured["prompt"] == "mix the apple cider vinegar"
+
+    captured.clear()
+    video_edit.transcribe_words(tmp_path / "v.mp4", script_hint="x" * 2000)
+    assert len(captured["prompt"]) == 800          # last-800-chars cap
+
+    captured.clear()
+    video_edit.transcribe_words(tmp_path / "v.mp4")
+    assert "prompt" not in captured                # no hint → unchanged call
+
+
 def test_run_editor_pipeline_falls_back_to_legacy_chain(tmp_path, monkeypatch):
     """If the combined pass blows up, the proven 3-step chain still builds
     the video — reliability first."""

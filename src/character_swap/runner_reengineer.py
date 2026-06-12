@@ -650,14 +650,18 @@ _DIALOGUE_RE = re.compile(r'says[^"“”]{0,160}?["“]([^"”]+)["”]',
                           re.IGNORECASE)
 
 
-def _speech_secs(entry: dict) -> float:
-    """Seconds Kling needs to comfortably SAY the scene's dialogue. Source:
-    the motion prompt's `The person says: "..."` clause(s) — the text the
-    user sees and edits at the gate — falling back to the analyst's verbatim
-    `speech` field. No dialogue → 0."""
+def _spoken_text(entry: dict) -> str:
+    """The scene's dialogue: the motion prompt's says-clause(s) — the text
+    the user sees and edits at the gate — falling back to the analyst's
+    verbatim `speech` field."""
     texts = _DIALOGUE_RE.findall(entry.get("motion_prompt") or "")
-    spoken = " ".join(texts).strip() or (entry.get("speech") or "").strip()
-    words = len(spoken.split())
+    return " ".join(texts).strip() or (entry.get("speech") or "").strip()
+
+
+def _speech_secs(entry: dict) -> float:
+    """Seconds Kling needs to comfortably SAY the scene's dialogue.
+    No dialogue → 0."""
+    words = len(_spoken_text(entry).split())
     if not words:
         return 0.0
     return words / _SPEECH_WORDS_PER_SEC + _SPEECH_MARGIN_SECS
@@ -871,6 +875,13 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 _log.warning("reengineer %s %s: %s", re_id, cid, message)
                 warnings.append(message)
 
+            # The exact dialogue is KNOWN (gate-approved says-clauses in
+            # scene order) — bias Whisper toward it so captions stop
+            # burning in mis-hearings (backlog #20).
+            script_hint = " ".join(
+                t for t in (_spoken_text(e)
+                            for e in state.get("scenes") or []) if t) or None
+
             result = await runner_compile.run_editor_pipeline(
                 clips,
                 edit_id=edit_id, edit_dir=edit_dir,
@@ -884,6 +895,7 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 pad_secs=cfg["pad_secs"],
                 voice_id=voice_id,
                 warn=_warn,
+                script_hint=script_hint,
             )
             final = run_dir / f"final_{cid}.mp4"
             await asyncio.to_thread(shutil.copyfile, result.final, final)

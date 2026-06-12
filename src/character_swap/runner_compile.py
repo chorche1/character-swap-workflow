@@ -144,6 +144,7 @@ async def run_editor_pipeline(
     voice_id: str | None,
     enable_transcribe: bool = True,
     warn=None,
+    script_hint: str | None = None,
 ) -> EditorResult:
     """Concat + Editor finishing, shared by the Step-6 compile and the
     Reengineer assemble: per-clip audio-onset trim → concat → interior
@@ -275,6 +276,7 @@ async def run_editor_pipeline(
         try:
             words = await asyncio.to_thread(
                 video_edit.transcribe_words, current, job_id=edit_id,
+                script_hint=script_hint,
             )
         except Exception:
             words = []
@@ -428,6 +430,17 @@ async def _compile_one_character(
             await _emit(job_id, "char.compile_warning",
                         char_id=char_id, message=message)
 
+        # Known dialogue from the movement prompts' says-clauses (in scene
+        # order) biases Whisper toward the real wording (backlog #20).
+        # Lazy import: runner_reengineer imports this module at top level.
+        from character_swap.runner_reengineer import _DIALOGUE_RE
+        spoken_parts: list[str] = []
+        for sid in (job.scene_ids or [job.scene_id]):
+            prompt_text = (job.movement_prompts or {}).get(sid) or ""
+            spoken_parts += _DIALOGUE_RE.findall(prompt_text)
+        script_hint = " ".join(t.strip() for t in spoken_parts
+                               if t.strip()) or None
+
         result = await run_editor_pipeline(
             paths,
             edit_id=edit_id, edit_dir=edit_dir,
@@ -437,6 +450,7 @@ async def _compile_one_character(
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
             pad_secs=pad_secs, voice_id=effective_voice_id,
             enable_transcribe=enable_transcribe, warn=_warn,
+            script_hint=script_hint,
         )
 
         # Copy the final result to the canonical per-character location so
