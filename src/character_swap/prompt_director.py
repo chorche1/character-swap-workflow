@@ -260,7 +260,9 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   the final image looks like a completely ordinary, unedited iPhone photo taken
   quickly by another person — NOT staged, composed, retouched, filtered, color
   corrected, or professionally lit. Plain, slightly dull phone-camera colors,
-  neutral white balance, no warm tint. Mundane natural daylight with slightly
+  neutral white balance, no warm tint. Mundane everyday light AS THE SCENE
+  ACTUALLY HAS IT — window daylight, indoor lamps, or a dim evening mix; never
+  invent daylight for an indoor or evening scene — with slightly
   uneven exposure, mild softness, subtle sensor noise, ordinary shadows, and
   small background distractions. Do not beautify, and do not perfectly center
   or symmetrize. It should look like a normal photo from someone's camera roll,
@@ -270,7 +272,8 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   polished skin.
 - INTEGRATION (so the character NEVER looks pasted in — this is the difference
   between a believable swap and an obvious cutout): relight the inserted person
-  with the scene's OWN plain ambient daylight — match its direction, softness,
+  with the scene's OWN plain ambient light, whatever it actually is (daylight,
+  lamp light, evening mix) — match its direction, softness,
   and intensity, and discard the lighting baked into the character photo. Match
   the scene's plain, neutral white balance on their skin and clothing. Add
   ordinary contact shadows + ambient occlusion where they touch surfaces. Blend
