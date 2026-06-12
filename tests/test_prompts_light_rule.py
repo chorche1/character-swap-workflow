@@ -28,8 +28,47 @@ def test_swap_director_system_does_not_mandate_daylight():
     text = _flat(prompt_director.SWAP_DIRECTOR_SYSTEM)
     for m in _MANDATES:
         assert m not in text, m
-    assert "as the scene actually has it" in text
-    assert "whatever it actually is" in text
+    assert "actual light source" in text
+
+
+def test_swap_director_budget_boilerplate_appended_in_code():
+    """Backlog #33: the system used to demand ~250 words of style/
+    integration/negative boilerplate INSIDE every variant prompt, crowding
+    out scene-specific anchors. Boilerplate now ships via code-appended
+    clauses; the agent is told not to write it and gets a ~120-word budget
+    for pure scene content."""
+    text = _flat(prompt_director.SWAP_DIRECTOR_SYSTEM)
+    assert "do not write it" in text
+    assert "appended to every prompt automatically" in text
+    assert "~120 words of pure scene-specific content" in text
+    assert "every prompt must specify that" not in text
+    flat_avoid = _flat(prompt_director.SWAP_AVOID_CLAUSE)
+    assert "pasted-in / cutout" in flat_avoid
+    assert "identity bleed" in flat_avoid
+
+
+def test_direct_swap_appends_style_clauses(monkeypatch, tmp_path):
+    from character_swap.clients import anthropic_client
+
+    payload = {"intent": "swap", "characters": [
+        {"char_id": "c1", "name": "A", "scenes": [
+            {"scene_id": "s1", "variants": [
+                {"variant_index": 0, "prompt": "Scene-specific anchors."}]}]}]}
+    monkeypatch.setattr(anthropic_client, "messages_with_tools",
+                        lambda **kw: object())
+    monkeypatch.setattr(anthropic_client, "extract_tool_call",
+                        lambda resp, name: payload)
+    monkeypatch.setattr(anthropic_client, "_file_to_image_block",
+                        lambda p: {"type": "text", "text": str(p)})
+
+    plan = prompt_director.direct_swap(
+        user_prompt="x", characters=[("c1", "A", tmp_path / "c.png")],
+        scenes=[("s1", tmp_path / "s.png")], images_per_character=1)
+    assert plan is not None
+    (p,) = plan.lookup("c1", "s1")
+    assert p.startswith("Scene-specific anchors.")
+    assert "ordinary, unedited iPhone photo" in p     # ORGANIC_STYLE_CLAUSE
+    assert "Avoid: a pasted-in / cutout" in p         # SWAP_AVOID_CLAUSE
 
 
 def test_generation_prompt_does_not_mandate_daylight():

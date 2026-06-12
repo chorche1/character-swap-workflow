@@ -256,47 +256,18 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
 - FRAMING & POSE ANCHOR: match the scene's shot type, camera angle, subject-
   to-camera distance, crop, head-room, eye-line, and hand positions EXACTLY.
   No zoom, no focal-length skew.
-- OVERALL LOOK — ORDINARY UNEDITED PHONE PHOTO: every prompt MUST specify that
-  the final image looks like a completely ordinary, unedited iPhone photo taken
-  quickly by another person — NOT staged, composed, retouched, filtered, color
-  corrected, or professionally lit. Plain, slightly dull phone-camera colors,
-  neutral white balance, no warm tint. Mundane everyday light AS THE SCENE
-  ACTUALLY HAS IT — window daylight, indoor lamps, or a dim evening mix; never
-  invent daylight for an indoor or evening scene — with slightly
-  uneven exposure, mild softness, subtle sensor noise, ordinary shadows, and
-  small background distractions. Do not beautify, and do not perfectly center
-  or symmetrize. It should look like a normal photo from someone's camera roll,
-  not an advertisement or a professionally edited social-media image. Explicitly
-  forbid: golden tones, cinematic contrast, dramatic shadows, rich saturation,
-  glossy highlights, crisp commercial sharpness, HDR, enhanced clarity, and
-  polished skin.
-- INTEGRATION (so the character NEVER looks pasted in — this is the difference
-  between a believable swap and an obvious cutout): relight the inserted person
-  with the scene's OWN plain ambient light, whatever it actually is (daylight,
-  lamp light, evening mix) — match its direction, softness,
-  and intensity, and discard the lighting baked into the character photo. Match
-  the scene's plain, neutral white balance on their skin and clothing. Add
-  ordinary contact shadows + ambient occlusion where they touch surfaces. Blend
-  edges (no cutout halo or fringe). Match the scene's softness, sensor noise,
-  and grain so the subject isn't crisper or cleaner than the background. Keep
-  the lighting unremarkable and consistent with the rest of the frame —
-  EVERYTHING must look like the same ordinary snapshot, not like the person was
-  pasted in. Do NOT add rim / edge lights, glamour lighting, color grading, or
-  any cinematic relighting.
+- SCENE LIGHT, IN A FEW WORDS: name the scene's ACTUAL light source and
+  direction ("lit by the window on the left", "dim warm ceiling lamp") so the
+  inserted person is relit by it. Nothing more — no style or grading language.
+- STYLE & INTEGRATION — DO NOT WRITE IT: a fixed organic phone-photo style +
+  integration + "Avoid:" clause is appended to every prompt automatically in
+  code (ordinary unedited phone photo, scene-light relighting, contact
+  shadows, no cutout look, the full negative list). NEVER restate or
+  paraphrase any of it — every word you spend there is a word stolen from
+  the scene-specific anchors above, and the appended clause cannot be
+  paraphrased away.
 - NO BURNT-IN TEXT: instruct removal of any captions, subtitles, progress bars,
   logos, or watermarks present in the source image.
-- INLINE NEGATIVES: end each prompt with a short "Avoid:" clause listing the
-  failure modes to exclude — a pasted-in / cutout / collage look, the subject
-  floating with no shadow, lighting that doesn't match the scene, the subject
-  sharper or cleaner than the background, professional / studio / glamour
-  lighting, cinematic contrast, dramatic shadows, HDR, color grading, warm or
-  golden tint, oversaturation, glossy highlights, crisp commercial sharpness,
-  enhanced clarity, retouching, beautification, polished skin, shallow depth of
-  field / portrait-mode blur, identity bleed from the original subject, extra or
-  distorted fingers, warped facial features, changed/restyled background, altered
-  prop counts, props changing state, misspelled labels, captions, subtitles,
-  watermarks, cartoon/illustration look — plus anything scene-specific you can
-  see.
 
 PRESERVE every verbatim user constraint WORD-FOR-WORD: exact phrases ("exact
 same pose"), hex codes (#FFD400), brand names (Pumpkin Oil), exact text
@@ -310,8 +281,10 @@ lighting, expression, and micro-framing within the scene's constraints — NEVER
 the identity, props, or background. Variant 0 is the safest by-the-book pass;
 later variants may be marginally more interpretive.
 
-Each prompt should be specific and vivid — roughly 120–200 words is fine given
-the enforcement sections. Never generic.
+Each prompt: at most ~120 words of pure scene-specific content (identity
+override, secondary people, props, background lock, clothing, framing/pose,
+scene light). Specific and vivid, never generic — the style boilerplate is
+not your job.
 
 REFERENCE IMAGE ORDER (as you will see them):
 1. SCENES first, each labeled "SCENE <scene_id>".
@@ -449,6 +422,15 @@ def direct_swap(
     except ValidationError as e:
         logger.warning("director_swap: validation failed: %s", e)
         return None
+    # Style/integration/negatives are appended HERE, in code — never
+    # delegated to the agent (backlog #33: ~250 words of boilerplate were
+    # demanded inside every variant prompt, crowding out the scene-specific
+    # anchors; an appended clause also cannot be paraphrased away).
+    for c in plan.characters:
+        for sc_plan in c.scenes:
+            for v in sc_plan.variants:
+                v.prompt = (v.prompt.strip() + ORGANIC_STYLE_CLAUSE
+                            + SWAP_AVOID_CLAUSE)
     plan.prompt_version = prompt_fingerprint()
     return plan
 
@@ -630,6 +612,22 @@ ORGANIC_STYLE_CLAUSE = (
     "Not staged, not professional: no studio lighting, no soft flattering "
     "key light, no cinematic grading, no glossy highlights, no retouching, "
     "no portrait-mode blur."
+)
+
+# The full inline negative list for direct_swap plans (the image engines
+# have no separate negative-prompt field). Appended in code after
+# ORGANIC_STYLE_CLAUSE — backlog #33.
+SWAP_AVOID_CLAUSE = (
+    " Avoid: a pasted-in / cutout / collage look, the subject floating with "
+    "no contact shadow, lighting that doesn't match the scene, the subject "
+    "sharper or cleaner than the background, professional / studio / glamour "
+    "lighting, cinematic contrast, dramatic shadows, HDR, color grading, "
+    "warm or golden tint, oversaturation, glossy highlights, enhanced "
+    "clarity, retouching, polished skin, portrait-mode blur, identity bleed "
+    "from the original subject, extra or distorted fingers, warped facial "
+    "features, changed/restyled background, altered prop counts, props "
+    "changing state, misspelled labels, captions, subtitles, watermarks, "
+    "cartoon/illustration look."
 )
 
 REENGINEER_SWAP_TOOL: dict[str, Any] = {
