@@ -237,6 +237,41 @@ def test_assemble_loudnorm_disabled_keeps_audio_untouched(tmp_path, monkeypatch)
     assert calls == []                  # opt-out: no analysis, no gain
 
 
+def _fps(p: Path) -> float:
+    # r_frame_rate = the stream's DECLARED rate (what the fps filter set);
+    # avg_frame_rate is frames/duration and dips below it on trimmed clips.
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=r_frame_rate",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+        check=True, capture_output=True, text=True).stdout.strip()
+    num, _, den = out.partition("/")
+    return float(num) / float(den or "1")
+
+
+def test_assemble_keeps_native_fps(tmp_path):
+    """Backlog #19: fps was hardcoded to 30 — an all-24fps Kling set got
+    ~20% duplicated frames (judder). An all-equal input set must pass
+    through at its native rate (test clips are synthesized at 12 fps)."""
+    c1 = _clip(tmp_path / "a.mp4", tone_secs=1.0)
+    c2 = _clip(tmp_path / "b.mp4", tone_secs=1.0)
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([c1, c2], out, enable_interior_trim=False)
+    assert _fps(out) == pytest.approx(12.0, abs=0.1)
+
+
+def test_assemble_mixed_fps_uses_highest(tmp_path):
+    c1 = _clip(tmp_path / "a.mp4", tone_secs=1.0)          # 12 fps
+    c2_src = _clip(tmp_path / "b_src.mp4", tone_secs=1.0)
+    c2 = tmp_path / "b.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-y", "-i", str(c2_src),
+                    "-r", "24", "-c:a", "copy", str(c2)],
+                   check=True, capture_output=True)
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([c1, c2], out, enable_interior_trim=False)
+    assert _fps(out) == pytest.approx(24.0, abs=0.1)
+
+
 def test_assemble_clips_raises_on_probe_failure(tmp_path, monkeypatch):
     """REGRESSION (review 2026-06-12): a failed duration probe (0.0 sentinel)
     must RAISE — engaging run_editor_pipeline's legacy fallback — never

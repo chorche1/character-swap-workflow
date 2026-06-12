@@ -301,6 +301,30 @@ def _clip_gain_db(input_i: float, input_tp: float, target_i: float,
     return max(-max_gain, min(max_gain, gain))
 
 
+def _probe_fps(input_path: Path) -> float | None:
+    """Average frame rate of the first video stream, or None when probing
+    fails. Parses ffprobe's rational form ('24/1', '2997/100')."""
+    probe = _ffprobe()
+    if not probe:
+        return None
+    try:
+        proc = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(input_path)],
+            capture_output=True, text=True, check=False)
+        raw = (proc.stdout or "").strip().splitlines()
+        if proc.returncode != 0 or not raw:
+            return None
+        num_s, _, den_s = raw[0].partition("/")
+        num, den = float(num_s), float(den_s or "1")
+        if num <= 0 or den <= 0:
+            return None
+        return num / den
+    except (ValueError, OSError):
+        return None
+
+
 def _detect_silences(input_path: Path, threshold_db: float = -30.0,
                      min_silence_secs: float = 0.4) -> list[tuple[float, float]]:
     """Return a list of (start, end) silent intervals in seconds."""
@@ -1811,6 +1835,15 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                        "anullsrc=channel_layout=stereo:sample_rate=44100"]
 
         target_w, target_h = _target_resolution(aspect_ratio)
+        # Backlog #19 (2026-06-12): fps was hardcoded to 30, so an all-24fps
+        # Kling set got ~20% duplicated frames (visible judder). The concat
+        # still needs ONE uniform rate — use the highest measured input rate
+        # (a minority-low-fps clip gets dups either way; an all-equal set
+        # passes through at its native rate). Probe failure → legacy 30.
+        measured_fps = [f for f in (_probe_fps(p) for p in video_paths) if f]
+        fps_target = max(10.0, min(60.0, max(measured_fps))) if measured_fps else 30.0
+        entry["fps"] = round(fps_target, 3)
+
         parts: list[str] = []
         seg_labels: list[str] = []
         for i, keep in enumerate(keeps):
@@ -1820,7 +1853,7 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                     f"[{i}:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS,"
                     f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
                     f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-                    f"setsar=1,fps=30,format=yuv420p[{vlab}]"
+                    f"setsar=1,fps={fps_target:g},format=yuv420p[{vlab}]"
                 )
                 if any_audio:
                     if has_audio_flags[i]:
