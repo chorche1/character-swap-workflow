@@ -195,19 +195,27 @@ class ScenePlan:
 
 REENGINEER_ANALYST_SYSTEM = """\
 You are a video reverse-engineer for a character-swap pipeline. You see, for
-each SCENE of a reference UGC-style video: the scene's representative frame
-and the words spoken during that scene (from Whisper). The original person in
-every frame will be REPLACED by a different person, and each frame will then
-be animated into a clip by an image-to-video model (Kling v3) that also
-generates NATIVE AUDIO — including the person's voice when the prompt contains
-dialogue.
+each SCENE of a reference UGC-style video: THREE frames in chronological
+order (early → middle → late in the scene) and the words spoken during that
+scene (from Whisper). The original person in every frame will be REPLACED by
+a different person, and the scene's MIDDLE frame will then be animated into
+a clip by an image-to-video model (Kling v3) that also generates NATIVE
+AUDIO — including the person's voice when the prompt contains dialogue.
 
 For EVERY scene, write:
 1. motion_prompt — an imperative direction for the video model describing
-   what happens in the original clip: the subject's action and gesture, any
-   object interaction, and the camera behavior (static / hand-held wobble /
-   slow push-in). Stay true to the ORIGINAL footage — same action, same
-   energy. The clip must look like ordinary hand-held UGC phone footage, NOT
+   what happens in the original clip. THE ACTION IS THE MOST IMPORTANT PART:
+   compare the three frames and describe the PHYSICAL ACTION that unfolds
+   across them — what the hands do, what object moves where, and the
+   direction of the movement (pours X over Y, lifts X toward Y, drops X
+   into Y, tilts/stirs/presses). The generated clip's motion must line up
+   EXACTLY with the original footage, so never reduce a dynamic action to a
+   static pose: if the frames show a pour in progress or completed residue
+   (foam, fizz, spilled powder), the prompt must contain the pouring action
+   itself, not just "holds/displays the result". Also include the gesture
+   energy and the camera behavior (static / hand-held wobble / slow
+   push-in). Stay true to the ORIGINAL footage — same action, same energy.
+   The clip must look like ordinary hand-held UGC phone footage, NOT
    cinematic. Do not describe the person's appearance (they are being
    replaced); refer to them as "the person". If the scene has dialogue,
    include it VERBATIM as: The person says: "<dialogue>" — with natural
@@ -220,7 +228,7 @@ For EVERY scene, write:
 Rules:
 - Use the spoken words EXACTLY as transcribed; do not paraphrase dialogue.
 - Keep motion_prompt under 120 words.
-- Never add scene elements that are not visible in the frame.
+- Never add scene elements that are not visible in the frames.
 - The voice should match the demographic of the REPLACEMENT character, so
   describe the voice generically ("a natural middle-aged male voice" style
   hints belong to the pipeline, not you) — just mark the dialogue.
@@ -262,22 +270,38 @@ def analyze_scenes(
     spans: list[tuple[float, float]],
     words: list[Word],
     re_id: str,
+    motion_frames: list[list[Path]] | None = None,
 ) -> list[ScenePlan] | None:
     """ONE Claude vision call: per-scene motion+speech plan. None on any
-    failure — the caller falls back to transcript-derived prompts."""
+    failure — the caller falls back to transcript-derived prompts.
+
+    `motion_frames` (one chronological [early, mid, late] list per scene)
+    lets the analyst SEE the action unfold — a single frame collapsed
+    dynamic actions ("pours baking soda over the kiwis") into static poses
+    ("holds kiwis"), and the generated clip's motion then didn't line up
+    with the original (Hugo 2026-06-12). Falls back to the single
+    representative frame per scene when omitted."""
     try:
         from character_swap.clients import anthropic_client
         content: list[dict] = [
             {"type": "text",
              "text": f"Reference video, {len(frames)} scenes. For each scene you "
-                     "get the representative frame and the transcript span."},
+                     "get chronological frames and the transcript span."},
         ]
         for i, (frame, (a, b)) in enumerate(zip(frames, spans)):
             spoken = words_in_span(words, a, b)
             content.append({"type": "text",
                             "text": f"SCENE {i} [{a:.1f}s – {b:.1f}s] spoken: "
                                     f"{spoken or '(silent)'}"})
-            content.append(anthropic_client._file_to_image_block(frame))
+            triplet = (motion_frames[i]
+                       if motion_frames and i < len(motion_frames)
+                       and motion_frames[i] else [frame])
+            labels = (["early:", "middle:", "late:"]
+                      if len(triplet) > 1 else [""])
+            for label, fp in zip(labels, triplet):
+                if label:
+                    content.append({"type": "text", "text": label})
+                content.append(anthropic_client._file_to_image_block(fp))
         resp = anthropic_client.messages_with_tools(
             system=REENGINEER_ANALYST_SYSTEM,
             messages=[{"role": "user", "content": content}],

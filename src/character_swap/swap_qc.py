@@ -67,7 +67,13 @@ Context flags you may receive:
 - background_replaced=true: the RESULT's environment is SUPPOSED to differ
   from SCENE (a replacement background was requested). Do NOT fail for a
   changed background; still require the pose/props from SCENE and identity
-  from CHARACTER, and lighting consistent with the NEW environment.
+  from CHARACTER, and lighting consistent with the NEW environment. When you
+  ALSO receive a BACKGROUND image: that is the requested replacement
+  environment — FAIL (WRONG BACKGROUND) if RESULT's surroundings clearly
+  show SCENE's original environment instead of BACKGROUND's (the original
+  location/walls/buildings were kept), or an unrelated third environment
+  matching neither. RESULT does not need to be a pixel match of BACKGROUND —
+  same recognizable location/setting type and light is a PASS.
 - outfit_from_character=true: the RESULT's clothing is SUPPOSED to come from
   CHARACTER, not SCENE. Do not fail for changed clothing.
 
@@ -131,12 +137,18 @@ def inspect_variant(
     character_image: Path,
     result_image: Path,
     background_replaced: bool = False,
+    background_image: Path | None = None,
     outfit_from_character: bool = False,
     job_id: str | None = None,
 ) -> QCVerdict | None:
     """ONE cheap vision call: does the generated swap pass? None when QC is
     unavailable (no key / SDK / API error / bad response) — callers treat
-    None as 'skip QC', never as a failure."""
+    None as 'skip QC', never as a failure.
+
+    `background_image`: the requested replacement environment. Without it
+    the judge can only IGNORE background changes — it cannot catch the
+    observed 2026-06-12 failure where the ORIGINAL scene background was kept
+    despite a replacement being requested (that image PASSED QC)."""
     from character_swap.config import settings
     if not settings.swap_qc_enabled or not settings.anthropic_api_key:
         return None
@@ -149,6 +161,14 @@ def inspect_variant(
             anthropic_client._file_to_image_block(scene_image),
             {"type": "text", "text": "CHARACTER:"},
             anthropic_client._file_to_image_block(character_image),
+        ]
+        if background_replaced and background_image is not None:
+            content += [
+                {"type": "text",
+                 "text": "BACKGROUND (the requested replacement environment):"},
+                anthropic_client._file_to_image_block(background_image),
+            ]
+        content += [
             {"type": "text", "text": "RESULT (inspect this):"},
             anthropic_client._file_to_image_block(result_image),
         ]

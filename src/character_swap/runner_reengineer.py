@@ -289,17 +289,32 @@ async def _analyze(re_id: str, state: dict, source: Path,
             video_edit.transcribe_words, source, job_id=re_id))
 
     # --- frames (bounded parallel ffmpeg extracts) -------------------------
+    # Per scene: the MID frame stays the canonical scene asset (swap input),
+    # but the analyst ALSO gets an early + late frame so it can see the
+    # scene's MOTION — a single frame reduced "pours baking soda over the
+    # kiwis" to a static "holds kiwis" prompt (Hugo 2026-06-12: the motions
+    # must line up exactly with the original).
     frame_sem = asyncio.Semaphore(4)
 
-    async def _extract(i: int, a: float, b: float) -> Path:
-        dest = run_dir / "scenes" / f"scene-{i:02d}.png"
+    async def _extract(i: int, a: float, b: float, frac: float,
+                       tag: str) -> Path:
+        suffix = "" if tag == "mid" else f"-{tag}"
+        dest = run_dir / "scenes" / f"scene-{i:02d}{suffix}.png"
         async with frame_sem:
             await asyncio.to_thread(
-                reengineer.extract_frame, source, (a + b) / 2.0, dest)
+                reengineer.extract_frame, source, a + (b - a) * frac, dest)
         return dest
 
-    frames = list(await asyncio.gather(
-        *[_extract(i, a, b) for i, (a, b) in enumerate(spans)]))
+    async def _extract_triplet(i: int, a: float, b: float) -> list[Path]:
+        return list(await asyncio.gather(
+            _extract(i, a, b, 0.15, "early"),
+            _extract(i, a, b, 0.50, "mid"),
+            _extract(i, a, b, 0.85, "late"),
+        ))
+
+    triplets = list(await asyncio.gather(
+        *[_extract_triplet(i, a, b) for i, (a, b) in enumerate(spans)]))
+    frames = [t[1] for t in triplets]          # canonical mid frames
 
     if cached_words is not None:
         words = cached_words
@@ -311,6 +326,7 @@ async def _analyze(re_id: str, state: dict, source: Path,
     plans = await asyncio.to_thread(
         reengineer.analyze_scenes,
         frames=frames, spans=spans, words=words, re_id=re_id,
+        motion_frames=triplets,
     ) or reengineer.fallback_plans(spans, words)
 
     # --- register frames as scenes + persist the plan ---------------------
@@ -407,7 +423,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
             scenes=[(sid, Path(p)) for sid, p in zip(uniq_ids, uniq_paths)],
             outfit_mode=outfit_mode,
             outfit_text=state.get("outfit_text"),
-            background=bool(background_path),
+            background_path=Path(background_path) if background_path else None,
             job_id=job_id,
         )
         if result is not None:

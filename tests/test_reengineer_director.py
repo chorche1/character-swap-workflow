@@ -83,14 +83,29 @@ def test_direct_reengineer_swap_happy_path(monkeypatch, tmp_path):
 
 
 def test_direct_reengineer_swap_background_and_custom(monkeypatch, tmp_path):
+    """With a replacement background, the Director SEES the background image,
+    is told to anchor environment+light to IT, and is FORBIDDEN from naming
+    the original scene's background (2026-06-12: the Director wrote 'red
+    barn visible upper background' from the scene frame, contradicting the
+    replace-surroundings directive → wrong background in the output)."""
     payload = {"intent": "x", "scenes": [{"scene_id": "s1", "prompt": "p"}]}
     seen = _stub_call(monkeypatch, payload)
+    bg = tmp_path / "bg.png"
     out = prompt_director.direct_reengineer_swap(
         scenes=[("s1", tmp_path / "f1.png")],
-        outfit_mode="custom", outfit_text="a red hoodie", background=True)
+        outfit_mode="custom", outfit_text="a red hoodie",
+        background_path=bg)
     assert out is not None
     assert "NEW ENVIRONMENT" in seen["system"]
+    assert "STRICTLY FORBIDDEN" in seen["system"]        # no old-bg anchors
+    assert "lit by the NEW" in seen["system"]            # light from Image 3
     assert "a red hoodie" in seen["system"]
+    # The background image itself is in the vision content, before scenes.
+    blocks = seen["messages"][0]["content"]
+    texts = [b.get("text", "") for b in blocks]
+    assert any("REPLACEMENT BACKGROUND" in t for t in texts)
+    assert str(bg) in texts                              # the encoded image
+    assert texts.index(str(bg)) < texts.index("SCENE s1:")
 
 
 @pytest.mark.parametrize("case", ["no_scenes", "bad_payload", "exception",

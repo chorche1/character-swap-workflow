@@ -532,8 +532,7 @@ Prompt format rules (follow exactly):
   see (e.g. "waist-up shot, person fills the left two-thirds of the frame")
   and add: "identical camera distance and crop — do not zoom out or
   recompose; every object keeps this exact size and position."
-- Mention the scene's actual light (direction/quality) in a few words so the
-  inserted person is lit to match.
+- {light_rule}
 - Do NOT write any photographic-style/grading language (no "cinematic",
   "professional", "high quality", camera/lens jargon) — a fixed organic
   phone-photo style paragraph is appended to your prompt automatically.
@@ -623,12 +622,19 @@ def direct_reengineer_swap(
     scenes: list[tuple[str, Path]],             # [(scene_id, frame_path)]
     outfit_mode: str = "scene",
     outfit_text: str | None = None,
-    background: bool = False,
+    background_path: Path | None = None,
     job_id: str | None = None,
 ) -> tuple[str, dict[str, str]] | None:
     """ONE Claude call with every scene frame → (intent, {scene_id: prompt}).
     Returns None on ANY failure — callers fall back to the static template;
-    image generation never blocks on the Director."""
+    image generation never blocks on the Director.
+
+    `background_path`: the replacement environment (Image 3 at generation
+    time). The Director SEES it and anchors the prompt's environment + light
+    to IT — and is forbidden from naming the original scene's background.
+    (Observed 2026-06-12: without seeing it, the Director anchored "red barn
+    visible upper background" from the scene frame, directly contradicting
+    the replace-surroundings directive → wrong background in the output.)"""
     if not scenes:
         return None
     outfit = _REENGINEER_OUTFIT_DIRECTIVES.get(outfit_mode or "scene")
@@ -638,20 +644,45 @@ def direct_reengineer_swap(
         if not (outfit_text or "").strip():
             return None
         outfit = outfit.format(outfit=outfit_text.strip())
-    bg_role = (
-        "Image 3 is the NEW ENVIRONMENT the finished photo takes place in — "
-        "say the surroundings are replaced with Image 3's location and the "
-        "person plus kept objects are relit entirely with Image 3's light."
-        if background else
-        "There is no Image 3 — the scene's own background is preserved exactly."
-    )
+    if background_path is not None:
+        bg_role = (
+            "Image 3 is the NEW ENVIRONMENT the finished photo takes place "
+            "in (the REPLACEMENT BACKGROUND image you are shown) — say the "
+            "surroundings are replaced with Image 3's location, name 1-2 of "
+            "Image 3's actual visible features so the model targets THAT "
+            "environment, and say the person plus kept objects are relit "
+            "entirely with Image 3's light. STRICTLY FORBIDDEN: naming or "
+            "describing ANYTHING visible only in the scene frame's original "
+            "background (buildings, walls, sky, signage, flags, location) — "
+            "the original environment is being thrown away, so your framing "
+            "anchors must cover ONLY the person, the held/foreground props "
+            "and the camera distance/crop."
+        )
+        light_rule = ("Describe Image 3's light (direction/quality) in a few "
+                      "words — the inserted person is lit by the NEW "
+                      "environment, never by the original scene's light.")
+    else:
+        bg_role = ("There is no Image 3 — the scene's own background is "
+                   "preserved exactly.")
+        light_rule = ("Mention the scene's actual light (direction/quality) "
+                      "in a few words so the inserted person is lit to match.")
     system = REENGINEER_SWAP_DIRECTOR_SYSTEM.format(
-        bg_role=bg_role, outfit_directive=outfit)
+        bg_role=bg_role, outfit_directive=outfit, light_rule=light_rule)
 
-    content: list[dict] = [
+    content: list[dict] = []
+    if background_path is not None:
+        content.append({"type": "text",
+                        "text": "REPLACEMENT BACKGROUND (this is Image 3 at "
+                                "generation time — the environment every "
+                                "finished photo must take place in):"})
+        try:
+            content.append(anthropic_client._file_to_image_block(background_path))
+        except Exception as e:
+            logger.warning("director_reengineer: failed to encode background: %s", e)
+            return None
+    content.append(
         {"type": "text",
-         "text": "SCENES (use these scene_ids verbatim in your answer):"},
-    ]
+         "text": "SCENES (use these scene_ids verbatim in your answer):"})
     for scene_id, frame in scenes:
         content.append({"type": "text", "text": f"SCENE {scene_id}:"})
         try:

@@ -275,6 +275,10 @@ async def _generate_one_variant(
                 character_image=char_path,
                 result_image=dest,
                 background_replaced=extra_ref is not None,
+                # The judge SEES the replacement environment — without it a
+                # result that kept the ORIGINAL background passed QC
+                # (observed 2026-06-12, scene 1 of re_10fe66db8b).
+                background_image=extra_ref,
                 outfit_from_character=bool(job.prompt and
                                            "own outfit from Image 2" in job.prompt),
                 job_id=job.job_id,
