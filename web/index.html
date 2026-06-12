@@ -2033,6 +2033,13 @@
                                   class="absolute bottom-0.5 right-0.5 bg-neutral-900/70 hover:bg-rose-600 text-white text-[9px] px-1 rounded leading-tight"
                                   :title="'Reject & regenerate — ' + jc.name + ' gets a fresh take of this image'"
                                   @click.stop="reengineerRetryVariant(r, cid, v.variant_id)">✕↻</button>
+                          <!-- Regenerate with an ALTERED prompt (Hugo
+                               2026-06-12): opens a modal prefilled with the
+                               variant's current prompt. -->
+                          <button x-show="v.status === 'ready'"
+                                  class="absolute bottom-0.5 right-7 bg-neutral-900/70 hover:bg-indigo-600 text-white text-[9px] px-1 rounded leading-tight"
+                                  :title="'Regenerera med ÄNDRAD prompt — redigera bildprompten och gör en ny tagning'"
+                                  @click.stop="openImgRegenModal(r.job_id, cid, v, r)">✎↻</button>
                           <span x-show="v.qc_status === 'failed' && v.status === 'ready'"
                                 class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded cursor-help"
                                 :title="'QC: ' + (v.qc_reason || '')">⚠</span>
@@ -4392,6 +4399,57 @@
   <!-- Regen-video modal: pre-fills with the per-scene movement prompt (or the
        previous override) and submits a fresh take. Used from Step 5 video
        cards' ↻ regen button on DONE clips. -->
+  <!-- IMAGE regen with altered prompt (Hugo 2026-06-12) — sibling of the
+       video regen modal below; same retry endpoint as ✕↻ but the prompt is
+       edited first. -->
+  <div x-show="imgRegenModal.open"
+       @click="imgRegenModal.open = false"
+       @keydown.window.escape="if (imgRegenModal.open) imgRegenModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">Regenerera bilden med ändrad prompt</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            <span x-text="imgRegenModal.charName"></span> · scen
+            <span x-text="(imgRegenModal.sceneId || '').slice(-6)"></span>
+            · den nya bilden ersätter den nuvarande (godkännandet dras tillbaka)
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="imgRegenModal.open = false">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <label class="block">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+            Bildprompt
+            <span x-show="imgRegenModal.loading" class="ml-2 text-neutral-400">(hämtar nuvarande prompt…)</span>
+          </span>
+          <textarea x-model="imgRegenModal.prompt"
+                    rows="8"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg"
+                    placeholder="Beskriv bilden — t.ex. 'white open-collar shirt, no scrubs'…"></textarea>
+          <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1">
+            Samma prompt = ny slumpad tagning. Redigera för att styra resultatet
+            (t.ex. "vit skjorta, inga scrubs", "håll glaset med höger hand").
+            Den ändrade prompten sparas på bilden så nästa ✎↻ utgår från den.
+          </p>
+        </label>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="imgRegenModal.open = false">Avbryt</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-medium disabled:opacity-40"
+                :disabled="imgRegenModal.submitting || imgRegenModal.loading"
+                @click="submitImgRegen()">
+          <span x-show="!imgRegenModal.submitting">✎↻ Regenerera</span>
+          <span x-show="imgRegenModal.submitting">Skickar…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div x-show="regenModal.open"
        @click="regenModal.open = false"
        @keydown.window.escape="if (regenModal.open) regenModal.open = false"

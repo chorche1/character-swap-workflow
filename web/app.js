@@ -5529,6 +5529,65 @@ function studio() {
       sceneId: null, prompt: '', hadOverride: false, submitting: false,
     },
 
+    // IMAGE regen with an altered prompt (Hugo 2026-06-12): same retry
+    // endpoint as ✕↻ but with the prompt edited first. Works from the
+    // Reengineer strip (pass the run for view-splicing) and Step 3.
+    imgRegenModal: {
+      open: false, jobId: null, charId: null, variantId: null,
+      charName: '', sceneId: null, prompt: '', loading: false,
+      submitting: false, reRun: null,
+    },
+
+    async openImgRegenModal(jobId, charId, v, reRun = null) {
+      const jc = (reRun ? reRun.job : this.job)?.characters?.[charId];
+      this.imgRegenModal = {
+        open: true, jobId, charId, variantId: v.variant_id,
+        charName: jc?.name || charId, sceneId: v.scene_id || null,
+        prompt: v.prompt || '', loading: !v.prompt, submitting: false, reRun,
+      };
+      if (!v.prompt) {
+        // Slim reengineer payloads omit variant prompts — fetch the full job.
+        try {
+          const r = await fetch('/api/jobs/' + jobId);
+          if (r.ok) {
+            const job = await r.json();
+            const vv = (job.characters?.[charId]?.images || [])
+              .find(x => x.variant_id === v.variant_id);
+            if (this.imgRegenModal.variantId === v.variant_id) {
+              this.imgRegenModal.prompt = vv?.prompt || '';
+            }
+          }
+        } finally {
+          this.imgRegenModal.loading = false;
+        }
+      }
+    },
+
+    async submitImgRegen() {
+      const m = this.imgRegenModal;
+      if (!m.jobId || !m.variantId || m.submitting) return;
+      m.submitting = true;
+      try {
+        const r = await fetch(
+          `/api/jobs/${m.jobId}/characters/${m.charId}/variants/${m.variantId}/retry`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt: (m.prompt || '').trim() || null }),
+          });
+        if (!r.ok) {
+          this.notifyError('Regen misslyckades: ' + await r.text());
+          return;
+        }
+        const job = await r.json();
+        if (m.reRun) m.reRun.job = job;
+        else if (this.job?.job_id === m.jobId) this.job = job;
+        this.imgRegenModal.open = false;
+        this.notifyInfo(`Regenererar ${m.charName}s bild med den ändrade prompten…`);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
     openRegenModal(charId, vv) {
       // Pre-fill the prompt with the previous override if any (so iterating
       // on the same video keeps building on what the user last tried),

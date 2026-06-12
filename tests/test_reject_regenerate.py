@@ -109,3 +109,32 @@ def test_locked_job_is_refused(fake_store):
     with pytest.raises(HTTPException) as e:
         asyncio.run(api.retry_variant("j1", "cA", "v1", BackgroundTasks()))
     assert e.value.status_code == 409
+
+
+def test_retry_with_altered_prompt_forwards_override(fake_store):
+    """Hugo 2026-06-12: the ✎↻ modal regenerates with an EDITED prompt —
+    the override must reach runner.retry_single_variant (which persists it
+    on the slot so the next ✎↻ pre-fills the last iteration)."""
+    job, jc = _job(VariantStatus.READY)
+    fake_store["job"] = job
+    bg = BackgroundTasks()
+    asyncio.run(api.retry_variant(
+        "j1", "cA", "v1", bg,
+        body=api.RetryVariantBody(prompt="white shirt, no scrubs")))
+    assert len(bg.tasks) == 1
+    # BackgroundTasks wraps (_run_async, retry_single_variant, *args) —
+    # the LAST positional arg is the prompt override.
+    assert bg.tasks[0].args[-1] == "white shirt, no scrubs"
+
+
+def test_img_regen_modal_ui_wired():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "imgRegenModal" in js
+    assert "openImgRegenModal(jobId, charId, v, reRun = null)" in js
+    sub = js.split("async submitImgRegen()")[1][:900]
+    assert "/retry" in sub and "prompt:" in sub
+    html = (root / "web" / "index.html").read_text(encoding="utf-8")
+    assert "openImgRegenModal(r.job_id, cid, v, r)" in html   # ✎↻ in strip
+    assert "submitImgRegen()" in html                         # modal action
