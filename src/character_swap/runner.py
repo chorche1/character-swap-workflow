@@ -1125,6 +1125,49 @@ async def generate_more_videos(
     )
 
 
+async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool:
+    """Backlog #22 (2026-06-12): a clip whose local wait TIMED OUT is often
+    finished at the provider minutes later — the 600s default sits inside
+    Kling's measured tail. Re-poll the already-submitted provider job (free)
+    before letting the caller re-bill a fresh submit. Returns True when the
+    clip was recovered; False → caller proceeds with the normal fresh
+    submit."""
+    video = jc.videos[idx]
+    video_model = job.video_model or "grok-imagine"
+    dest = _output_dir(job.job_id, jc.char_id) / f"video_{video.video_id}.mp4"
+    video.status = VideoStatus.PROCESSING
+    video.error = None
+    _replace_video(job, jc, video)
+    await _emit(job.job_id, "video.salvage_poll", char_id=jc.char_id,
+                video_id=video.video_id, grok_job_id=video.grok_job_id)
+    try:
+        await asyncio.to_thread(
+            pipeline.wait_for_video,
+            job_id=video.grok_job_id,
+            character_name=jc.name,
+            dest=dest,
+            app_job_id=job.job_id,
+            model=video_model,
+        )
+    except Exception as e:
+        logger.info("video %s: salvage re-poll failed (%s) — falling back "
+                    "to a fresh submit", video.video_id, e)
+        video.status = VideoStatus.ERROR
+        video.error = f"salvage re-poll failed: {e}"
+        _replace_video(job, jc, video)
+        return False
+    video.status = VideoStatus.DONE
+    video.completed_at = datetime.utcnow()
+    video.final_video_path = str(dest)
+    video.qc_status = "skipped"
+    video.qc_reason = "salvaged after timeout — QC not re-run"
+    _replace_video(job, jc, video)
+    await _emit(job.job_id, "video.ready", char_id=jc.char_id,
+                video_id=video.video_id, path=str(dest))
+    _maybe_complete_char(job, jc)
+    return True
+
+
 async def retry_one_video(job_id: str, char_id: str, video_id: str,
                           prompt_override: str | None = None) -> None:
     """Re-submit a single video. Replaces the entry in-place with a fresh
@@ -1155,6 +1198,18 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
     # provider that hasn't returned (we'd leak a running Grok job otherwise).
     if jc.videos[idx].status == VideoStatus.PROCESSING:
         return
+
+    # Timeout salvage (backlog #22): the provider job may have finished
+    # AFTER our wait gave up — re-poll it for free before re-billing a
+    # fresh submit. Only for timeout errors and only when the prompt isn't
+    # being changed (a new prompt requires a new generation anyway).
+    old = jc.videos[idx]
+    if (old.grok_job_id
+            and old.status in {VideoStatus.FAILED, VideoStatus.ERROR}
+            and "timed out" in (old.error or "").lower()
+            and prompt_override is None):
+        if await _salvage_timed_out_video(job, jc, idx):
+            return
 
     # Inherit an existing override if the caller didn't supply a new one. This
     # makes "regenerate again with the same override" a one-click action.
