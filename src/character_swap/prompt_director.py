@@ -54,10 +54,32 @@ class CharacterPlan(BaseModel):
     scenes: list[ScenePlanForChar] = Field(default_factory=list)
 
 
+def prompt_fingerprint() -> str:
+    """Version key stamped on every cached Director plan. A hash of THIS
+    module's source: any prompt-logic change (system prompts, light rules,
+    clause builders) invalidates previously cached plans, so a regen after a
+    prompt upgrade re-runs the Director instead of silently reusing prompts
+    written by an older template generation. Slightly over-eager (comment
+    edits also invalidate) — by design: one extra ~$0.10 Director call beats
+    a stale plan resurfacing an already-fixed drift mode."""
+    global _PROMPT_FINGERPRINT
+    if _PROMPT_FINGERPRINT is None:
+        import hashlib
+        _PROMPT_FINGERPRINT = hashlib.sha256(
+            Path(__file__).read_bytes()).hexdigest()[:16]
+    return _PROMPT_FINGERPRINT
+
+
+_PROMPT_FINGERPRINT: str | None = None
+
+
 class SwapDirectorPlan(BaseModel):
     intent: str
     notes: str | None = None
     characters: list[CharacterPlan] = Field(default_factory=list)
+    # Set from prompt_fingerprint() at plan-build time. None on plans cached
+    # before 2026-06-12 — readers treat those as stale (re-run / fall back).
+    prompt_version: str | None = None
 
     def lookup(self, char_id: str, scene_id: str) -> list[str]:
         """Return the per-variant prompts for (char_id, scene_id) in
@@ -410,10 +432,12 @@ def direct_swap(
         logger.warning("director_swap: tool `submit_swap_plan` not invoked in response")
         return None
     try:
-        return SwapDirectorPlan.model_validate(payload)
+        plan = SwapDirectorPlan.model_validate(payload)
     except ValidationError as e:
         logger.warning("director_swap: validation failed: %s", e)
         return None
+    plan.prompt_version = prompt_fingerprint()
+    return plan
 
 
 def direct_movement(
@@ -612,6 +636,7 @@ def plan_from_scene_prompts(
     (identity varies via the reference image, not the text)."""
     return SwapDirectorPlan(
         intent=intent,
+        prompt_version=prompt_fingerprint(),
         characters=[
             CharacterPlan(
                 char_id=cid, name=name,

@@ -6,6 +6,7 @@ WebSocket layer can broadcast them.
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 import shutil
 from datetime import datetime
@@ -24,6 +25,8 @@ from character_swap.models import (
     VideoVariant,
 )
 from character_swap.state import store
+
+logger = logging.getLogger(__name__)
 
 
 def _output_dir(job_id: str, char_id: str) -> Path:
@@ -357,13 +360,24 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
 
 def _parse_director_plan(job: Job):
     """Parse the cached SwapDirectorPlan JSON on the Job. Returns None if no
-    plan is cached or parsing fails. Cached on `job.director_prompts_json`
-    by `_maybe_run_director_swap`."""
+    plan is cached, parsing fails, OR the plan was written by an older
+    prompt-template generation (prompt_version mismatch) — stale plans must
+    never steer a regen after a prompt-logic upgrade (observed 2026-06-12:
+    re_42d1dc8938/re_10fe66db8b regens kept resurfacing already-fixed drift).
+    Cached on `job.director_prompts_json` by `_maybe_run_director_swap`."""
     if not job.director_prompts_json:
         return None
     try:
-        from character_swap.prompt_director import SwapDirectorPlan
-        return SwapDirectorPlan.model_validate_json(job.director_prompts_json)
+        from character_swap import prompt_director
+        plan = prompt_director.SwapDirectorPlan.model_validate_json(
+            job.director_prompts_json)
+        if plan.prompt_version != prompt_director.prompt_fingerprint():
+            logger.info(
+                "job %s: cached Director plan is stale (plan version %s, "
+                "current %s) — ignoring it", job.job_id, plan.prompt_version,
+                prompt_director.prompt_fingerprint())
+            return None
+        return plan
     except Exception:
         return None
 
@@ -632,11 +646,17 @@ async def regen_scene_variants(job_id: str, char_id: str, scene_id: str,
 
 
 async def _maybe_run_director_swap(job: Job, s) -> None:
-    """If `use_director=True` and the plan isn't cached yet, run a ONE-shot
+    """If `use_director=True` and no FRESH plan is cached, run a ONE-shot
     Claude Opus call to plan per-(char, scene, variant) prompts and cache
     the result as JSON on `job.director_prompts_json`. Silent no-op on any
-    failure — `_kick_char` falls back to enrich/raw automatically."""
-    if not job.use_director or job.director_prompts_json:
+    failure — `_kick_char` falls back to enrich/raw automatically.
+
+    A cached plan from the CURRENT prompt generation short-circuits (crash
+    resume / retries never re-bill). A stale or legacy plan (version
+    mismatch) is re-planned and overwritten — one ~$0.10 call, logged."""
+    if not job.use_director:
+        return
+    if _parse_director_plan(job) is not None:
         return
     from pathlib import Path
 
