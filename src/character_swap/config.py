@@ -118,6 +118,14 @@ class Settings(BaseSettings):
     # worst measured contended render (430s) — generous, but finite.
     remotion_render_timeout_secs: int = Field(
         default=1800, validation_alias="REMOTION_RENDER_TIMEOUT_SECS")
+    # Per-clip loudness equalization in assemble_clips (backlog #10,
+    # 2026-06-12): finals measured -20 LUFS with 3 dB jumps between Kling
+    # clips. One static volume gain per clip toward the target (analysis
+    # pass only — no extra encode generation), true-peak-capped at -1 dBTP.
+    # LOUDNORM_ENABLED=0 restores the old untouched audio.
+    loudnorm_enabled: bool = Field(default=True, validation_alias="LOUDNORM_ENABLED")
+    loudnorm_target_lufs: float = Field(
+        default=-14.0, validation_alias="LOUDNORM_TARGET_LUFS")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")

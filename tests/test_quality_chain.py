@@ -168,6 +168,75 @@ def test_remotion_cache_key_includes_encode_quality(monkeypatch, tmp_path):
     assert k1 != k2
 
 
+def test_clip_gain_math():
+    """Backlog #10: static per-clip gain — target-seeking, true-peak-capped,
+    clamped to ±12 dB."""
+    g = video_edit._clip_gain_db
+    assert g(-20.0, -8.0, -14.0) == 6.0          # plain boost to target
+    assert g(-20.0, -2.0, -14.0) == 1.0          # capped by -1 dBTP ceiling
+    assert g(-8.0, -1.0, -14.0) == -6.0          # attenuation, no tp cap
+    assert g(-40.0, -30.0, -14.0) == 12.0        # clamped boost
+    assert g(-2.0, -0.1, -30.0) == -12.0         # clamped attenuation
+
+
+def test_measure_clip_loudness_on_real_tone(tmp_path):
+    clip = _clip(tmp_path / "tone.mp4", tone_secs=3.0)
+    measured = video_edit._measure_clip_loudness(clip)
+    assert measured is not None
+    loudness, true_peak = measured
+    assert -60.0 < loudness < -1.0
+    assert true_peak <= 0.5
+
+
+def test_measure_clip_loudness_silent_clip_returns_none(tmp_path):
+    clip = _clip(tmp_path / "sil.mp4", tone_secs=2.0, silent=True)
+    assert video_edit._measure_clip_loudness(clip) is None
+
+
+def test_assemble_equalizes_clip_loudness(tmp_path, monkeypatch):
+    """Two clips ~12 dB apart must land near the shared target after
+    assemble (backlog #10: -20 LUFS finals with 3 dB jumps between scenes).
+    The gain rides inside the single encode — no extra generation."""
+    quiet = tmp_path / "quiet.mp4"
+    loud = tmp_path / "loud.mp4"
+    _clip(loud, tone_secs=3.0)
+    subprocess.run(  # same tone, attenuated 12 dB
+        ["ffmpeg", "-hide_banner", "-y", "-i", str(loud),
+         "-af", "volume=-12dB", "-c:v", "copy", "-c:a", "aac", str(quiet)],
+        check=True, capture_output=True)
+    monkeypatch.setattr(settings, "loudnorm_enabled", True, raising=False)
+    monkeypatch.setattr(settings, "loudnorm_target_lufs", -14.0, raising=False)
+
+    out = tmp_path / "out.mp4"
+    video_edit.assemble_clips([quiet, loud], out,
+                              enable_interior_trim=False)
+    measured = video_edit._measure_clip_loudness(out)
+    assert measured is not None
+    # Both halves pulled toward -14 → integrated lands well inside ±4 LU
+    # (raw concat of -14 and -26 LUFS halves would integrate near -16.5
+    # and, more importantly, keep the 12 dB step between halves).
+    assert -18.0 < measured[0] < -10.0
+
+
+def test_assemble_loudnorm_disabled_keeps_audio_untouched(tmp_path, monkeypatch):
+    quiet = tmp_path / "q.mp4"
+    _clip(quiet, tone_secs=2.0)
+    sub = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-y", "-i", str(quiet),
+         "-af", "volume=-18dB", "-c:v", "copy", "-c:a", "aac",
+         str(tmp_path / "q2.mp4")], check=True, capture_output=True)
+    assert sub.returncode == 0
+    monkeypatch.setattr(settings, "loudnorm_enabled", False, raising=False)
+    calls = []
+    real_measure = video_edit._measure_clip_loudness
+    monkeypatch.setattr(video_edit, "_measure_clip_loudness",
+                        lambda p: calls.append(p) or real_measure(p))
+
+    video_edit.assemble_clips([tmp_path / "q2.mp4"], tmp_path / "out.mp4",
+                              enable_interior_trim=False)
+    assert calls == []                  # opt-out: no analysis, no gain
+
+
 def test_assemble_clips_raises_on_probe_failure(tmp_path, monkeypatch):
     """REGRESSION (review 2026-06-12): a failed duration probe (0.0 sentinel)
     must RAISE — engaging run_editor_pipeline's legacy fallback — never

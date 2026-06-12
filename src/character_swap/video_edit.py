@@ -19,6 +19,7 @@ ffmpeg binary comes from `imageio_ffmpeg` so users don't need a system install.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -256,6 +257,48 @@ def _probe_duration(input_path: Path) -> float:
             h, m, s = dur.split(":")
             return int(h) * 3600 + int(m) * 60 + float(s)
     return 0.0
+
+
+# loudnorm's analysis JSON lands on stderr; input_i = integrated loudness
+# (LUFS), input_tp = true peak (dBTP).
+_LOUDNORM_JSON_RE = re.compile(
+    r'"input_i"\s*:\s*"(?P<i>-?[\d.]+)"[\s\S]*?"input_tp"\s*:\s*"(?P<tp>-?[\d.]+)"')
+
+
+def _measure_clip_loudness(input_path: Path) -> tuple[float, float] | None:
+    """Integrated loudness (LUFS) + true peak (dBTP) of a clip's audio via
+    ONE loudnorm analysis pass — decode only, no encode generation. Returns
+    None when measurement fails or the clip is essentially silent; callers
+    treat None as 'apply no gain' (the equalization never blocks a build)."""
+    try:
+        out = _run([
+            _ffmpeg(), "-hide_banner", "-i", str(input_path),
+            "-af", "loudnorm=print_format=json", "-f", "null", "-",
+        ])
+    except RuntimeError as e:
+        out = str(e)
+    m = _LOUDNORM_JSON_RE.search(out)
+    if not m:
+        return None
+    try:
+        loudness, true_peak = float(m.group("i")), float(m.group("tp"))
+    except ValueError:
+        return None
+    if loudness <= -70.0:           # loudnorm's silence sentinel
+        return None
+    return loudness, true_peak
+
+
+def _clip_gain_db(input_i: float, input_tp: float, target_i: float,
+                  *, max_gain: float = 12.0, tp_ceiling: float = -1.0) -> float:
+    """Static volume gain bringing a clip to the target integrated loudness
+    without pushing its true peak above `tp_ceiling` (no clipping) — pure
+    linear gain, NO dynamics processing, so every segment cut from the same
+    clip moves together (backlog #10: dynamic loudnorm on sub-3s concat
+    segments pumps; one static gain per clip cannot)."""
+    gain = target_i - input_i
+    gain = min(gain, tp_ceiling - input_tp)
+    return max(-max_gain, min(max_gain, gain))
 
 
 def _detect_silences(input_path: Path, threshold_db: float = -30.0,
@@ -1738,6 +1781,25 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
         entry["n_segments"] = n_segments
         entry["removed_secs"] = round(removed_total, 2)
 
+        # ---- per-clip loudness equalization (backlog #10, 2026-06-12) -----
+        # Finals measured -20 LUFS with 3 dB jumps between Kling clips. One
+        # static gain per clip (analysis pass only — applied inside the same
+        # single encode below, so it costs zero extra generations), true-peak
+        # capped at -1 dBTP. LOUDNORM_ENABLED=0 restores untouched audio.
+        gains: list[float] = [0.0] * len(video_paths)
+        if settings.loudnorm_enabled and any_audio:
+            for gi, (p, has_audio) in enumerate(
+                    zip(video_paths, has_audio_flags)):
+                if not has_audio:
+                    continue
+                measured = _measure_clip_loudness(p)
+                if measured is None:
+                    continue
+                gains[gi] = round(_clip_gain_db(
+                    measured[0], measured[1],
+                    settings.loudnorm_target_lufs), 2)
+            entry["loudnorm_gains_db"] = list(gains)
+
         # ---- one filter_complex: trims + scale/pad + concat ----------------
         inputs: list[str] = []
         for p in video_paths:
@@ -1762,9 +1824,11 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                 )
                 if any_audio:
                     if has_audio_flags[i]:
+                        vol = (f"volume={gains[i]:.2f}dB,"
+                               if abs(gains[i]) >= 0.25 else "")
                         parts.append(
                             f"[{i}:a]atrim=start={s:.3f}:end={e:.3f},"
-                            f"asetpts=PTS-STARTPTS,aresample=44100,"
+                            f"asetpts=PTS-STARTPTS,{vol}aresample=44100,"
                             f"aformat=channel_layouts=stereo[{alab}]"
                         )
                     else:
