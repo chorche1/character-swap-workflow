@@ -96,6 +96,13 @@ def _spawn(coro, name: str) -> None:
 
 def _update(re_id: str, **changes) -> dict:
     state = reengineer.load_state(re_id) or {"re_id": re_id}
+    # Backlog #36 (2026-06-12): a run that recovered (retry → done) kept
+    # showing the OLD failure banner — the error field survived every
+    # status transition. Moving to a non-failed status clears it unless the
+    # caller explicitly sets one.
+    if (changes.get("status") and changes["status"] != "failed"
+            and "error" not in changes):
+        changes["error"] = None
     state.update(changes)
     state["updated_at"] = _now()
     reengineer.save_state(state)

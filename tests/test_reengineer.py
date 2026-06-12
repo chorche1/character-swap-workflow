@@ -303,3 +303,37 @@ def test_analyst_success_does_not_set_fallback_flag(tmp_path, monkeypatch):
     assert "analyst_fallback" not in state
     assert [e["motion_prompt"] for e in entries] == \
         [f"plan {i}" for i in range(len(entries))]
+
+
+# --- recovered runs drop stale error banners (backlog #36, 2026-06-12) -------
+
+
+def test_update_clears_error_on_non_failed_status(tmp_path, monkeypatch):
+    from character_swap import runner_reengineer
+    from character_swap.config import settings
+    monkeypatch.setattr(settings, "output_dir", tmp_path, raising=False)
+    (tmp_path / "reengineer" / "re_e").mkdir(parents=True)
+
+    runner_reengineer._update("re_e", status="failed", error="kling exploded")
+    assert reengineer.load_state("re_e")["error"] == "kling exploded"
+
+    # Recovery: a later non-failed transition clears the stale banner.
+    runner_reengineer._update("re_e", status="done")
+    state = reengineer.load_state("re_e")
+    assert state["status"] == "done"
+    assert state["error"] is None
+
+    # Non-status updates never touch the error field.
+    runner_reengineer._update("re_e", status="failed", error="boom")
+    runner_reengineer._update("re_e", finals_stale=True)
+    assert reengineer.load_state("re_e")["error"] == "boom"
+
+
+def test_pre_v2_finals_rebuild_hint_in_ui():
+    """Backlog #38: finals built by the old assemble (no edit_id — the
+    duration-cap era with truncated dialogue) must surface a rebuild hint."""
+    from pathlib import Path
+    html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
+        encoding="utf-8")
+    assert "f.status === 'done' && !f.edit_id" in html
+    assert "Bygg ihop igen" in html
