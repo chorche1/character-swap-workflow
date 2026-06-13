@@ -1837,19 +1837,27 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
             # −36 dB) and the fixed −30 can land BELOW the noise floor and
             # find nothing — re_e3734aa9c1's 19-clip final shipped
             # 148.8s → 142.1s, essentially untrimmed. When a clip yields
-            # (almost) no detectable silence, re-probe at +3 dB steps until
-            # pauses appear. The ceiling is −25 dB (the adaptive formula's
-            # own cap) AND at least 4 LU below the clip's measured speech
-            # level — so quiet-speech clips (the case the adaptive threshold
-            # protects) are never escalated into "all silence". Wall-to-wall
-            # speech finds nothing at any step and stays uncut.
+            # too little CUTTABLE silence (pauses ≥ min_silence_secs —
+            # sub-cuttable fragments don't count: the first trigger counted
+            # them and never fired, removing only 7.2s of a measured ~20s),
+            # re-probe at +3 dB steps until real pauses appear. The ceiling
+            # is −25 dB (the adaptive formula's own cap) AND at least 4 LU
+            # below the clip's measured speech level — so quiet-speech
+            # clips (the case the adaptive threshold protects) are never
+            # escalated into "all silence". Wall-to-wall speech finds
+            # nothing at any step and stays uncut.
             if enable_interior_trim:
                 ceiling = -25.0
                 if measured[ci] is not None:
                     ceiling = min(ceiling, measured[ci][0] - 4.0)
+
+                def _cuttable(sil: list[tuple[float, float]]) -> float:
+                    return sum(e - s for s, e in sil
+                               if (e - s) >= min_silence_secs)
+
+                need = min(1.5, max(0.35, 0.05 * duration))
                 esc = thr
-                while (esc < ceiling
-                       and sum(e - s for s, e in silences) < 0.3):
+                while esc < ceiling and _cuttable(silences) < need:
                     esc = min(ceiling, esc + 3.0)
                     silences = _detect_silences(p, esc, 0.05)
             onset = (silences[0][1]
