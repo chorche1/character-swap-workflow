@@ -233,31 +233,38 @@ image-to-video model (Kling v3) that also generates NATIVE AUDIO —
 including the person's voice when the prompt contains dialogue.
 
 For EVERY scene, write:
-1. motion_prompt — SHORT and SIMPLE (Hugo's directive 2026-06-13). Only two
-   things matter: the RIGHT person (the on-screen subject) speaks, and the
-   subject performs the scene's actual action. Build it as:
-   a) THE PHYSICAL ACTION — only when the scene has a distinct one: ONE
-      compact clause with a strong concrete verb, the object(s) the hands
-      touch and the direction, in the order the timestamps show ("He pours
-      kiwi pieces into the bowl, then holds it toward the camera."). Play
-      the frame sequence as a VIDEO: compare consecutive frames for state
-      changes (an object moved, a container emptier, residue/foam
-      appeared) — an action that happened between two samples must still
-      be described, never reduced to a static pose. Keep hands anchored to
-      objects. If the scene is just talking, write NO action clause at all.
-   b) DIALOGUE, with the delivery folded into the attribution and nothing
-      more:
-      He says enthusiastically to the camera with an American accent:
-      "<dialogue>"
-      Pick the tone word from the actual delivery (enthusiastically /
-      calmly / matter-of-factly / warmly / urgently…) and use He/She to
-      match the subject.
+1. motion_prompt — simple and concrete (Hugo's directive 2026-06-13): no
+   boilerplate, but never at the cost of the two things that matter — the
+   subject performs the scene's ACTUAL action correctly, and he speaks
+   WHILE doing it. Build it as:
+   a) THE PHYSICAL ACTION — when the scene has one, describe it precisely
+      enough to reproduce it: strong concrete verbs, the object(s) the
+      hands touch, the direction, in the order the timestamps show, with
+      an endpoint ("He pours kiwi pieces into the bowl, then holds it
+      toward the camera."). Play the frame sequence as a VIDEO: compare
+      consecutive frames for state changes (an object moved, a container
+      emptier, residue/foam appeared) — an action that happened between
+      two samples must still be described, never reduced to a static pose.
+      Keep hands anchored to objects. Skip filler gestures ("gestures
+      expressively", "hands opening and closing") — only motion that is
+      actually visible and matters. Pure talking scenes need no action
+      clause.
+   b) DIALOGUE, BOUND to the action so the speech happens DURING the
+      movement, with the delivery folded into the attribution:
+      While pouring, he says enthusiastically to the camera with an
+      American accent: "<dialogue>"
+      — or for pure talking scenes simply: He says enthusiastically to
+      the camera with an American accent: "<dialogue>". Pick the tone word
+      from the actual delivery (enthusiastically / calmly /
+      matter-of-factly / warmly / urgently…) and use He/She to match the
+      subject. The person must never freeze or pause the action to talk —
+      speech and motion run simultaneously.
    NEVER describe the environment, background, location, lighting, camera,
    framing or the person's appearance — the start image carries all of
    that, and (officially documented) text that deviates from the image
    causes camera cuts. No "handheld", no "micro-shake", no "static
-   framing", no "UGC". Target: at most ~15 words BEFORE the dialogue
-   quote; zero is fine for pure talking scenes.
+   framing", no "UGC". Aim for ~10-30 words before the dialogue quote —
+   whatever correct motion needs, nothing more.
 2. speech — the dialogue line alone (empty string if the scene has no speech).
 3. summary — one short line describing the scene for a UI list.
 
