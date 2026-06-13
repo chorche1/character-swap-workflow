@@ -233,36 +233,31 @@ image-to-video model (Kling v3) that also generates NATIVE AUDIO —
 including the person's voice when the prompt contains dialogue.
 
 For EVERY scene, write:
-1. motion_prompt — an imperative direction for the video model, built EXACTLY
-   like this (Kling's official image-to-video formula is subject + movement —
-   the start image already supplies the scene):
-   a) SUBJECT ANCHOR, one short clause: "the person" plus only the prop(s)
-      their hands touch (e.g. "The person, holding kiwi slices in cupped
-      hands,"). NEVER describe the environment, background, location,
-      lighting or the person's appearance — the start image carries all of
-      that, and (officially documented) text that deviates from the image
-      causes camera cuts; the start image's background may even differ from
-      these frames.
-   b) THE PHYSICAL ACTION — the most important part: play the frame
-      sequence through in your head and describe the action that unfolds
-      across it with strong concrete verbs — what the hands do, what object
-      moves where, the direction (pours X over Y, lifts X toward Y, drops X
-      into Y, tilts/stirs/presses), in the ORDER the timestamps show. ONE
-      hero action per scene; give it an endpoint ("…then holds them toward
-      the camera"). Keep hands anchored to objects, never free-floating.
-      Never reduce a dynamic action to a static pose: if any frames show an
-      action in progress or its residue (foam, fizz, spilled powder, a
-      moved object), the prompt must contain the action itself, not just
-      "holds/displays the result" — even when the action happened between
-      two samples.
-   c) CAMERA, one behavior only: "Handheld phone footage with subtle
-      micro-shake, static framing." (or "Static camera, background remains
-      static." when the original is tripod-still). Not cinematic.
-   d) DIALOGUE last, with the delivery folded into the attribution:
-      The person says, in a casual conversational tone with a natural
-      American accent: "<dialogue>"
-   Target 30-60 words BEFORE the dialogue quote — shorter is better; the
-   image replaces description.
+1. motion_prompt — SHORT and SIMPLE (Hugo's directive 2026-06-13). Only two
+   things matter: the RIGHT person (the on-screen subject) speaks, and the
+   subject performs the scene's actual action. Build it as:
+   a) THE PHYSICAL ACTION — only when the scene has a distinct one: ONE
+      compact clause with a strong concrete verb, the object(s) the hands
+      touch and the direction, in the order the timestamps show ("He pours
+      kiwi pieces into the bowl, then holds it toward the camera."). Play
+      the frame sequence as a VIDEO: compare consecutive frames for state
+      changes (an object moved, a container emptier, residue/foam
+      appeared) — an action that happened between two samples must still
+      be described, never reduced to a static pose. Keep hands anchored to
+      objects. If the scene is just talking, write NO action clause at all.
+   b) DIALOGUE, with the delivery folded into the attribution and nothing
+      more:
+      He says enthusiastically to the camera with an American accent:
+      "<dialogue>"
+      Pick the tone word from the actual delivery (enthusiastically /
+      calmly / matter-of-factly / warmly / urgently…) and use He/She to
+      match the subject.
+   NEVER describe the environment, background, location, lighting, camera,
+   framing or the person's appearance — the start image carries all of
+   that, and (officially documented) text that deviates from the image
+   causes camera cuts. No "handheld", no "micro-shake", no "static
+   framing", no "UGC". Target: at most ~15 words BEFORE the dialogue
+   quote; zero is fine for pure talking scenes.
 2. speech — the dialogue line alone (empty string if the scene has no speech).
 3. summary — one short line describing the scene for a UI list.
 
@@ -428,18 +423,18 @@ def snap_spans_to_word_gaps(
 
 
 def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[ScenePlan]:
-    """Agent-less fallback: generic hand-held direction + verbatim dialogue."""
+    """Agent-less fallback: minimal direction + verbatim dialogue (simple
+    Kling style, Hugo 2026-06-13 — gender-neutral since no frames are
+    seen)."""
     out: list[ScenePlan] = []
     for i, (a, b) in enumerate(spans):
         spoken = words_in_span(words, a, b)
-        speech = (' The person says, in a casual conversational tone with a '
-                  f'natural American accent: "{spoken}"') if spoken else ""
+        speech = (' The person says to the camera with an American accent: '
+                  f'"{spoken}"') if spoken else ""
         out.append(ScenePlan(
             idx=i,
-            motion_prompt=("Ordinary hand-held UGC phone footage: the person continues the "
-                           "action visible in the frame with natural small movements and "
-                           "gestures, looking at the camera. Static framing with slight "
-                           "hand-held wobble. Not cinematic." + speech),
+            motion_prompt=("The person continues the action visible in the "
+                           "image naturally." + speech),
             speech=spoken,
             summary=spoken[:80] or f"Scene {i + 1}",
         ))

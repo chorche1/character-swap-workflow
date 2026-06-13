@@ -1084,17 +1084,16 @@ _EDITABLE_RUN_STATES = {"awaiting_approval", "awaiting_assembly",
 # agent-less prompt, sans dialogue). The Whisper prefill appends the spoken
 # line when the user uploads a video and asks for transcription.
 ADDED_SCENE_PROMPT = (
-    "Ordinary hand-held UGC phone footage: the person continues the action "
-    "visible in the frame with natural small movements and gestures, looking "
-    "at the camera. Static framing with slight hand-held wobble. Not cinematic.")
+    "The person continues the action visible in the image naturally, "
+    "looking at the camera.")
 
 
 def _speech_clause(spoken: str) -> str:
-    """Dialogue attribution per Kling's documented idiom: tone + accent
-    folded INTO the attribution (research 2026-06-12 — descriptor style is
-    what official guides show; trailing meta-instructions are not)."""
-    return (' The person says, in a casual conversational tone with a '
-            f'natural American accent: "{spoken}"')
+    """Dialogue attribution, simple Kling style (Hugo 2026-06-13): accent
+    folded into the attribution, nothing else. Gender-neutral — this
+    fallback never sees the frames."""
+    return (' The person says to the camera with an American accent: '
+            f'"{spoken}"')
 
 
 def _sync_movement_from_state(job: Job, state: dict,

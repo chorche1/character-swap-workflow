@@ -68,7 +68,7 @@ def test_analyst_sees_timestamped_frame_sequence(monkeypatch, tmp_path):
     # The system prompt demands the action arc, not a static pose.
     assert "PHYSICAL ACTION" in seen["system"]
     flat = " ".join(seen["system"].split())
-    assert "reduce a dynamic action to a static pose" in flat
+    assert "never reduced to a static pose" in flat
     assert "READ EACH SEQUENCE AS A VIDEO" in seen["system"]
     assert "between two samples" in flat     # actions hiding between frames
 

@@ -74,8 +74,8 @@ def test_fallback_plans_carry_verbatim_dialogue():
     words = [Word("drink", 0.2, 0.5), Word("this", 0.5, 0.9)]
     plans = reengineer.fallback_plans([(0.0, 2.0), (2.0, 4.0)], words)
     assert len(plans) == 2
-    assert ('The person says, in a casual conversational tone with a '
-            'natural American accent: "drink this"') in plans[0].motion_prompt
+    assert ('The person says to the camera with an American accent: '
+            '"drink this"') in plans[0].motion_prompt
     assert plans[0].speech == "drink this"
     assert plans[1].speech == ""           # silent scene → no dialogue clause
     assert "says:" not in plans[1].motion_prompt

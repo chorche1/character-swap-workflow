@@ -204,6 +204,6 @@ def test_whisper_prefill_rewrites_default_prompt(wired, monkeypatch):
         "re_t", "sc_new", whisper_source="/tmp/clip.mp4"))
     entry = wired["states"]["re_t"]["scenes"][1]
     assert "transcribing" not in entry
-    assert ('The person says, in a casual conversational tone with a '
-            'natural American accent: "grab four kiwis"') in entry["motion_prompt"]
+    assert ('The person says to the camera with an American accent: '
+            '"grab four kiwis"') in entry["motion_prompt"]
     assert entry["speech"] == "grab four kiwis"
