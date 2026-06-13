@@ -4385,6 +4385,9 @@ class ReAssembleSettingsBody(BaseModel):
     threshold_db: float | None = Field(default=None, ge=-60, le=0)
     min_silence_secs: float | None = Field(default=None, ge=0.05, le=5)
     pad_secs: float | None = Field(default=None, ge=0, le=1)
+    # Global playback speed (the Editor tab's Speed control): pitch-
+    # preserving, applied on top of WPM normalization, captions in sync.
+    playback_speed: float | None = Field(default=None, ge=0.5, le=2.0)
     enable_voice_swap: bool | None = None
     voice_override: str | None = None
 

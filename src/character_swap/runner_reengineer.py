@@ -891,6 +891,9 @@ ASSEMBLE_DEFAULTS: dict = {
     "pad_secs": 0.03,
     "enable_voice_swap": False,
     "voice_override": None,
+    # Global playback speed (Hugo 2026-06-13 — the Editor tab's Speed
+    # control): pitch-preserving, captions stay in sync. 1.0 = off.
+    "playback_speed": 1.0,
 }
 
 
@@ -1031,6 +1034,7 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 min_silence_secs=cfg["min_silence_secs"],
                 pad_secs=cfg["pad_secs"],
                 voice_id=voice_id,
+                playback_speed=cfg["playback_speed"],
                 warn=_warn,
                 script_hint=script_hint,
             )

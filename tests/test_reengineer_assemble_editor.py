@@ -111,6 +111,7 @@ def test_assemble_passes_full_clips_with_kling_defaults(tmp_path, monkeypatch):
     assert kw["enable_captions"] is True
     assert kw["enable_wpm_normalize"] is False         # Kling pacing kept
     assert kw["voice_id"] is None                      # Kling voice kept
+    assert kw["playback_speed"] == 1.0                 # global speed off
     assert updates["status"] == "done"
     f = updates["finals"]["cA"]
     assert f["edit_id"].startswith("ed_")              # Editor-tab re-renderable
@@ -129,6 +130,7 @@ def test_assemble_respects_stored_settings(tmp_path, monkeypatch):
                                "enable_captions": False,
                                "enable_wpm_normalize": True,
                                "target_wpm": 160.0,
+                               "playback_speed": 1.25,
                                "junk_key": "ignored"}
 
     asyncio.run(runner_reengineer._do_assemble("re_t", st))
@@ -138,6 +140,7 @@ def test_assemble_respects_stored_settings(tmp_path, monkeypatch):
     assert kw["enable_captions"] is False
     assert kw["enable_wpm_normalize"] is True
     assert kw["target_wpm"] == 160.0
+    assert kw["playback_speed"] == 1.25
     assert "junk_key" not in kw
 
 
@@ -173,6 +176,53 @@ def _wire_api(monkeypatch, status: str = "awaiting_approval") -> dict:
     monkeypatch.setattr(reengineer_mod, "load_state", load_state)
     monkeypatch.setattr(reengineer_mod, "save_state", save_state)
     return box
+
+
+def test_editor_pipeline_applies_playback_speed(tmp_path, monkeypatch):
+    """run_editor_pipeline's global-speed step (Hugo 2026-06-13): the same
+    Speed control as the Editor tab — pitch-preserving time-stretch with
+    word timestamps scaled in lockstep so captions stay in sync."""
+    from character_swap import runner_compile
+    calls: dict = {}
+
+    def fake_assemble(paths, out, **kw):
+        Path(out).write_bytes(b"v")
+    monkeypatch.setattr(runner_compile.video_edit, "assemble_clips",
+                        fake_assemble)
+    monkeypatch.setattr(runner_compile.video_edit, "transcribe_words",
+                        lambda *a, **k: ["w1", "w2"])
+
+    def fake_stretch(src, out, *, speed_factor, job_id=None):
+        calls["speed"] = speed_factor
+        Path(out).write_bytes(b"s")
+    monkeypatch.setattr(runner_compile.video_edit, "time_stretch",
+                        fake_stretch)
+
+    def fake_scale(words, s):
+        calls["scaled"] = s
+        return words
+    monkeypatch.setattr(runner_compile.video_edit, "scale_word_timestamps",
+                        fake_scale)
+    monkeypatch.setattr(runner_compile.video_edit, "words_to_json",
+                        lambda w: "[]")
+
+    def _run_pipeline(speed):
+        return asyncio.run(runner_compile.run_editor_pipeline(
+            [tmp_path / "a.mp4"], edit_id="ed_t", edit_dir=tmp_path,
+            template="minimal", overrides=None, enable_trim=True,
+            enable_captions=False, enable_wpm_normalize=False,
+            target_wpm=190.0, threshold_db=-30.0, min_silence_secs=0.3,
+            pad_secs=0.03, voice_id=None, playback_speed=speed))
+
+    res = _run_pipeline(1.25)
+    assert calls["speed"] == 1.25
+    assert calls["scaled"] == 1.25                  # captions stay in sync
+    assert res.final.name == "035-speed.mp4"
+
+    calls.clear()
+    res = _run_pipeline(1.0)
+    assert "speed" not in calls                     # 1.0 = off, no encode
+    assert res.final.name != "035-speed.mp4"
 
 
 def test_animate_persists_panel_settings(monkeypatch):
@@ -398,6 +448,9 @@ def test_reasm_body_clamps_target_wpm():
     m = re.search(r"_reAsmBody\(\)\s*{(.*?)\n    },", js, re.S)
     assert m, "_reAsmBody not found in app.js"
     assert "Math.min(400, Math.max(80," in m.group(1)
+    # Global speed (2026-06-13): clamped to the server's ge=0.5/le=2.0.
+    assert "playback_speed" in m.group(1)
+    assert "Math.min(2, Math.max(0.5," in m.group(1)
 
 
 # ------------------------------------------------- dialogue-fitted durations

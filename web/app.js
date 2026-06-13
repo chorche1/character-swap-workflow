@@ -241,6 +241,7 @@ function studio() {
         enableVoiceSwap: false,
         targetWpm: 190,
         voiceOverride: '',
+        playbackSpeed: 1.0,             // global speed (Editor's control); 1.0 = av
       };
       try {
         const saved = JSON.parse(localStorage.getItem('reassemble.settings.v1') || '{}');
@@ -1643,6 +1644,8 @@ function studio() {
         // Clamp to the server's ge=80/le=400 — a typed out-of-range value
         // would otherwise 422-block ▶ Generate videos on every click.
         target_wpm: Math.min(400, Math.max(80, Number(s.targetWpm) || 190)),
+        // Clamped to the server's ge=0.5/le=2.0 for the same reason.
+        playback_speed: Math.min(2, Math.max(0.5, Number(s.playbackSpeed) || 1)),
         enable_voice_swap: !!s.enableVoiceSwap,
         voice_override: s.voiceOverride || '',
       };

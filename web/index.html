@@ -2240,7 +2240,7 @@
             <summary class="px-3 py-2 text-xs font-medium cursor-pointer bg-neutral-50 dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900">
               ⚙ Slutvideo (Editor)
               <span class="text-neutral-400 dark:text-neutral-500 ml-1 font-normal"
-                    x-text="`(${reAsmSettings.template}${reAsmSettings.enableCaptions ? '' : ' · inga captions'}${reAsmSettings.enableWpmNormalize ? ` · ${reAsmSettings.targetWpm} WPM` : ''}${reAsmSettings.enableVoiceSwap ? ' · röstbyte' : ' · Kling-röst'})`"></span>
+                    x-text="`(${reAsmSettings.template}${reAsmSettings.enableCaptions ? '' : ' · inga captions'}${reAsmSettings.enableWpmNormalize ? ` · ${reAsmSettings.targetWpm} WPM` : ''}${Number(reAsmSettings.playbackSpeed || 1) !== 1 ? ` · ${reAsmSettings.playbackSpeed}×` : ''}${reAsmSettings.enableVoiceSwap ? ' · röstbyte' : ' · Kling-röst'})`"></span>
             </summary>
             <div class="p-3 space-y-3 text-xs">
               <p class="text-[10px] text-neutral-400 dark:text-neutral-500">
@@ -2286,6 +2286,20 @@
                   <input type="checkbox" x-model="reAsmSettings.enableVoiceSwap" class="accent-indigo-500"> Röstbyte (ElevenLabs)
                 </label>
               </div>
+              <!-- Global speed (Hugo 2026-06-13): the Editor tab's Speed
+                   control — pitch-preserving, on top of WPM normalization,
+                   captions stay in sync. 1.0 = av. -->
+              <label class="flex items-center gap-1.5"
+                     title="Snabba upp (eller sakta ner) hela slutvideon i fina 0,05×-steg (skriv valfritt värde 0,5–2,0). Pitch-bevarande — rösterna låter naturliga. Läggs ovanpå ev. WPM-normalisering; captions hålls i synk. 1.0 = av.">
+                <span>Hastighet</span>
+                <input type="range" min="0.5" max="2" step="0.05"
+                       x-model.number="reAsmSettings.playbackSpeed"
+                       class="w-24 accent-indigo-500 align-middle" />
+                <input type="number" min="0.5" max="2" step="0.01"
+                       x-model.number="reAsmSettings.playbackSpeed"
+                       class="w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+                <span>×</span>
+              </label>
               <label class="block" :class="reAsmSettings.enableVoiceSwap ? '' : 'opacity-40'">
                 Röst-override (alla karaktärer)
                 <select x-model="reAsmSettings.voiceOverride"

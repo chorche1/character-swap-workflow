@@ -143,6 +143,7 @@ async def run_editor_pipeline(
     pad_secs: float,
     voice_id: str | None,
     enable_transcribe: bool = True,
+    playback_speed: float = 1.0,
     warn=None,
     script_hint: str | None = None,
 ) -> EditorResult:
@@ -302,6 +303,30 @@ async def run_editor_pipeline(
                 current = stretched
         except Exception:
             pass
+
+    # Step 4b.5: global playback speed (Hugo 2026-06-13 — the same Speed
+    # control as the Editor tab). Pitch-preserving time-stretch applied on
+    # top of any WPM normalization; word timestamps scale in lockstep so
+    # the captions burned below stay perfectly in sync. 1.0 = off.
+    speed = max(0.5, min(2.0, float(playback_speed or 1.0)))
+    if abs(speed - 1.0) > 1e-3:
+        try:
+            sped = edit_dir / "035-speed.mp4"
+            await asyncio.to_thread(
+                video_edit.time_stretch, current, sped,
+                speed_factor=speed, job_id=edit_id,
+            )
+            if words:
+                words = video_edit.scale_word_timestamps(words, speed)
+            current = sped
+        except Exception as speed_err:
+            logger.warning("%s: playback speed %.2fx skipped: %s: %s",
+                           edit_id, speed, type(speed_err).__name__,
+                           speed_err)
+            if warn is not None:
+                await warn(f"hastighet {speed:g}× hoppades över "
+                           f"({type(speed_err).__name__}: "
+                           f"{str(speed_err)[:200]})")
 
     # Persist the transcript NOW (after any WPM scaling) so the Resolve
     # export can build an SRT even when caption burn-in is skipped, AND
