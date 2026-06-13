@@ -717,16 +717,17 @@ def _kling_duration(entry: dict) -> int:
 
     Priority: (1) the user's manual `kling_secs` override (the editable
     field at the gate) — clamped to Kling's [3, 15]; (2) AUTO = the ORIGINAL
-    scene clip's length rounded UP to the SECOND-next whole second, i.e.
-    ceil + 1 (Hugo 2026-06-13: "6,4 s original → 8 s Kling" — one breath of
-    margin, but never the old speech-fitted extension that produced far too
-    long clips). When the dialogue needs even more time, the gate shows a
-    '⚠ replik ~Ns' hint instead of silently extending — bumping the manual
-    field is the user's call."""
+    scene clip's length rounded UP to a whole second with a margin that is
+    ALWAYS strictly more than 1 s and at most 2 s — i.e. floor + 2 (Hugo
+    2026-06-13, second revision: "6,4 s → 8 s" AND an exact 6,0 s original
+    must give 8, never 7 = exactly 1,0 s margin). Never the old
+    speech-fitted extension. When the dialogue needs even more time, the
+    gate shows a '⚠ replik ~Ns' hint instead of silently extending —
+    bumping the manual field is the user's call."""
     override = entry.get("kling_secs")
     if override:
         return _clamp_kling(float(override))
-    return _clamp_kling(float(entry.get("duration") or 0.0) + 1.0)
+    return _clamp_kling(math.floor(float(entry.get("duration") or 0.0)) + 2.0)
 
 
 def _with_accent(prompt: str) -> str:

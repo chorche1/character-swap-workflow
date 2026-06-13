@@ -459,15 +459,18 @@ def test_reasm_body_clamps_target_wpm():
 
 # ------------------------------------------------- dialogue-fitted durations
 
-def test_kling_duration_is_scene_length_ceil_plus_one():
-    """Hugo 2026-06-13 (supersedes the 06-12 plain ceil): AUTO Kling length
-    = the ORIGINAL scene clip's length rounded UP to the SECOND-next whole
-    second (ceil + 1) — "6,4 s original → 8 s Kling". Dialogue never
-    extends it (the gate shows a ⚠ hint and the manual field owns that
-    tradeoff)."""
+def test_kling_duration_is_floor_plus_two():
+    """Hugo 2026-06-13 rev 2: AUTO Kling length = whole seconds with a
+    margin ALWAYS strictly >1 s and <=2 s above the original — floor + 2.
+    "6,4 s → 8 s", and an exact 6,0 s original gives 8 (never 7 = exactly
+    1,0 s margin). Dialogue never extends it (the gate shows a ⚠ hint and
+    the manual field owns that tradeoff)."""
     # Hugo's literal example.
     assert runner_reengineer._kling_duration(
         {"duration": 6.4, "motion_prompt": "He talks.", "speech": ""}) == 8
+    # Exact integers get the FULL 2s margin — never exactly 1.0s.
+    assert runner_reengineer._kling_duration(
+        {"duration": 6.0, "motion_prompt": "He talks.", "speech": ""}) == 8
 
     short_scene_long_line = {
         "duration": 1.4,
@@ -476,16 +479,16 @@ def test_kling_duration_is_scene_length_ceil_plus_one():
                          'their customers would disappear overnight"',
         "speech": "",
     }
-    # ceil(1.4) + 1 = 3; the 17-word line does NOT extend it further (the
+    # floor(1.4) + 2 = 3; the 17-word line does NOT extend it further (the
     # ⚠ hint covers that).
     assert runner_reengineer._kling_duration(short_scene_long_line) == 3
 
     no_dialogue = {"duration": 7.567, "motion_prompt": "He pours.", "speech": ""}
-    assert runner_reengineer._kling_duration(no_dialogue) == 9   # ceil + 1
+    assert runner_reengineer._kling_duration(no_dialogue) == 9   # floor + 2
 
     speech_fallback = {"duration": 2.0, "motion_prompt": "He nods.",
                        "speech": "this little thing beats your multivitamin"}
-    assert runner_reengineer._kling_duration(speech_fallback) == 3   # 2 + 1
+    assert runner_reengineer._kling_duration(speech_fallback) == 4   # 2 + 2
 
     assert runner_reengineer._kling_duration(
         {"duration": 14.2, "motion_prompt": 'Says: "hi"', "speech": ""}) == 15
@@ -521,7 +524,7 @@ def test_do_animate_uses_scene_length_durations(monkeypatch):
         'The person says: "one two three four five six seven eight nine ten '
         'eleven"')
     asyncio.run(runner_reengineer._do_animate("re_t", st))
-    # Scene length 6.2 → ceil + 1 = 8 (dialogue does not extend — Hugo's
+    # Scene length 6.2 → floor + 2 = 8 (dialogue does not extend — Hugo's
     # directive; the manual kling_secs override is tested separately).
     assert job.durations_by_scene["s1"] == 8
 
@@ -551,7 +554,7 @@ def test_kling_duration_js_mirror_in_sync():
     body = m.group(1)
     assert "kling_secs" in body                  # manual override honored
     assert "Math.ceil" in body and "Math.max(3, Math.min(15" in body
-    assert "+ 1)" in body                        # AUTO = ceil + 1 (2026-06-13)
+    assert "Math.floor" in body and "+ 2)" in body   # AUTO = floor + 2
     # The speech estimate lives in klingSpeechSecs (HINT only since the
     # evening directive) — constants + the #7 attribution regex pinned there.
     m2 = re.search(r"klingSpeechSecs\(run, sc\)\s*{(.*?)\n    },", js, re.S)
@@ -701,7 +704,7 @@ def test_kling_duration_manual_override_wins():
     long_line = ('The person says: "one two three four five six seven eight '
                  'nine ten eleven twelve thirteen fourteen fifteen sixteen"')
     entry = {"duration": 8.0, "motion_prompt": long_line, "speech": ""}
-    assert runner_reengineer._kling_duration(entry) == 9      # auto = ceil+1
+    assert runner_reengineer._kling_duration(entry) == 10     # auto = floor+2
     assert runner_reengineer._kling_duration(
         {**entry, "kling_secs": 5}) == 5                      # manual wins
     assert runner_reengineer._kling_duration(

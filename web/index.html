@@ -2016,7 +2016,7 @@
                              (Hugo 2026-06-12): a manual value overrides the
                              speech-fitted auto outright; empty = auto. -->
                         <label class="flex items-center gap-1 text-neutral-400 dark:text-neutral-500"
-                               :title="'Klipplängden som skickas till Kling (3–15 s). Tomt = auto: originalscenens längd + 1 s, avrundad uppåt (6,4 s → 8 s). Just nu skickas ' + klingDuration(r, sc) + ' s.'">
+                               :title="'Klipplängden som skickas till Kling (3–15 s). Tomt = auto: originalscenens längd + 1–2 s, alltid uppåt till heltal med mer än 1 s marginal (6,4 s → 8 s; 6,0 s → 8 s). Just nu skickas ' + klingDuration(r, sc) + ' s.'">
                           → Kling
                           <input type="number" min="3" max="15" step="1"
                                  class="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
