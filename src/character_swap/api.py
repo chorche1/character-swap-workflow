@@ -4854,6 +4854,41 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
 
 
+class ReClipRegenBody(BaseModel):
+    char_id: str
+    video_id: str
+    # Edited motion/Kling prompt. Empty/None = a fresh take on the same prompt.
+    prompt: str | None = None
+
+
+@app.post("/api/reengineer/{re_id}/regen_clip")
+async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
+                                body: ReClipRegenBody) -> dict:
+    """Regenerate ONE character's scene clip with an optionally edited motion
+    prompt — a per-clip override, exactly like the Swap Step-5 regen. The clip
+    is replaced IN PLACE (runner.retry_one_video, which re-targets the same
+    source variant), and the final is marked stale so the user re-assembles
+    with "▶ Bygg ihop igen" (the live poll keeps refreshing because the new
+    clip is pending/processing). Unlike /scenes/{idx}/redo this carries a
+    per-clip prompt and never touches the scene-level motion prompt."""
+    from character_swap import runner
+    state = _editable_reengineer_state(
+        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
+    job_id = state.get("job_id")
+    job = store().get_job(job_id or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    jc = (job.characters or {}).get(body.char_id)
+    if jc is None or not any(v.video_id == body.video_id for v in jc.videos):
+        raise HTTPException(404, "clip not found for this character")
+    prompt_override = (body.prompt or "").strip() or None
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner.retry_one_video,
+                              job_id, body.char_id, body.video_id, prompt_override)
+    return _reengineer_view(state, slim=True)
+
+
 # ------------------------------------------ scene-level image rewrite + regen
 # "Ändra scenens bild för alla karaktärer" (Hugo 2026-06-13): the user writes
 # WHAT should change in plain language → the AI Director rewrites the scene's

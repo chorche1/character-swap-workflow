@@ -1973,6 +1973,16 @@ function studio() {
       return { variant, video };
     },
 
+    // The clip generated FROM a specific image variant (for the player shown
+    // directly under that image). Only the approved/source variant has a
+    // matching video; pick the most recent if an in-place retry left more
+    // than one row.
+    reClipForVariant(jc, variantId) {
+      if (!jc || !variantId) return null;
+      const vids = (jc.videos || []).filter(v => v.source_variant_id === variantId);
+      return vids.length ? vids[vids.length - 1] : null;
+    },
+
     async reengineerRedoClip(run, sc, cid) {
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5869,6 +5879,24 @@ function studio() {
       };
     },
 
+    // Reengineer: open the SAME regen modal for a per-scene clip, but carry the
+    // run so submitRegen posts to the reengineer per-clip endpoint (which marks
+    // the final stale) instead of the Swap /retry_video path.
+    openReClipRegenModal(reRun, charId, vv, sceneId) {
+      const jc = reRun?.job?.characters?.[charId];
+      this.regenModal = {
+        open: true,
+        charId,
+        videoId: vv.video_id,
+        charName: jc?.name || charId,
+        sceneId: sceneId || null,
+        prompt: vv.movement_prompt_override || vv.effective_movement_prompt || '',
+        hadOverride: !!vv.movement_prompt_override,
+        submitting: false,
+        reRun,
+      };
+    },
+
     _sceneIdForVideo(charId, vv) {
       const jc = this.job?.characters?.[charId];
       if (!jc) return null;
@@ -5880,6 +5908,27 @@ function studio() {
       if (!this.regenModal.charId || !this.regenModal.videoId) return;
       this.regenModal.submitting = true;
       try {
+        // Reengineer per-clip regen (Hugo 2026-06-13): edited motion prompt →
+        // retry_one_video in place + final marked stale. The live poll keeps
+        // refreshing because the new clip is pending/processing.
+        if (this.regenModal.reRun) {
+          const run = this.regenModal.reRun;
+          const rr = await fetch(`/api/reengineer/${run.re_id}/regen_clip`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              char_id: this.regenModal.charId,
+              video_id: this.regenModal.videoId,
+              prompt: (this.regenModal.prompt || '').trim() || null,
+            }),
+          });
+          if (!rr.ok) { this.notifyError('Regen failed: ' + await rr.text()); return; }
+          this._spliceReengineerView(await rr.json());
+          this.regenModal.open = false;
+          this.notifyInfo(`Regenererar ${this.regenModal.charName}s klipp — bygg ihop igen när det är klart.`);
+          this._startReengineerPolling();
+          return;
+        }
         const body = {
           char_id: this.regenModal.charId,
           video_id: this.regenModal.videoId,
