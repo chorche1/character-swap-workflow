@@ -232,6 +232,40 @@ def test_assemble_quiet_clip_speech_survives_adaptive_threshold(tmp_path, monkey
     assert video_edit._probe_duration(out) > 2.0
 
 
+def test_assemble_escalates_threshold_over_loud_room_tone(tmp_path, monkeypatch):
+    """Hugo 2026-06-13: Kling's synthetic room tone (~-28 dB amplitude)
+    sits ABOVE the -30 dB silence threshold, so no pause was ever detected
+    and the 19-clip re_e3734aa9c1 final shipped essentially untrimmed
+    (148.8s → 142.1s). When a clip yields no detectable silence, the
+    threshold escalates (+3 dB steps, capped at -25) until pauses appear."""
+    monkeypatch.setattr(settings, "adaptive_silence_threshold", False,
+                        raising=False)
+    monkeypatch.setattr(settings, "loudnorm_enabled", False, raising=False)
+    t1 = _clip(tmp_path / "p1.mp4", tone_secs=1.5)
+    amb = _clip(tmp_path / "amb.mp4", tone_secs=1.6)
+    quiet = tmp_path / "amb-quiet.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-y", "-i", str(amb),
+         "-af", "volume=-28dB", "-c:v", "copy", "-c:a", "aac", str(quiet)],
+        check=True, capture_output=True)
+    t2 = _clip(tmp_path / "p2.mp4", tone_secs=1.5)
+    listfile = tmp_path / "cat.txt"
+    listfile.write_text(f"file '{t1}'\nfile '{quiet}'\nfile '{t2}'\n")
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-hide_banner", "-y", "-f", "concat", "-safe",
+                    "0", "-i", str(listfile), "-c:v", "libx264", "-c:a",
+                    "aac", str(src)], check=True, capture_output=True)
+
+    out = tmp_path / "out.mp4"
+    info = video_edit.assemble_clips([src], out, enable_interior_trim=True,
+                                     threshold_db=-30.0)
+    # The ~1.6s "room tone" pause is invisible at -30 dB but found once the
+    # threshold escalates past -28 — most of it must be gone (pads + the
+    # ~0.25s natural tail survive). Untrimmed would be ~4.6s.
+    assert info["removed_secs"] >= 1.0
+    assert video_edit._probe_duration(out) < 3.9
+
+
 def test_clip_gain_math():
     """Backlog #10: static per-clip gain — target-seeking, true-peak-capped,
     clamped to ±12 dB."""
