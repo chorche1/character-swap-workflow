@@ -4040,6 +4040,39 @@ async def editor_pipeline_state(edit_id: str) -> dict:
         return {}
 
 
+@app.get("/api/editor/edit/{edit_id}")
+async def get_editor_edit(edit_id: str) -> dict:
+    """ADOPT an existing edit into the Editor tab (Hugo 2026-06-13): every
+    Reengineer final and Step-6 compile is built through the Editor
+    pipeline with its own edit_id — this returns what the result panel
+    needs (latest render + transcript) so the user can re-render captions,
+    edit words, trim the timeline or change speed WITHOUT re-billing."""
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {edit_id!r} not found")
+    # The NEWEST render wins here (unlike _find_editor_videos' fixed
+    # priority): re-opening an edit must show the latest rerender/timeline
+    # result, not the original 04-final it superseded.
+    cands = [p for pat in ("04-final.mp4", "captioned.mp4",
+                           "rerender-*.mp4", "timeline-*.mp4")
+             for p in edit_dir.glob(pat)]
+    final_video = max(cands, key=lambda p: p.stat().st_mtime, default=None)
+    if final_video is None:
+        final_video, _pre = _find_editor_videos(edit_dir)
+    if final_video is None:
+        raise HTTPException(404, f"No rendered video in {edit_id!r}")
+    words: list = []
+    words_path = edit_dir / "words.json"
+    if words_path.exists():
+        try:
+            words = json.loads(words_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            words = []
+    return {"edit_id": edit_id, "kind": "adopted",
+            "output_url": _file_url(final_video),
+            "words": words, "n_words": len(words)}
+
+
 @app.get("/api/editor/export_resolve/{edit_id}")
 async def editor_export_resolve(edit_id: str):
     """Download the edit as a DaVinci Resolve-ready project bundle (.zip).

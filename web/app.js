@@ -496,6 +496,28 @@ function studio() {
       localStorage.setItem('active_tab', slug);
     },
 
+    // Adopt an existing edit (Reengineer final / Step-6 compile — both are
+    // built through the Editor pipeline with an edit_id) into the Editor
+    // tab: re-render captions, edit words, trim the timeline or change
+    // speed — without re-billing anything (Hugo 2026-06-13).
+    async openEditInEditor(editId) {
+      if (!editId) {
+        this.notifyError('Ingen Editor-koppling på den här videon (äldre körning?)');
+        return;
+      }
+      const r = await fetch('/api/editor/edit/' + editId);
+      if (!r.ok) {
+        this.notifyError('Kunde inte öppna i Editorn: ' + await r.text());
+        return;
+      }
+      this.editor.lastResult = await r.json();
+      this.editor.rerenderOpen = true;
+      this.switchTab('editor');
+      this.notifyInfo('Finalen är öppnad i Editorn — re-rendera captions, '
+        + 'redigera ord (✎), trimma (Trim & split) eller ändra hastighet.');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+
     // --- Chat tab -----------------------------------------------------------
     // Claude agent loop: user types → /api/chats/<id>/turn → Claude runs
     // tool_use loop until end_turn → we get back the full updated chat.

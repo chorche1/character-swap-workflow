@@ -1714,6 +1714,10 @@
                      :download="`${jc.name}-resolve.zip`"
                      title="Download Resolve project zip (video + SRT + automate.py)"
                      class="text-xs text-slate-700 dark:text-slate-300 hover:underline font-medium">↓ Resolve</a>
+                  <button x-show="jc.compile_status === 'done' && jc.compile_edit_id"
+                          class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
+                          title="Öppna i Editor-tabben — re-rendera captions, redigera ord, trimma eller ändra hastighet (gratis)"
+                          @click="openEditInEditor(jc.compile_edit_id)">✎ Re-edit</button>
                 </div>
               </div>
               <!-- Phase 4 pipeline status (only shown when a 🚀 run has been kicked off) -->
@@ -2397,8 +2401,17 @@
                 <div class="w-44">
                   <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
                   <video x-show="f.final_url" :src="f.final_url" controls class="w-full rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
-                  <a x-show="f.final_url" :href="f.final_url" :download="(r.job?.characters?.[cid]?.name || cid) + '-reengineered.mp4'"
-                     class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                  <div class="flex items-center gap-3">
+                    <a x-show="f.final_url" :href="f.final_url" :download="(r.job?.characters?.[cid]?.name || cid) + '-reengineered.mp4'"
+                       class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                    <!-- Re-edit in the Editor tab (Hugo 2026-06-13): the final
+                         is an Editor edit — captions/words/trim/speed can be
+                         reworked without touching the Kling clips. -->
+                    <button x-show="f.final_url && f.edit_id"
+                            class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
+                            title="Öppna finalen i Editor-tabben — re-rendera captions, redigera ord, trimma eller ändra hastighet (gratis, inga nya Kling-klipp)"
+                            @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
+                  </div>
                 </div>
               </template>
             </div>
