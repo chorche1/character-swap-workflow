@@ -1496,6 +1496,84 @@ function studio() {
 
     // Retry one failed slot in a reengineer run — same endpoint as the Swap
     // tab's per-variant ↻ (keeps the slot in place, regenerates only it).
+    // --- 🎯 Per-scene END FRAME (Hugo 2026-06-13): upload an end pose after
+    // the scenes exist → every character is swapped into it → the scene's
+    // Kling clip interpolates start → end. NOT a new scene — it rides on the
+    // existing one (job-level endpoints keyed by scene_id; post-gate the
+    // scene is marked dirty so "Animera om ändrade" picks it up).
+
+    reSceneEndFrameUrl(run, sc) {
+      const s = (run.job?.scenes || []).find(x => x.scene_id === sc.scene_id);
+      return s?.end_frame_url || null;
+    },
+
+    // Mark ONE scene entry dirty by idx (clip no longer matches its images).
+    async _reMarkSceneDirtyIdx(run, idx) {
+      if (!['done', 'partial_success', 'failed',
+            'awaiting_assembly'].includes(run.status)) return;
+      try {
+        const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${idx}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dirty: true }),
+        });
+        if (r.ok) this._spliceReengineerView(await r.json());
+      } catch (_) {}
+    },
+
+    async reengineerUploadEndFrame(run, sc, ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!file || !run.job_id) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/scenes/${sc.scene_id}/end_frame`,
+        { method: 'POST', body: fd });
+      if (!r.ok) {
+        this.notifyError('End frame-uppladdning misslyckades: ' + await r.text());
+        return;
+      }
+      run.job = await r.json();
+      this.notifyInfo('End frame uppladdad — varje karaktär swappas in i slutposen…');
+      await this._reMarkSceneDirtyIdx(run, sc.idx);   // new end ≠ old clip
+      this._startReengineerPolling();
+      await this.refreshReengineer(run.re_id);
+    },
+
+    async reengineerRegenEndFrame(run, sc) {
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/scenes/${sc.scene_id}/regen_end_frame`,
+        { method: 'POST' });
+      if (!r.ok) {
+        this.notifyError('End frame-regen misslyckades: ' + await r.text());
+        return;
+      }
+      run.job = await r.json();
+      // Cache-busters: the swaps regenerate into the SAME file paths.
+      const nonces = { ...this.reengineerRetryNonce };
+      Object.keys(run.job?.characters || {}).forEach(cid => {
+        nonces['ef-' + sc.scene_id + '-' + cid] = Date.now();
+      });
+      this.reengineerRetryNonce = nonces;
+      await this._reMarkSceneDirtyIdx(run, sc.idx);
+      this._startReengineerPolling();
+      await this.refreshReengineer(run.re_id);
+    },
+
+    async reengineerClearEndFrame(run, sc) {
+      if (!confirm('Ta bort end framen för scen ' + (sc.idx + 1)
+                   + '? (klippet animeras från enbart startbilden igen)')) return;
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/scenes/${sc.scene_id}/end_frame`,
+        { method: 'DELETE' });
+      if (!r.ok) {
+        this.notifyError('Kunde inte ta bort end framen: ' + await r.text());
+        return;
+      }
+      run.job = await r.json();
+      await this._reMarkSceneDirtyIdx(run, sc.idx);
+    },
+
     // Human-readable one-liner for a failed variant slot — shown as visible
     // text in the strip (the tooltip-only error was invisible on iPhone).
     // The full raw error stays in the title attribute.

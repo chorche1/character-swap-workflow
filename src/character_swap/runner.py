@@ -860,6 +860,33 @@ async def run_edit_variant(
 
 # --- video synthesis ----------------------------------------------------------------
 
+async def _resolve_end_image(job: Job, jc: JobCharacter,
+                             scene_id: str | None) -> Path | None:
+    """Optional per-scene END FRAME (Kling 3.0 only): prefer the frame
+    already generated (the character swapped into the scene's end pose);
+    fall back to swapping now if it's missing. Errors are surfaced on
+    `end_frame_errors` + an event, never swallowed. Shared by the initial
+    batch, "+ N more" AND per-clip retries — the latter two previously
+    DROPPED the end frame on regenerated clips (review 2026-06-13), which
+    also broke Reengineer's reanimate path."""
+    if job.video_model != "kling-v3" or scene_id is None:
+        return None
+    pre = (jc.end_frame_paths or {}).get(scene_id)
+    if pre and Path(pre).exists():
+        return Path(pre)
+    end_pose = (job.end_frames_by_scene or {}).get(scene_id)
+    if end_pose and Path(end_pose).exists():
+        try:
+            return await asyncio.to_thread(
+                _ensure_end_frame_swap, job, jc, scene_id, end_pose)
+        except Exception as e:  # noqa: BLE001 — surfaced, not swallowed
+            jc.end_frame_errors = dict(jc.end_frame_errors or {})
+            jc.end_frame_errors[scene_id] = str(e)
+            await _emit(job.job_id, "char.end_frame_failed",
+                        char_id=jc.char_id, scene_id=scene_id, error=str(e))
+    return None
+
+
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
     duration_secs: int | None = None, end_image: Path | None = None,
@@ -1058,7 +1085,6 @@ async def _animate_character(
     by_variant = dict(job.movement_prompts_by_variant or {})
     dur_by_variant = dict(job.durations_by_variant or {})
     dur_by_scene = dict(job.durations_by_scene or {})
-    end_by_scene = dict(job.end_frames_by_scene or {})
 
     placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
     for src_variant_id in approved_ids:
@@ -1068,27 +1094,9 @@ async def _animate_character(
         duration = (dur_by_variant.get(src_variant_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
-        # Optional per-scene END FRAME (Kling 3.0 only): prefer the frame we
-        # already generated in Step 3 (character swapped into the scene's end
-        # pose); fall back to swapping now if it's missing. Errors are surfaced
-        # on `end_frame_errors` + an event, never swallowed.
-        end_image: Path | None = None
-        if job.video_model == "kling-v3":
-            pre = (jc.end_frame_paths or {}).get(scene_id)
-            if pre and Path(pre).exists():
-                end_image = Path(pre)
-            else:
-                end_pose = end_by_scene.get(scene_id)
-                if end_pose and Path(end_pose).exists():
-                    try:
-                        end_image = await asyncio.to_thread(
-                            _ensure_end_frame_swap, job, jc, scene_id, end_pose)
-                    except Exception as e:  # noqa: BLE001 — surfaced, not swallowed
-                        jc.end_frame_errors = dict(jc.end_frame_errors or {})
-                        jc.end_frame_errors[scene_id] = str(e)
-                        await _emit(job.job_id, "char.end_frame_failed",
-                                    char_id=jc.char_id, scene_id=scene_id, error=str(e))
-                        end_image = None
+        # Optional per-scene END FRAME (Kling 3.0 only) — see
+        # _resolve_end_image (shared with "+ N more" and per-clip retries).
+        end_image = await _resolve_end_image(job, jc, scene_id)
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -1158,7 +1166,7 @@ async def generate_more_videos(
     dur_by_variant = dict(job.durations_by_variant or {})
     dur_by_scene = dict(job.durations_by_scene or {})
 
-    placeholders: list[tuple[VideoVariant, str, int | None]] = []
+    placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
     for src_id in approved_ids:
         variant = next((iv for iv in jc.images if iv.variant_id == src_id), None)
         scene_id = variant.scene_id if variant else None
@@ -1166,6 +1174,9 @@ async def generate_more_videos(
         duration = (dur_by_variant.get(src_id)
                     or dur_by_scene.get(scene_id)
                     or job.duration_secs)
+        # The scene's end frame rides along on extra takes too (it was
+        # silently dropped here before — review 2026-06-13).
+        end_image = await _resolve_end_image(job, jc, scene_id)
         for _ in range(n):
             v = VideoVariant(
                 video_id=_short("vd_"),
@@ -1175,11 +1186,12 @@ async def generate_more_videos(
                 movement_prompt_override=prompt_override,
             )
             jc.videos.append(v)
-            placeholders.append((v, prompt, duration))
+            placeholders.append((v, prompt, duration, end_image))
     _persist(job, jc, status=CharStatus.ANIMATING)
 
     await asyncio.gather(
-        *[_animate_one_video(job, jc, v, mp, dur) for v, mp, dur in placeholders]
+        *[_animate_one_video(job, jc, v, mp, dur, end_img)
+          for v, mp, dur, end_img in placeholders]
     )
 
 
@@ -1314,7 +1326,11 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
         or (job.durations_by_scene or {}).get(sid)
         or job.duration_secs
     )
-    await _animate_one_video(job, jc, fresh, movement_prompt, duration)
+    # The scene's end frame rides along on retried clips too (it was
+    # silently dropped here before — review 2026-06-13; this is the path
+    # Reengineer's reanimate uses for every redo).
+    end_image = await _resolve_end_image(job, jc, scene_id)
+    await _animate_one_video(job, jc, fresh, movement_prompt, duration, end_image)
 
 
 async def run_video_synthesis(job_id: str) -> None:

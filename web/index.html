@@ -2120,6 +2120,57 @@
                       </label>
                     </template>
                   </div>
+                  <!-- 🎯 END FRAME per scene (Hugo 2026-06-13): upload an end
+                       pose AFTER the scenes exist → every character is
+                       swapped into it → the scene's Kling 3.0 clip
+                       interpolates start → end. NOT a new scene. Only
+                       kling-v3 honors it. -->
+                  <div x-show="(r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && (r.job?.video_model || 'kling-v3') === 'kling-v3'"
+                       class="flex gap-2 mt-1 flex-wrap items-center text-[10px]">
+                    <template x-if="!reSceneEndFrameUrl(r, sc)">
+                      <label class="text-indigo-500 hover:underline cursor-pointer"
+                             title="Ladda upp en SLUT-bild för scenen — varje karaktär swappas in i den och Kling animerar från startbilden till slutbilden. Räknas INTE som en ny scen.">
+                        🎯 End frame
+                        <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                               @change="reengineerUploadEndFrame(r, sc, $event)" />
+                      </label>
+                    </template>
+                    <template x-if="reSceneEndFrameUrl(r, sc)">
+                      <div class="flex items-center gap-2 flex-wrap">
+                        <a :href="reSceneEndFrameUrl(r, sc)" target="_blank"
+                           class="text-neutral-400 hover:underline" title="Slutposen du laddade upp (öppna i full storlek)">🎯 End frame:</a>
+                        <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-ef-'+sc.idx+'-'+cid">
+                          <div>
+                            <template x-if="(jc.end_frame_urls || {})[sc.scene_id]">
+                              <a :href="jc.end_frame_urls[sc.scene_id]" target="_blank">
+                                <img :src="jc.end_frame_urls[sc.scene_id] + (reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] ? '?r=' + reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] : '')"
+                                     class="w-14 rounded object-cover border-2 border-indigo-400"
+                                     :title="jc.name + ' — swappad slutbild (Kling animerar hit)'" />
+                              </a>
+                            </template>
+                            <span x-show="(jc.end_frame_errors || {})[sc.scene_id]"
+                                  class="text-rose-500 cursor-help"
+                                  :title="(jc.end_frame_errors || {})[sc.scene_id]"
+                                  x-text="'✕ ' + jc.name"></span>
+                            <span x-show="!(jc.end_frame_urls || {})[sc.scene_id] && !(jc.end_frame_errors || {})[sc.scene_id]"
+                                  class="inline-block w-14 h-24 skeleton rounded"
+                                  :title="jc.name + ' — genererar slutbild…'"></span>
+                          </div>
+                        </template>
+                        <button class="text-indigo-500 hover:underline"
+                                title="Generera om slutbilderna för alla karaktärer (t.ex. efter fel)"
+                                @click="reengineerRegenEndFrame(r, sc)">↻</button>
+                        <label class="text-indigo-500 hover:underline cursor-pointer" title="Byt slutpose">
+                          ⇪
+                          <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                 @change="reengineerUploadEndFrame(r, sc, $event)" />
+                        </label>
+                        <button class="text-rose-500 hover:underline"
+                                title="Ta bort end framen (tillbaka till enbart startbild)"
+                                @click="reengineerClearEndFrame(r, sc)">✕</button>
+                      </div>
+                    </template>
+                  </div>
                   <!-- per-(scene × character) clips — edit mode on finished runs -->
                   <div x-show="r.status === 'awaiting_assembly' || (reEdit[r.re_id] && ['done','partial_success','failed','reanimating'].includes(r.status))"
                        class="flex gap-1.5 mt-1.5 flex-wrap items-center">

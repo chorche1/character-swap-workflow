@@ -2199,7 +2199,10 @@ async def set_scene_end_frame(job_id: str, scene_id: str,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
+    # Relaxed for Reengineer-origin jobs (Hugo 2026-06-13): edit mode adds
+    # end frames AFTER the clips exist — its own dirty/reanimate flow gates
+    # the expensive work. Plain Swap jobs stay locked.
+    if _movement_locked(job) and not job.from_reengineer:
         raise HTTPException(409, "Movement already submitted; end frames are locked")
     if scene_id not in _effective_scene_ids(job):
         raise HTTPException(404, f"Scene not in job: {scene_id}")
@@ -2236,7 +2239,10 @@ async def clear_scene_end_frame(job_id: str, scene_id: str) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
+    # Relaxed for Reengineer-origin jobs (Hugo 2026-06-13): edit mode adds
+    # end frames AFTER the clips exist — its own dirty/reanimate flow gates
+    # the expensive work. Plain Swap jobs stay locked.
+    if _movement_locked(job) and not job.from_reengineer:
         raise HTTPException(409, "Movement already submitted; end frames are locked")
     frames = dict(job.end_frames_by_scene or {})
     old = frames.pop(scene_id, None)
@@ -2266,7 +2272,10 @@ async def regen_scene_end_frame(job_id: str, scene_id: str,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if _movement_locked(job):
+    # Relaxed for Reengineer-origin jobs (Hugo 2026-06-13): edit mode adds
+    # end frames AFTER the clips exist — its own dirty/reanimate flow gates
+    # the expensive work. Plain Swap jobs stay locked.
+    if _movement_locked(job) and not job.from_reengineer:
         raise HTTPException(409, "Movement already submitted; end frames are locked")
     if not (job.end_frames_by_scene or {}).get(scene_id):
         raise HTTPException(409, "No end pose set for this scene")
