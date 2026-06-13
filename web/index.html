@@ -2068,8 +2068,15 @@
                                   class="absolute bottom-0.5 left-0.5 bg-amber-500/90 text-white text-[8px] px-1 rounded"
                                   x-text="'QC ↻' + (v.qc_attempts - 1)"></span>
                           </div>
-                          <div x-show="v.status === 'failed'" class="w-14 text-center">
-                            <div class="text-[9px] text-rose-500" :title="v.error || 'generation failed'">✕ failed</div>
+                          <!-- VISIBLE failure reason (Hugo 2026-06-13): the
+                               tooltip-only error was invisible on iPhone —
+                               show a readable one-liner; full error stays
+                               in the title. -->
+                          <div x-show="v.status === 'failed'" class="w-28 text-center space-y-0.5">
+                            <div class="text-[9px] text-rose-500 font-medium" :title="v.error || 'generation failed'">✕ failed</div>
+                            <div class="text-[8px] text-rose-400/90 leading-tight"
+                                 :title="v.error || ''"
+                                 x-text="variantFailText(v)"></div>
                             <button class="text-[10px] text-indigo-500 hover:underline"
                                     title="Retry this image"
                                     @click="reengineerRetryVariant(r, cid, v.variant_id)">↻ retry</button>

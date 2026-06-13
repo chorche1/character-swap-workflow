@@ -1496,6 +1496,26 @@ function studio() {
 
     // Retry one failed slot in a reengineer run — same endpoint as the Swap
     // tab's per-variant ↻ (keeps the slot in place, regenerates only it).
+    // Human-readable one-liner for a failed variant slot — shown as visible
+    // text in the strip (the tooltip-only error was invisible on iPhone).
+    // The full raw error stays in the title attribute.
+    variantFailText(v) {
+      const e = v.error || '';
+      if (/moderation_blocked|safety system/i.test(e)) {
+        const m = e.match(/categories[^\[]*\[([^\]]*)\]/);
+        const cat = m ? m[1].replace(/['" ]/g, '') : '';
+        return '⛔ OpenAI:s säkerhetssystem blockerade bilden'
+          + (cat ? ` (${cat})` : '') + ' — ↻ funkar ofta, annars ✎↻ eller ⬆';
+      }
+      if (/interrupted \(server restart\)/i.test(e)) {
+        return 'avbruten av serveromstart — ↻ för att köra om';
+      }
+      if (/timeout|timed out/i.test(e)) return 'timeout — ↻ för att köra om';
+      if (/rate.?limit|429/i.test(e)) return 'rate-limit hos leverantören — vänta en stund och ↻';
+      if (!e) return 'genereringen misslyckades — ↻ för att köra om';
+      return e.slice(0, 110);
+    },
+
     async reengineerRetryVariant(run, charId, variantId) {
       if (!run.job_id) return;
       const r = await fetch(
