@@ -237,6 +237,8 @@ async def _generate_one_variant(
     # Image 2" directive — by default a rejected slot fails with the
     # moderation reason instead of switching engines.
     effective_model = _swap_image_model(job)
+    # Director moderation-rescue (Hugo 2026-06-13): ONE rewrite per slot.
+    moderation_rewrite_tried = False
     try:
         for attempt in range(1, max_attempts + 1):
             if job.job_id in _CANCELLED_JOBS:
@@ -269,27 +271,69 @@ async def _generate_one_variant(
                         pipeline.generate_variant,
                         model=effective_model, **gen_kwargs)
                 except Exception as e:
-                    if not (settings.swap_moderation_fallback
-                            and content_policy.is_content_rejection(e)
-                            and effective_model != "nbp-swap"
-                            and _model_provider(effective_model) != "fal"
-                            and settings.has_provider("fal")):
+                    if not content_policy.is_content_rejection(e):
                         raise
-                    effective_model = "nbp-swap"
-                    variant.fallback_model = "nbp-swap"
-                    await _emit(job.job_id, "variant.fallback",
-                                char_id=jc.char_id,
-                                variant_id=variant.variant_id,
-                                fallback_model="nbp-swap",
-                                reason=str(e)[:300])
-                    try:
-                        await asyncio.to_thread(
-                            pipeline.generate_variant,
-                            model="nbp-swap", **gen_kwargs)
-                    except Exception as e2:
-                        raise RuntimeError(
-                            "fallback(nbp-swap) after content rejection "
-                            f"failed: {type(e2).__name__}: {e2}") from e2
+                    # RUNG A (Hugo 2026-06-13): ONE Director rewrite — Claude
+                    # looks at the scene and rewords the prompt (same scene,
+                    # same visual result, neutral phrasing). Hugo verified
+                    # the approach by hand in ChatGPT: a reworded prompt
+                    # generated the exact scene the original couldn't. Same
+                    # engine, no switch; requires ANTHROPIC_API_KEY (None →
+                    # fall through to the next rung).
+                    handled = False
+                    if not moderation_rewrite_tried:
+                        moderation_rewrite_tried = True
+                        from character_swap import prompt_director
+                        rewritten = await asyncio.to_thread(
+                            prompt_director.direct_moderation_rewrite,
+                            scene_path=attempt_scene,
+                            current_prompt=engine_effective_swap_prompt(
+                                job, prompt),
+                            rejection_reason=str(e),
+                            camera_gaze=job.from_reengineer,
+                            job_id=job.job_id)
+                        if rewritten:
+                            prompt = rewritten
+                            variant.prompt = rewritten
+                            variant.moderation_rewritten = True
+                            gen_kwargs["prompt"] = rewritten
+                            await _emit(job.job_id, "variant.moderation_rewrite",
+                                        char_id=jc.char_id,
+                                        variant_id=variant.variant_id,
+                                        reason=str(e)[:300])
+                            try:
+                                await asyncio.to_thread(
+                                    pipeline.generate_variant,
+                                    model=effective_model, **gen_kwargs)
+                                handled = True
+                            except Exception as e2:
+                                if not content_policy.is_content_rejection(e2):
+                                    raise
+                                e = e2          # still blocked → next rung
+                    if not handled:
+                        # RUNG B: cross-engine nbp-swap rescue — OPT-IN
+                        # (SWAP_MODERATION_FALLBACK=1; Hugo's 100% GPT
+                        # directive keeps it off by default).
+                        if not (settings.swap_moderation_fallback
+                                and effective_model != "nbp-swap"
+                                and _model_provider(effective_model) != "fal"
+                                and settings.has_provider("fal")):
+                            raise e
+                        effective_model = "nbp-swap"
+                        variant.fallback_model = "nbp-swap"
+                        await _emit(job.job_id, "variant.fallback",
+                                    char_id=jc.char_id,
+                                    variant_id=variant.variant_id,
+                                    fallback_model="nbp-swap",
+                                    reason=str(e)[:300])
+                        try:
+                            await asyncio.to_thread(
+                                pipeline.generate_variant,
+                                model="nbp-swap", **gen_kwargs)
+                        except Exception as e2:
+                            raise RuntimeError(
+                                "fallback(nbp-swap) after content rejection "
+                                f"failed: {type(e2).__name__}: {e2}") from e2
             verdict = await asyncio.to_thread(
                 swap_qc.inspect_variant,
                 scene_image=scene_path,
@@ -393,6 +437,37 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
         s.update_variant(job, jc, variant)      # single-row fast path
     else:
         s.update_job(job)
+
+
+def engine_effective_swap_prompt(job: Job, prompt: str) -> str:
+    """The prompt the image was ACTUALLY generated with. Slots store stock
+    templates verbatim (e.g. GENERATION_PROMPT), but pipeline's dispatch
+    SUBSTITUTES those with engine-specific prompts — gpt2-id-swap's compact
+    identity-first prompt, the fal engines' EDIT_SWAP_PROMPT. Rewriting the
+    stored stock string would rewrite text the engine never saw AND bypass
+    the substitution on regen. gpt2's prompt is returned in standard
+    Image1=scene orientation (dispatch re-flips it mechanically)."""
+    background = bool(job.extra_reference_path)
+    outfit_mode = job.outfit_mode or "scene"
+    stock = {pipeline.GENERATION_PROMPT, pipeline.EDIT_SWAP_PROMPT}
+    try:
+        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=background))
+        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=False))
+    except ValueError:
+        pass
+    if prompt not in stock:
+        return prompt
+    try:
+        if _swap_image_model(job) == "gpt2-id-swap":
+            return pipeline._flip_image_roles(
+                pipeline.build_gpt_id_swap_prompt(outfit_mode, job.outfit_text,
+                                                  background=background))
+        return pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
+                                               background=background)
+    except ValueError:
+        return pipeline.EDIT_SWAP_PROMPT
 
 
 def _parse_director_plan(job: Job):

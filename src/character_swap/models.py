@@ -128,6 +128,11 @@ class GeneratedImage(BaseModel):
     # (pipeline.generate_variant docstring): recorded here, emitted as a
     # `variant.fallback` event, and rendered as a ⇄ chip in the UI.
     fallback_model: str | None = None
+    # Set when the prompt was auto-reworded by the Director to pass the
+    # engine's safety system (moderation rescue, Hugo 2026-06-13) — same
+    # scene, neutral phrasing, same engine. The reworded prompt persists on
+    # `prompt` (visible in ✎↻); 🪄 chip in the Reengineer strip.
+    moderation_rewritten: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 

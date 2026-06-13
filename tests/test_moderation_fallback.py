@@ -66,6 +66,12 @@ def _wire(monkeypatch, gen_behavior, *, fal_configured=True,
         models_called.append(model)
         gen_behavior(model, kw)
     monkeypatch.setattr(runner.pipeline, "generate_variant", fake_gen)
+    # RUNG A (the Director moderation rewrite, 2026-06-13) is stubbed OUT —
+    # these tests cover RUNG B (the nbp engine switch) in isolation; the
+    # rewrite rung has its own suite in test_moderation_rewrite.py.
+    from character_swap import prompt_director
+    monkeypatch.setattr(prompt_director, "direct_moderation_rewrite",
+                        lambda **kw: None)
     monkeypatch.setattr(runner.swap_qc, "inspect_variant",
                         lambda **kw: QCVerdict(True, "", ""))
     monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)

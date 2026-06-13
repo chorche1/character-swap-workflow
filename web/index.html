@@ -2103,6 +2103,9 @@
                           <span x-show="v.fallback_model && v.status === 'ready'"
                                 class="absolute top-0.5 left-0.5 bg-purple-600/90 text-white text-[8px] px-1 rounded cursor-help"
                                 :title="'Content-policy fallback to ' + v.fallback_model">⇄</span>
+                          <span x-show="v.moderation_rewritten && v.status === 'ready'"
+                                class="absolute top-5 left-0.5 bg-violet-600/90 text-white text-[8px] px-1 rounded cursor-help"
+                                title="Prompten skrevs om automatiskt av AI Director för att passera säkerhetssystemet (samma scen, neutralare ordval) — se ✎↻ för texten">🪄</span>
                         </div>
                       </template>
                     </template>

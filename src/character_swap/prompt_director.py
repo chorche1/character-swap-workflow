@@ -1005,6 +1005,115 @@ def direct_scene_prompt_rewrite(
         return None
 
 
+# --- Moderation rescue REWRITE (Hugo 2026-06-13) ----------------------------
+#
+# When the image engine's safety system blocks a swap even after the
+# append-only softeners, ONE Claude call looks at the scene and rewords the
+# prompt — same scene, same visual result, neutral phrasing. Hugo verified
+# the approach empirically: a manually reworded prompt generated the exact
+# scene the original prompt couldn't.
+
+MODERATION_REWRITE_SYSTEM = """\
+You are rescuing a BLOCKED image-edit prompt for a character-swap pipeline.
+The image engine's safety system rejected the generation — usually a false
+positive on harmless UGC/fitness content (a bare-chested creator, a hand
+indicating skin, body close-ups). You see the scene frame (it is "Image 1"
+at generation time; the identity reference is "Image 2" and is not shown to
+you), the CURRENT PROMPT and the engine's REJECTION message.
+
+Rewrite the prompt so the SAME scene — same composition, props, action,
+outfit, framing and gaze — is produced, while avoiding wording and emphasis
+that trips safety filters:
+- Describe bodies and touch neutrally and matter-of-factly: prefer "torso",
+  "midsection", "gently holds / points at / indicates" over charged words
+  (bare, flesh, fat, pinch, squeeze, grab) when a neutral synonym keeps the
+  same visual.
+- Open with ONE short wholesome-context clause (e.g. "Everyday fitness-
+  education content filmed at home.") — never claim anything visually false.
+- Do NOT change what is visible. If the scene shows a bare torso, the
+  rewrite must still produce a bare torso — change the WORDS, not the image.
+- Keep ALL identity / framing / prop / headroom / outfit / gaze anchors and
+  the overall structure intact; roughly the same length as the input.
+- Do not add style/grading language.
+
+Return the FULL rewritten prompt via the tool.
+"""
+
+MODERATION_REWRITE_TOOL: dict[str, Any] = {
+    "name": "submit_safe_prompt",
+    "description": "The full rewritten prompt, safety-filter-friendly.",
+    "input_schema": {
+        "type": "object",
+        "required": ["prompt"],
+        "properties": {
+            "prompt": {"type": "string"},
+        },
+    },
+}
+
+
+def direct_moderation_rewrite(
+    *,
+    scene_path: Path,
+    current_prompt: str,
+    rejection_reason: str,
+    camera_gaze: bool = False,
+    job_id: str | None = None,
+) -> str | None:
+    """ONE Claude call: scene frame + the blocked prompt + the engine's
+    rejection → a reworded prompt that aims for the SAME image. Returns None
+    on ANY failure (no key, tool not called, API error) — the caller falls
+    through to the next rung. Code-appended style clauses are stripped
+    before and re-appended after, exactly like the scene-level rewrite."""
+    if not (current_prompt or "").strip():
+        return None
+    had_organic = ORGANIC_STYLE_CLAUSE in current_prompt
+    had_avoid = SWAP_AVOID_CLAUSE in current_prompt
+    content: list[dict] = [
+        {"type": "text",
+         "text": "SCENE FRAME (Image 1 at generation time):"},
+    ]
+    try:
+        content.append(anthropic_client._file_to_image_block(scene_path))
+    except Exception as e:
+        logger.warning("moderation_rewrite: failed to encode scene: %s", e)
+        return None
+    content.append({
+        "type": "text",
+        "text": ("CURRENT PROMPT:\n"
+                 f"{strip_style_clauses(current_prompt)}\n\n"
+                 "ENGINE REJECTION:\n"
+                 f"{(rejection_reason or '')[:400]}"),
+    })
+    try:
+        resp = anthropic_client.messages_with_tools(
+            system=MODERATION_REWRITE_SYSTEM,
+            messages=[{"role": "user", "content": content}],
+            tools=[MODERATION_REWRITE_TOOL],
+            tool_choice={"type": "tool", "name": "submit_safe_prompt"},
+            max_tokens=2048,
+            job_id=job_id,
+            phase="director_rewrite",
+        )
+        data = anthropic_client.extract_tool_call(resp, "submit_safe_prompt")
+        new_prompt = (data or {}).get("prompt", "")
+        if not (new_prompt or "").strip():
+            return None
+        out = str(new_prompt).strip()
+        if camera_gaze:
+            out = ensure_camera_gaze(out)
+        if had_organic:
+            out += ORGANIC_STYLE_CLAUSE
+        if had_avoid:
+            out += SWAP_AVOID_CLAUSE
+        return out
+    except ProviderNotConfigured:
+        return None
+    except Exception:
+        logger.exception("moderation_rewrite failed")
+        return None
+
+
 def replace_scene_prompt_in_plan(plan: SwapDirectorPlan, scene_id: str,
                                  prompt: str) -> bool:
     """Overwrite the cached plan's prompt for ONE scene across every

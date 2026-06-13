@@ -4836,36 +4836,10 @@ def _scene_swap_prompt_for(job: Job, scene_id: str) -> str:
 
 
 def _engine_effective_swap_prompt(job: Job, prompt: str) -> str:
-    """The prompt the image was ACTUALLY generated with. Slots store stock
-    templates verbatim (e.g. GENERATION_PROMPT), but pipeline's dispatch
-    SUBSTITUTES those with engine-specific prompts — gpt2-id-swap's compact
-    identity-first prompt, the fal engines' EDIT_SWAP_PROMPT. Editing the
-    stored stock string would rewrite text the engine never saw AND bypass
-    the substitution on regen, silently losing the compact prompt's identity
-    + framing locks (review 2026-06-13). gpt2's prompt is returned in
-    standard Image1=scene orientation (dispatch re-flips it mechanically)."""
-    from character_swap import pipeline, runner as runner_mod
-    background = bool(job.extra_reference_path)
-    outfit_mode = job.outfit_mode or "scene"
-    stock = {pipeline.GENERATION_PROMPT, pipeline.EDIT_SWAP_PROMPT}
-    try:
-        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=background))
-        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=False))
-    except ValueError:
-        pass
-    if prompt not in stock:
-        return prompt
-    try:
-        if runner_mod._swap_image_model(job) == "gpt2-id-swap":
-            return pipeline._flip_image_roles(
-                pipeline.build_gpt_id_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=background))
-        return pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                               background=background)
-    except ValueError:
-        return pipeline.EDIT_SWAP_PROMPT
+    """The prompt the image was ACTUALLY generated with — delegates to
+    `runner.engine_effective_swap_prompt` (shared with the moderation-rescue
+    rewrite, which must reword the engine's real text too)."""
+    return runner.engine_effective_swap_prompt(job, prompt)
 
 
 def _scene_frame_path(job: Job, scene_id: str) -> Path | None:
