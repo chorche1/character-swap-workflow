@@ -1069,6 +1069,26 @@ function studio() {
         + (p.retries ? ` · ${p.retries} QC ${p.retries === 1 ? 'retry' : 'retries'}` : '');
     },
 
+    // Video/clip generation progress for the Reengineer header (Hugo
+    // 2026-06-13: "easily see if videos are being generated"). Mirrors
+    // jobImageProgress but over each character's `videos`.
+    jobClipProgress(job) {
+      const vs = Object.values(job?.characters || {}).flatMap(c => c.videos || []);
+      if (!vs.length) return null;
+      const done = vs.filter(v => v.status === 'done').length;
+      const failed = vs.filter(v => ['failed', 'error'].includes(v.status)).length;
+      const inflight = vs.filter(v => ['pending', 'processing'].includes(v.status)).length;
+      return { total: vs.length, done, failed, inflight };
+    },
+
+    jobClipProgressText(job) {
+      const p = this.jobClipProgress(job);
+      if (!p) return '';
+      return `🎬 ${p.done}/${p.total} klipp klara`
+        + (p.inflight ? ` · ${p.inflight} renderas…` : '')
+        + (p.failed ? ` · ${p.failed} fail` : '');
+    },
+
     // Aggregate every in-flight job across tabs into one list for the
     // persistent status toast at the bottom-right. Each entry has:
     //   {kind, label, status, tab, navigate(): switch to its tab}
@@ -5712,6 +5732,31 @@ function studio() {
     regenModal: {
       open: false, charId: null, videoId: null, charName: '',
       sceneId: null, prompt: '', hadOverride: false, submitting: false,
+    },
+
+    // Read-only "view the EXACT prompt that generated this image" (Hugo
+    // 2026-06-13). Fetches the engine-effective per-slot prompt — same source
+    // the ✎↻ modal prefills, but display-only.
+    promptViewModal: { open: false, loading: false, prompt: '', label: '' },
+
+    async openPromptView(reRun, sc, v, charName) {
+      this.promptViewModal = {
+        open: true, loading: true, prompt: '',
+        label: (charName || '') + ' · scen ' + ((sc?.idx ?? 0) + 1),
+      };
+      try {
+        const r = await fetch(`/api/reengineer/${reRun.re_id}/scenes/${sc.idx}`
+          + `/swap_prompt?variant_id=${encodeURIComponent(v.variant_id)}`);
+        if (r.ok) {
+          this.promptViewModal.prompt = (await r.json()).prompt || '(ingen prompt hittad)';
+        } else {
+          this.promptViewModal.prompt = 'Kunde inte hämta prompten: ' + await r.text();
+        }
+      } catch (e) {
+        this.promptViewModal.prompt = 'Fel vid hämtning: ' + e;
+      } finally {
+        this.promptViewModal.loading = false;
+      }
     },
 
     // IMAGE regen with an altered prompt (Hugo 2026-06-12): same retry

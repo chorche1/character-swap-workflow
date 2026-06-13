@@ -1918,6 +1918,13 @@
             <span class="text-xs text-amber-600 dark:text-amber-400"
                   x-show="r.status === 'swapping' && jobImageProgress(r.job)"
                   x-text="jobImageProgressText(r.job)"></span>
+            <!-- Video/clip generation progress (Hugo 2026-06-13): so it's
+                 obvious when clips are rendering. -->
+            <span class="text-xs text-sky-600 dark:text-sky-400 flex items-center gap-1"
+                  x-show="jobClipProgress(r.job) && (jobClipProgress(r.job).inflight > 0 || ['animating','reanimating'].includes(r.status))">
+              <span x-show="jobClipProgress(r.job)?.inflight > 0" class="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>
+              <span x-text="jobClipProgressText(r.job)"></span>
+            </span>
             <span class="text-xs text-neutral-400" x-show="r.auto_mode">⚡ auto</span>
             <!-- Restart-stranded clips land as failed (never billed) — this
                  re-submits ALL failed clips on the run's underlying job. -->
@@ -2082,14 +2089,19 @@
                                  :title="jc.name + ' — click to approve/unapprove' + (v.qc_status === 'failed' ? ' · QC: ' + (v.qc_reason || '') : '')"
                                  @click="reengineerApprove(r, cid, v.variant_id)" />
                           </template>
-                          <!-- Download this ready image (Hugo 2026-06-13): mirrors the
-                               Swap Step-3 per-variant download; friendly name + nonce
-                               from the same backend fields the <img> uses. -->
+                          <!-- Download + view-prompt for this ready image (Hugo
+                               2026-06-13): ↓ saves it (friendly name), 📝 shows the
+                               EXACT engine-effective prompt that generated it. -->
                           <template x-if="v.status === 'ready' && v.url">
-                            <a :href="v.url + (reengineerRetryNonce[v.variant_id] ? '?r=' + reengineerRetryNonce[v.variant_id] : '')"
-                               :download="v.download_name"
-                               class="block w-14 text-center text-[10px] text-indigo-500 hover:underline leading-tight mt-0.5"
-                               :title="'Ladda ner ' + (v.download_name || 'bilden')">↓</a>
+                            <div class="flex items-center justify-center gap-2 w-14 mt-0.5 leading-tight">
+                              <a :href="v.url + (reengineerRetryNonce[v.variant_id] ? '?r=' + reengineerRetryNonce[v.variant_id] : '')"
+                                 :download="v.download_name"
+                                 class="text-[10px] text-indigo-500 hover:underline"
+                                 :title="'Ladda ner ' + (v.download_name || 'bilden')">↓</a>
+                              <button class="text-[10px] text-indigo-500 hover:underline"
+                                      title="Visa exakt prompt som genererade bilden"
+                                      @click.stop="openPromptView(r, sc, v, jc.name)">📝</button>
+                            </div>
                           </template>
                           <!-- The generated CLIP for THIS image, shown directly under
                                the image it was animated from (Hugo 2026-06-13). Only the
@@ -4621,6 +4633,39 @@
   <!-- IMAGE regen with altered prompt (Hugo 2026-06-12) — sibling of the
        video regen modal below; same retry endpoint as ✕↻ but the prompt is
        edited first. -->
+  <!-- Read-only: the EXACT prompt that generated an image (Hugo 2026-06-13). -->
+  <div x-show="promptViewModal.open"
+       @click="promptViewModal.open = false"
+       @keydown.window.escape="if (promptViewModal.open) promptViewModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">Prompt som genererade bilden</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400" x-text="promptViewModal.label"></div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="promptViewModal.open = false">✕</button>
+      </div>
+      <div class="p-5">
+        <div x-show="promptViewModal.loading" class="text-xs text-neutral-400">Hämtar…</div>
+        <textarea x-show="!promptViewModal.loading" readonly rows="12"
+                  x-model="promptViewModal.prompt"
+                  class="w-full px-3 py-2 text-xs font-mono border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-950 rounded-lg"></textarea>
+        <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1">
+          Detta är den motoreffektiva prompten bilden faktiskt genererades med. Vill du ÄNDRA den, använd ✎↻ på bilden.
+        </p>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="navigator.clipboard && navigator.clipboard.writeText(promptViewModal.prompt)">Kopiera</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-neutral-800 dark:bg-neutral-700 text-white"
+                @click="promptViewModal.open = false">Stäng</button>
+      </div>
+    </div>
+  </div>
+
   <div x-show="imgRegenModal.open"
        @click="imgRegenModal.open = false"
        @keydown.window.escape="if (imgRegenModal.open) imgRegenModal.open = false"
