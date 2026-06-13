@@ -2123,10 +2123,17 @@
                               <div x-show="['failed','error'].includes(reClipForVariant(jc, v.variant_id).status)"
                                    class="w-28 text-[9px] text-rose-500 leading-tight"
                                    :title="reClipForVariant(jc, v.variant_id).error || 'klippet misslyckades'">✕ klippet misslyckades</div>
-                              <button x-show="!['pending','processing'].includes(reClipForVariant(jc, v.variant_id).status)"
-                                      class="mt-0.5 text-[9px] text-indigo-500 hover:underline leading-tight"
-                                      title="Regenerera klippet med ändrad rörelse-prompt"
-                                      @click.stop="openReClipRegenModal(r, cid, reClipForVariant(jc, v.variant_id), v.scene_id)">✎↻ prompt</button>
+                              <div class="flex items-center gap-2 mt-0.5">
+                                <a x-show="reClipForVariant(jc, v.variant_id).status === 'done' && reClipForVariant(jc, v.variant_id).url"
+                                   :href="reClipForVariant(jc, v.variant_id).url"
+                                   :download="reClipDownloadName(jc, sc)"
+                                   class="text-[9px] text-indigo-500 hover:underline leading-tight"
+                                   title="Ladda ner det här klippet separat">↓ klipp</a>
+                                <button x-show="!['pending','processing'].includes(reClipForVariant(jc, v.variant_id).status)"
+                                        class="text-[9px] text-indigo-500 hover:underline leading-tight"
+                                        title="Regenerera klippet med ändrad rörelse-prompt"
+                                        @click.stop="openReClipRegenModal(r, cid, reClipForVariant(jc, v.variant_id), v.scene_id)">✎↻ prompt</button>
+                              </div>
                             </div>
                           </template>
                           <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded relative"

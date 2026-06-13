@@ -2033,6 +2033,15 @@ function studio() {
       return vids.length ? vids[vids.length - 1] : null;
     },
 
+    // Per-clip download filename — scene-numbered so individual Kling clips
+    // are distinguishable (the backend download_name is just the char name,
+    // shared by all of a character's clips). Hugo 2026-06-13.
+    reClipDownloadName(jc, sc) {
+      const name = (jc?.name || 'clip').toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+      return `${name || 'clip'}-scen-${(sc?.idx ?? 0) + 1}.mp4`;
+    },
+
     async reengineerRedoClip(run, sc, cid) {
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
