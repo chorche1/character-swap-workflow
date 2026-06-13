@@ -455,6 +455,15 @@ async def app_js() -> FileResponse:
     return FileResponse(settings.web_dir / "app.js")
 
 
+@app.get("/favicon.ico")
+async def favicon() -> FileResponse:
+    """Browser default favicon request + the notification icon referenced in
+    app.js (`icon: '/favicon.ico'`). The <link rel=icon> tags in index.html
+    point at the PNGs under /files/web/static; this route covers the bare
+    /favicon.ico that browsers fetch automatically."""
+    return FileResponse(settings.web_dir / "static" / "favicon.ico")
+
+
 # SPA deep-link: a reload on /j/<job_id> should serve the same index.html.
 # Defined separately (not catch-all) so we don't accidentally swallow real API
 # routes when adding new ones later.
