@@ -112,6 +112,10 @@ def test_assemble_passes_full_clips_with_kling_defaults(tmp_path, monkeypatch):
     assert kw["enable_wpm_normalize"] is False         # Kling pacing kept
     assert kw["voice_id"] is None                      # Kling voice kept
     assert kw["playback_speed"] == 1.0                 # global speed off
+    # Hugo 2026-06-13: the Editor-tab trim values he actually runs with.
+    assert kw["threshold_db"] == -30.0
+    assert kw["min_silence_secs"] == 0.20
+    assert kw["pad_secs"] == 0.02
     assert updates["status"] == "done"
     f = updates["finals"]["cA"]
     assert f["edit_id"].startswith("ed_")              # Editor-tab re-renderable

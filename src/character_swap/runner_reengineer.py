@@ -886,9 +886,12 @@ ASSEMBLE_DEFAULTS: dict = {
     "enable_captions": True,
     "enable_wpm_normalize": False,
     "target_wpm": 190.0,
+    # Hugo 2026-06-13: the Editor-tab trim values he actually runs with
+    # (−30 dB / 0.20 s / 0.02 s) — tighter than the old 0.30/0.03 preset,
+    # so short pauses get cut and less padding survives around speech.
     "threshold_db": -30.0,
-    "min_silence_secs": 0.30,
-    "pad_secs": 0.03,
+    "min_silence_secs": 0.20,
+    "pad_secs": 0.02,
     "enable_voice_swap": False,
     "voice_override": None,
     # Global playback speed (Hugo 2026-06-13 — the Editor tab's Speed
