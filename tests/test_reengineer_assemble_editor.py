@@ -469,6 +469,22 @@ def test_do_animate_uses_scene_length_durations(monkeypatch):
     assert job.durations_by_scene["s1"] == 8
 
 
+def test_template_selects_resync_after_async_options():
+    """The caption-template <select>s render their options from the async
+    /api/editor/templates fetch — without an x-effect re-sync the browser
+    DISPLAYS the first option (e.g. Mrbeast) while the model correctly holds
+    the persisted default (Hugo 2026-06-13: the ⚙ Slutvideo header said
+    capcut-bluebox but the dropdown showed Mrbeast)."""
+    html = (Path(__file__).resolve().parents[1] / "web" / "index.html"
+            ).read_text(encoding="utf-8")
+    for model in ("reAsmSettings.template", "compileSettings.template"):
+        i = html.find(f'x-model="{model}"')
+        assert i != -1, f"select for {model} not found"
+        chunk = html[i:i + 400]
+        assert f"$el.value = {model}" in chunk, \
+            f"{model} select lost its x-effect option re-sync"
+
+
 def test_kling_duration_js_mirror_in_sync():
     """app.js klingDuration must use the same constants + dialogue regex as
     the Python source of truth. Edit both together."""

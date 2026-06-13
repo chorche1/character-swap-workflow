@@ -1558,7 +1558,11 @@
         <div class="p-3 space-y-3 text-xs">
           <div class="grid grid-cols-2 gap-2">
             <label>Caption template
+              <!-- x-effect re-sync: options load async — without it the
+                   browser displays the first option while the model holds
+                   the persisted template. -->
               <select x-model="compileSettings.template"
+                      x-effect="editorTemplates; $nextTick(() => $el.value = compileSettings.template)"
                       class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
                 <template x-for="t in editorTemplates" :key="'ct-'+t.slug">
                   <option :value="t.slug" x-text="t.label || t.slug"></option>
@@ -2183,7 +2187,11 @@
               </p>
               <div class="grid grid-cols-2 gap-2">
                 <label>Caption-mall
+                  <!-- x-effect re-sync: the option list loads async — without
+                       it the browser DISPLAYS the first option (e.g. Mrbeast)
+                       while the model correctly holds capcut-bluebox. -->
                   <select x-model="reAsmSettings.template"
+                          x-effect="editorTemplates; $nextTick(() => $el.value = reAsmSettings.template)"
                           class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
                     <template x-for="t in editorTemplates" :key="'ra-'+t.slug">
                       <option :value="t.slug" x-text="t.label || t.slug"></option>
