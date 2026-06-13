@@ -1127,3 +1127,20 @@ def replace_scene_prompt_in_plan(plan: SwapDirectorPlan, scene_id: str,
                     vp.prompt = prompt
                 changed = True
     return changed
+
+
+def rekey_scene_in_plan(plan: SwapDirectorPlan, old_scene_id: str,
+                        new_scene_id: str) -> bool:
+    """Re-key a scene's plan entry from old_scene_id to new_scene_id across
+    every character — used when a scene's REFERENCE image is replaced (the
+    per-scene prompt is unchanged, only the scene identity moves). Returns
+    True if any entry changed."""
+    if old_scene_id == new_scene_id:
+        return False
+    changed = False
+    for cp in plan.characters:
+        for sp in cp.scenes:
+            if sp.scene_id == old_scene_id:
+                sp.scene_id = new_scene_id
+                changed = True
+    return changed

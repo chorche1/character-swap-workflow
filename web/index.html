@@ -2052,6 +2052,16 @@
                         <button class="text-violet-500 hover:underline"
                                 title="Ändra scenens BILD för alla karaktärer — beskriv ändringen i klartext, AI Director skriver om bildprompten, granska och regenerera"
                                 @click="openSceneImgModal(r, sc)">🪄 Ändra bild</button>
+                        <!-- Replace the scene's REFERENCE image with an uploaded
+                             one → re-swap every character against it (Hugo
+                             2026-06-13). New content-addressed scene_id; the
+                             scene is re-pointed, approvals withdrawn, finals stale. -->
+                        <label class="text-sky-500 hover:underline cursor-pointer"
+                               title="Byt ut scenens BILD mot en egen uppladdad bild — swappen genereras om för alla karaktärer mot den nya bilden">
+                          🖼 Byt scenbild
+                          <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                 @change="reengineerReplaceSceneImage(r, sc, $event.target.files[0]); $event.target.value=''" />
+                        </label>
                       </div>
                     </div>
                   </template>

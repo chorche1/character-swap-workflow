@@ -2075,6 +2075,68 @@ def _apply_scene_duplicate(job: Job, scene_id: str) -> str:
     return new_sid
 
 
+def _repoint_scene(job: Job, state: dict, idx: int, old_sid: str,
+                   new_sid: str, new_path: str) -> None:
+    """Re-point ONE reengineer scene entry from `old_sid` to a freshly
+    registered uploaded image (`new_sid` + `new_path`) — used by "byt
+    scenbild". Updates the state entry, the job's scene lists + legacy mirror,
+    every scene_id-keyed dict, every variant's scene_id, end frames, and the
+    cached Director plan. Caller persists job + state.
+
+    Raises 409 if `old_sid` is shared by another `state.scenes` entry (two
+    byte-identical detected frames content-hash to the same id): variants are
+    keyed by scene_id ALONE, so two same-id entries can't be re-pointed
+    independently — refuse loudly rather than corrupt the sibling. Duplicated
+    scenes carry a `__dup<hex>` id, so they're never matched here."""
+    scenes = state.get("scenes") or []
+    if sum(1 for e in scenes if e.get("scene_id") == old_sid) > 1:
+        raise HTTPException(409,
+            "Den här scenen delar bild med en annan scen (identisk bildruta). "
+            "Byt bild på alla berörda scener eller duplicera först.")
+    scenes[idx]["scene_id"] = new_sid
+
+    scene_ids = _effective_scene_ids(job)
+    scene_paths = _effective_scene_paths(job)
+    primary = scene_ids[0] if scene_ids else job.scene_id
+    if old_sid in scene_ids:
+        i = scene_ids.index(old_sid)
+        scene_ids[i] = new_sid
+        if i < len(scene_paths):
+            scene_paths[i] = new_path
+        else:
+            scene_paths.append(new_path)
+    job.scene_ids = scene_ids
+    job.scene_image_paths = scene_paths
+    job.scene_id = scene_ids[0]
+    job.scene_image_path = scene_paths[0]
+
+    # Move scene_id-keyed dict entries (only when present).
+    for d in (job.movement_prompts, job.enriched_movement_prompts,
+              job.durations_by_scene, job.end_frames_by_scene):
+        if d and old_sid in d:
+            d[new_sid] = d.pop(old_sid)
+
+    # Re-point this scene's variants — `_belongs_to_scene` catches legacy
+    # null-scene variants when old_sid is the primary. Drop their stale
+    # SWAPPED end frames so the end pose re-swaps against the new background;
+    # the end-pose REFERENCE (job.end_frames_by_scene) was migrated above.
+    for jc in job.characters.values():
+        for v in jc.images:
+            if _belongs_to_scene(v, old_sid, primary):
+                v.scene_id = new_sid
+        if jc.end_frame_paths:
+            jc.end_frame_paths.pop(old_sid, None)
+        if jc.end_frame_errors:
+            jc.end_frame_errors.pop(old_sid, None)
+
+    # Re-key the cached Director plan (no-op when Director is off / no plan).
+    from character_swap import prompt_director
+    plan = runner._parse_director_plan(job)
+    if plan is not None and prompt_director.rekey_scene_in_plan(plan, old_sid, new_sid):
+        job.director_prompts_json = plan.model_dump_json()
+    job.updated_at = datetime.utcnow()
+
+
 @app.post("/api/jobs/{job_id}/scenes/{scene_id}/duplicate")
 async def duplicate_scene(job_id: str, scene_id: str) -> dict:
     """Clone a scene slot: a new scene_id is inserted right after the source,
@@ -5017,6 +5079,44 @@ async def reengineer_rewrite_scene_prompt(re_id: str, idx: int,
             "prompt": new_prompt, "current_prompt": current}
 
 
+async def _select_and_unapprove_scene_slots(job: Job, scene_id: str) -> dict[str, str]:
+    """Per character, pick the regenerable slot for `scene_id` (approved →
+    first READY → first FAILED, never GENERATING) and withdraw its approval —
+    the regenerated image is a different picture and must be re-approved.
+    Shared by scene-image rewrite (new prompt) and scene-image replace (new
+    reference image). Returns {char_id: variant_id}; empty means nothing
+    regenerable (caller raises 409)."""
+    targets: dict[str, str] = {}
+    for cid, jc in job.characters.items():
+        cands = [v for v in jc.images if v.scene_id == scene_id]
+        if not cands:
+            continue
+        approved_ids = list(jc.approved_variant_ids or
+                            ([jc.approved_variant_id] if jc.approved_variant_id else []))
+        # In-flight slots are never picked (mirrors retry_variant's guard) —
+        # two concurrent submits must not double-run the same slot.
+        target = (next((v for v in cands if v.variant_id in approved_ids
+                        and v.status != VariantStatus.GENERATING), None)
+                  or next((v for v in cands if v.status == VariantStatus.READY), None)
+                  or next((v for v in cands if v.status == VariantStatus.FAILED), None))
+        if target is None:                  # every slot already in flight
+            continue
+        if target.variant_id in approved_ids:
+            # Withdraw the approval (mirrors retry_variant's bookkeeping).
+            approved_ids = [v for v in approved_ids if v != target.variant_id]
+            jc.approved_variant_ids = approved_ids
+            jc.approved_variant_id = approved_ids[0] if approved_ids else None
+            if jc.status == CharStatus.APPROVED and not approved_ids:
+                jc.status = CharStatus.AWAITING_APPROVAL
+            jc.updated_at = datetime.utcnow()
+            await events.publish(job.job_id, {
+                "kind": "char.unapproved", "job_id": job.job_id,
+                "char_id": cid, "variant_id": target.variant_id,
+                "approved_variant_ids": approved_ids})
+        targets[cid] = target.variant_id
+    return targets
+
+
 class ReRegenImagesBody(BaseModel):
     # The full new swap prompt (Director-rewritten and/or hand-edited).
     prompt: str
@@ -5049,34 +5149,7 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
         raise HTTPException(409, "underlying job missing")
     scene_id = entry["scene_id"]
 
-    targets: dict[str, str] = {}
-    for cid, jc in job.characters.items():
-        cands = [v for v in jc.images if v.scene_id == scene_id]
-        if not cands:
-            continue
-        approved_ids = list(jc.approved_variant_ids or
-                            ([jc.approved_variant_id] if jc.approved_variant_id else []))
-        # In-flight slots are never picked (mirrors retry_variant's guard) —
-        # two concurrent submits must not double-run the same slot.
-        target = (next((v for v in cands if v.variant_id in approved_ids
-                        and v.status != VariantStatus.GENERATING), None)
-                  or next((v for v in cands if v.status == VariantStatus.READY), None)
-                  or next((v for v in cands if v.status == VariantStatus.FAILED), None))
-        if target is None:                  # every slot already in flight
-            continue
-        if target.variant_id in approved_ids:
-            # Withdraw the approval (mirrors retry_variant's bookkeeping).
-            approved_ids = [v for v in approved_ids if v != target.variant_id]
-            jc.approved_variant_ids = approved_ids
-            jc.approved_variant_id = approved_ids[0] if approved_ids else None
-            if jc.status == CharStatus.APPROVED and not approved_ids:
-                jc.status = CharStatus.AWAITING_APPROVAL
-            jc.updated_at = datetime.utcnow()
-            await events.publish(job.job_id, {
-                "kind": "char.unapproved", "job_id": job.job_id,
-                "char_id": cid, "variant_id": target.variant_id,
-                "approved_variant_ids": approved_ids})
-        targets[cid] = target.variant_id
+    targets = await _select_and_unapprove_scene_slots(job, scene_id)
     if not targets:
         raise HTTPException(409, "no regenerable image slots for this scene "
                                  "(images still generating?)")
@@ -5110,6 +5183,69 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
                               runner_reengineer.regen_scene_images_with_prompt,
                               job.job_id, prompt, targets,
                               (body.change or "").strip() or None)
+    view = _reengineer_view(state, slim=True)
+    view["regen_variants"] = targets
+    return view
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/replace_scene_image")
+async def reengineer_replace_scene_image(re_id: str, idx: int,
+                                         background_tasks: BackgroundTasks,
+                                         file: UploadFile = File(...)) -> dict:
+    """Replace a scene's REFERENCE image with an uploaded image, then
+    regenerate the swap for EVERY character against it. Mirrors "🪄 Ändra
+    bild" but swaps the picture instead of the prompt: each slot keeps its own
+    prompt, approvals are withdrawn, the scene is marked dirty + finals stale,
+    and the user re-approves → ▶ Animera om → ▶ Bygg ihop igen. The uploaded
+    image is registered as a NEW content-addressed scene_id and this scene is
+    re-pointed at it (never overwrites the shared scene file)."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job missing")
+    old_sid = entry["scene_id"]
+
+    ext = _safe_ext(file.filename or "upload.png")          # image-only
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+    run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    upload = run_dir / f"replace_{secrets.token_hex(4)}{ext}"
+    upload.write_bytes(data)
+    new_sid, new_path = runner_reengineer._register_frame_as_scene(upload)
+
+    if new_sid == old_sid:                                  # identical bytes
+        view = _reengineer_view(state, slim=True)
+        view["regen_variants"] = {}
+        view["noop"] = True
+        return view
+
+    # Re-point first (raises 409 on the sibling-collision guard, BEFORE any
+    # approval is withdrawn), then select+unapprove by the NEW scene_id.
+    _repoint_scene(job, state, idx, old_sid, new_sid, str(new_path))
+    targets = await _select_and_unapprove_scene_slots(job, new_sid)
+    if not targets:
+        raise HTTPException(409, "no regenerable image slots for this scene "
+                                 "(images still generating?)")
+
+    # New image ≠ old clip: post-gate the scene must re-animate.
+    if job.movement_prompts or job.movement_prompt:
+        entry["dirty"] = True
+    s.update_job(job)
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+
+    # prompt=None → retry_single_variant keeps each slot's existing prompt;
+    # only the scene reference image changed.
+    background_tasks.add_task(_run_async,
+                              runner_reengineer.regen_scene_images_with_prompt,
+                              job.job_id, None, targets, None)
     view = _reengineer_view(state, slim=True)
     view["regen_variants"] = targets
     return view

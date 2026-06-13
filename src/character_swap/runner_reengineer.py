@@ -1165,12 +1165,15 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
     ])
 
 
-async def regen_scene_images_with_prompt(job_id: str, prompt: str,
+async def regen_scene_images_with_prompt(job_id: str, prompt: str | None,
                                          variant_ids: dict[str, str],
                                          change: str | None = None) -> None:
     """Scene-level "ändra bilden" (Hugo 2026-06-13): regenerate ONE scene's
-    swap image for EVERY character with a NEW prompt (Director-rewritten or
-    hand-edited). `variant_ids` = {char_id: variant_id} — the endpoint picked
+    swap image for EVERY character. `prompt` is the NEW swap prompt
+    (Director-rewritten or hand-edited) OR None to keep each slot's existing
+    prompt — the latter is used by "byt scenbild", where only the scene
+    REFERENCE image changed (`retry_single_variant` leaves the slot's prompt
+    untouched when prompt is falsy). `variant_ids` = {char_id: variant_id} — the endpoint picked
     each character's slot and withdrew its approval. Slots regenerate IN
     PLACE (same variant_id) with the shared provider semaphore; QC runs as
     usual inside _generate_one_variant; the prompt persists on each slot so

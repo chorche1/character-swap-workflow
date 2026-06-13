@@ -1871,6 +1871,36 @@ function studio() {
       this.notify('info', 'Egen bild uppladdad och godkänd för scenen.');
     },
 
+    // Replace a scene's REFERENCE image with an uploaded one → re-swap every
+    // character against it (Hugo 2026-06-13). Mirrors the "🪄 Ändra bild"
+    // response handling: cache-bust the regenerated variant files, splice the
+    // view, keep polling while they render.
+    async reengineerReplaceSceneImage(run, sc, file) {
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(
+        `/api/reengineer/${run.re_id}/scenes/${sc.idx}/replace_scene_image`,
+        { method: 'POST', body: fd });
+      if (!r.ok) {
+        this.notifyError('Kunde inte byta scenbild: ' + await r.text());
+        return;
+      }
+      const view = await r.json();
+      if (view.noop) {
+        this.notify('info', 'Samma bild — inget ändrades.');
+        return;
+      }
+      const regen = view.regen_variants || {};
+      // Variants regenerate into the SAME file path → cache-bust them.
+      const nonces = { ...this.reengineerRetryNonce };
+      Object.values(regen).forEach(vid => { nonces[vid] = Date.now(); });
+      this.reengineerRetryNonce = nonces;
+      this._spliceReengineerView(view);
+      this.notifyInfo(`Ny scenbild — regenererar swappen för ${Object.keys(regen).length} karaktärer…`);
+      this._startReengineerPolling();
+    },
+
     // After approve-swaps / image-regens on an ALREADY-ANIMATED scene, the
     // existing clip no longer matches the chosen image — flag the scene.
     async _reMarkVariantSceneDirty(run, charId, variantId) {
