@@ -83,7 +83,7 @@ def test_direct_reengineer_swap_enforces_gaze(monkeypatch, tmp_path):
     })
     result = prompt_director.direct_reengineer_swap(scenes=[("s1", frame)])
     assert result is not None
-    _, prompts = result
+    _, prompts, _meta = result
     assert CAMERA_GAZE_SENTENCE in prompts["s1"]
     # Ordering: gaze sentence belongs to the scene part, before the style clause.
     assert prompts["s1"].index(CAMERA_GAZE_SENTENCE) < \

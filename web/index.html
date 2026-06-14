@@ -1464,6 +1464,7 @@
                     'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300': r.status === 'done',
                     'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': ['queued','analyzing','swapping','animating','reanimating','assembling'].includes(r.status),
                     'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300': r.status === 'awaiting_approval',
+                    'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300': r.status === 'awaiting_person_choice',
                     'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300': r.status === 'awaiting_assembly',
                     'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300': ['failed','partial_success'].includes(r.status),
                   }"
@@ -1551,6 +1552,36 @@
                               title="Ta bort scenen ur finalen" @click="reengineerDeleteScene(r, sc)">✕</button>
                     </div>
                   </div>
+                  <!-- Multi-person gate: pick WHICH person to swap + what to do
+                       with the other(s). Only for ambiguous scenes. -->
+                  <template x-if="r.status === 'awaiting_person_choice' && sc.multi_person">
+                    <div class="mt-2 p-3 rounded-lg border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/30 space-y-2">
+                      <div class="text-[11px] font-medium text-violet-700 dark:text-violet-300">Flera personer i scenen — vem ska bytas ut?</div>
+                      <div class="space-y-1">
+                        <template x-for="(p, pi) in (sc.people || [])" :key="sc.idx + '-p-' + pi">
+                          <label class="flex items-center gap-2 text-[11px] cursor-pointer">
+                            <input type="radio" :name="r.re_id + '-person-' + sc.idx"
+                                   :checked="(rePersonChoice(r, sc).swap_person_idx ?? 0) === pi"
+                                   @change="rePersonChoiceEdit(r, sc, 'swap_person_idx', pi)" />
+                            <span x-text="(p.description || 'person') + (p.position ? ' (' + p.position + ')' : '')"></span>
+                          </label>
+                        </template>
+                      </div>
+                      <div class="flex items-center gap-3 text-[11px]">
+                        <span class="text-neutral-500 dark:text-neutral-400">Den andra personen:</span>
+                        <label class="flex items-center gap-1 cursor-pointer">
+                          <input type="radio" :name="r.re_id + '-other-' + sc.idx"
+                                 :checked="(rePersonChoice(r, sc).other_action || 'keep') === 'keep'"
+                                 @change="rePersonChoiceEdit(r, sc, 'other_action', 'keep')" /> behåll
+                        </label>
+                        <label class="flex items-center gap-1 cursor-pointer">
+                          <input type="radio" :name="r.re_id + '-other-' + sc.idx"
+                                 :checked="rePersonChoice(r, sc).other_action === 'remove'"
+                                 @change="rePersonChoiceEdit(r, sc, 'other_action', 'remove')" /> ta bort
+                        </label>
+                      </div>
+                    </div>
+                  </template>
                   <!-- motion prompt: editable at the gate and in edit mode -->
                   <template x-if="!(r.status === 'awaiting_approval' || reEdit[r.re_id])">
                     <div class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2" x-text="sc.motion_prompt"></div>
@@ -2018,6 +2049,13 @@
 
           <!-- approval actions (also on failed runs whose video phase never
                started — the animate endpoint accepts 'failed') -->
+          <!-- Multi-person gate action: continue once the user picked which
+               person to swap (+ keep/remove the other) for every flagged scene. -->
+          <div x-show="r.status === 'awaiting_person_choice'" class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
+            <span class="text-xs text-neutral-500 dark:text-neutral-400">Välj vem som ska bytas ut i scenerna ovan, sedan:</span>
+            <button class="text-sm px-4 py-1.5 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 font-medium"
+                    @click="submitReengineerPersonChoices(r)">▶ Fortsätt</button>
+          </div>
           <div x-show="reengineerGateVisible(r)" class="flex items-center gap-3 flex-wrap border-t border-neutral-100 dark:border-neutral-900 pt-3">
             <span class="text-xs text-neutral-500 dark:text-neutral-400">Approve one image per scene per character, then:</span>
             <button class="text-sm px-3 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950"

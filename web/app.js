@@ -150,6 +150,7 @@ function studio() {
     // can't clobber a half-typed prompt; per-run add-scene form state.
     reEdit: {},
     reSceneDrafts: {},
+    rePersonChoices: {},   // "${re_id}:${idx}" → {swap_person_idx, other_action}
     reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
@@ -2045,6 +2046,34 @@ function studio() {
       if (!r.ok) { this.notifyError('Kunde inte återställa: ' + await r.text()); return; }
       this._spliceReengineerView(await r.json());
       this.notify('info', 'Scenen swappas nu per karaktär igen — godkänn de nya bilderna.');
+    },
+
+    // Multi-person gate: which person to swap + keep/remove the other(s).
+    rePersonChoice(run, sc) {
+      return this.rePersonChoices[run.re_id + ':' + sc.idx] || {};
+    },
+    rePersonChoiceEdit(run, sc, field, value) {
+      const key = run.re_id + ':' + sc.idx;
+      this.rePersonChoices = { ...this.rePersonChoices,
+        [key]: { ...(this.rePersonChoices[key] || {}), [field]: value } };
+    },
+    async submitReengineerPersonChoices(run) {
+      const scenes = (run.scenes || []).filter(sc => sc.multi_person).map(sc => {
+        const c = this.rePersonChoices[run.re_id + ':' + sc.idx] || {};
+        return {
+          idx: sc.idx,
+          swap_person_idx: Number(c.swap_person_idx) || 0,
+          other_action: c.other_action === 'remove' ? 'remove' : 'keep',
+        };
+      });
+      const r = await fetch(`/api/reengineer/${run.re_id}/resolve_people`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scenes }),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte fortsätta: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      this.notifyInfo('Tack — genererar bilderna…');
+      this._startReengineerPolling();
     },
 
     // Replace a scene's REFERENCE image with an uploaded one → re-swap every

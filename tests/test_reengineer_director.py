@@ -65,7 +65,7 @@ def test_direct_reengineer_swap_happy_path(monkeypatch, tmp_path):
         scenes=[("s1", tmp_path / "f1.png"), ("s2", tmp_path / "f2.png")],
         outfit_mode="scene", job_id="re_t")
     assert out is not None
-    intent, prompts = out
+    intent, prompts, meta = out
     assert intent == "ugc kiwi video"
     assert prompts["s1"].startswith("Tailored one")
     assert prompts["s2"].startswith("Tailored two")
@@ -246,7 +246,7 @@ def test_create_job_caches_director_plan(monkeypatch, tmp_path):
                         property(lambda self: tmp_path), raising=False)
     box, states = _wire_create(
         monkeypatch, tmp_path,
-        director_result=("intent!", {"s1": "TAILORED s1", "s2": "TAILORED s2"}))
+        director_result=("intent!", {"s1": "TAILORED s1", "s2": "TAILORED s2"}, {}))
 
     asyncio.run(runner_reengineer._create_job_and_swap(
         "re_t", dict(states["re_t"]), _entries(tmp_path), "j_dir"))

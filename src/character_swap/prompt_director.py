@@ -602,6 +602,17 @@ Prompt format rules (follow exactly):
   phone-photo style paragraph is appended to your prompt automatically.
 - Imperative, concrete, NO long lists of generic constraints, no headers.
 
+MULTI-PERSON DETECTION (Hugo 2026-06-14) — REQUIRED for every scene:
+- Set "multi_person": true ONLY if MORE THAN ONE person is clearly visible in
+  the frame (so it is ambiguous which one should be swapped). A single subject
+  → false (and omit "people").
+- When multi_person=true, fill "people" with ONE entry per visible person:
+  "position" is one of left / right / center / background; "description" is
+  2-3 words (age range, gender, one visible trait — e.g. "young woman red
+  top", "older man left"). METADATA ONLY — it does NOT go in the swap prompt; the
+  app pauses and asks the user which person to swap. Still write the normal
+  per-scene "prompt" as usual (it will be refined with the user's choice).
+
 Return via the tool with one entry per scene, scene_ids verbatim.
 """
 
@@ -671,10 +682,33 @@ REENGINEER_SWAP_TOOL: dict[str, Any] = {
                 "type": "array",
                 "items": {
                     "type": "object",
-                    "required": ["scene_id", "prompt"],
+                    "required": ["scene_id", "prompt", "multi_person"],
                     "properties": {
                         "scene_id": {"type": "string"},
                         "prompt": {"type": "string"},
+                        "multi_person": {
+                            "type": "boolean",
+                            "description": "True if MORE THAN ONE person is "
+                            "visible in the scene (so it is ambiguous which one "
+                            "to swap). False for a single subject."},
+                        "people": {
+                            "type": "array",
+                            "description": "Only when multi_person=true: one "
+                            "entry per visible person.",
+                            "items": {
+                                "type": "object",
+                                "required": ["position", "description"],
+                                "properties": {
+                                    "position": {"type": "string",
+                                                 "description": "left | right | "
+                                                 "center | background"},
+                                    "description": {"type": "string",
+                                                    "description": "2-3 words: "
+                                                    "age, gender, one trait "
+                                                    "(e.g. 'young woman red top')"},
+                                },
+                            },
+                        },
                     },
                 },
             },
@@ -730,8 +764,9 @@ def direct_reengineer_swap(
     outfit_text: str | None = None,
     background_path: Path | None = None,
     job_id: str | None = None,
-) -> tuple[str, dict[str, str]] | None:
-    """ONE Claude call with every scene frame → (intent, {scene_id: prompt}).
+) -> tuple[str, dict[str, str], dict[str, dict]] | None:
+    """ONE Claude call with every scene frame → (intent, {scene_id: prompt},
+    {scene_id: {multi_person, people}}).
     Returns None on ANY failure — callers fall back to the static template;
     image generation never blocks on the Director.
 
@@ -840,7 +875,21 @@ def direct_reengineer_swap(
                    if s.get("scene_id") and (s.get("prompt") or "").strip()}
         if not prompts:
             return None
-        return (str(data.get("intent") or ""), prompts)
+        # Per-scene multi-person metadata (Hugo 2026-06-14): flags scenes with
+        # >1 visible person so the run can pause and ask which one to swap.
+        metadata: dict[str, dict] = {}
+        for s in data["scenes"]:
+            sid = str(s.get("scene_id") or "")
+            if not sid or sid not in prompts:
+                continue
+            if s.get("multi_person"):
+                people = [{"position": str(p.get("position") or ""),
+                           "description": str(p.get("description") or "")}
+                          for p in (s.get("people") or [])
+                          if isinstance(p, dict)]
+                if len(people) >= 2:        # only a REAL ambiguity counts
+                    metadata[sid] = {"multi_person": True, "people": people}
+        return (str(data.get("intent") or ""), prompts, metadata)
     except ProviderNotConfigured:
         return None
     except Exception:

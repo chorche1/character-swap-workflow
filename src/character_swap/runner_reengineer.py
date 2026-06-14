@@ -131,7 +131,8 @@ async def resume_all() -> None:
         status = state.get("status")
         if not re_id or status in _TERMINAL_RUN_STATES:
             continue
-        if status in {"awaiting_approval", "awaiting_assembly"}:
+        if status in {"awaiting_approval", "awaiting_assembly",
+                      "awaiting_person_choice"}:
             continue                       # user gates — nothing to re-attach
         _log.info("resuming reengineer %s from status=%r", re_id, status)
         if status in {"queued", "analyzing"}:
@@ -526,11 +527,18 @@ async def _create_job_and_swap(re_id: str, state: dict,
             job_id=job_id,
         )
         if result is not None:
-            intent, prompts = result
+            intent, prompts, meta = result
             director_json = prompt_director.plan_from_scene_prompts(
                 intent, prompts,
                 [(cid, jc.name) for cid, jc in chars.items()],
             ).model_dump_json()
+            # Flag multi-person SWAP scenes onto their entries — the person-
+            # choice gate reads these (direct scenes never swap, so skip them).
+            for e in scene_entries:
+                m = meta.get(e["scene_id"])
+                if m and e["scene_id"] not in direct_ids:
+                    e["multi_person"] = True
+                    e["people"] = m["people"]
 
     job = Job(
         job_id=job_id,
@@ -567,6 +575,17 @@ async def _create_job_and_swap(re_id: str, state: dict,
             _update(re_id, status="awaiting_approval")
         return
 
+    ambiguous = [e for e in scene_entries
+                 if e.get("multi_person") and e["scene_id"] not in direct_ids]
+    if ambiguous:
+        # Multiple people in one or more swap scenes — PAUSE and ask the user
+        # which person to swap + what to do with the other(s) before any image
+        # is generated (even in auto mode: ambiguity needs a decision). The job
+        # + Director plan are already persisted; resolve_people patches the plan
+        # and kicks the swap phase.
+        _update(re_id, status="awaiting_person_choice", scenes=scene_entries)
+        return
+
     swap_task = asyncio.create_task(runner.run_image_generation(job.job_id))
     await _watch_swap_phase(re_id, job.job_id, tasks=[swap_task])
     # The watcher cancels swap_task on stall — CancelledError is BaseException
@@ -574,6 +593,29 @@ async def _create_job_and_swap(re_id: str, state: dict,
     # and the stall reason written by the watcher would get clobbered.
     with contextlib.suppress(asyncio.CancelledError):
         await swap_task
+
+
+async def _resolve_people_and_swap(re_id: str) -> None:
+    """Resume the swap phase after the user answered the multi-person gate.
+    The resolve_people endpoint already patched the Director plan on the job
+    with the chosen person + keep/remove directive; here we just kick image
+    generation + watch it (the same tail as _create_job_and_swap)."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    job_id = state["job_id"]
+    if store().get_job(job_id) is None:
+        _update(re_id, status="failed", error="underlying job disappeared")
+        return
+    try:
+        _update(re_id, status="swapping")
+        swap_task = asyncio.create_task(runner.run_image_generation(job_id))
+        await _watch_swap_phase(re_id, job_id, tasks=[swap_task])
+        with contextlib.suppress(asyncio.CancelledError):
+            await swap_task
+    except Exception as e:
+        _log.exception("reengineer %s resolve_people swap failed", re_id)
+        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
 
 
 def _variants_terminal(job: Job) -> bool:

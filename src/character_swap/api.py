@@ -4680,6 +4680,93 @@ def _store_assemble_settings(state: dict,
     return True
 
 
+class ResolvePeopleSceneBody(BaseModel):
+    idx: int
+    swap_person_idx: int = 0
+    other_action: str = "keep"          # "keep" | "remove"
+
+
+class ResolvePeopleBody(BaseModel):
+    scenes: list[ResolvePeopleSceneBody] = Field(default_factory=list)
+
+
+def _person_directive(person: dict, other_action: str) -> str:
+    """Build the directive appended to a multi-person scene's swap prompt once
+    the user picks WHICH person to swap + what to do with the other(s)."""
+    pos = (person.get("position") or "").strip()
+    desc = (person.get("description") or "").strip()
+    if pos and desc:
+        who = f"the {desc} on the {pos}"
+    elif desc:
+        who = f"the {desc}"
+    elif pos:
+        who = f"the person on the {pos}"
+    else:
+        who = "the indicated person"
+    d = (f" Multiple people are visible in this scene. Replace SPECIFICALLY "
+         f"{who} with the new character; do not change anyone else's identity.")
+    if other_action == "remove":
+        return d + (" Remove the other people from the scene entirely, leaving "
+                    "only the new character.")
+    return d + " Keep the other people in the scene exactly as they are."
+
+
+@app.post("/api/reengineer/{re_id}/resolve_people")
+async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTasks,
+                                    body: ResolvePeopleBody) -> dict:
+    """Multi-person gate: the user picked which person to swap + what to do with
+    the other(s) per ambiguous scene. Bake each choice into the cached Director
+    plan, then kick the swap phase."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import runner, prompt_director
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if state.get("status") != "awaiting_person_choice":
+        raise HTTPException(409, "run is not awaiting person choices")
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    entries = state.get("scenes") or []
+
+    ambiguous_idxs = [i for i, e in enumerate(entries) if e.get("multi_person")]
+    by_idx = {sc.idx: sc for sc in body.scenes}
+    missing = [i for i in ambiguous_idxs if i not in by_idx]
+    if missing:
+        raise HTTPException(400, f"besvara alla oklara scener först (saknar idx {missing})")
+
+    plan = runner._parse_director_plan(job)
+    for i in ambiguous_idxs:
+        e = entries[i]
+        people = e.get("people") or []
+        sc = by_idx[i]
+        pi = max(0, min(sc.swap_person_idx, len(people) - 1)) if people else 0
+        action = "remove" if sc.other_action == "remove" else "keep"
+        if people and plan is not None:
+            sid = e["scene_id"]
+            base = next((sp.variants[0].prompt
+                         for cp in plan.characters for sp in cp.scenes
+                         if sp.scene_id == sid and sp.variants), None)
+            if base is not None:
+                prompt_director.replace_scene_prompt_in_plan(
+                    plan, sid, base + _person_directive(people[pi], action))
+        # Record the choice + clear the gate flag so the scene shows normally.
+        e["swap_person_idx"] = pi
+        e["other_action"] = action
+        e.pop("multi_person", None)
+        e.pop("people", None)
+
+    if plan is not None:
+        job.director_prompts_json = plan.model_dump_json()
+        job.updated_at = datetime.utcnow()
+        store().update_job(job)
+    state["scenes"] = entries
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async,
+                             runner_reengineer._resolve_people_and_swap, re_id)
+    return _reengineer_view(state)
+
+
 @app.post("/api/reengineer/{re_id}/animate")
 async def reengineer_animate(re_id: str, background_tasks: BackgroundTasks,
                              body: ReAssembleSettingsBody | None = None) -> dict:
