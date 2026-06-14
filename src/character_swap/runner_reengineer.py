@@ -189,7 +189,14 @@ async def _resume_animating(re_id: str, state: dict) -> None:
     if not job_id or store().get_job(job_id) is None:
         _update(re_id, status="failed", error="underlying job lost across restart")
         return
-    await _watch_video_phase(re_id, job_id)
+    # Direct-scene shared clips live OUTSIDE the job (no VideoVariant), so
+    # resume_pending never revives them — re-render any that didn't finish.
+    direct_tasks = [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
+                    for e in (state.get("scenes") or [])
+                    if e.get("is_direct") and not e.get("shared_clip_path")]
+    await _watch_video_phase(re_id, job_id, direct_tasks=direct_tasks)
+    if direct_tasks:
+        await asyncio.gather(*direct_tasks, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------- phase 1: analyze + create job
@@ -478,6 +485,13 @@ async def _create_job_and_swap(re_id: str, state: dict,
         uniq_ids.append(sid)
         uniq_paths.append(sp)
 
+    # "Direct image — no swap" scenes: NO per-character variants are generated
+    # (_kick_char skips them) — one shared Kling clip is reused for every
+    # character. swap_ids = the scenes that actually get swapped.
+    direct_map = {e["scene_id"]: bool(e.get("is_direct")) for e in scene_entries}
+    direct_ids = [sid for sid in uniq_ids if direct_map.get(sid)]
+    swap_ids = [sid for sid in uniq_ids if not direct_map.get(sid)]
+
     # Outfit choice ("Kläder" in the upload form): scene = wear the original
     # person's clothes (default — job.prompt stays None so the validated
     # default prompt chain applies); character/custom get an explicit prompt.
@@ -527,6 +541,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         scene_image_path=uniq_paths[0],
         scene_ids=uniq_ids,
         scene_image_paths=uniq_paths,
+        direct_scene_ids=direct_ids,
         characters=chars,
         images_per_character=1,
         image_model=image_model,
@@ -541,6 +556,16 @@ async def _create_job_and_swap(re_id: str, state: dict,
     s.add_job(job)
     _update(re_id, status="swapping", job_id=job.job_id, scenes=scene_entries,
             n_scenes=len(scene_entries))
+
+    if not swap_ids:
+        # Every scene is a direct image — nothing to swap. Skip the image-gen
+        # phase entirely (its watcher would never go terminal with zero
+        # variants) and go to the gate, or auto-animate.
+        if state.get("auto_mode"):
+            await animate(re_id)
+        else:
+            _update(re_id, status="awaiting_approval")
+        return
 
     swap_task = asyncio.create_task(runner.run_image_generation(job.job_id))
     await _watch_swap_phase(re_id, job.job_id, tasks=[swap_task])
@@ -799,6 +824,77 @@ def _with_accent(prompt: str) -> str:
     return out
 
 
+# Per-run lock so concurrent direct-clip tasks don't clobber each other's
+# state writes (each writes a different scene's shared_clip_path).
+_DIRECT_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _direct_lock(re_id: str) -> asyncio.Lock:
+    lock = _DIRECT_LOCKS.get(re_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _DIRECT_LOCKS[re_id] = lock
+    return lock
+
+
+async def _persist_direct(re_id: str, scene_id: str, **fields) -> None:
+    """Clobber-safe write of a direct scene's fields (shared_clip_path /
+    direct_error): reload → mutate the matching scene → save, under the
+    per-run lock. save_state is already atomic (tmp + replace)."""
+    async with _direct_lock(re_id):
+        st = reengineer.load_state(re_id)
+        if not st:
+            return
+        for e in st.get("scenes") or []:
+            if e.get("scene_id") == scene_id:
+                e.update(fields)
+                break
+        reengineer.save_state(st)
+
+
+async def _render_direct_clip(re_id: str, scene_id: str) -> None:
+    """Render ONE shared Kling clip for a 'direct image — no swap' scene and
+    store its path on the scene. Reused by EVERY character in assembly, so it
+    is rendered once (not per character). Never raises — failures land on
+    `direct_error` and surface as an assembly coverage gap."""
+    state = reengineer.load_state(re_id) or {}
+    job = store().get_job(state.get("job_id"))
+    entry = next((e for e in state.get("scenes") or []
+                  if e.get("scene_id") == scene_id), None)
+    if job is None or entry is None:
+        return
+    image = Path(entry.get("direct_image_path") or "")
+    if not image.exists():
+        await _persist_direct(re_id, scene_id, direct_error="direkt bild saknas")
+        return
+    prompt = _with_accent(entry.get("motion_prompt") or "")
+    dur = _kling_duration(entry)
+    dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
+    try:
+        from character_swap import pipeline
+        provider_job_id = await asyncio.to_thread(
+            pipeline.submit_video,
+            image=image, movement_prompt=prompt,
+            character_name="(delad scen)", job_id=job.job_id,
+            model=job.video_model or "kling-v3",
+            duration_secs=dur, generate_audio=job.video_audio)
+        await asyncio.to_thread(
+            pipeline.wait_for_video,
+            job_id=provider_job_id, character_name="(delad scen)",
+            dest=dest, app_job_id=job.job_id,
+            model=job.video_model or "kling-v3")
+        await _persist_direct(re_id, scene_id,
+                              shared_clip_path=str(dest), direct_error=None)
+        await events.publish(job.job_id, {"kind": "direct.clip.done",
+                                          "job_id": job.job_id,
+                                          "scene_id": scene_id})
+    except Exception as e:
+        _log.exception("reengineer %s: direct clip for scene %s failed",
+                       re_id, scene_id)
+        await _persist_direct(re_id, scene_id,
+                              direct_error=f"{type(e).__name__}: {e}")
+
+
 async def _do_animate(re_id: str, state: dict) -> None:
     # Backlog #35 (2026-06-12): always animate the FRESHEST scenes. The
     # caller loaded `state` at trigger time — a prompt edit saved between
@@ -811,7 +907,8 @@ async def _do_animate(re_id: str, state: dict) -> None:
         raise RuntimeError("underlying job disappeared")
     approved_any = any(jc.approved_variant_ids or jc.approved_variant_id
                        for jc in job.characters.values())
-    if not approved_any:
+    direct_scenes = [e for e in state["scenes"] if e.get("is_direct")]
+    if not approved_any and not direct_scenes:
         raise RuntimeError("no approved variants — approve images first")
 
     movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"])
@@ -842,10 +939,23 @@ async def _do_animate(re_id: str, state: dict) -> None:
     current = reengineer.load_state(re_id) or state
     for e in current.get("scenes") or []:
         e.pop("dirty", None)
+        if e.get("is_direct"):       # full (re)animate re-renders the shared clip
+            e["shared_clip_path"] = None
+            e.pop("direct_error", None)
     _update(re_id, status="animating", scenes=current.get("scenes") or [])
-    video_task = asyncio.create_task(runner.run_video_synthesis(job.job_id))
-    await _watch_video_phase(re_id, job.job_id)
-    await video_task
+
+    # ONE shared Kling clip per direct scene (no swap), reused by all characters.
+    direct_tasks = [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
+                    for e in (current.get("scenes") or []) if e.get("is_direct")]
+    # Per-character clips only when there are swap scenes (skip for all-direct).
+    swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
+    video_task = (asyncio.create_task(runner.run_video_synthesis(job.job_id))
+                  if swap_present else None)
+    await _watch_video_phase(re_id, job.job_id, direct_tasks=direct_tasks)
+    if video_task is not None:
+        await video_task
+    if direct_tasks:
+        await asyncio.gather(*direct_tasks, return_exceptions=True)
 
 
 def _approved_variant_for(jc: JobCharacter, scene_id: str) -> str | None:
@@ -865,7 +975,16 @@ def _videos_terminal(job: Job) -> bool:
                                            VideoStatus.ERROR} for v in vids)
 
 
-async def _watch_video_phase(re_id: str, job_id: str) -> None:
+def _swap_videos_done(job: Job) -> bool:
+    """Per-character (swap-scene) clips done. Trivially True when every scene is
+    a direct image — no per-character clips are expected, so the empty-videos
+    case must NOT block the phase (that's the all-direct landmine)."""
+    swap = set(job.scene_ids) - set(job.direct_scene_ids or [])
+    return True if not swap else _videos_terminal(job)
+
+
+async def _watch_video_phase(re_id: str, job_id: str, *,
+                             direct_tasks: list = ()) -> None:
     deadline = asyncio.get_event_loop().time() + _VIDEO_PHASE_TIMEOUT_SECS
     while True:
         await asyncio.sleep(_POLL_SECS)
@@ -873,7 +992,7 @@ async def _watch_video_phase(re_id: str, job_id: str) -> None:
         if job is None:
             _update(re_id, status="failed", error="underlying job disappeared")
             return
-        if _videos_terminal(job):
+        if _swap_videos_done(job) and all(t.done() for t in direct_tasks):
             break
         if asyncio.get_event_loop().time() > deadline:
             _update(re_id, status="failed", error="video phase timed out")
@@ -975,6 +1094,18 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
     missing: list[str] = []
     waitable = False
     for e in state["scenes"]:
+        if e.get("is_direct"):
+            # "Direct image — no swap": ONE shared clip, identical for every
+            # character. Append it here (no per-character variant lookup).
+            shared = e.get("shared_clip_path")
+            if shared and Path(shared).exists():
+                clips.append(Path(shared))
+            elif e.get("direct_error"):
+                missing.append(f"scen {e['idx'] + 1} (direktklipp misslyckades)")
+            else:
+                missing.append(f"scen {e['idx'] + 1} (direktklipp ej klart)")
+                waitable = True
+            continue
         vid_variant = _approved_variant_for(jc, e["scene_id"])
         if vid_variant is None:
             # No approved image. A scene the character has NO slots for was
@@ -1297,6 +1428,12 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
     for i in idxs:
         sid = entries[i]["scene_id"]
         n_before = len(tasks)
+        if entries[i].get("is_direct"):
+            # Redo of a direct scene re-renders the ONE shared clip (it has no
+            # per-character variants). _render_direct_clip overwrites the path.
+            tasks.append(_render_direct_clip(re_id, sid))
+            acted.append(i)
+            continue
         for cid, jc in job.characters.items():
             if char_id and cid != char_id:
                 continue

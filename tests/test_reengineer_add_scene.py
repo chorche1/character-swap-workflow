@@ -83,7 +83,7 @@ def test_add_scene_from_image(wired):
     out = asyncio.run(api.reengineer_add_scene(
         "re_t", bg, file=_upload("extra.png", b"png-bytes"),
         motion_prompt="Hold up the product", duration=6.0,
-        whisper=False, position=-1))
+        whisper=False, position=-1, direct=False))
     saved = wired["states"]["re_t"]
     assert len(saved["scenes"]) == 2
     new = saved["scenes"][1]
@@ -102,7 +102,7 @@ def test_add_scene_default_prompt_when_empty(wired):
     bg = BackgroundTasks()
     asyncio.run(api.reengineer_add_scene(
         "re_t", bg, file=_upload("extra.png", b"x"),
-        motion_prompt="", duration=0.0, whisper=False, position=-1))
+        motion_prompt="", duration=0.0, whisper=False, position=-1, direct=False))
     new = wired["states"]["re_t"]["scenes"][1]
     assert new["motion_prompt"] == runner_reengineer.ADDED_SCENE_PROMPT
     assert new["duration"] == 5.0                   # image default
@@ -125,7 +125,7 @@ def test_add_scene_from_video_extracts_midframe(wired, monkeypatch, tmp_path):
     bg = BackgroundTasks()
     asyncio.run(api.reengineer_add_scene(
         "re_t", bg, file=_upload("clip.mp4", b"mp4-bytes"),
-        motion_prompt="", duration=0.0, whisper=False, position=0))
+        motion_prompt="", duration=0.0, whisper=False, position=0, direct=False))
     saved = wired["states"]["re_t"]
     new = saved["scenes"][0]                        # position=0 → first
     assert calls["at"] == pytest.approx(4.5)        # mid-frame
@@ -148,7 +148,7 @@ def test_add_scene_video_whisper_flag(wired, monkeypatch):
     bg = BackgroundTasks()
     asyncio.run(api.reengineer_add_scene(
         "re_t", bg, file=_upload("clip.mov", b"mov"),
-        motion_prompt="", duration=0.0, whisper=True, position=-1))
+        motion_prompt="", duration=0.0, whisper=True, position=-1, direct=False))
     new = wired["states"]["re_t"]["scenes"][1]
     assert new["transcribing"] is True
 
@@ -158,7 +158,7 @@ def test_add_scene_blocked_mid_phase(wired):
     with pytest.raises(HTTPException) as e:
         asyncio.run(api.reengineer_add_scene(
             "re_t", BackgroundTasks(), file=_upload("x.png", b"x"),
-            motion_prompt="", duration=0.0, whisper=False, position=-1))
+            motion_prompt="", duration=0.0, whisper=False, position=-1, direct=False))
     assert e.value.status_code == 409
 
 

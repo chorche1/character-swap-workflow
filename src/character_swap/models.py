@@ -229,6 +229,10 @@ class Job(BaseModel):
     # from disk that don't have this field yet — see `effective_scene_ids`.
     scene_ids: list[str] = Field(default_factory=list)
     scene_image_paths: list[str] = Field(default_factory=list)
+    # Reengineer "direct image — no swap" scenes (subset of scene_ids): the
+    # image is used AS-IS (no per-character swap), so `_kick_char` generates no
+    # variants for them and one shared Kling clip is reused for every character.
+    direct_scene_ids: list[str] = Field(default_factory=list)
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants

@@ -73,6 +73,7 @@ def _call(files, motion, lengths, **kw):
     out = asyncio.run(api.reengineer_from_images(
         bg, files=files,
         motion_prompts=json.dumps(motion), lengths=json.dumps(lengths),
+        direct=kw.get("direct", "[]"),
         character_ids=kw.get("character_ids", json.dumps(["cA"])),
         image_model=kw.get("image_model", "gpt2-id-swap"),
         outfit_mode=kw.get("outfit_mode", "scene"),

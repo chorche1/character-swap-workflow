@@ -1442,7 +1442,7 @@ function studio() {
           uid: ++this._swapRowSeq,
           file, name: file.name,
           previewUrl: URL.createObjectURL(file),
-          motion_prompt: '', length: 5,
+          motion_prompt: '', length: 5, direct: false,
         });
       }
     },
@@ -1518,6 +1518,7 @@ function studio() {
         for (const row of g.rows) fd.append('files', row.file);
         fd.append('motion_prompts', JSON.stringify(g.rows.map(r => r.motion_prompt || '')));
         fd.append('lengths', JSON.stringify(g.rows.map(r => Number(r.length) || 0)));
+        fd.append('direct', JSON.stringify(g.rows.map(r => !!r.direct)));
         fd.append('character_ids', JSON.stringify(g.charIds));
         fd.append('image_model', g.imageModel);
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
@@ -2021,6 +2022,29 @@ function studio() {
       if (data.job) run = Object.assign(run, { job: data.job });
       await this._reMarkVariantSceneDirty(run, charId, data.variant_id);
       this.notify('info', 'Egen bild uppladdad och godkänd för scenen.');
+    },
+
+    // Mark a scene "direct image — no swap": used as-is for ALL characters,
+    // one shared clip. `ev` optional — with a file it uploads the image (video
+    // runs need it); without, the scene's existing image is reused.
+    async reengineerSetDirect(run, sc, ev) {
+      const fd = new FormData();
+      const f = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
+      if (f) fd.append('file', f);
+      if (ev && ev.target) ev.target.value = '';
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/direct_image`,
+                            { method: 'POST', body: fd });
+      if (!r.ok) { this.notifyError('Kunde inte sätta direkt-bild: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      this.notify('info', 'Scenen använder nu en direkt bild för alla karaktärer (ingen swap).');
+    },
+
+    async reengineerClearDirect(run, sc) {
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/clear_direct`,
+                            { method: 'POST' });
+      if (!r.ok) { this.notifyError('Kunde inte återställa: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      this.notify('info', 'Scenen swappas nu per karaktär igen — godkänn de nya bilderna.');
     },
 
     // Replace a scene's REFERENCE image with an uploaded one → re-swap every

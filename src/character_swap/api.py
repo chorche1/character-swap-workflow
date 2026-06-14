@@ -4454,6 +4454,7 @@ async def reengineer_from_images(
     files: list[UploadFile] = File(...),     # one scene image per scene, in order
     motion_prompts: str = Form(...),         # JSON array of strings (one per file)
     lengths: str = Form(...),                # JSON array of seconds (one per file)
+    direct: str = Form("[]"),                # JSON array of bools — "no swap" scenes
     character_ids: str = Form(...),          # JSON array of char ids
     image_model: str = Form("gpt2-id-swap"),
     outfit_mode: str = Form("scene"),
@@ -4514,6 +4515,16 @@ async def reengineer_from_images(
         raise HTTPException(400, "motion_prompts and lengths must be JSON arrays")
     if len(motion_list) != len(files) or len(length_list) != len(files):
         raise HTTPException(400, "motion_prompts and lengths must match the number of images")
+    try:
+        direct_list = json.loads(direct) if direct.strip() else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "direct must be a JSON array of booleans")
+    if not isinstance(direct_list, list):
+        raise HTTPException(400, "direct must be a JSON array")
+    if direct_list and len(direct_list) != len(files):
+        raise HTTPException(400, "direct must match the number of images")
+    if not direct_list:
+        direct_list = [False] * len(files)
 
     re_id = "re_" + secrets.token_hex(5)
     work = reengineer_mod.reengineer_dir(re_id)
@@ -4530,7 +4541,7 @@ async def reengineer_from_images(
         tmp = img_path.with_suffix(img_path.suffix + ".tmp")
         tmp.write_bytes(data)
         tmp.replace(img_path)
-        scene_id, _ = runner_reengineer._register_frame_as_scene(img_path)
+        scene_id, reg_path = runner_reengineer._register_frame_as_scene(img_path)
 
         raw_len = length_list[idx]
         length = float(raw_len) if raw_len else 5.0
@@ -4549,6 +4560,11 @@ async def reengineer_from_images(
             "summary": (upload.filename or f"Scene {idx + 1}")[:80],
             "source": "image",
         }
+        if bool(direct_list[idx]):
+            # "No swap": animate THIS image directly into one shared clip for
+            # every character. Point at the registered library path (stable).
+            entry["is_direct"] = True
+            entry["direct_image_path"] = str(reg_path)
         # Derive the dialogue from the says-clause so the '⚠ replik' hint +
         # caption script-bias work (empty when the prompt has no says-clause).
         entry["speech"] = runner_reengineer._spoken_text(entry)
@@ -4839,6 +4855,7 @@ async def reengineer_add_scene(
     duration: float = Form(0.0),
     whisper: bool = Form(False),
     position: int = Form(-1),
+    direct: bool = Form(False),       # use the image as-is, no swap, shared clip
 ) -> dict:
     """Add a scene from an uploaded IMAGE or VIDEO. Video → mid-frame becomes
     the scene image (+ optional Whisper dialogue prefill into the prompt).
@@ -4898,7 +4915,10 @@ async def reengineer_add_scene(
         "dirty": True,
         "source": "video" if is_video else "image",
     }
-    if whisper_source:
+    if direct:
+        entry["is_direct"] = True
+        entry["direct_image_path"] = str(_path)
+    if whisper_source and not direct:
         entry["transcribing"] = True
 
     entries = state.get("scenes") or []
@@ -4917,11 +4937,112 @@ async def reengineer_add_scene(
                                  + [str(_path)])
         job.updated_at = datetime.utcnow()
         s.update_job(job)
+    if direct and scene_id not in (job.direct_scene_ids or []):
+        job.direct_scene_ids = list(job.direct_scene_ids or []) + [scene_id]
+        job.updated_at = datetime.utcnow()
+        s.update_job(job)
 
     _save_reengineer_state(state)
-    background_tasks.add_task(_run_async, runner_reengineer.generate_added_scene,
-                              re_id, scene_id, whisper_source=whisper_source)
+    if not direct:
+        # Swap the new scene for every character. Direct scenes use the image
+        # as-is — no swap; the shared clip renders at animate time.
+        background_tasks.add_task(_run_async,
+                                  runner_reengineer.generate_added_scene,
+                                  re_id, scene_id, whisper_source=whisper_source)
     return _reengineer_view(state, slim=True)
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/direct_image")
+async def reengineer_set_direct(re_id: str, idx: int,
+                                file: UploadFile | None = File(None)) -> dict:
+    """Mark a scene "direct image — no swap": its image is used AS-IS and
+    animated into ONE shared clip reused by every character. Optional `file`
+    uploads the image (video runs need this — the detected frame has the wrong
+    person); omit it to reuse the scene's existing image (Swap-from-images
+    scenes already hold the user's image). Drops the scene's per-character swap
+    variants + approvals and excludes it from the swap phase."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "kan inte ändra medan klippen animeras")
+    entry = _reengineer_entry(state, idx)
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    if file is not None and (file.filename or "").strip():
+        ext = _safe_ext(file.filename or "")
+        data = await _read_capped(file)
+        if not data:
+            raise HTTPException(400, "Empty upload")
+        run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        up = run_dir / f"direct_{secrets.token_hex(4)}{ext}"
+        up.write_bytes(data)
+        new_sid, reg_path = runner_reengineer._register_frame_as_scene(up)
+        old_sid = entry["scene_id"]
+        if new_sid != old_sid:
+            _repoint_scene(job, state, idx, old_sid, new_sid, str(reg_path))
+        entry["direct_image_path"] = str(reg_path)
+    else:
+        sc = s.get_scene(entry["scene_id"])
+        if sc is None:
+            raise HTTPException(400, "ingen bild att använda — ladda upp en")
+        entry["direct_image_path"] = str(settings.scenes_dir / sc.filename)
+
+    sid = entry["scene_id"]
+    entry["is_direct"] = True
+    entry.pop("shared_clip_path", None)
+    entry.pop("direct_error", None)
+    entry["dirty"] = True
+
+    # Drop this scene's per-character swap variants + approvals; exclude from swap.
+    for jc in job.characters.values():
+        keep = {v.variant_id for v in jc.images if v.scene_id != sid}
+        jc.images = [v for v in jc.images if v.scene_id != sid]
+        jc.approved_variant_ids = [vid for vid in (jc.approved_variant_ids or [])
+                                   if vid in keep]
+        jc.approved_variant_id = (jc.approved_variant_ids[0]
+                                  if jc.approved_variant_ids else None)
+    if sid not in (job.direct_scene_ids or []):
+        job.direct_scene_ids = list(job.direct_scene_ids or []) + [sid]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+    return _reengineer_view(state)
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/clear_direct")
+async def reengineer_clear_direct(re_id: str, idx: int,
+                                  background_tasks: BackgroundTasks) -> dict:
+    """Revert a "direct image" scene back to per-character swap: re-swap every
+    character (background); the user re-approves the new images."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "kan inte ändra medan klippen animeras")
+    entry = _reengineer_entry(state, idx)
+    if not entry.get("is_direct"):
+        raise HTTPException(400, "scenen är inte i direkt-läge")
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    sid = entry["scene_id"]
+    for k in ("is_direct", "direct_image_path", "shared_clip_path", "direct_error"):
+        entry.pop(k, None)
+    entry["dirty"] = True
+    job.direct_scene_ids = [x for x in (job.direct_scene_ids or []) if x != sid]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_reengineer.generate_added_scene,
+                              re_id, sid)
+    return _reengineer_view(state)
 
 
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/duplicate")

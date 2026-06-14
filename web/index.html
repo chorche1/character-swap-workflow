@@ -1202,6 +1202,12 @@
                   </label>
                   <span class="text-xs text-neutral-400 dark:text-neutral-500"
                         x-text="'→ Kling ' + Math.max(3, Math.min(15, Math.ceil((Number(row.length)||0) - 1e-9))) + ' s'"></span>
+                  <label class="flex items-center gap-1 text-xs cursor-pointer"
+                         :class="row.direct ? 'text-indigo-600 dark:text-indigo-400' : 'text-neutral-500 dark:text-neutral-400'"
+                         title="Använd den här bilden som den är (ingen swap) — ETT delat klipp för alla karaktärer. T.ex. en produktbild eller en scen du förberett själv.">
+                    <input type="checkbox" x-model="row.direct" class="rounded" />
+                    📌 ingen swap
+                  </label>
                   <span class="flex-1"></span>
                   <button @click="moveSwapImageRow(idx, -1)" :disabled="idx === 0"
                           class="text-xs px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30" title="Flytta upp">↑</button>
@@ -1617,11 +1623,42 @@
                           <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
                                  @change="reengineerReplaceSceneImage(r, sc, $event.target.files[0]); $event.target.value=''" />
                         </label>
+                        <!-- 📌 Direct image — no swap: use THIS scene's image as-is
+                             for ALL characters (one shared clip). Click to use the
+                             current scene image, or "(egen bild)" to upload one. -->
+                        <template x-if="!sc.is_direct">
+                          <span class="flex items-center gap-1">
+                            <button class="text-indigo-500 hover:underline"
+                                    title="Använd scenens nuvarande bild som den är (ingen swap) — ETT delat klipp för alla karaktärer"
+                                    @click="reengineerSetDirect(r, sc, null)">📌 Ingen swap</button>
+                            <label class="text-indigo-400 hover:underline cursor-pointer" title="…eller ladda upp en egen bild för scenen (ingen swap)">
+                              (egen bild)
+                              <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                     @change="reengineerSetDirect(r, sc, $event)" />
+                            </label>
+                          </span>
+                        </template>
+                        <template x-if="sc.is_direct">
+                          <span class="flex items-center gap-2">
+                            <label class="text-sky-500 hover:underline cursor-pointer" title="Byt ut direktbilden">⬆ byt bild
+                              <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                     @change="reengineerSetDirect(r, sc, $event)" />
+                            </label>
+                            <button class="text-rose-500 hover:underline" title="Återgå till per-karaktär-swap (genererar om bilderna)"
+                                    @click="reengineerClearDirect(r, sc)">↩ swap igen</button>
+                          </span>
+                        </template>
                       </div>
                     </div>
                   </template>
+                  <!-- Direct-image scenes use ONE shared image/clip for all
+                       characters — show a badge instead of the swap grid. -->
+                  <div x-show="sc.is_direct" class="mt-1.5 flex items-center gap-2">
+                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">📌 delas av alla — ingen swap</span>
+                    <span x-show="sc.direct_error" class="text-[10px] text-rose-500" x-text="sc.direct_error"></span>
+                  </div>
                   <!-- swapped variants per character for THIS scene -->
-                  <div class="flex gap-2 mt-1.5 flex-wrap">
+                  <div x-show="!sc.is_direct" class="flex gap-2 mt-1.5 flex-wrap">
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-v-'+sc.idx+'-'+cid">
                       <template x-for="v in (jc.images || []).filter(v => v.scene_id === sc.scene_id)" :key="v.variant_id">
                         <div class="relative">
@@ -1735,7 +1772,7 @@
                   <!-- Upload your OWN image for this scene (Hugo 2026-06-12):
                        lands as a READY variant (QC skipped) and auto-approves,
                        replacing the previous approval on this scene. -->
-                  <div class="flex gap-2 mt-1 flex-wrap">
+                  <div x-show="!sc.is_direct" class="flex gap-2 mt-1 flex-wrap">
                     <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-up-'+sc.idx+'-'+cid">
                       <label class="text-[10px] text-indigo-500 hover:underline cursor-pointer"
                              :title="'Ersätt med en egen bild för ' + jc.name + ' i denna scen — godkänns direkt (ingen QC)'">
@@ -1750,7 +1787,7 @@
                        swapped into it → the scene's Kling 3.0 clip
                        interpolates start → end. NOT a new scene. Only
                        kling-v3 honors it. -->
-                  <div x-show="(r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && (r.job?.video_model || 'kling-v3') === 'kling-v3'"
+                  <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && (r.job?.video_model || 'kling-v3') === 'kling-v3'"
                        class="flex gap-2 mt-1 flex-wrap items-center text-[10px]">
                     <template x-if="!reSceneEndFrameUrl(r, sc)">
                       <label class="text-indigo-500 hover:underline cursor-pointer"

@@ -528,8 +528,15 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
                        or pipeline.GENERATION_PROMPT)
     director_plan = _parse_director_plan(job)
 
+    # Reengineer "direct image — no swap" scenes generate NO per-character
+    # variants: the uploaded image is used as-is and one shared Kling clip is
+    # reused for every character (handled in runner_reengineer animate/assemble).
+    direct_scenes = set(job.direct_scene_ids or [])
+
     placeholders: list[GeneratedImage] = []
     for sid in scene_ids:
+        if sid in direct_scenes:
+            continue
         # Pull this (char, scene)'s ordered per-variant prompts from the
         # Director cache, if present. Indexed by variant_index in plan; we
         # consume them in order. Missing entries fall back.
