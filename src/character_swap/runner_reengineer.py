@@ -136,7 +136,13 @@ async def resume_all() -> None:
         _log.info("resuming reengineer %s from status=%r", re_id, status)
         if status in {"queued", "analyzing"}:
             # Analysis died mid-flight — safe to redo from the source video.
-            _spawn(run_reengineer(re_id), f"reengineer-resume-{re_id}")
+            # Image-sourced runs (Swap tab) have no video to re-analyze; they
+            # just recreate the job from the already-built scene entries.
+            if state.get("from_images"):
+                _spawn(run_reengineer_from_images(re_id),
+                       f"reengineer-resume-{re_id}")
+            else:
+                _spawn(run_reengineer(re_id), f"reengineer-resume-{re_id}")
         elif status == "swapping":
             _spawn(_resume_swapping(re_id, state), f"reengineer-resume-{re_id}")
         elif status == "animating":
@@ -221,6 +227,42 @@ async def run_reengineer(re_id: str) -> None:
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
 
 
+async def run_reengineer_from_images(re_id: str) -> None:
+    """Phase 1 for the image-sourced flow (the Swap tab): there is no source
+    video to analyze — the scene entries were already built from the uploaded
+    images at creation, with the user's manual motion prompt + Kling length per
+    scene — so go straight to creating the swap job. Everything downstream
+    (gate → animate → assemble → edit mode) is identical to the video flow."""
+    state = reengineer.load_state(re_id)
+    if not state:
+        return
+    try:
+        await _do_create_from_images(re_id, state)
+    except Exception as e:
+        _log.exception("reengineer(from_images) %s failed", re_id)
+        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
+
+
+async def _do_create_from_images(re_id: str, state: dict) -> None:
+    # Resume short-circuit (same contract as _do_analyze_and_swap): a crash
+    # between add_job and the status flip leaves a live job in the store;
+    # re-attach instead of creating a duplicate.
+    if state.get("job_id") and store().get_job(state["job_id"]) is not None:
+        _log.info("reengineer(from_images) %s: job %s already exists — "
+                  "re-attaching", re_id, state["job_id"])
+        _update(re_id, status="swapping")
+        await _resume_swapping(re_id, state)
+        return
+    scene_entries = state.get("scenes") or []
+    if not scene_entries:
+        _update(re_id, status="failed", error="no scenes")
+        return
+    # job_id persisted FIRST (crash-resume contract — mirrors the video path)
+    job_id = state.get("job_id") or ("j_" + secrets.token_hex(5))
+    state = _update(re_id, job_id=job_id)
+    await _create_job_and_swap(re_id, state, scene_entries, job_id)
+
+
 def _load_cached_plan(run_dir: Path) -> list[dict] | None:
     """Reuse a previous attempt's plan.json after a crash-resume: a crash
     1 second before status flipped to 'swapping' used to recompute scene
@@ -249,6 +291,11 @@ def _load_cached_plan(run_dir: Path) -> list[dict] | None:
 
 
 async def _do_analyze_and_swap(re_id: str, state: dict) -> None:
+    # Defensive: an image-sourced run has no source_path to analyze. Should be
+    # routed to _do_create_from_images by the caller, but guard against any
+    # other entry (resume, retry) reaching here and KeyError-ing on source_path.
+    if state.get("from_images"):
+        return await _do_create_from_images(re_id, state)
     source = Path(state["source_path"])
     run_dir = reengineer.reengineer_dir(re_id)
 

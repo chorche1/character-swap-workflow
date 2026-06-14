@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "character-swap-preview",
-      "runtimeExecutable": "/Users/hugonorrbom/.local/bin/uv",
-      "runtimeArgs": ["run", "character-swap", "serve", "--no-open", "--port", "8055"],
+      "runtimeExecutable": "/bin/bash",
+      "runtimeArgs": ["-lc", "cd /Users/hugonorrbom/character-swap-workflow && exec /Users/hugonorrbom/.local/bin/uv run character-swap serve --no-open --port 8055"],
       "port": 8055
     }
   ]

@@ -113,6 +113,25 @@ function studio() {
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
+    // Swap tab = Reengineer from reference IMAGES (no source video). One
+    // uploaded image per scene; the user writes its motion+dialogue prompt and
+    // sets its Kling length. POSTs /api/reengineer/from_images and reuses the
+    // Reengineer run-card (gate → animate → assemble → edit mode) downstream.
+    swapFromImages: {
+      rows: [],                       // [{uid, file, name, previewUrl, motion_prompt, length}]
+      charIds: [],
+      imageModel: 'gpt2-id-swap',
+      autoMode: false,
+      useDirector: false,
+      outfitMode: 'scene',
+      outfitText: '',
+      background: null,
+      backgroundUrl: '',
+      sourceOverrides: {},            // char_id → image_id (outfit/reference pick)
+      submitting: false,
+    },
+    swapPickerChar: null,             // char_id whose reference-image popover is open
+    _swapRowSeq: 0,
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
@@ -1410,6 +1429,119 @@ function studio() {
         this._startReengineerPolling();
         // Keep the form: Hugo iterates. Only the file is consumed.
         g.file = null; g.name = '';
+      } finally {
+        g.submitting = false;
+      }
+    },
+
+    // ---- Swap tab: Reengineer from reference images -----------------------
+    addSwapImages(fileList) {
+      for (const file of Array.from(fileList || [])) {
+        if (!file.type || !file.type.startsWith('image/')) continue;
+        this.swapFromImages.rows.push({
+          uid: ++this._swapRowSeq,
+          file, name: file.name,
+          previewUrl: URL.createObjectURL(file),
+          motion_prompt: '', length: 5,
+        });
+      }
+    },
+
+    removeSwapImageRow(i) {
+      const row = this.swapFromImages.rows[i];
+      if (row && row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+      this.swapFromImages.rows.splice(i, 1);
+    },
+
+    moveSwapImageRow(i, dir) {
+      const rows = this.swapFromImages.rows;
+      const j = i + dir;
+      if (j < 0 || j >= rows.length) return;
+      [rows[i], rows[j]] = [rows[j], rows[i]];
+    },
+
+    onSwapImagesDrop(ev) { this.addSwapImages(ev.dataTransfer.files); },
+
+    onSwapImagesPaste(ev) {
+      const files = [];
+      for (const item of (ev.clipboardData?.items || [])) {
+        if (item.kind === 'file') { const f = item.getAsFile(); if (f) files.push(f); }
+      }
+      if (files.length) this.addSwapImages(files);
+    },
+
+    setSwapBackground(file) {
+      if (!file) return;
+      if (this.swapFromImages.backgroundUrl) URL.revokeObjectURL(this.swapFromImages.backgroundUrl);
+      this.swapFromImages.background = file;
+      this.swapFromImages.backgroundUrl = URL.createObjectURL(file);
+    },
+
+    swapCharThumb(ch) {
+      const picked = this.swapFromImages.sourceOverrides[ch.char_id];
+      if (picked) {
+        const img = (ch.images || []).find(i => i.image_id === picked);
+        if (img) return img.url;
+      }
+      return ch.url;
+    },
+
+    pickSwapSource(charId, imageId) {
+      const ch = this.library.find(c => c.char_id === charId);
+      if (ch && imageId === ch.primary_image_id) {
+        const next = { ...this.swapFromImages.sourceOverrides };
+        delete next[charId];
+        this.swapFromImages.sourceOverrides = next;
+      } else {
+        this.swapFromImages.sourceOverrides = {
+          ...this.swapFromImages.sourceOverrides, [charId]: imageId };
+      }
+      this.swapPickerChar = null;
+    },
+
+    toggleSwapChar(cid) {
+      const ids = this.swapFromImages.charIds;
+      const i = ids.indexOf(cid);
+      if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+    },
+
+    async submitSwapFromImages() {
+      const g = this.swapFromImages;
+      if (!g.rows.length || !g.charIds.length || g.submitting) return;
+      if (g.outfitMode === 'custom' && !g.outfitText.trim()) {
+        this.notifyError('Beskriv kläderna (eller välj ett annat klädval)');
+        return;
+      }
+      g.submitting = true;
+      try {
+        const fd = new FormData();
+        for (const row of g.rows) fd.append('files', row.file);
+        fd.append('motion_prompts', JSON.stringify(g.rows.map(r => r.motion_prompt || '')));
+        fd.append('lengths', JSON.stringify(g.rows.map(r => Number(r.length) || 0)));
+        fd.append('character_ids', JSON.stringify(g.charIds));
+        fd.append('image_model', g.imageModel);
+        fd.append('auto_mode', g.autoMode ? 'true' : 'false');
+        fd.append('use_director',
+                  (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
+        fd.append('outfit_mode', g.outfitMode);
+        fd.append('outfit_text', g.outfitText || '');
+        if (g.background) fd.append('background_file', g.background);
+        const pickedOverrides = {};
+        for (const cid of g.charIds) {
+          if (g.sourceOverrides[cid]) pickedOverrides[cid] = g.sourceOverrides[cid];
+        }
+        if (Object.keys(pickedOverrides).length) {
+          fd.append('character_source_image_ids', JSON.stringify(pickedOverrides));
+        }
+        const r = await fetch('/api/reengineer/from_images', { method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Swap misslyckades: ' + await r.text()); return; }
+        const state = await r.json();
+        this.reengineerHistory = [state, ...this.reengineerHistory.filter(x => x.re_id !== state.re_id)];
+        this.notifyInfo('Swap startad — swappar in karaktärerna i dina scener…');
+        this._startReengineerPolling();
+        // Keep the settings (Hugo iterates); clear the consumed image rows.
+        for (const row of g.rows) if (row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+        g.rows = [];
       } finally {
         g.submitting = false;
       }

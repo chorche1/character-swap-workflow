@@ -4448,6 +4448,153 @@ async def reengineer_create(
     return _reengineer_view(initial_state)
 
 
+@app.post("/api/reengineer/from_images")
+async def reengineer_from_images(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),     # one scene image per scene, in order
+    motion_prompts: str = Form(...),         # JSON array of strings (one per file)
+    lengths: str = Form(...),                # JSON array of seconds (one per file)
+    character_ids: str = Form(...),          # JSON array of char ids
+    image_model: str = Form("gpt2-id-swap"),
+    outfit_mode: str = Form("scene"),
+    outfit_text: str = Form(""),
+    auto_mode: bool = Form(False),
+    use_director: bool = Form(False),
+    background_file: UploadFile | None = File(None),
+    character_source_image_ids: str = Form(""),
+) -> dict:
+    """The Swap tab: start a Reengineer run from reference IMAGES (no source
+    video). Each image becomes a scene; the user supplies its motion+dialogue
+    prompt and its Kling clip length. Skips scene detection / Whisper / the
+    analyst — everything downstream (swap → approval gate → Kling v3 → assemble
+    → edit mode) is identical to the video flow. video_model is locked to
+    kling-v3. Returns the initial state; poll GET /api/reengineer/{re_id}."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+
+    # --- validate the shared config (mirrors reengineer_create, minus the
+    # Whisper key requirement — image runs never transcribe) ----------------
+    try:
+        char_ids = [c for c in json.loads(character_ids) if c]
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "character_ids must be a JSON array of ids")
+    if not char_ids:
+        raise HTTPException(400, "Pick at least one character")
+    for cid in char_ids:
+        if store().get_character(cid) is None:
+            raise HTTPException(404, f"Character not found: {cid}")
+    info = runner_media.IMAGE_MODELS.get(image_model)
+    if info is None:
+        raise HTTPException(400, f"Unknown image_model '{image_model}'")
+    if not settings.has_provider(info["provider"]):
+        raise HTTPException(503, f"{info['label']} is not configured. Add the API key to .env.")
+    if outfit_mode not in ("scene", "character", "custom"):
+        raise HTTPException(400, f"Unknown outfit_mode '{outfit_mode}'")
+    if outfit_mode == "custom" and not outfit_text.strip():
+        raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
+    source_overrides: dict[str, str] = {}
+    if character_source_image_ids.strip():
+        try:
+            parsed = json.loads(character_source_image_ids)
+            if isinstance(parsed, dict):
+                source_overrides = {str(k): str(v) for k, v in parsed.items() if v}
+        except json.JSONDecodeError:
+            raise HTTPException(400, "character_source_image_ids must be a JSON dict")
+
+    # --- validate the per-scene image list + parallel prompt/length arrays --
+    if not files:
+        raise HTTPException(400, "Upload at least one scene image")
+    if len(files) > _MAX_SEQUENCE_IMAGES:
+        raise HTTPException(400, f"Too many images (max {_MAX_SEQUENCE_IMAGES})")
+    try:
+        motion_list = json.loads(motion_prompts)
+        length_list = json.loads(lengths)
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "motion_prompts and lengths must be JSON arrays")
+    if not isinstance(motion_list, list) or not isinstance(length_list, list):
+        raise HTTPException(400, "motion_prompts and lengths must be JSON arrays")
+    if len(motion_list) != len(files) or len(length_list) != len(files):
+        raise HTTPException(400, "motion_prompts and lengths must match the number of images")
+
+    re_id = "re_" + secrets.token_hex(5)
+    work = reengineer_mod.reengineer_dir(re_id)
+    img_dir = work / "images"
+    img_dir.mkdir(parents=True, exist_ok=True)
+
+    scene_entries: list[dict] = []
+    for idx, upload in enumerate(files):
+        ext = _safe_ext(upload.filename or "")          # image-only; 400 on bad ext
+        data = await _read_capped(upload)
+        if not data:
+            raise HTTPException(400, f"Empty upload (image {idx + 1})")
+        img_path = img_dir / f"img_{idx:02d}{ext}"
+        tmp = img_path.with_suffix(img_path.suffix + ".tmp")
+        tmp.write_bytes(data)
+        tmp.replace(img_path)
+        scene_id, _ = runner_reengineer._register_frame_as_scene(img_path)
+
+        raw_len = length_list[idx]
+        length = float(raw_len) if raw_len else 5.0
+        prompt = (str(motion_list[idx] or "")).strip()
+        entry = {
+            "idx": idx,
+            "scene_id": scene_id,
+            "start": 0.0,
+            "end": round(length, 3),
+            "duration": round(length, 3),
+            # Manual length wins outright in _kling_duration; duration mirrors
+            # it so the gate's "Längd" field + the JS AUTO fallback agree.
+            "kling_secs": runner_reengineer._clamp_kling(length),
+            "motion_prompt": prompt or runner_reengineer.ADDED_SCENE_PROMPT,
+            "speech": "",
+            "summary": (upload.filename or f"Scene {idx + 1}")[:80],
+            "source": "image",
+        }
+        # Derive the dialogue from the says-clause so the '⚠ replik' hint +
+        # caption script-bias work (empty when the prompt has no says-clause).
+        entry["speech"] = runner_reengineer._spoken_text(entry)
+        scene_entries.append(entry)
+
+    background_path: str | None = None
+    if background_file is not None and (background_file.filename or "").strip():
+        bg_ext = _safe_ext(background_file.filename or "")
+        bg_data = await _read_capped(background_file)
+        if not bg_data:
+            raise HTTPException(400, "Empty background upload")
+        bg_dest = work / f"background{bg_ext}"
+        bg_tmp = bg_dest.with_suffix(bg_dest.suffix + ".tmp")
+        bg_tmp.write_bytes(bg_data)
+        bg_tmp.replace(bg_dest)
+        background_path = str(bg_dest)
+
+    initial_state = {
+        "re_id": re_id,
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "status": "queued",
+        "error": None,
+        # No source_path — this run was built from images, not a video.
+        "from_images": True,
+        "source_name": f"{len(files)} bilder",
+        "character_ids": char_ids,
+        "image_model": image_model,
+        "video_model": "kling-v3",          # locked
+        "auto_mode": bool(auto_mode),
+        "outfit_mode": outfit_mode,
+        "outfit_text": outfit_text.strip(),
+        "use_director": bool(use_director) and bool(settings.anthropic_api_key),
+        "background_path": background_path,
+        "character_source_image_ids": source_overrides,
+        "scenes": scene_entries,
+        "n_scenes": len(scene_entries),
+        "job_id": None,
+        "finals": {},
+    }
+    reengineer_mod.save_state(initial_state)
+    background_tasks.add_task(_run_async,
+                             runner_reengineer.run_reengineer_from_images, re_id)
+    return _reengineer_view(initial_state)
+
+
 @app.get("/api/reengineer")
 async def reengineer_list() -> list[dict]:
     from character_swap import reengineer as reengineer_mod
