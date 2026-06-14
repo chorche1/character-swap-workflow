@@ -1249,7 +1249,10 @@ def _format_ts(t: float) -> str:
 # first keep a short pre-roll before the audio onset, and every clip keeps a
 # short tail after its last sound (bounded by the source material).
 _JOIN_HEAD_SECS = 0.12
-_JOIN_TAIL_SECS = 0.25
+# Hugo 2026-06-14: tighter tail (was 0.25) — the kept room after the last
+# sound is _JOIN_TAIL_SECS + the trailing pad_secs (≈0.05 + 0.02 = 0.07s),
+# still bounded by the source clip's own end.
+_JOIN_TAIL_SECS = 0.05
 
 # A caption card never spans a real pause or scene join (backlog #21,
 # 2026-06-12): a gap longer than this between consecutive words starts a new

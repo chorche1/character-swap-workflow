@@ -184,8 +184,9 @@ def test_assemble_joins_get_head_breathing_room(tmp_path):
 
 
 def test_assemble_keeps_natural_tail_after_last_sound(tmp_path):
-    """Backlog #30 (tail): trailing silence is kept up to ~0.25s after the
-    last sound instead of cutting at last-word + 0.03s pad."""
+    """Backlog #30 (tail): trailing silence is kept a short beat after the
+    last sound (Hugo 2026-06-14: ~0.05s tail + pad) instead of cutting hard
+    at the last word."""
     body = _clip(tmp_path / "body.mp4", tone_secs=1.5)
     tail = _clip(tmp_path / "tail.mp4", tone_secs=1.0, silent=True)
     listfile = tmp_path / "cat.txt"
@@ -199,8 +200,9 @@ def test_assemble_keeps_natural_tail_after_last_sound(tmp_path):
     video_edit.assemble_clips([src], out, enable_interior_trim=True,
                               threshold_db=-30.0)
     dur = video_edit._probe_duration(out)
-    # Old: ~1.5 + 0.03 pad. New: + ~0.25 natural tail.
-    assert 1.62 < dur < 2.1
+    # ~1.5s tone + 0.02s trailing pad + ~0.05s natural tail ≈ 1.57s
+    # (was ~0.25s tail → ~1.77s before 2026-06-14).
+    assert 1.50 < dur < 1.72
 
 
 def test_adaptive_silence_threshold_math():
