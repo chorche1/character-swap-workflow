@@ -1060,7 +1060,11 @@ TEMPLATES: dict[str, CaptionStyle] = {
     # ALLCAPS base with a thinner outline; the spoken word gets a vivid blue
     # (#0070F8, sampled) rounded box behind it, hopping word-to-word
     # instantly. No entrance animation, mid-screen.
-    "capcut-bluebox": CaptionStyle(font="Poppins", size=85,
+    # Size 60 is Hugo's dialed-in Style-tab preset (2026-06-15) — the rest
+    # of the fields already matched what he set. (Reengineer assemble still
+    # rides its own size=68 override, so this only changes Editor-tab / other
+    # direct uses of the template.)
+    "capcut-bluebox": CaptionStyle(font="Poppins", size=60,
                               highlight_color="&H00F87000",   # #0070F8 blue (ASS BGR)
                               outline_color="&H00000000",
                               outline=0,
