@@ -150,7 +150,7 @@ function studio() {
     // can't clobber a half-typed prompt; per-run add-scene form state.
     reEdit: {},
     reSceneDrafts: {},
-    rePersonChoices: {},   // "${re_id}:${idx}" → {swap_person_idx, other_action}
+    rePersonChoices: {},   // "${re_id}:${idx}" → {swap_person_idx}
     reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
@@ -2060,11 +2060,7 @@ function studio() {
     async submitReengineerPersonChoices(run) {
       const scenes = (run.scenes || []).filter(sc => sc.multi_person).map(sc => {
         const c = this.rePersonChoices[run.re_id + ':' + sc.idx] || {};
-        return {
-          idx: sc.idx,
-          swap_person_idx: Number(c.swap_person_idx) || 0,
-          other_action: c.other_action === 'remove' ? 'remove' : 'keep',
-        };
+        return { idx: sc.idx, swap_person_idx: Number(c.swap_person_idx) || 0 };
       });
       const r = await fetch(`/api/reengineer/${run.re_id}/resolve_people`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

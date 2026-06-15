@@ -1567,19 +1567,7 @@
                           </label>
                         </template>
                       </div>
-                      <div class="flex items-center gap-3 text-[11px]">
-                        <span class="text-neutral-500 dark:text-neutral-400">Den andra personen:</span>
-                        <label class="flex items-center gap-1 cursor-pointer">
-                          <input type="radio" :name="r.re_id + '-other-' + sc.idx"
-                                 :checked="(rePersonChoice(r, sc).other_action || 'keep') === 'keep'"
-                                 @change="rePersonChoiceEdit(r, sc, 'other_action', 'keep')" /> behåll
-                        </label>
-                        <label class="flex items-center gap-1 cursor-pointer">
-                          <input type="radio" :name="r.re_id + '-other-' + sc.idx"
-                                 :checked="rePersonChoice(r, sc).other_action === 'remove'"
-                                 @change="rePersonChoiceEdit(r, sc, 'other_action', 'remove')" /> ta bort
-                        </label>
-                      </div>
+                      <div class="text-[10px] text-neutral-400 dark:text-neutral-500">De andra personerna lämnas som de är.</div>
                     </div>
                   </template>
                   <!-- motion prompt: editable at the gate and in edit mode -->

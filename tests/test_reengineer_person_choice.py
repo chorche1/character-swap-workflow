@@ -184,38 +184,39 @@ def gate(monkeypatch, tmp_path):
     return box
 
 
-def _body(idx=0, swap_person_idx=1, other_action="remove"):
+def _body(idx=0, swap_person_idx=1):
     return api.ResolvePeopleBody(scenes=[api.ResolvePeopleSceneBody(
-        idx=idx, swap_person_idx=swap_person_idx, other_action=other_action)])
+        idx=idx, swap_person_idx=swap_person_idx)])
 
 
 def test_resolve_people_bakes_choice_and_kicks(gate):
     box = gate
     bg = BackgroundTasks()
-    asyncio.run(api.reengineer_resolve_people("re_t", bg, _body(
-        swap_person_idx=1, other_action="remove")))
-    # Director plan prompt rewritten with the directive.
+    asyncio.run(api.reengineer_resolve_people("re_t", bg, _body(swap_person_idx=1)))
+    # Director plan prompt rewritten with the chosen-person directive. The other
+    # people are always kept as they are (the "remove" option was dropped).
     plan = prompt_director.SwapDirectorPlan.model_validate_json(
         box["job"].director_prompts_json)
     p = plan.lookup("ch_a", "s2")[0]
     assert p.startswith("BASE PROMPT s2")
     assert "Replace SPECIFICALLY the man blue on the right" in p
-    assert "Remove the other people" in p
+    assert "keep the other people in the scene exactly as they are" in p
+    assert "Remove the other people" not in p
     # Scene flag cleared + choice recorded; swap kicked.
     sc = box["states"]["re_t"]["scenes"][0]
     assert "multi_person" not in sc
-    assert sc["swap_person_idx"] == 1 and sc["other_action"] == "remove"
+    assert sc["swap_person_idx"] == 1
+    assert "other_action" not in sc
     assert len(bg.tasks) == 1
 
 
-def test_resolve_people_keep_directive(gate):
+def test_resolve_people_first_person_directive(gate):
     box = gate
     asyncio.run(api.reengineer_resolve_people(
-        "re_t", BackgroundTasks(), _body(swap_person_idx=0, other_action="keep")))
+        "re_t", BackgroundTasks(), _body(swap_person_idx=0)))
     p = prompt_director.SwapDirectorPlan.model_validate_json(
         box["job"].director_prompts_json).lookup("ch_a", "s2")[0]
     assert "woman red on the left" in p
-    assert "Keep the other people in the scene exactly as they are" in p
 
 
 def test_resolve_people_requires_all_answered(gate):

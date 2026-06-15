@@ -4683,16 +4683,15 @@ def _store_assemble_settings(state: dict,
 class ResolvePeopleSceneBody(BaseModel):
     idx: int
     swap_person_idx: int = 0
-    other_action: str = "keep"          # "keep" | "remove"
 
 
 class ResolvePeopleBody(BaseModel):
     scenes: list[ResolvePeopleSceneBody] = Field(default_factory=list)
 
 
-def _person_directive(person: dict, other_action: str) -> str:
-    """Build the directive appended to a multi-person scene's swap prompt once
-    the user picks WHICH person to swap + what to do with the other(s)."""
+def _person_directive(person: dict) -> str:
+    """Directive appended to a multi-person scene's swap prompt once the user
+    picks WHICH person to swap. The other people always stay as they are."""
     pos = (person.get("position") or "").strip()
     desc = (person.get("description") or "").strip()
     if pos and desc:
@@ -4703,12 +4702,9 @@ def _person_directive(person: dict, other_action: str) -> str:
         who = f"the person on the {pos}"
     else:
         who = "the indicated person"
-    d = (f" Multiple people are visible in this scene. Replace SPECIFICALLY "
-         f"{who} with the new character; do not change anyone else's identity.")
-    if other_action == "remove":
-        return d + (" Remove the other people from the scene entirely, leaving "
-                    "only the new character.")
-    return d + " Keep the other people in the scene exactly as they are."
+    return (f" Multiple people are visible in this scene. Replace SPECIFICALLY "
+            f"{who} with the new character; keep the other people in the scene "
+            f"exactly as they are and do not change anyone else's identity.")
 
 
 @app.post("/api/reengineer/{re_id}/resolve_people")
@@ -4741,7 +4737,6 @@ async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTask
         people = e.get("people") or []
         sc = by_idx[i]
         pi = max(0, min(sc.swap_person_idx, len(people) - 1)) if people else 0
-        action = "remove" if sc.other_action == "remove" else "keep"
         if people and plan is not None:
             sid = e["scene_id"]
             base = next((sp.variants[0].prompt
@@ -4749,10 +4744,9 @@ async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTask
                          if sp.scene_id == sid and sp.variants), None)
             if base is not None:
                 prompt_director.replace_scene_prompt_in_plan(
-                    plan, sid, base + _person_directive(people[pi], action))
+                    plan, sid, base + _person_directive(people[pi]))
         # Record the choice + clear the gate flag so the scene shows normally.
         e["swap_person_idx"] = pi
-        e["other_action"] = action
         e.pop("multi_person", None)
         e.pop("people", None)
 
