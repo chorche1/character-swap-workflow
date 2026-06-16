@@ -84,8 +84,17 @@ def _install(monkeypatch, raises=None) -> _FakeClient:
     return client
 
 
+def _moderation_of(call: dict):
+    # moderation now rides in extra_body — the typed images.edit() signature has
+    # no `moderation` kwarg in openai 2.36 (a top-level kwarg TypeErrors before
+    # the request). Still tolerate a top-level kwarg for forward-compat.
+    if "moderation" in call:
+        return call["moderation"]
+    return call.get("extra_body", {}).get("moderation", "__absent__")
+
+
 def _last_moderation(client):
-    return client.images.calls[-1].get("moderation", "__absent__")
+    return _moderation_of(client.images.calls[-1])
 
 
 def test_moderation_low_on_create(monkeypatch):
@@ -115,8 +124,28 @@ def test_unknown_moderation_param_falls_back(monkeypatch):
     assert out == b"PNGDATA"
     assert len(client.images.calls) == 2
     # First attempt carried moderation; the fallback retry omitted it.
-    assert client.images.calls[0].get("moderation") == "low"
-    assert "moderation" not in client.images.calls[1]
+    assert _moderation_of(client.images.calls[0]) == "low"
+    assert _moderation_of(client.images.calls[1]) == "__absent__"
+
+
+def test_typeerror_moderation_falls_back(monkeypatch):
+    # REGRESSION (2026-06-17): the installed openai SDK's typed images.edit()
+    # has no `moderation` kwarg, so a top-level kwarg raised a CLIENT-SIDE
+    # TypeError (not a 400) that the old BadRequestError-only guard missed →
+    # every swap failed. The guard now also catches TypeError and retries
+    # without the param. (Production sends moderation via extra_body, which
+    # avoids the TypeError entirely; this locks the safety net regardless.)
+    client = _install(
+        monkeypatch,
+        raises=[TypeError(
+            "Images.edit() got an unexpected keyword argument 'moderation'"),
+            None],
+    )
+    out = openai_image._generate_once(prompt="x", phase="generate", character="c")
+    assert out == b"PNGDATA"
+    assert len(client.images.calls) == 2
+    assert _moderation_of(client.images.calls[0]) == "low"
+    assert _moderation_of(client.images.calls[1]) == "__absent__"
 
 
 def test_real_content_block_propagates(monkeypatch):

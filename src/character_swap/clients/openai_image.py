@@ -104,7 +104,15 @@ def _generate_once(
     # the "more NSFW errors than chatgpt.com" gap. Applies to every GPT path:
     # Swap (gpt-image), Swap/Reengineer (gpt2-id-swap), and the free-form Image
     # tab — all of them route through here.
-    extra["moderation"] = "low"
+    #
+    # Sent via extra_body, NOT as a top-level kwarg: the openai SDK's typed
+    # images.edit() does NOT expose `moderation` (only images.generate() does,
+    # as of openai 2.36), so a top-level kwarg raises a CLIENT-SIDE TypeError
+    # before the request even goes out — which failed EVERY swap (swaps always
+    # use the edit endpoint). The /images/edits REST endpoint itself accepts
+    # moderation, so extra_body merges it into the request body for BOTH create
+    # and edit. Verified live 2026-06-17 against gpt-image-2.
+    extra["extra_body"] = {"moderation": "low"}
 
     def _call(params: dict):
         if refs:
@@ -140,24 +148,35 @@ def _generate_once(
         ) as entry:
             try:
                 response = _call(extra)
-            except openai.BadRequestError as e:
-                # Distinguish "this endpoint/model doesn't KNOW the `moderation`
-                # param" (an unknown-argument 400) from a genuine content block
-                # (also a 400, but carrying a content_policy/safety message).
-                # Only the former should drop the param and retry — degrade
-                # gracefully rather than fail a slot. A real content rejection
-                # must propagate so content_policy's softening ladder handles it.
+            except (openai.BadRequestError, TypeError) as e:
+                # Distinguish "this endpoint/SDK doesn't KNOW `moderation`" — an
+                # unknown-argument 400, OR a client-side TypeError from an SDK
+                # whose typed images.edit() signature lacks the param — from a
+                # genuine content block (a 400 carrying a safety message). Only
+                # the former drops the param and retries; a real content
+                # rejection must propagate so content_policy's softening ladder
+                # handles it.
                 msg = str(e).lower()
-                param_unknown = "moderation" in msg and any(
-                    s in msg
-                    for s in (
-                        "unknown parameter", "unrecognized", "unexpected",
-                        "unsupported", "not supported", "does not support",
-                        "extra fields",
+                param_unknown = "moderation" in msg and (
+                    isinstance(e, TypeError)
+                    or any(
+                        s in msg
+                        for s in (
+                            "unknown parameter", "unrecognized", "unexpected",
+                            "unsupported", "not supported", "does not support",
+                            "extra fields",
+                        )
                     )
                 )
                 if param_unknown:
-                    extra.pop("moderation", None)
+                    # Rebuild extra_body without moderation (fresh dict — never
+                    # mutate the one already handed to the first call).
+                    eb = dict(extra.get("extra_body") or {})
+                    eb.pop("moderation", None)
+                    if eb:
+                        extra["extra_body"] = eb
+                    else:
+                        extra.pop("extra_body", None)
                     entry["moderation"] = None
                     response = _call(extra)
                 else:
