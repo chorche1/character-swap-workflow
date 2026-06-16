@@ -48,6 +48,10 @@ GENERATION_PROMPT = (
     "must be looking directly at the camera, with eyes clearly facing the lens "
     "and a natural, composed expression, even if the original person in Image 1 "
     "was not.\n"
+    "Match the scene's own existing light on the replacement person — its "
+    "light direction and color temperature — and add real contact and cast "
+    "shadows where the body and held objects meet surfaces, with softly "
+    "blended edges, so they are not pasted in.\n"
     "Keep the background visually consistent with Image 1, not Image 2. "
     "Preserve the same environment type, background structure, visible "
     "elements, and spatial layout from Image 1.\n"
@@ -346,13 +350,26 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
                    "horizon or open sky, and do NOT add any empty space or "
                    "scenery above the head that Image 2 does not have; the "
                    "subject keeps Image 2's exact vertical placement and size.")
+    # Lighting INTEGRATION (2026-06-17): the non-background gpt2-id-swap path
+    # was the lone swap prompt with NO relight/contact-shadow directive, so
+    # gpt-image-2 kept the identity photo's baked-in light → the "pasted-in"
+    # look. One compact sentence anchored to the scene's own light (OpenAI's
+    # prompting guide: match lighting/shadows/colour temperature so it
+    # "integrates photorealistically, without looking pasted on"). Skipped when
+    # background=True — bg_part already relights to Image 3 and this would
+    # contradict it.
+    integration = ("" if background else
+                   " Match the scene's own existing light on them — its light "
+                   "direction and color temperature — and add real contact and "
+                   "cast shadows where the body and held objects meet surfaces, "
+                   "with softly blended edges, so they are not pasted in.")
     return (
         f"{roles}\n{scene_keep}{bg_part}\n"
         "Replace the person in Image 2 with the person from Image 1. The face "
         "must be a clear, recognizable likeness of the person in Image 1 — "
         "unmistakably the same individual; this identity match is the single "
         "most important requirement. " + outfit + " They look directly into "
-        "the camera with a natural, composed expression.\n"
+        "the camera with a natural, composed expression." + integration + "\n"
         "Style: a completely ordinary, unedited iPhone photo — plain, "
         "slightly dull phone-camera colors, neutral white balance, the scene's "
         "own mundane ambient light as it actually appears, slightly uneven exposure, mild softness, subtle "
