@@ -1676,10 +1676,29 @@
                     <span class="text-[10px] px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300">📌 delas av alla — ingen swap</span>
                     <span x-show="sc.direct_error" class="text-[10px] text-rose-500" x-text="sc.direct_error"></span>
                   </div>
-                  <!-- swapped variants per character for THIS scene -->
-                  <div x-show="!sc.is_direct" class="flex gap-2 mt-1.5 flex-wrap">
-                    <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-v-'+sc.idx+'-'+cid">
-                      <template x-for="v in (jc.images || []).filter(v => v.scene_id === sc.scene_id)" :key="v.variant_id">
+                  <!-- Swapped variants per character for THIS scene, grouped
+                       into a labeled box PER CHARACTER (Hugo 2026-06-16): a
+                       header with the character's reference thumb + name, then
+                       that character's images, then that character's own
+                       "Egen bild" upload button INSIDE the same box — so it's
+                       unmistakable which character each image (and each
+                       uploaded image) belongs to. -->
+                  <div x-show="!sc.is_direct" class="flex gap-2 mt-1.5 flex-wrap items-start">
+                    <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-grp-'+sc.idx+'-'+cid">
+                      <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 bg-neutral-50/60 dark:bg-neutral-900/40 p-1.5">
+                        <!-- character label: reference thumbnail + name -->
+                        <div class="flex items-center gap-1.5 mb-1 max-w-[12rem]">
+                          <img x-show="jc.source_image_url" :src="jc.source_image_url"
+                               class="w-5 h-5 rounded-full object-cover border border-neutral-300 dark:border-neutral-700 shrink-0"
+                               :title="jc.name" :alt="jc.name" />
+                          <span class="text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 truncate" x-text="jc.name"></span>
+                        </div>
+                        <!-- this character's image tiles for this scene -->
+                        <div class="flex gap-2 flex-wrap">
+                          <template x-if="!(jc.images || []).some(v => v.scene_id === sc.scene_id)">
+                            <span class="text-[10px] text-neutral-400 self-center px-1">ingen bild ännu</span>
+                          </template>
+                          <template x-for="v in (jc.images || []).filter(v => v.scene_id === sc.scene_id)" :key="v.variant_id">
                         <div class="relative">
                           <!-- x-if (NOT x-show): the <img> must not exist in the
                                DOM before the file does — x-show creates it with a
@@ -1786,19 +1805,20 @@
                                 title="Prompten skrevs om automatiskt av AI Director för att passera säkerhetssystemet (samma scen, neutralare ordval) — se ✎↻ för texten">🪄</span>
                         </div>
                       </template>
-                    </template>
-                  </div>
-                  <!-- Upload your OWN image for this scene (Hugo 2026-06-12):
-                       lands as a READY variant (QC skipped) and auto-approves,
-                       replacing the previous approval on this scene. -->
-                  <div x-show="!sc.is_direct" class="flex gap-2 mt-1 flex-wrap">
-                    <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-up-'+sc.idx+'-'+cid">
-                      <label class="text-[10px] text-indigo-500 hover:underline cursor-pointer"
-                             :title="'Ersätt med en egen bild för ' + jc.name + ' i denna scen — godkänns direkt (ingen QC)'">
-                        ⬆ <span x-text="'Egen bild' + (Object.keys(r.job?.characters || {}).length > 1 ? ' (' + jc.name + ')' : '')"></span>
-                        <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
-                               @change="reengineerUploadOwnImage(r, cid, sc, $event)" />
-                      </label>
+                        </div>
+                        <!-- Upload your OWN image for THIS character × scene
+                             (Hugo 2026-06-12): lands as a READY variant (QC
+                             skipped) and auto-approves, replacing the previous
+                             approval on this scene. Lives INSIDE the
+                             character's box (Hugo 2026-06-16) so it's obvious
+                             who the upload is for. -->
+                        <label class="inline-block mt-1.5 text-[10px] text-indigo-500 hover:underline cursor-pointer"
+                               :title="'Ladda upp en egen bild för ' + jc.name + ' i denna scen — godkänns direkt (ingen QC)'">
+                          ⬆ Egen bild
+                          <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                 @change="reengineerUploadOwnImage(r, cid, sc, $event)" />
+                        </label>
+                      </div>
                     </template>
                   </div>
                   <!-- 🎯 END FRAME per scene (Hugo 2026-06-13): upload an end
