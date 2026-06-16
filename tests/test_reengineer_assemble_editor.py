@@ -104,9 +104,9 @@ def test_assemble_passes_full_clips_with_kling_defaults(tmp_path, monkeypatch):
     assert len(calls) == 1
     kw = calls[0]
     assert kw["paths"] == [str(clip)]                  # full clip, uncut
-    # Hugo 2026-06-12: capcut-bluebox @ size 68 is the Reengineer standard.
+    # Hugo 2026-06-16: capcut-bluebox @ size 60 is the Swap/Reengineer standard.
     assert kw["template"] == "capcut-bluebox"
-    assert kw["overrides"] == {"size": 68}
+    assert kw["overrides"] == {"size": 60}
     assert kw["enable_trim"] is True
     assert kw["enable_captions"] is True
     assert kw["enable_wpm_normalize"] is False         # Kling pacing kept
@@ -682,11 +682,11 @@ def test_assemble_caption_size_override_from_panel(tmp_path, monkeypatch):
 
 
 def test_panel_ui_has_caption_size_control():
-    """Backlog follow-up (Hugo 2026-06-12): bluebox default + selectable
-    caption size 68 in the ⚙ Slutvideo panel."""
+    """Backlog follow-up (Hugo 2026-06-16): bluebox default + selectable
+    caption size 60 in the ⚙ Slutvideo panel."""
     js = _APP_JS.read_text(encoding="utf-8")
     assert "template: 'capcut-bluebox'" in js
-    assert "captionSize: 68" in js
+    assert "captionSize: 60" in js
     body = js.split("_reAsmBody()")[1][:1200]
     assert "overrides: { size:" in body
     html = (Path(__file__).resolve().parents[1] / "web" /
