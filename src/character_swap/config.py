@@ -182,6 +182,17 @@ class Settings(BaseSettings):
     host: str = Field(default="127.0.0.1", validation_alias="HOST")
     port: int = Field(default=8000, validation_alias="PORT")
 
+    # Phone push via ntfy (https://ntfy.sh) — opt-in. When NTFY_TOPIC is empty
+    # every push is a silent no-op (nothing changes for users who haven't set
+    # it up). The server POSTs a short message to <ntfy_server>/<ntfy_topic>
+    # at milestone events (approval gates + finished jobs) so Hugo gets pinged
+    # on his phone even when no browser is open. See clients-free push.py.
+    # ntfy_click is an optional URL opened when the notification is tapped —
+    # set it to the Tailscale app URL so a tap jumps straight into the app.
+    ntfy_topic: str = Field(default="", validation_alias="NTFY_TOPIC")
+    ntfy_server: str = Field(default="https://ntfy.sh", validation_alias="NTFY_SERVER")
+    ntfy_click: str = Field(default="", validation_alias="NTFY_CLICK")
+
     max_upload_bytes: int = Field(
         default=25 * 1024 * 1024,
         validation_alias="MAX_UPLOAD_BYTES",

@@ -23,7 +23,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import broll, video_edit
+from character_swap import broll, push, video_edit
 from character_swap.clients import (
     ProviderNotConfigured,
     _stubs,
@@ -71,11 +71,32 @@ def _now() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
 
+# B-roll milestones worth a phone push (review gate + finished runs).
+# status we transition INTO → (title, ntfy tags, priority).
+_BROLL_PUSH: dict[str, tuple[str, list[str], int]] = {
+    "awaiting_approval": ("B-roll: granska klippen", ["mag"], 4),
+    "done":              ("B-roll klar", ["white_check_mark"], 3),
+    "partial_success":   ("B-roll delvis klar", ["warning"], 4),
+    "failed":            ("B-roll misslyckades", ["rotating_light"], 5),
+}
+
+
 def _update_state(broll_id: str, **changes) -> dict:
     state = broll.load_state(broll_id) or {}
+    old_status = state.get("status")
     state.update(changes)
     state["updated_at"] = _now()
     broll.save_state(state)
+    new_status = state.get("status")
+    if new_status != old_status:
+        spec = _BROLL_PUSH.get(new_status)
+        if spec:
+            title, tags, priority = spec
+            n_clips = len(state.get("clips") or [])
+            body = f"{n_clips} klipp" if n_clips else ""
+            if new_status == "failed" and state.get("error"):
+                body = str(state["error"])[:200]
+            push.notify(title, body, priority=priority, tags=tags)
     return state
 
 

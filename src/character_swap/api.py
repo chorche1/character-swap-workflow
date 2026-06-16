@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from character_swap import call_log, events, runner, runner_media
+from character_swap import call_log, events, push, runner, runner_media
 from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
 from character_swap.models import (
@@ -3425,6 +3425,9 @@ async def editor_auto_edit(
         except RuntimeError as e:
             raise HTTPException(500, f"Caption rendering failed: {e}")
 
+    push.notify("Editor: auto-edit klar",
+                f"{cap_info['n_words']} ord · {template}" if cap_info
+                else "video klar", priority=3, tags=["white_check_mark"])
     return {
         "edit_id": edit_id,
         "output_url": _file_url(current),
@@ -3690,6 +3693,9 @@ async def editor_multi_auto_edit(
         except RuntimeError as e:
             raise HTTPException(500, f"Caption rendering failed: {e}")
 
+    push.notify("Editor: multi-clip klar",
+                f"{len(ordered_paths)} klipp · {template}",
+                priority=3, tags=["white_check_mark"])
     return {
         "edit_id": edit_id,
         "output_url": _file_url(current),
@@ -5721,6 +5727,16 @@ async def _provider_not_configured(request, exc: ProviderNotConfigured):
     return JSONResponse(status_code=503, content={"error": str(exc), "provider": exc.provider})
 
 
+@app.post("/api/push/test")
+async def push_test() -> dict:
+    """Fire a test phone push so the user can confirm ntfy is wired up.
+    Returns whether a topic is configured (no-op push if not)."""
+    push.notify("Character Swap: testnotis",
+                "Om du ser det har funkar push till telefonen 🎉",
+                priority=4, tags=["tada"])
+    return {"sent": push.enabled(), "configured": push.enabled()}
+
+
 @app.get("/api/health")
 async def health() -> dict:
     return {
@@ -5737,6 +5753,8 @@ async def health() -> dict:
         # Drives the lock state on `veed-*` caption templates in the Editor.
         "fal_key": bool(settings.fal_api_key),
         "remotion_available": _remotion_available(),
+        # Phone push (ntfy) — true when NTFY_TOPIC is configured.
+        "ntfy_enabled": push.enabled(),
         # Higgsfield → Drive auto-import: whether OAuth is set up enough to
         # let the watcher poll the user's configured folder.
         "higgsfield_drive_ready": __import__(

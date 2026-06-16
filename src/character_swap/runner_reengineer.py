@@ -49,6 +49,7 @@ from pathlib import Path
 
 from character_swap import (
     events,
+    push,
     reengineer,
     runner,
     runner_compile,
@@ -97,6 +98,7 @@ def _spawn(coro, name: str) -> None:
 
 def _update(re_id: str, **changes) -> dict:
     state = reengineer.load_state(re_id) or {"re_id": re_id}
+    old_status = state.get("status")
     # Backlog #36 (2026-06-12): a run that recovered (retry → done) kept
     # showing the OLD failure banner — the error field survived every
     # status transition. Moving to a non-failed status clears it unless the
@@ -107,7 +109,42 @@ def _update(re_id: str, **changes) -> dict:
     state.update(changes)
     state["updated_at"] = _now()
     reengineer.save_state(state)
+    new_status = state.get("status")
+    if new_status != old_status:
+        _push_status(state, new_status)
     return state
+
+
+# Reengineer milestones worth a phone push (approval gates + finished runs).
+# Maps the run STATUS we transition INTO → (title, ntfy tags, priority).
+# Gates use a higher priority so they break through; failures are loudest.
+_RE_PUSH: dict[str, tuple[str, list[str], int]] = {
+    "awaiting_approval":      ("Granska klippen", ["mag"], 4),
+    "awaiting_person_choice": ("Valj person i scenen", ["bust_in_silhouette"], 4),
+    "awaiting_assembly":      ("Bilder godkanda – redo att bygga", ["clapper"], 3),
+    "done":                   ("Reengineer klar", ["white_check_mark"], 3),
+    "partial_success":        ("Reengineer delvis klar", ["warning"], 4),
+    "failed":                 ("Reengineer misslyckades", ["rotating_light"], 5),
+}
+
+
+def _push_status(state: dict, status: str) -> None:
+    """Best-effort phone push on a reengineer status transition (no-op unless
+    NTFY_TOPIC is set; never raises — push.notify swallows everything)."""
+    spec = _RE_PUSH.get(status)
+    if not spec:
+        return
+    title, tags, priority = spec
+    n_scenes = len(state.get("scenes") or [])
+    name = state.get("name") or state.get("title") or state.get("re_id") or ""
+    parts = []
+    if name:
+        parts.append(str(name))
+    if n_scenes:
+        parts.append(f"{n_scenes} scener")
+    if status == "failed" and state.get("error"):
+        parts.append(str(state["error"])[:200])
+    push.notify(title, " · ".join(parts), priority=priority, tags=tags)
 
 
 # --------------------------------------------------------------------------- crash resume

@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from character_swap import events, video_edit
+from character_swap import events, push, video_edit
 from character_swap.config import settings
 from character_swap.models import CharStatus, Job, JobCharacter, VideoStatus
 from character_swap.state import store
@@ -571,3 +571,20 @@ async def compile_job_videos(
         )
         for cid in targets
     ])
+
+    # One phone push when the whole batch settles (per-character would spam on
+    # a 5-char compile). No-op unless NTFY_TOPIC is configured.
+    fresh = store().get_job(job_id)
+    if fresh is not None:
+        ok = sum(1 for cid in targets
+                 if (jc := fresh.characters.get(cid))
+                 and jc.compile_status == "done")
+        total = len(targets)
+        if ok == total:
+            push.notify("Slutvideor klara",
+                        f"{ok}/{total} karaktarer kompilerade",
+                        priority=3, tags=["white_check_mark"])
+        else:
+            push.notify("Slutvideor klara (delvis)",
+                        f"{ok}/{total} lyckades",
+                        priority=4, tags=["warning"])

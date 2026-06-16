@@ -12,7 +12,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import content_policy, events, pipeline, swap_qc, video_qc
+from character_swap import content_policy, events, pipeline, push, swap_qc, video_qc
 from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
@@ -881,6 +881,16 @@ async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -
 
     sem = asyncio.Semaphore(_image_concurrency_for_model(_swap_image_model(job)))
     await asyncio.gather(*[_kick_char(job, jc, n, sem) for jc in targets])
+
+    # Phone push at the Swap image gate: only on the INITIAL full-job
+    # generation (char_ids is None) — targeted retries/regens pass char_ids
+    # and shouldn't re-ping. Reengineer drives its own gate push via
+    # runner_reengineer._update, so skip from_reengineer jobs here to avoid a
+    # double notification. No-op unless NTFY_TOPIC is set.
+    if char_ids is None and not job.from_reengineer:
+        push.notify("Swap: bilder redo",
+                    f"{len(targets)} karaktarer · granska & godkann",
+                    priority=4, tags=["mag"])
 
 
 # --- edit ---------------------------------------------------------------------------
