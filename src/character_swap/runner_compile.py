@@ -505,6 +505,42 @@ async def _compile_one_character(
                     char_id=char_id, error=str(e))
 
 
+def _eligible_for_compile(jc: JobCharacter) -> bool:
+    """A character can be compiled iff it isn't rejected, has at least one
+    approved variant, and has at least one DONE video to concatenate. Shared
+    by the target selection and the batch-settled phone push so both agree on
+    the denominator."""
+    if jc.status == CharStatus.REJECTED:
+        return False
+    if not (jc.approved_variant_ids or jc.approved_variant_id):
+        return False
+    return any(
+        v.status == VideoStatus.DONE and v.final_video_path
+        for v in jc.videos
+    )
+
+
+def _compile_push_spec(ok: int, total: int) -> tuple[str, str, int, list[str]] | None:
+    """(title, body, priority, tags) for the batch-settled compile push, or
+    None when there's nothing to report (no compilable characters).
+
+    ``ok``/``total`` are counted over the WHOLE job's compilable characters —
+    not just this run's targets — so a per-character retry reports true
+    job-wide progress instead of a misleading "1/1". A total failure
+    (``ok == 0 < total``) is a LOUD failure, never "klara (delvis)" — a batch
+    where nothing compiled must not read as partial success on the phone."""
+    if total <= 0:
+        return None
+    if ok == total:
+        return ("Slutvideor klara", f"{ok}/{total} karaktarer kompilerade",
+                3, ["white_check_mark"])
+    if ok == 0:
+        return ("Slutvideor misslyckades", f"0/{total} kompilerade",
+                5, ["rotating_light"])
+    return ("Slutvideor klara (delvis)", f"{ok}/{total} lyckades",
+            4, ["warning"])
+
+
 async def compile_job_videos(
     job_id: str,
     *,
@@ -537,23 +573,12 @@ async def compile_job_videos(
         return
 
     # Compile for every approved char by default; allow filter for retry-one.
-    targets: list[str] = []
-    for cid, jc in job.characters.items():
-        if char_ids is not None and cid not in char_ids:
-            continue
-        # Skip rejected / never-approved chars; we need at least one
-        # approved variant + one DONE video to have anything to compile.
-        if jc.status == CharStatus.REJECTED:
-            continue
-        if not (jc.approved_variant_ids or jc.approved_variant_id):
-            continue
-        has_any_done = any(
-            v.status == VideoStatus.DONE and v.final_video_path
-            for v in jc.videos
-        )
-        if not has_any_done:
-            continue
-        targets.append(cid)
+    # Eligibility (not rejected + an approved variant + a DONE video to concat)
+    # is shared with the batch-settled push below via `_eligible_for_compile`.
+    targets: list[str] = [
+        cid for cid, jc in job.characters.items()
+        if (char_ids is None or cid in char_ids) and _eligible_for_compile(jc)
+    ]
 
     if not targets:
         return
@@ -572,19 +597,19 @@ async def compile_job_videos(
         for cid in targets
     ])
 
-    # One phone push when the whole batch settles (per-character would spam on
-    # a 5-char compile). No-op unless NTFY_TOPIC is configured.
+    # One phone push when the JOB's compile state settles. Counted over every
+    # compilable character (not just this run's targets) so a per-character
+    # retry reports true job-wide progress instead of a misleading "1/1", and
+    # a total failure pushes loudly instead of "klara (delvis)". Per-character
+    # pushes are deliberately avoided (they'd spam a 5-char compile). No-op
+    # unless NTFY_TOPIC is configured.
     fresh = store().get_job(job_id)
     if fresh is not None:
-        ok = sum(1 for cid in targets
-                 if (jc := fresh.characters.get(cid))
-                 and jc.compile_status == "done")
-        total = len(targets)
-        if ok == total:
-            push.notify("Slutvideor klara",
-                        f"{ok}/{total} karaktarer kompilerade",
-                        priority=3, tags=["white_check_mark"])
-        else:
-            push.notify("Slutvideor klara (delvis)",
-                        f"{ok}/{total} lyckades",
-                        priority=4, tags=["warning"])
+        eligible = [cid for cid, jc in fresh.characters.items()
+                    if _eligible_for_compile(jc)]
+        ok = sum(1 for cid in eligible
+                 if fresh.characters[cid].compile_status == "done")
+        spec = _compile_push_spec(ok, len(eligible))
+        if spec is not None:
+            title, body, priority, tags = spec
+            push.notify(title, body, priority=priority, tags=tags)

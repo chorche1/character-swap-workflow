@@ -105,6 +105,19 @@ def test_notify_never_raises_on_send_error(monkeypatch):
     push.notify("x", "y")
 
 
+def test_notify_never_raises_on_build_error(monkeypatch):
+    """build_request() runs INSIDE notify()'s guard: a bad arg (here a
+    non-int priority that breaks int()) must be swallowed, never bubble into
+    the calling render."""
+    _set_topic(monkeypatch, topic="abc")
+    submitted: list = []
+    monkeypatch.setattr(push._EXECUTOR, "submit",
+                        lambda fn, req: submitted.append(req))
+    # priority="not-a-number" → int() raises ValueError inside build_request.
+    push.notify("x", "y", priority="not-a-number")  # must not raise
+    assert submitted == []  # nothing enqueued — failed safely
+
+
 # --- runner integration: the milestone helpers call push.notify -------------
 
 def test_reengineer_push_status_fires_on_gate(monkeypatch):

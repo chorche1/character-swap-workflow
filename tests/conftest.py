@@ -80,3 +80,20 @@ def _isolated_data_dirs():
             f"settings.{attr} escaped test isolation: {getattr(settings, attr)}"
         )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_phone_push(monkeypatch):
+    """No test may fire a REAL phone push (ntfy HTTP POST).
+
+    The shared `.env` sets NTFY_TOPIC, so `push.enabled()` is True on any
+    checkout with the symlink. Several tests reach `push.notify` indirectly
+    (e.g. the compile target-selection tests run `compile_job_videos`, whose
+    batch push fires with ok=0) — without this, those would buzz Hugo's phone
+    on every `pytest` run from the main checkout. Setting the env var empty
+    won't help (config uses `env_ignore_empty=True`, so an empty override is
+    ignored and the .env value wins), so pin the singleton attr directly
+    before each test. Tests that exercise the push path turn it back on
+    explicitly via monkeypatch + a stubbed `_send`/`notify`."""
+    from character_swap.config import settings
+    monkeypatch.setattr(settings, "ntfy_topic", "", raising=False)

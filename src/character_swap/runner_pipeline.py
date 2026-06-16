@@ -36,8 +36,8 @@ from pathlib import Path
 
 from character_swap import events, exporter
 from character_swap.config import settings
-from character_swap.models import CharStatus, Job, JobCharacter, VideoStatus
-from character_swap.runner_compile import compile_job_videos
+from character_swap.models import Job, JobCharacter
+from character_swap.runner_compile import _eligible_for_compile, compile_job_videos
 from character_swap.state import store
 
 
@@ -332,12 +332,8 @@ async def run_full_pipeline(job_id: str, *,
     for cid, jc in job.characters.items():
         if char_ids is not None and cid not in char_ids:
             continue
-        if jc.status == CharStatus.REJECTED:
-            continue
-        if not (jc.approved_variant_ids or jc.approved_variant_id):
-            continue
-        if not any(v.status == VideoStatus.DONE and v.final_video_path
-                   for v in jc.videos):
+        # Same eligibility as Step-6 compile — shared so the two can't drift.
+        if not _eligible_for_compile(jc):
             continue
         targets.append(cid)
         _persist_pipeline(job, jc,

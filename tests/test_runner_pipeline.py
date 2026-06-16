@@ -133,3 +133,66 @@ def test_shared_drive_token_returns_path_even_when_missing(monkeypatch, tmp_path
     assert token is not None
     assert token.name == "token.json"
     assert not token.exists()
+
+
+# --- run_full_pipeline target selection ------------------------------------------------
+
+def _pipeline_eligible_jc(char_id: str, tmp_path):
+    """A character eligible for the Resolve pipeline: one approved variant +
+    one DONE video on disk (mirrors compile eligibility)."""
+    from pathlib import Path
+    from character_swap.models import (
+        CharStatus, GeneratedImage, JobCharacter, VariantStatus,
+        VideoStatus, VideoVariant,
+    )
+    v = tmp_path / f"{char_id}.mp4"; v.write_text("fake")
+    return JobCharacter(
+        char_id=char_id, name=char_id, source_image_path=f"/tmp/{char_id}.png",
+        status=CharStatus.ANIMATING,
+        images=[GeneratedImage(variant_id=f"var_{char_id}",
+                               path=f"/tmp/{char_id}.png", prompt="x",
+                               scene_id="sc1", status=VariantStatus.READY)],
+        approved_variant_ids=[f"var_{char_id}"],
+        videos=[VideoVariant(video_id=f"vid_{char_id}",
+                             grok_job_id=f"g_{char_id}", status=VideoStatus.DONE,
+                             source_variant_id=f"var_{char_id}",
+                             final_video_path=str(v))],
+    )
+
+
+def test_run_full_pipeline_selects_only_eligible_chars(monkeypatch, tmp_path):
+    """run_full_pipeline shares compile eligibility (via _eligible_for_compile):
+    only not-rejected + approved + has-DONE-video chars get a pipeline task."""
+    import asyncio
+    from types import SimpleNamespace
+    from character_swap.models import CharStatus, Job, VideoStatus, VideoVariant
+
+    good = _pipeline_eligible_jc("good", tmp_path)
+    rejected = _pipeline_eligible_jc("rejected", tmp_path)
+    rejected.status = CharStatus.REJECTED
+    no_approval = _pipeline_eligible_jc("no_approval", tmp_path)
+    no_approval.approved_variant_ids = []
+    no_approval.approved_variant_id = None
+    no_video = _pipeline_eligible_jc("no_video", tmp_path)
+    no_video.videos = [VideoVariant(video_id="v_nv", grok_job_id="g_nv",
+                                    status=VideoStatus.PROCESSING,
+                                    source_variant_id="var_no_video",
+                                    final_video_path="/tmp/never.mp4")]
+
+    chars = {c.char_id: c for c in (good, rejected, no_approval, no_video)}
+    job = Job(job_id="j1", scene_id="sc1", scene_image_path="/tmp/sc1.png",
+              scene_ids=["sc1"], characters=chars)
+
+    monkeypatch.setattr(runner_pipeline, "store",
+                        lambda: SimpleNamespace(get_job=lambda jid: job))
+    monkeypatch.setattr(runner_pipeline, "_persist_pipeline",
+                        lambda *a, **k: None)
+
+    scheduled: list[str] = []
+
+    async def fake_run_char(job_id, cid):
+        scheduled.append(cid)
+    monkeypatch.setattr(runner_pipeline, "_run_char_pipeline", fake_run_char)
+
+    asyncio.run(runner_pipeline.run_full_pipeline("j1"))
+    assert scheduled == ["good"]

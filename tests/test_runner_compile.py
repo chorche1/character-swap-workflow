@@ -420,3 +420,138 @@ def test_compile_job_videos_missing_job_no_op(monkeypatch, stub_compile_one):
     monkeypatch.setattr(runner_compile, "store", lambda: _NoneStore())
     asyncio.run(runner_compile.compile_job_videos("missing"))
     assert stub_compile_one == []
+
+
+# --- batch-settled phone push ----------------------------------------------------------
+
+
+def test_compile_push_spec_all_done():
+    assert runner_compile._compile_push_spec(3, 3) == (
+        "Slutvideor klara", "3/3 karaktarer kompilerade", 3, ["white_check_mark"])
+
+
+def test_compile_push_spec_total_failure_is_loud():
+    """0 of N compiled is a LOUD failure, never the 'klara (delvis)' partial
+    message — a batch where nothing compiled must not read as partial success
+    on the phone (regression for the code-review finding)."""
+    title, body, priority, tags = runner_compile._compile_push_spec(0, 4)
+    assert title == "Slutvideor misslyckades"
+    assert body == "0/4 kompilerade"
+    assert priority == 5
+    assert tags == ["rotating_light"]
+    assert "delvis" not in title.lower()
+
+
+def test_compile_push_spec_partial():
+    assert runner_compile._compile_push_spec(2, 5) == (
+        "Slutvideor klara (delvis)", "2/5 lyckades", 4, ["warning"])
+
+
+def test_compile_push_spec_nothing_to_report():
+    """No compilable characters → no push at all."""
+    assert runner_compile._compile_push_spec(0, 0) is None
+
+
+def test_eligible_for_compile_predicate(tmp_path):
+    """Eligibility = not rejected + an approved variant + a DONE video on disk."""
+    good = _eligible_jc("good", tmp_path)
+    assert runner_compile._eligible_for_compile(good) is True
+
+    rejected = _eligible_jc("rej", tmp_path)
+    rejected.status = CharStatus.REJECTED
+    assert runner_compile._eligible_for_compile(rejected) is False
+
+    no_approval = _eligible_jc("noapp", tmp_path)
+    no_approval.approved_variant_ids = []
+    no_approval.approved_variant_id = None
+    assert runner_compile._eligible_for_compile(no_approval) is False
+
+    no_video = _eligible_jc("novid", tmp_path)
+    no_video.videos = [_mkvideo(Path("/tmp/never.mp4"), "var_novid",
+                                status=VideoStatus.PROCESSING)]
+    assert runner_compile._eligible_for_compile(no_video) is False
+
+
+@pytest.fixture
+def capture_push(monkeypatch):
+    """Capture push.notify calls fired from runner_compile."""
+    calls: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        runner_compile.push, "notify",
+        lambda title, body="", **kw: calls.append((title, body, kw)))
+    return calls
+
+
+def _stub_compile_setting_status(monkeypatch, outcomes: dict[str, str]):
+    """Replace _compile_one_character with a stub that sets each char's
+    compile_status from `outcomes` (default 'done'), mirroring the real run."""
+    async def fake(job_id: str, char_id: str, **kwargs):
+        j = runner_compile.store().get_job(job_id)
+        j.characters[char_id].compile_status = outcomes.get(char_id, "done")
+    monkeypatch.setattr(runner_compile, "_compile_one_character", fake)
+
+
+def test_compile_push_reports_whole_job_on_retry(monkeypatch, tmp_path, capture_push):
+    """A per-character retry (char_ids filter) must report TRUE job-wide
+    progress, not a misleading '1/1' scoped to the retried char (regression
+    for the code-review finding). Two chars already compiled + retrying the
+    third → '3/3', not '1/1'."""
+    c1 = _eligible_jc("c1", tmp_path); c1.compile_status = "done"
+    c2 = _eligible_jc("c2", tmp_path); c2.compile_status = "done"
+    c3 = _eligible_jc("c3", tmp_path); c3.compile_status = "failed"
+
+    job = Job(
+        job_id="j1", scene_id="sc1", scene_image_path="/tmp/sc1.png",
+        scene_ids=["sc1"],
+        characters={c.char_id: c for c in (c1, c2, c3)},
+    )
+    monkeypatch.setattr(runner_compile, "store", lambda: _FakeStore(job))
+    _stub_compile_setting_status(monkeypatch, {"c3": "done"})
+
+    asyncio.run(runner_compile.compile_job_videos("j1", char_ids=["c3"]))
+
+    assert len(capture_push) == 1
+    title, body, kw = capture_push[0]
+    assert title == "Slutvideor klara"
+    assert body == "3/3 karaktarer kompilerade"
+
+
+def test_compile_push_total_failure(monkeypatch, tmp_path, capture_push):
+    """All targeted chars fail to compile → loud failure push, not partial."""
+    c1 = _eligible_jc("c1", tmp_path)
+    c2 = _eligible_jc("c2", tmp_path)
+    job = Job(
+        job_id="j1", scene_id="sc1", scene_image_path="/tmp/sc1.png",
+        scene_ids=["sc1"],
+        characters={c.char_id: c for c in (c1, c2)},
+    )
+    monkeypatch.setattr(runner_compile, "store", lambda: _FakeStore(job))
+    _stub_compile_setting_status(monkeypatch, {"c1": "failed", "c2": "failed"})
+
+    asyncio.run(runner_compile.compile_job_videos("j1"))
+
+    assert len(capture_push) == 1
+    title, body, kw = capture_push[0]
+    assert title == "Slutvideor misslyckades"
+    assert body == "0/2 kompilerade"
+    assert kw["priority"] == 5
+
+
+def test_compile_push_partial_success(monkeypatch, tmp_path, capture_push):
+    """One of two chars compiles → partial-success push."""
+    c1 = _eligible_jc("c1", tmp_path)
+    c2 = _eligible_jc("c2", tmp_path)
+    job = Job(
+        job_id="j1", scene_id="sc1", scene_image_path="/tmp/sc1.png",
+        scene_ids=["sc1"],
+        characters={c.char_id: c for c in (c1, c2)},
+    )
+    monkeypatch.setattr(runner_compile, "store", lambda: _FakeStore(job))
+    _stub_compile_setting_status(monkeypatch, {"c1": "done", "c2": "failed"})
+
+    asyncio.run(runner_compile.compile_job_videos("j1"))
+
+    assert len(capture_push) == 1
+    title, body, kw = capture_push[0]
+    assert title == "Slutvideor klara (delvis)"
+    assert body == "1/2 lyckades"

@@ -102,10 +102,14 @@ def notify(
 ) -> None:
     """Fire a best-effort phone push. Non-blocking, never raises, no-op if
     ``NTFY_TOPIC`` is unset."""
-    req = build_request(title, body, priority=priority, tags=tags, click=click)
-    if req is None:
-        return
+    # build_request() must be inside the guard too: a bad arg (e.g. a
+    # non-int priority or non-str tag) would otherwise raise straight through
+    # notify() and into the calling render — the exact thing this module
+    # promises never to do.
     try:
+        req = build_request(title, body, priority=priority, tags=tags, click=click)
+        if req is None:
+            return
         _EXECUTOR.submit(_send, req)
-    except Exception as e:  # pragma: no cover — pool shutdown at interpreter exit
-        _log.warning("ntfy push submit failed: %s", e)
+    except Exception as e:  # noqa: BLE001 — push must never break a render
+        _log.warning("ntfy push failed to enqueue: %s", e)
