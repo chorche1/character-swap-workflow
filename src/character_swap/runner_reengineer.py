@@ -1123,11 +1123,12 @@ async def assemble(re_id: str) -> None:
 # both are opt-in via the ⚙ panel. Only keys listed here are accepted from
 # state["assemble_settings"] (anything else is ignored).
 ASSEMBLE_DEFAULTS: dict = {
-    # Hugo 2026-06-12: capcut-bluebox at size 68 is the Reengineer-final
-    # standard (Step 6 keeps its own default). The size rides as a caption
-    # style override and is user-tunable in the ⚙ panel.
+    # Hugo 2026-06-16: capcut-bluebox at size 60 is the Swap/Reengineer-final
+    # standard (the classic Step-6 compile keeps its own purple-pill default).
+    # The size rides as a caption style override and is user-tunable in the ⚙
+    # panel. (Matches the baked capcut-bluebox template size in video_edit.py.)
     "template": "capcut-bluebox",
-    "overrides": {"size": 68},
+    "overrides": {"size": 60},
     "enable_trim": True,
     "enable_captions": True,
     "enable_wpm_normalize": False,

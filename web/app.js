@@ -253,8 +253,8 @@ function studio() {
     // preset values for those). Defaults keep Kling's voice + pacing.
     reAsmSettings: (() => {
       const defaults = {
-        template: 'capcut-bluebox',     // Hugo 2026-06-12: bluebox @ 68 is
-        captionSize: 68,                // the Reengineer-final standard
+        template: 'capcut-bluebox',     // Hugo 2026-06-16: bluebox @ 60 is
+        captionSize: 60,                // the Swap/Reengineer-final standard
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
@@ -264,7 +264,9 @@ function studio() {
         playbackSpeed: 1.0,             // global speed (Editor's control); 1.0 = av
       };
       try {
-        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v1') || '{}');
+        // v2 (2026-06-16): supersedes v1 so the new bluebox @ 60 default
+        // replaces any saved 68 from before; older reAsm prefs reset to current.
+        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v2') || '{}');
         return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
       } catch (_) { return defaults; }
     })(),
@@ -1822,14 +1824,14 @@ function studio() {
     // stay OFF so Kling's own lip-synced voice and pacing survive.
     _reAsmBody() {
       try {
-        localStorage.setItem('reassemble.settings.v1', JSON.stringify(this.reAsmSettings));
+        localStorage.setItem('reassemble.settings.v2', JSON.stringify(this.reAsmSettings));
       } catch (_) { /* private window etc. */ }
       const s = this.reAsmSettings;
       return {
         template: s.template,
         // Caption size rides as a style override (works for both caption
         // engines). Clamped so a typo can't render unreadable captions.
-        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 68)) },
+        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 60)) },
         enable_trim: !!s.enableTrim,
         enable_captions: !!s.enableCaptions,
         enable_wpm_normalize: !!s.enableWpmNormalize,
