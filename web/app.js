@@ -316,7 +316,7 @@ function studio() {
     higgsfieldInbox: null,
     higgsfieldPolling: false,
     swapPrompt: '',
-    swapModel: 'gpt-image',
+    swapModel: 'gpt2-id-swap',   // Hugo 2026-06-16: identity-first is the Swap default
     // Optional 3rd reference image for the swap flow's image model. Filename
     // is what we send back to POST /api/jobs; URL is for the inline preview.
     extraRefFilename: '',
@@ -816,12 +816,15 @@ function studio() {
     },
 
     async loadSwapDefaults() {
-      // Pass the active project_id so the backend can return that
-      // project's `default_prompt` instead of the global one.
+      // Pass the active project_id (project default_prompt) AND the selected
+      // engine so the backend returns the prompt in the engine's USER view —
+      // identity-first for gpt2-id-swap (WYSIWYG, 2026-06-16).
       try {
-        const url = '/api/swap/defaults' + (this.currentProjectId
-          ? '?project_id=' + encodeURIComponent(this.currentProjectId) : '');
-        const r = await fetch(url);
+        const params = new URLSearchParams();
+        if (this.currentProjectId) params.set('project_id', this.currentProjectId);
+        if (this.swapModel) params.set('image_model', this.swapModel);
+        const qs = params.toString();
+        const r = await fetch('/api/swap/defaults' + (qs ? '?' + qs : ''));
         if (!r.ok) return;
         const data = await r.json();
         this.swapDefaultPrompt = data.prompt || '';
@@ -829,6 +832,16 @@ function studio() {
         this.swapProjectDefaultPrompt = data.project_prompt || '';
         if (!this.swapPrompt) this.swapPrompt = this.swapDefaultPrompt;
       } catch (_) {}
+    },
+
+    // Switching the swap engine changes the prompt's orientation (gpt2-id-swap
+    // shows identity-first). Reload the engine-appropriate default, but only
+    // overwrite the box when it still holds the previous engine's default — a
+    // user-typed prompt is never clobbered.
+    async onSwapModelChange() {
+      const wasDefault = this.swapPromptIsDefault();
+      await this.loadSwapDefaults();
+      if (wasDefault) this.swapPrompt = this.swapDefaultPrompt;
     },
 
     resetSwapPrompt() {
@@ -848,7 +861,10 @@ function studio() {
         const r = await fetch('/api/projects/' + encodeURIComponent(this.currentProjectId), {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ default_prompt: newPrompt || null }),
+          // Send the engine so the backend can store the default scene-first
+          // canonical (the box holds gpt2-id-swap prompts identity-first).
+          body: JSON.stringify({ default_prompt: newPrompt || null,
+                                 default_prompt_image_model: this.swapModel }),
         });
         if (!r.ok) { this.notifyError('Save failed: ' + await r.text()); return; }
         const updated = await r.json();
@@ -5440,7 +5456,9 @@ function studio() {
           ? (_fromServer[s.scene_id] || '')
           : (this.job.movement_prompt || '');
       }
-      this.swapPrompt = this.job.prompt || this.swapDefaultPrompt;
+      // prompt_display is the server-flipped USER view (identity-first for
+      // gpt2-id-swap); job.prompt itself is scene-first storage (2026-06-16).
+      this.swapPrompt = this.job.prompt_display || this.swapDefaultPrompt;
       this.swapModel = this.job.image_model || 'gpt-image';
       this.swapVideoModel = this.job.video_model || 'kling-v3';
       this.swapDurationSecs = this.job.duration_secs || null;
@@ -5506,7 +5524,9 @@ function studio() {
     swapPromptDirty() {
       if (!this.job) return false;
       const current = this.swapPrompt || '';
-      const stored = this.job.prompt || this.swapDefaultPrompt || '';
+      // Compare against the USER-view (identity-first) form so a gpt2-id-swap
+      // job isn't flagged "dirty" just because storage is scene-first.
+      const stored = this.job.prompt_display || this.swapDefaultPrompt || '';
       return current.trim() !== stored.trim() || this.swapModel !== (this.job.image_model || 'gpt-image');
     },
 
@@ -5963,7 +5983,11 @@ function studio() {
       this.imgRegenModal = {
         open: true, jobId, charId, variantId: v.variant_id,
         charName: jc?.name || charId, sceneId: v.scene_id || null,
-        prompt: v.prompt || '', loading: !v.prompt, submitting: false, reRun,
+        // Prefill the USER-facing orientation (identity-first for gpt2-id-swap)
+        // so an unedited submit round-trips correctly through the retry
+        // endpoint's input flip (2026-06-16). Reengineer overrides below.
+        prompt: v.prompt_display || v.prompt || '',
+        loading: !(v.prompt_display || v.prompt), submitting: false, reRun,
       };
       // Reengineer context: prefill the ENGINE-EFFECTIVE prompt from the
       // server — slots can store stock templates that dispatch substitutes,
@@ -5997,7 +6021,7 @@ function studio() {
             const vv = (job.characters?.[charId]?.images || [])
               .find(x => x.variant_id === v.variant_id);
             if (this.imgRegenModal.variantId === v.variant_id) {
-              this.imgRegenModal.prompt = vv?.prompt || '';
+              this.imgRegenModal.prompt = vv?.prompt_display || vv?.prompt || '';
             }
           }
         } finally {
@@ -6478,7 +6502,7 @@ function studio() {
       this.draftTitle = '';
       this.jobCost = null;
       this.swapPrompt = this.swapDefaultPrompt;
-      this.swapModel = 'gpt-image';
+      this.swapModel = 'gpt2-id-swap';
       this.swapVideoModel = 'kling-v3';
       this.swapDurationSecs = null;
     },

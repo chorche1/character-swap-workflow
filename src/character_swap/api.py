@@ -249,6 +249,12 @@ def _job_to_dict(job: Job) -> dict:
             for sid, p in zip(eff_ids, eff_paths)
         ],
         "prompt": job.prompt,
+        # The swap prompt in the engine's USER-FACING orientation (identity-first
+        # for gpt2-id-swap) — what the Step-2 box SHOWS. `prompt` itself is
+        # scene-first canonical storage; pipeline dispatch flips it at gen time
+        # (WYSIWYG, Hugo 2026-06-16).
+        "prompt_display": (_flip_swap_orientation_for_idfirst(
+            job.prompt, runner._swap_image_model(job)) if job.prompt else None),
         "image_model": job.image_model,
         "video_model": job.video_model,
         # Legacy single + new per-scene dict. The UI prefers the dict;
@@ -311,6 +317,13 @@ def _job_to_dict(job: Job) -> dict:
                         "variant_id": v.variant_id,
                         "url": _file_url(v.path),
                         "prompt": v.prompt,
+                        # USER-facing orientation for the ✎↻ edit modal —
+                        # identity-first for gpt2-id-swap (the plain-Swap modal
+                        # prefills from this; the Reengineer modal fetches the
+                        # same via /scenes/{idx}/swap_prompt). WYSIWYG 2026-06-16.
+                        "prompt_display": (_flip_swap_orientation_for_idfirst(
+                            v.prompt, runner._swap_image_model(job))
+                            if v.prompt else None),
                         "parent_variant_id": v.parent_variant_id,
                         "scene_id": v.scene_id,
                         "status": v.status,
@@ -888,7 +901,14 @@ async def patch_project(project_id: str, body: dict) -> dict:
         if raw is None or (isinstance(raw, str) and not raw.strip()):
             project.default_prompt = None    # clear → fall back to global default
         elif isinstance(raw, str):
-            project.default_prompt = raw.strip()
+            # The Step-2 box holds gpt2-id-swap prompts in the IDENTITY-FIRST
+            # user view; project defaults are stored SCENE-FIRST canonical (the
+            # whole backend + get_swap_defaults assume that and flip back to the
+            # engine's view on load), so flip on save. The frontend sends the
+            # box's engine in `default_prompt_image_model`; no-op for other
+            # engines / when omitted (WYSIWYG, Hugo 2026-06-16).
+            project.default_prompt = _flip_swap_orientation_for_idfirst(
+                raw.strip(), body.get("default_prompt_image_model"))
         else:
             raise HTTPException(400, "default_prompt must be a string or null")
         changed = True
@@ -1038,10 +1058,18 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
             f"{runner_media.IMAGE_MODELS[image_model]['label']} is not configured. "
             f"Add the right API key to .env.",
         )
+    # WYSIWYG (Hugo 2026-06-16): the Step-2 box sends gpt2-id-swap prompts in
+    # the engine's IDENTITY-FIRST view; storage + the whole generation backbone
+    # are scene-first canonical (pipeline dispatch re-flips at gen time), so
+    # flip the user-supplied text back to storage orientation. The inherited
+    # project default is ALREADY scene-first canonical (patch_project flips it
+    # on save), so it must NOT be flipped again — flip ONLY body.prompt.
     custom_prompt = (body.prompt or "").strip() or None
+    if custom_prompt:
+        custom_prompt = _flip_swap_orientation_for_idfirst(custom_prompt, image_model)
     # If no explicit prompt was supplied and the job's project has a
-    # custom default_prompt, inherit it. This lets the user say "every
-    # job in project X uses this prompt" without having to retype it.
+    # custom default_prompt, inherit it (scene-first canonical, no flip). This
+    # lets the user say "every job in project X uses this prompt".
     if not custom_prompt and body.project_id:
         proj = s.get_project(body.project_id)
         if proj and proj.default_prompt:
@@ -1232,6 +1260,14 @@ async def patch_job(job_id: str, body: dict) -> dict:
         if raw is not None and not isinstance(raw, str):
             raise HTTPException(400, "prompt must be a string or null")
         cleaned = (raw or "").strip() or None
+        if cleaned:
+            # The box holds gpt2-id-swap prompts in the IDENTITY-FIRST user view;
+            # storage is scene-first canonical. Flip using the body's engine (the
+            # model the box was showing — saveJobPromptModel PATCHes prompt +
+            # image_model together), else the job's current engine. No-op for
+            # other engines (WYSIWYG, Hugo 2026-06-16).
+            eff_model = (body.get("image_model") or job.image_model)
+            cleaned = _flip_swap_orientation_for_idfirst(cleaned, eff_model)
         job.prompt = cleaned
         changed = True
     if "image_model" in body:
@@ -1570,9 +1606,16 @@ async def retry_variant(job_id: str, char_id: str, variant_id: str,
                                       "char_id": char_id,
                                       "variant_id": variant_id,
                                       "approved_variant_ids": approved_ids})
+    # A user-edited prompt from the ✎↻ modal arrives in the engine's USER view
+    # (identity-first for gpt2-id-swap); flip to scene-first storage so the slot
+    # + pipeline dispatch behave exactly as for any stored prompt. No-op for
+    # gpt-image / fal engines, and for a plain ↻ retry with no edit.
+    edited_prompt = (body.prompt if body else None)
+    if edited_prompt and edited_prompt.strip():
+        edited_prompt = _flip_swap_orientation_for_idfirst(
+            edited_prompt.strip(), runner._swap_image_model(job))
     background.add_task(_run_async, runner.retry_single_variant,
-                        job_id, char_id, variant_id,
-                        (body.prompt if body else None))
+                        job_id, char_id, variant_id, edited_prompt)
     return _job_to_dict(job)
 
 
@@ -1679,9 +1722,14 @@ async def regenerate_scene(job_id: str, char_id: str, scene_id: str,
     scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
     if scene_id not in scene_ids:
         raise HTTPException(404, "Scene not in job")
+    # A user prompt override arrives identity-first for gpt2-id-swap → flip to
+    # scene-first storage (no-op for other engines / no override).
+    override = (body.prompt if body else None)
+    if override and override.strip():
+        override = _flip_swap_orientation_for_idfirst(
+            override.strip(), runner._swap_image_model(job))
     background.add_task(_run_async, runner.regen_scene_variants,
-                        job_id, char_id, scene_id,
-                        (body.prompt if body else None))
+                        job_id, char_id, scene_id, override)
     return _job_to_dict(job)
 
 
@@ -2872,7 +2920,8 @@ async def get_gen_models() -> dict:
 
 
 @app.get("/api/swap/defaults")
-async def get_swap_defaults(project_id: str | None = None) -> dict:
+async def get_swap_defaults(project_id: str | None = None,
+                            image_model: str | None = None) -> dict:
     """Defaults for the Swap-tab Step-2 form (prompt + model).
 
     If `project_id` is given AND that project has a custom `default_prompt`,
@@ -2880,8 +2929,15 @@ async def get_swap_defaults(project_id: str | None = None) -> dict:
     to drive both the textarea's initial value and the "↺ reset to default"
     button. `global_prompt` is always returned alongside so the frontend
     can offer a "reset to global default" too.
-    """
+
+    `image_model` makes the default ENGINE-AWARE (WYSIWYG, Hugo 2026-06-16):
+    for gpt2-id-swap the box shows the IDENTITY-FIRST compact prompt the engine
+    actually runs (Image 1 = person, Image 2 = scene); other engines show the
+    scene-first default. A project default is flipped into the engine's view so
+    it reads the same way. Defaults to gpt2-id-swap when unset (the Swap-tab
+    default engine since 2026-06-16)."""
     from character_swap import pipeline
+    model = (image_model or "gpt2-id-swap").strip()
     global_prompt = pipeline.GENERATION_PROMPT
     project_prompt: str | None = None
     if project_id:
@@ -2889,11 +2945,21 @@ async def get_swap_defaults(project_id: str | None = None) -> dict:
         project = s.get_project(project_id)
         if project and project.default_prompt:
             project_prompt = project.default_prompt
+    # The active default in the engine's USER-FACING orientation. For
+    # gpt2-id-swap with no project override that's the compact identity-first
+    # prompt; otherwise flip the (scene-first) project/global text into the
+    # engine's view so the textarea is WYSIWYG.
+    if _swap_engine_is_identity_first(model) and not project_prompt:
+        active_prompt = pipeline.build_gpt_id_swap_prompt()
+    else:
+        active_prompt = _flip_swap_orientation_for_idfirst(
+            project_prompt or global_prompt, model)
     return {
-        "prompt": project_prompt or global_prompt,
-        "global_prompt": global_prompt,
-        "project_prompt": project_prompt,
-        "image_model": "gpt-image",
+        "prompt": active_prompt,
+        "global_prompt": _flip_swap_orientation_for_idfirst(global_prompt, model),
+        "project_prompt": _flip_swap_orientation_for_idfirst(project_prompt, model)
+        if project_prompt else None,
+        "image_model": model,
         "image_models": _models_payload()["image"],
     }
 
@@ -4331,6 +4397,10 @@ def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
                 for jc in out["job"]["characters"].values():
                     for img in jc["images"]:
                         img.pop("prompt", None)
+                        # prompt_display is the same ~4KB text in the user's
+                        # orientation — the strip never renders it either, and
+                        # the ✎↻ modal fetches it on demand via /swap_prompt.
+                        img.pop("prompt_display", None)
     return out
 
 
@@ -5335,8 +5405,42 @@ def _scene_swap_prompt_for(job: Job, scene_id: str) -> str:
 def _engine_effective_swap_prompt(job: Job, prompt: str) -> str:
     """The prompt the image was ACTUALLY generated with — delegates to
     `runner.engine_effective_swap_prompt` (shared with the moderation-rescue
-    rewrite, which must reword the engine's real text too)."""
+    rewrite, which must reword the engine's real text too).
+
+    NOTE: this returns the SCENE-FIRST canonical orientation (Image 1 = scene)
+    — the orientation the AI Director reasons in and the generation backbone
+    stores. To show a prompt to the USER, pass the result through
+    `_flip_swap_orientation_for_idfirst` so gpt2-id-swap reads identity-first."""
     return runner.engine_effective_swap_prompt(job, prompt)
+
+
+# --- WYSIWYG identity-first swap prompts (Hugo 2026-06-16) -------------------
+#
+# gpt2-id-swap RUNS prompts identity-first (Image 1 = person/identity, Image 2
+# = scene); every other swap engine is scene-first. To keep the change tiny and
+# safe, the app stores prompts AND runs the whole generation backbone (plan,
+# _kick_char, pipeline dispatch, Director, moderation rewrite) in SCENE-FIRST
+# canonical orientation EXACTLY as before — pipeline._dispatch_variant still
+# flips scene-first → identity-first for gpt2-id-swap at gen time. Only the
+# USER-FACING boundaries flip, so the Step-2 box and the ✎↻ / 🪄 modals SHOW
+# and ACCEPT identity-first text (WYSIWYG) without touching generation.
+
+def _swap_engine_is_identity_first(image_model: str | None) -> bool:
+    """True for the one swap engine the user sees/edits in identity-first
+    terms (gpt2-id-swap)."""
+    return (image_model or "").strip() == "gpt2-id-swap"
+
+
+def _flip_swap_orientation_for_idfirst(prompt: str, image_model: str | None) -> str:
+    """Symmetric scene-first <-> identity-first flip for swap prompts, applied
+    ONLY for gpt2-id-swap. `pipeline._flip_image_roles` is its own inverse, so
+    the SAME call serves both display (storage scene-first → user view) and
+    input (user view → storage scene-first). No-op for gpt-image / fal engines
+    (scene-first end to end)."""
+    from character_swap import pipeline
+    if not (prompt or "").strip() or not _swap_engine_is_identity_first(image_model):
+        return prompt
+    return pipeline._flip_image_roles(prompt)
 
 
 def _scene_frame_path(job: Job, scene_id: str) -> Path | None:
@@ -5375,8 +5479,12 @@ async def reengineer_scene_swap_prompt(re_id: str, idx: int,
             if v is not None:
                 raw = (v.prompt or "").strip() or None
                 break
-    prompt = _engine_effective_swap_prompt(
-        job, raw or _scene_swap_prompt_for(job, scene_id))
+    # WYSIWYG: show the prompt in the engine's user-facing orientation
+    # (identity-first for gpt2-id-swap) — what the engine actually runs.
+    prompt = _flip_swap_orientation_for_idfirst(
+        _engine_effective_swap_prompt(
+            job, raw or _scene_swap_prompt_for(job, scene_id)),
+        runner._swap_image_model(job))
     return {"re_id": re_id, "idx": idx, "scene_id": scene_id, "prompt": prompt}
 
 
@@ -5410,9 +5518,19 @@ async def reengineer_rewrite_scene_prompt(re_id: str, idx: int,
     if job is None:
         raise HTTPException(409, "underlying job missing")
     scene_id = entry["scene_id"]
-    current = _engine_effective_swap_prompt(
-        job, (body.current_prompt or "").strip()
-        or _scene_swap_prompt_for(job, scene_id))
+    model = runner._swap_image_model(job)
+    # WYSIWYG orientation handling (Hugo 2026-06-16): the modal sends
+    # current_prompt in the engine's USER view (identity-first for
+    # gpt2-id-swap); the fallback is scene-first storage. Normalize to one
+    # identity-first "display" string, then flip to the SCENE-FIRST orientation
+    # the AI Director reasons in. All flips are no-ops for gpt-image / fal.
+    if (body.current_prompt or "").strip():
+        current_display = body.current_prompt.strip()
+    else:
+        current_display = _flip_swap_orientation_for_idfirst(
+            _engine_effective_swap_prompt(
+                job, _scene_swap_prompt_for(job, scene_id)), model)
+    director_current = _flip_swap_orientation_for_idfirst(current_display, model)
     frame = _scene_frame_path(job, scene_id)
     if frame is None:
         raise HTTPException(409, "scene frame missing on disk")
@@ -5424,14 +5542,16 @@ async def reengineer_rewrite_scene_prompt(re_id: str, idx: int,
                   and Path(job.extra_reference_path).exists() else None)
     new_prompt = await asyncio.to_thread(
         prompt_director.direct_scene_prompt_rewrite,
-        scene_id=scene_id, frame_path=frame, current_prompt=current,
+        scene_id=scene_id, frame_path=frame, current_prompt=director_current,
         change_request=change, background_path=background,
         job_id=job.job_id)
     if not new_prompt:
         raise HTTPException(502, "AI Director kunde inte skriva om prompten — "
                                  "försök igen eller redigera prompten manuellt")
+    # Director output is scene-first → flip back to the modal's view.
+    new_display = _flip_swap_orientation_for_idfirst(new_prompt, model)
     return {"re_id": re_id, "idx": idx, "scene_id": scene_id,
-            "prompt": new_prompt, "current_prompt": current}
+            "prompt": new_display, "current_prompt": current_display}
 
 
 async def _select_and_unapprove_scene_slots(job: Job, scene_id: str) -> dict[str, str]:
@@ -5503,6 +5623,12 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
     if job is None:
         raise HTTPException(409, "underlying job missing")
     scene_id = entry["scene_id"]
+    # The modal sends the prompt in the engine's USER view (identity-first for
+    # gpt2-id-swap). Storage, the cached Director plan, and pipeline dispatch
+    # are all scene-first canonical, so flip back to storage orientation before
+    # persisting on the plan + each slot. No-op for gpt-image / fal engines.
+    prompt = _flip_swap_orientation_for_idfirst(
+        prompt, runner._swap_image_model(job))
 
     targets = await _select_and_unapprove_scene_slots(job, scene_id)
     if not targets:
