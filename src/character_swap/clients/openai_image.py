@@ -95,6 +95,37 @@ def _generate_once(
     if effective_quality:
         extra["quality"] = effective_quality
 
+    # gpt-image moderation: ALWAYS "low" — hardcoded, not switchable (Hugo's
+    # directive 2026-06-16). The consumer ChatGPT product runs its own tuned
+    # moderation level; the API defaults to the stricter "auto", which was
+    # rejecting ~49% of swap calls on safety grounds. "low" is permissive but
+    # still filtered, and OpenAI's reference confirms it on BOTH the create and
+    # edit endpoints for gpt-image models. This is the single biggest lever for
+    # the "more NSFW errors than chatgpt.com" gap. Applies to every GPT path:
+    # Swap (gpt-image), Swap/Reengineer (gpt2-id-swap), and the free-form Image
+    # tab — all of them route through here.
+    extra["moderation"] = "low"
+
+    def _call(params: dict):
+        if refs:
+            with ExitStack() as stack:
+                files = [stack.enter_context(p.open("rb")) for p in refs]
+                return client.images.edit(
+                    model=model,
+                    image=files if len(files) > 1 else files[0],
+                    prompt=prompt,
+                    size=size,
+                    n=1,
+                    **params,
+                )
+        return client.images.generate(
+            model=model,
+            prompt=prompt,
+            size=size,
+            n=1,
+            **params,
+        )
+
     try:
         with record(
             phase=phase,
@@ -105,26 +136,32 @@ def _generate_once(
             n_references=len(refs),
             size=size,
             quality=effective_quality,
+            moderation="low",
         ) as entry:
-            if refs:
-                with ExitStack() as stack:
-                    files = [stack.enter_context(p.open("rb")) for p in refs]
-                    response = client.images.edit(
-                        model=model,
-                        image=files if len(files) > 1 else files[0],
-                        prompt=prompt,
-                        size=size,
-                        n=1,
-                        **extra,
+            try:
+                response = _call(extra)
+            except openai.BadRequestError as e:
+                # Distinguish "this endpoint/model doesn't KNOW the `moderation`
+                # param" (an unknown-argument 400) from a genuine content block
+                # (also a 400, but carrying a content_policy/safety message).
+                # Only the former should drop the param and retry — degrade
+                # gracefully rather than fail a slot. A real content rejection
+                # must propagate so content_policy's softening ladder handles it.
+                msg = str(e).lower()
+                param_unknown = "moderation" in msg and any(
+                    s in msg
+                    for s in (
+                        "unknown parameter", "unrecognized", "unexpected",
+                        "unsupported", "not supported", "does not support",
+                        "extra fields",
                     )
-            else:
-                response = client.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=size,
-                    n=1,
-                    **extra,
                 )
+                if param_unknown:
+                    extra.pop("moderation", None)
+                    entry["moderation"] = None
+                    response = _call(extra)
+                else:
+                    raise
             entry["request_id"] = getattr(response, "_request_id", None) or getattr(
                 response, "id", None
             )
