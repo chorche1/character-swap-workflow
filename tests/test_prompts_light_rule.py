@@ -93,6 +93,34 @@ def test_movement_director_is_organic_not_cinematic():
     assert "pronounced" in text
 
 
+def test_swap_prompts_direct_lighting_integration():
+    """2026-06-17 (Hugo): EVERY swap image-model prompt must DIRECT relighting
+    the inserted person to the scene + contact/cast shadows (not merely
+    DESCRIBE the scene's light) — the fix for the gpt-image-2 'pasted-in' look.
+    The fal edit-engine prompt already carried an Integration paragraph; the
+    two GPT paths (GENERATION_PROMPT for 'gpt-image', build_gpt_id_swap_prompt
+    for 'gpt2-id-swap') got the compact one-sentence clause.
+    """
+    gen = _flat(pipeline.GENERATION_PROMPT)
+    assert "match the scene's own existing light" in gen
+    assert "contact and cast shadows" in gen
+    assert "not pasted in" in gen
+
+    gpt2 = _flat(pipeline.build_gpt_id_swap_prompt())
+    assert "match the scene's own existing light" in gpt2
+    assert "contact and cast shadows" in gpt2
+    assert "not pasted in" in gpt2
+
+    # The fal edit engine already integrates (relight + cast/contact shadows).
+    edit = _flat(pipeline.build_edit_swap_prompt("scene"))
+    assert "contact shadows" in edit
+
+    # background=True relights to Image 3 via bg_part, so the scene-light
+    # clause must NOT be added there (it would contradict the new environment).
+    gpt2_bg = _flat(pipeline.build_gpt_id_swap_prompt(background=True))
+    assert "match the scene's own existing light" not in gpt2_bg
+
+
 def test_gpt_id_swap_prompts_do_not_mandate_daylight():
     src = open(pipeline.__file__, encoding="utf-8").read()
     # No remaining mandate anywhere in the module's template strings —
