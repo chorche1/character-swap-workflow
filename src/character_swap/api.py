@@ -2684,9 +2684,13 @@ class CompileVideosBody(BaseModel):
     enable_captions: bool = True
     enable_wpm_normalize: bool = True
     target_wpm: float = Field(default=190.0, ge=80, le=400)
-    threshold_db: float = -30.0
+    threshold_db: float = -23.0
     min_silence_secs: float = Field(default=0.30, ge=0.05, le=5.0)
-    pad_secs: float = Field(default=0.03, ge=0.0, le=1.0)
+    pad_secs: float = Field(default=0.04, ge=0.0, le=1.0)
+    # Opt-in word-gap trim (replaces level interior trim when on). max_gap =
+    # the spoken-pause length that triggers a cut.
+    enable_gap_trim: bool = False
+    gap_max_secs: float = Field(default=0.35, ge=0.05, le=3.0)
     voice_override: str | None = None
     # When False, keep the original generated/Kling audio — skip the ElevenLabs
     # voice swap entirely, ignoring both `voice_override` and each character's
@@ -2745,6 +2749,7 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
         enable_wpm_normalize=body.enable_wpm_normalize,
         target_wpm=body.target_wpm, threshold_db=body.threshold_db,
         min_silence_secs=body.min_silence_secs, pad_secs=body.pad_secs,
+        enable_gap_trim=body.enable_gap_trim, gap_max_secs=body.gap_max_secs,
         voice_override=body.voice_override,
         enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
     )
@@ -3350,9 +3355,9 @@ async def editor_captions(
 @app.post("/api/editor/auto_edit")
 async def editor_auto_edit(
     file: UploadFile = File(...),
-    threshold_db: float = Form(-25.0),
+    threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.07),
+    pad_secs: float = Form(0.04),
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
@@ -3360,6 +3365,8 @@ async def editor_auto_edit(
     enable_captions: bool = Form(True),    # opt-out of caption burn-in
     enable_wpm_normalize: bool = Form(True),  # time-stretch to hit target_wpm
     target_wpm: float = Form(190.0),
+    enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
+    gap_max_secs: float = Form(0.35),      # spoken-pause length that triggers a cut
 ) -> dict:
     """One-shot pipeline. Each step is opt-out:
       - trim silences (enable_trim)
@@ -3401,9 +3408,10 @@ async def editor_auto_edit(
     except (RuntimeError, ValueError):
         pass
 
-    # Step 1: trim silences (optional — interior pauses)
+    # Step 1: trim silences (optional — interior pauses). In word-gap mode the
+    # level interior trim is REPLACED by the gap trim (Step 3a.5), so skip it.
     trim_summary: dict | None = None
-    if enable_trim:
+    if enable_trim and not enable_gap_trim:
         trimmed = edit_dir / "01-trimmed.mp4"
         try:
             trim_summary = await asyncio.to_thread(
@@ -3446,9 +3454,10 @@ async def editor_auto_edit(
         except Exception as e:
             raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
 
-    # Step 3a: transcribe (required if captions OR wpm-normalize is on)
+    # Step 3a: transcribe (required if captions, wpm-normalize, OR word-gap
+    # trim is on)
     words: list = []
-    if enable_captions or enable_wpm_normalize:
+    if enable_captions or enable_wpm_normalize or enable_gap_trim:
         settings.require_keys("openai")
         words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
         if enable_captions and not words:
@@ -3458,6 +3467,22 @@ async def editor_auto_edit(
     # Hugo chose AUDIO energy as the start marker — the unconditional
     # audio-onset trim at Step 0 is the contract now, and sub-threshold
     # ambient before speech is intentional content.)
+
+    # Step 3a.5: WORD-GAP TRIM (opt-in, replaces level interior trim) — cut
+    # spoken pauses > gap_max_secs by Whisper word boundaries; re-times words.
+    gap_info: dict | None = None
+    if enable_gap_trim and words:
+        gaptrimmed = edit_dir / "02b-gaptrim.mp4"
+        try:
+            gap_summary, words = await asyncio.to_thread(
+                video_edit.trim_word_gaps, current, gaptrimmed, words,
+                max_gap_secs=gap_max_secs, job_id=edit_id,
+            )
+            if gap_summary.get("removed_secs", 0.0) > 0.05:
+                current = gaptrimmed
+            gap_info = gap_summary
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(500, f"Word-gap trim failed: {e}")
 
     # Step 3b: WPM normalization (time-stretch so spoken pace ≈ target_wpm)
     wpm_info: dict | None = None
@@ -3515,6 +3540,7 @@ async def editor_auto_edit(
         "output_url": _file_url(current),
         "source_url": _file_url(src),
         "trim": trim_summary,
+        "gap_trim": gap_info,
         "voice_swap": swap_summary,
         "wpm_normalize": wpm_info,
         "captions": cap_info,
@@ -3526,9 +3552,9 @@ async def editor_auto_edit(
 async def editor_multi_auto_edit(
     files: list[UploadFile] = File(...),
     script: str = Form(...),
-    threshold_db: float = Form(-25.0),
+    threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.07),
+    pad_secs: float = Form(0.04),
     voice_id: str | None = Form(None),
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
@@ -3536,6 +3562,8 @@ async def editor_multi_auto_edit(
     enable_captions: bool = Form(True),
     enable_wpm_normalize: bool = Form(True),
     target_wpm: float = Form(190.0),
+    enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
+    gap_max_secs: float = Form(0.35),      # spoken-pause length that triggers a cut
     # Global playback-speed multiplier applied to the FINAL stitched video
     # (pitch-preserving). 1.0 = no change, 1.5 = 50% faster, etc. Distinct
     # from WPM normalize (which equalizes per-clip pace) — this is a
@@ -3684,10 +3712,11 @@ async def editor_multi_auto_edit(
     except RuntimeError as e:
         raise HTTPException(500, f"Concat failed: {e}")
 
-    # 5. Trim silences on the concatenated video (optional)
+    # 5. Trim silences on the concatenated video (optional). In word-gap mode
+    # the level interior trim is REPLACED by the gap trim (step 6.25), so skip.
     current = concat_out
     trim_summary: dict | None = None
-    if enable_trim:
+    if enable_trim and not enable_gap_trim:
         trimmed = edit_dir / "02-trimmed.mp4"
         try:
             trim_summary = await asyncio.to_thread(
@@ -3729,6 +3758,26 @@ async def editor_multi_auto_edit(
             raise HTTPException(501, f"ElevenLabs wiring pending: {e}")
         except Exception as e:
             raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
+
+    # 6.25. WORD-GAP TRIM (opt-in, replaces level interior trim). Needs a
+    # transcript of the stitched video; the caption block below re-transcribes
+    # the trimmed result so its words stay in sync (one extra Whisper call —
+    # reliability over micro-optimizing).
+    gap_info: dict | None = None
+    if enable_gap_trim:
+        try:
+            gap_words = await asyncio.to_thread(
+                video_edit.transcribe_words, current, job_id=edit_id)
+            if gap_words:
+                gaptrimmed = edit_dir / "032-gaptrim.mp4"
+                gap_summary, _ = await asyncio.to_thread(
+                    video_edit.trim_word_gaps, current, gaptrimmed, gap_words,
+                    max_gap_secs=gap_max_secs, job_id=edit_id)
+                if gap_summary.get("removed_secs", 0.0) > 0.05:
+                    current = gaptrimmed
+                gap_info = gap_summary
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(500, f"Word-gap trim failed: {e}")
 
     # 6.5. Global speed-up (pitch-preserving). Applied to the stitched result
     # BEFORE captions so the caption transcription below runs on the sped-up
@@ -3786,6 +3835,7 @@ async def editor_multi_auto_edit(
         "wpm_normalize": ({"target_wpm": target_wpm, "clips": wpm_decisions}
                           if wpm_decisions else None),
         "trim": trim_summary,
+        "gap_trim": gap_info,
         "voice_swap": swap_summary,
         "speed": speed_info,
         "captions": cap_info,
@@ -4744,6 +4794,12 @@ class ReAssembleSettingsBody(BaseModel):
     threshold_db: float | None = Field(default=None, ge=-60, le=0)
     min_silence_secs: float | None = Field(default=None, ge=0.05, le=5)
     pad_secs: float | None = Field(default=None, ge=0, le=1)
+    # Opt-in word-gap trim (replaces the level interior trim when on) +
+    # the spoken-pause length that triggers a cut. Both merge into
+    # assemble_settings via _store_assemble_settings (keys live in
+    # ASSEMBLE_DEFAULTS).
+    enable_gap_trim: bool | None = None
+    gap_max_secs: float | None = Field(default=None, ge=0.05, le=3.0)
     # Global playback speed (the Editor tab's Speed control): pitch-
     # preserving, applied on top of WPM normalization, captions in sync.
     playback_speed: float | None = Field(default=None, ge=0.5, le=2.0)

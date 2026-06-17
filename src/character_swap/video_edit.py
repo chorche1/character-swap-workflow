@@ -334,7 +334,7 @@ def _probe_fps(input_path: Path) -> float | None:
         return None
 
 
-def _detect_silences(input_path: Path, threshold_db: float = -30.0,
+def _detect_silences(input_path: Path, threshold_db: float = -23.0,
                      min_silence_secs: float = 0.4) -> list[tuple[float, float]]:
     """Return a list of (start, end) silent intervals in seconds."""
     out = _run([
@@ -362,7 +362,7 @@ def _detect_silences(input_path: Path, threshold_db: float = -30.0,
 
 def _invert_silences(silences: list[tuple[float, float]],
                      total_duration: float,
-                     pad_secs: float = 0.05) -> list[tuple[float, float]]:
+                     pad_secs: float = 0.04) -> list[tuple[float, float]]:
     """Return list of (start, end) speech-keep ranges by inverting silences.
     Adds a tiny `pad_secs` either side of each INTERIOR keep range so words
     don't get clipped — but NOT on the first keep range. Leading silence is
@@ -466,7 +466,7 @@ def trim_to_first_word(input_path: Path, output_path: Path, words: list,
 
 
 def trim_leading_silence(input_path: Path, output_path: Path, *,
-                         threshold_db: float = -30.0,
+                         threshold_db: float = -23.0,
                          min_silence_secs: float = 0.2,
                          job_id: str | None = None) -> dict:
     """Drop ONLY the leading silence from `input_path` — internal silences are
@@ -539,9 +539,9 @@ def trim_leading_silence(input_path: Path, output_path: Path, *,
 
 
 def trim_silences(input_path: Path, output_path: Path, *,
-                  threshold_db: float = -30.0,
+                  threshold_db: float = -23.0,
                   min_silence_secs: float = 0.4,
-                  pad_secs: float = 0.05,
+                  pad_secs: float = 0.04,
                   job_id: str | None = None) -> dict:
     """Remove silent gaps from `input_path`. Writes to `output_path`.
 
@@ -1664,6 +1664,140 @@ def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> li
     return out
 
 
+def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
+                          max_gap_secs: float = 0.35,
+                          pad_secs: float = 0.05) -> list[tuple[float, float]]:
+    """Pure keep-range builder for the word-gap trim. Returns the speech
+    ranges to KEEP after collapsing every inter-word pause longer than
+    `max_gap_secs` down to `pad_secs` on each side, and dropping the leading
+    silence before the first word and the trailing room tone after the last.
+
+    Robust against loud room tone (Kling): it keys on WORD boundaries, not
+    audio energy, so a pause is a pause even when the floor sits ~2 dB below
+    speech and `silencedetect` finds nothing. ffmpeg-free → unit-testable.
+    """
+    ws = sorted((w for w in words), key=lambda w: w.start)
+    if len(ws) < 1 or total_duration <= 0:
+        return [(0.0, total_duration)] if total_duration > 0 else []
+
+    removed: list[tuple[float, float]] = []
+    # Leading silence before the first word (onset trim usually handled this
+    # already; harmless + idempotent when it did).
+    lead_end = ws[0].start - pad_secs
+    if lead_end > 0.05:
+        removed.append((0.0, lead_end))
+    # Interior pauses longer than the threshold.
+    for i in range(1, len(ws)):
+        gap = ws[i].start - ws[i - 1].end
+        if gap > max_gap_secs:
+            s = ws[i - 1].end + pad_secs
+            e = ws[i].start - pad_secs
+            if e - s > 0.02:
+                removed.append((s, e))
+    # Trailing room tone after the last word.
+    trail_start = min(total_duration, ws[-1].end + pad_secs)
+    if total_duration - trail_start > 0.05:
+        removed.append((trail_start, total_duration))
+
+    # Invert removed → keep ranges.
+    keep: list[tuple[float, float]] = []
+    cursor = 0.0
+    for s, e in removed:
+        if s > cursor:
+            keep.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < total_duration:
+        keep.append((cursor, total_duration))
+    return [(a, b) for a, b in keep if b - a > 0.05]
+
+
+def _shift_words_to_keeps(words: list[Word],
+                          keeps: list[tuple[float, float]]) -> list[Word]:
+    """Re-time `words` onto the post-trim timeline produced by keeping
+    `keeps` (the output of `_word_gap_keep_ranges`) and concatenating them.
+    A word landing inside a removed gap snaps to the nearest kept boundary.
+    Returns a NEW list — never mutates the input (mirrors
+    `scale_word_timestamps`). ffmpeg-free → unit-testable."""
+    def _map(t: float) -> float:
+        cum = 0.0
+        for a, b in keeps:
+            if t < a:
+                return cum
+            if t <= b:
+                return cum + (t - a)
+            cum += (b - a)
+        return cum
+    out: list[Word] = []
+    for w in words:
+        ns = _map(w.start)
+        ne = _map(w.end)
+        if ne <= ns:
+            ne = ns + 0.001
+        out.append(Word(text=w.text, start=ns, end=ne))
+    return out
+
+
+def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
+                   max_gap_secs: float = 0.35, pad_secs: float = 0.05,
+                   job_id: str | None = None) -> tuple[dict, list[Word]]:
+    """Opt-in WORD-based interior trim: cut every spoken pause longer than
+    `max_gap_secs` using Whisper word timestamps, plus the leading silence and
+    trailing room tone. The robust sibling of the level-based `trim_silences`
+    — it cuts on word boundaries instead of audio energy, so it works even
+    when Kling's room tone sits too close to speech for `silencedetect`
+    (Hugo 2026-06-17).
+
+    Returns `(summary, adjusted_words)`. Passthrough (copy + unchanged words)
+    when there are <2 words or nothing exceeds the gap threshold, so it never
+    blocks a render. Preserves the input's native fps (no fps filter) — the
+    assemble step already picked the uniform rate.
+    """
+    import shutil as _shutil
+    with record(phase="editor_trim_word_gaps", model="word-timestamp",
+                character="editor", job_id=job_id) as entry:
+        duration = _probe_duration(input_path)
+        entry["n_words"] = len(words)
+        keep = (_word_gap_keep_ranges(words, duration, max_gap_secs=max_gap_secs,
+                                      pad_secs=pad_secs)
+                if len(words) >= 2 and duration > 0 else [])
+        removed_secs = (duration - sum(b - a for a, b in keep)) if keep else 0.0
+        if not keep or removed_secs < 0.05 or len(keep) == 0:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _shutil.copyfile(input_path, output_path)
+            entry["trimmed"] = False
+            entry["removed_secs"] = 0.0
+            return ({"original_duration": round(duration, 2),
+                     "trimmed_duration": round(duration, 2),
+                     "removed_secs": 0.0, "n_cuts": 0}, list(words))
+
+        parts: list[str] = []
+        for i, (start, end) in enumerate(keep):
+            parts.append(
+                f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{i}];"
+                f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]"
+            )
+        labels = "".join(f"[v{i}][a{i}]" for i in range(len(keep)))
+        filter_complex = ";".join(parts) + f";{labels}concat=n={len(keep)}:v=1:a=1[v][a]"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _run([
+            _ffmpeg(), "-y", "-i", str(input_path),
+            "-filter_complex", filter_complex,
+            "-map", "[v]", "-map", "[a]",
+            *_enc_v(),
+            "-c:a", "aac", "-b:a", "192k",
+            str(output_path),
+        ])
+        trimmed = _probe_duration(output_path)
+        adjusted = _shift_words_to_keeps(words, keep)
+        entry["trimmed"] = True
+        entry["n_cuts"] = len(keep) - 1
+        entry["removed_secs"] = round(removed_secs, 2)
+        return ({"original_duration": round(duration, 2),
+                 "trimmed_duration": round(trimmed, 2),
+                 "removed_secs": round(removed_secs, 2),
+                 "n_cuts": len(keep) - 1}, adjusted)
+
+
 def _target_resolution(aspect_ratio: str) -> tuple[int, int]:
     """Map an aspect ratio string ("9:16", "1:1", "16:9") to a target
     pixel resolution. All output sizes target a 1080-pixel short edge
@@ -1770,9 +1904,9 @@ def concat_videos(video_paths: list[Path], output_path: Path,
 def assemble_clips(video_paths: list[Path], output_path: Path, *,
                    aspect_ratio: str = "9:16",
                    enable_interior_trim: bool = True,
-                   threshold_db: float = -30.0,
+                   threshold_db: float = -23.0,
                    min_silence_secs: float = 0.30,
-                   pad_secs: float = 0.03,
+                   pad_secs: float = 0.04,
                    job_id: str | None = None) -> dict:
     """Audio-onset trim + interior/trailing silence trim + scale + concat of
     N clips in ONE libx264 generation (2026-06-12).
@@ -1848,13 +1982,14 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
             # sub-cuttable fragments don't count: the first trigger counted
             # them and never fired, removing only 7.2s of a measured ~20s),
             # re-probe at +3 dB steps until real pauses appear. The ceiling
-            # is −25 dB (the adaptive formula's own cap) AND at least 4 LU
-            # below the clip's measured speech level — so quiet-speech
-            # clips (the case the adaptive threshold protects) are never
-            # escalated into "all silence". Wall-to-wall speech finds
-            # nothing at any step and stays uncut.
+            # is −20 dB (Hugo 2026-06-17: raised from −25 when the base
+            # threshold moved to −23 — a −25 ceiling below a −23 base made
+            # the loop a no-op) AND at least 4 LU below the clip's measured
+            # speech level — so quiet-speech clips (the case the adaptive
+            # threshold protects) are never escalated into "all silence".
+            # Wall-to-wall speech finds nothing at any step and stays uncut.
             if enable_interior_trim:
-                ceiling = -25.0
+                ceiling = -20.0
                 if measured[ci] is not None:
                     ceiling = min(ceiling, measured[ci][0] - 4.0)
 

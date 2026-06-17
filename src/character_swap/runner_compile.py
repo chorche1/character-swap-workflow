@@ -143,6 +143,8 @@ async def run_editor_pipeline(
     pad_secs: float,
     voice_id: str | None,
     enable_transcribe: bool = True,
+    enable_gap_trim: bool = False,
+    gap_max_secs: float = 0.35,
     playback_speed: float = 1.0,
     warn=None,
     script_hint: str | None = None,
@@ -168,7 +170,11 @@ async def run_editor_pipeline(
         await asyncio.to_thread(
             video_edit.assemble_clips, paths, concat_out,
             aspect_ratio=settings.video_aspect_ratio,
-            enable_interior_trim=enable_trim,
+            # "Ersätt"-läge (Hugo 2026-06-17): when word-gap trim is on, the
+            # level-based interior trim here is SKIPPED — only the always-on
+            # per-clip audio-onset trim runs, and the gap trim removes interior
+            # pauses post-transcribe below. The two never stack.
+            enable_interior_trim=enable_trim and not enable_gap_trim,
             threshold_db=threshold_db,
             min_silence_secs=min_silence_secs,
             pad_secs=pad_secs,
@@ -211,7 +217,7 @@ async def run_editor_pipeline(
         )
         current = concat_out
 
-        if enable_trim:
+        if enable_trim and not enable_gap_trim:
             trimmed = edit_dir / "01-trimmed.mp4"
             try:
                 await asyncio.to_thread(
@@ -273,7 +279,8 @@ async def run_editor_pipeline(
     # defaults True so the words are always available for downstream consumers
     # even when captions + WPM are both off.
     words: list = []
-    if enable_transcribe or enable_captions or enable_wpm_normalize:
+    if (enable_transcribe or enable_captions or enable_wpm_normalize
+            or enable_gap_trim):
         try:
             words = await asyncio.to_thread(
                 video_edit.transcribe_words, current, job_id=edit_id,
@@ -281,6 +288,28 @@ async def run_editor_pipeline(
             )
         except Exception:
             words = []
+
+    # Step 4a.5: WORD-GAP TRIM (opt-in, Hugo 2026-06-17). Replaces the
+    # level-based interior trim (skipped above) — cuts spoken pauses longer
+    # than `gap_max_secs` by Whisper word boundaries, robust against Kling's
+    # loud room tone. Re-times `words` onto the trimmed timeline so captions +
+    # WPM downstream stay in sync. Passthrough when no qualifying gaps.
+    if enable_gap_trim and words:
+        try:
+            gaptrimmed = edit_dir / "02b-gaptrim.mp4"
+            summary, words = await asyncio.to_thread(
+                video_edit.trim_word_gaps, current, gaptrimmed, words,
+                max_gap_secs=gap_max_secs, job_id=edit_id,
+            )
+            if summary.get("removed_secs", 0.0) > 0.05:
+                current = gaptrimmed
+        except Exception as gap_err:
+            logger.warning("%s: word-gap trim skipped: %s: %s", edit_id,
+                           type(gap_err).__name__, gap_err)
+            if warn is not None:
+                await warn(f"ordglapp-trim hoppades över "
+                           f"({type(gap_err).__name__}: "
+                           f"{str(gap_err)[:200]})")
 
     # (The old Step 4a.5 Whisper-first-word recut was removed 2026-06-11:
     # audio energy is the start marker — Step 0.5's unconditional
@@ -386,6 +415,8 @@ async def _compile_one_character(
     voice_override: str | None,
     enable_voice_swap: bool = True,
     enable_transcribe: bool = True,
+    enable_gap_trim: bool = False,
+    gap_max_secs: float = 0.35,
 ) -> None:
     """Compile one character's per-scene videos into a single final MP4.
 
@@ -474,7 +505,9 @@ async def _compile_one_character(
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
             pad_secs=pad_secs, voice_id=effective_voice_id,
-            enable_transcribe=enable_transcribe, warn=_warn,
+            enable_transcribe=enable_transcribe,
+            enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
+            warn=_warn,
             script_hint=script_hint,
         )
 
@@ -550,13 +583,15 @@ async def compile_job_videos(
     enable_captions: bool = True,
     enable_wpm_normalize: bool = True,
     target_wpm: float = 190.0,
-    threshold_db: float = -30.0,
+    threshold_db: float = -23.0,
     min_silence_secs: float = 0.30,
-    pad_secs: float = 0.03,
+    pad_secs: float = 0.04,
     voice_override: str | None = None,
     enable_voice_swap: bool = True,
     char_ids: list[str] | None = None,
     enable_transcribe: bool = True,
+    enable_gap_trim: bool = False,
+    gap_max_secs: float = 0.35,
 ) -> None:
     """Fan out compile across every (or selected) approved character. All M
     chars compile in parallel via asyncio.gather. Settings apply uniformly
@@ -593,6 +628,7 @@ async def compile_job_videos(
             pad_secs=pad_secs, voice_override=voice_override,
             enable_voice_swap=enable_voice_swap,
             enable_transcribe=enable_transcribe,
+            enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
         )
         for cid in targets
     ])

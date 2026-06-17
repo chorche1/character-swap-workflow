@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from character_swap.video_edit import _invert_silences, Word, shift_word_timestamps
+from character_swap.video_edit import (
+    _invert_silences, Word, shift_word_timestamps,
+    _word_gap_keep_ranges, _shift_words_to_keeps,
+)
 
 
 def test_invert_silences_no_silences_returns_full_clip():
@@ -144,3 +147,64 @@ def test_shift_word_timestamps_returns_new_list_not_mutation():
     out = shift_word_timestamps(words, 0.5)
     assert words[0].start == original_start  # unchanged
     assert out[0].start == 0.5               # shifted
+
+
+# --- _word_gap_keep_ranges (word-gap trim, Hugo 2026-06-17) ----------------
+
+
+def test_word_gap_no_gaps_keeps_whole_clip():
+    """Words back-to-back, no pause exceeds max_gap → one keep, whole clip."""
+    words = [Word("a", 0.0, 1.0), Word("b", 1.0, 2.0)]
+    keep = _word_gap_keep_ranges(words, 2.0, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.0, 2.0)]
+
+
+def test_word_gap_interior_pause_collapsed():
+    """A 2s pause between words gets cut down, leaving pad_secs each side."""
+    words = [Word("a", 0.0, 1.0), Word("b", 3.0, 4.0)]
+    keep = _word_gap_keep_ranges(words, 4.0, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.0, 1.05), (2.95, 4.0)]
+    removed = 4.0 - sum(b - a for a, b in keep)
+    assert removed == pytest.approx(1.9)
+
+
+def test_word_gap_leading_silence_dropped():
+    """Room tone before the first word is removed (down to the word - pad)."""
+    words = [Word("a", 1.0, 2.0), Word("b", 2.0, 3.0)]
+    keep = _word_gap_keep_ranges(words, 3.0, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.95, 3.0)]
+
+
+def test_word_gap_trailing_room_tone_dropped():
+    """Silence after the last word (Kling sitting still) is removed."""
+    words = [Word("a", 0.0, 1.0), Word("b", 1.0, 2.0)]
+    keep = _word_gap_keep_ranges(words, 5.0, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.0, 2.05)]
+
+
+def test_word_gap_short_pause_under_threshold_kept():
+    """A pause shorter than max_gap is NOT cut (natural in-breath survives)."""
+    words = [Word("a", 0.0, 1.0), Word("b", 1.3, 2.3)]   # 0.3s gap < 0.35
+    keep = _word_gap_keep_ranges(words, 2.3, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.0, 2.3)]
+
+
+# --- _shift_words_to_keeps -------------------------------------------------
+
+
+def test_shift_words_to_keeps_retimes_onto_trimmed_timeline():
+    """After collapsing the gap, words re-map onto the concatenated timeline."""
+    words = [Word("a", 0.0, 1.0), Word("b", 3.0, 4.0)]
+    keep = [(0.0, 1.05), (2.95, 4.0)]
+    out = _shift_words_to_keeps(words, keep)
+    assert out[0].start == pytest.approx(0.0)
+    assert out[0].end == pytest.approx(1.0)
+    # 'b' starts at 3.0 → 1.05 (first keep len) + (3.0 - 2.95) = 1.10
+    assert out[1].start == pytest.approx(1.10)
+    assert out[1].end == pytest.approx(2.10)
+
+
+def test_shift_words_to_keeps_does_not_mutate_input():
+    words = [Word("a", 0.0, 1.0), Word("b", 3.0, 4.0)]
+    _shift_words_to_keeps(words, [(0.0, 1.05), (2.95, 4.0)])
+    assert words[1].start == 3.0 and words[1].end == 4.0
