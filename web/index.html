@@ -1215,13 +1215,15 @@
                           x-model="row.motion_prompt"
                           class="w-full px-2 py-1.5 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"></textarea>
                 <div class="flex items-center gap-3 text-sm flex-wrap">
-                  <label class="flex items-center gap-1 text-neutral-500 dark:text-neutral-400">
-                    Längd (s)
-                    <input type="number" min="3" max="15" step="0.5" x-model.number="row.length"
+                  <!-- ONE Kling clip-length field (Hugo 2026-06-17): the value
+                       here IS the clip length sent to Kling (3–15 s) — no
+                       separate derived label. -->
+                  <label class="flex items-center gap-1 text-neutral-500 dark:text-neutral-400"
+                         title="Klipplängden (s) som skickas till Kling, 3–15.">
+                    Kling-längd (s)
+                    <input type="number" min="3" max="15" step="1" x-model.number="row.length"
                            class="w-16 px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950" />
                   </label>
-                  <span class="text-xs text-neutral-400 dark:text-neutral-500"
-                        x-text="'→ Kling ' + Math.max(3, Math.min(15, Math.ceil((Number(row.length)||0) - 1e-9))) + ' s'"></span>
                   <label class="flex items-center gap-1 text-xs cursor-pointer"
                          :class="row.direct ? 'text-indigo-600 dark:text-indigo-400' : 'text-neutral-500 dark:text-neutral-400'"
                          title="Använd den här bilden som den är (ingen swap) — ETT delat klipp för alla karaktärer. T.ex. en produktbild eller en scen du förberett själv.">
@@ -1615,26 +1617,22 @@
                         ✓ Skickas till Kling exakt som ovan — inga auto-tillägg
                       </p>
                       <div class="flex items-center gap-3 text-[10px] text-neutral-500">
-                        <label class="flex items-center gap-1">Längd (s)
-                          <input type="number" min="1" max="15" step="0.5"
-                                 class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
-                                 :value="reSceneVal(r, sc, 'duration')"
-                                 @input="reSceneEdit(r, sc, 'duration', $event.target.value)"
-                                 @change="reengineerSaveScene(r, sc)" />
-                        </label>
-                        <!-- effective whole-second Kling duration. Editable
-                             (Hugo 2026-06-12): a manual value overrides the
-                             speech-fitted auto outright; empty = auto. -->
-                        <label class="flex items-center gap-1 text-neutral-400 dark:text-neutral-500"
-                               :title="'Klipplängden som skickas till Kling (3–15 s). Tomt = auto: originalscenens längd + 1–2 s, alltid uppåt till heltal med mer än 1 s marginal (6,4 s → 8 s; 6,0 s → 8 s). Just nu skickas ' + klingDuration(r, sc) + ' s.'">
-                          → Kling
+                        <!-- ONE Kling clip-length field (Hugo 2026-06-17):
+                             collapsed the old "Längd (s)" + "→ Kling (auto/
+                             manuell)" pair into a single 3–15 s control = the
+                             clip length sent to Kling. Empty = auto from the
+                             original scene length (shown as the placeholder). -->
+                        <label class="flex items-center gap-1"
+                               :title="'Klipplängden (s) som skickas till Kling, 3–15. Tomt = auto från originalscenens längd (' + klingDuration(r, sc) + ' s).'">
+                          Kling-längd (s)
                           <input type="number" min="3" max="15" step="1"
-                                 class="w-14 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                 class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
                                  :placeholder="klingDuration(r, sc)"
                                  :value="reSceneVal(r, sc, 'kling_secs') || ''"
                                  @input="reSceneEdit(r, sc, 'kling_secs', $event.target.value)"
                                  @change="reengineerSaveScene(r, sc)" />
-                          <span x-text="reSceneVal(r, sc, 'kling_secs') ? 's (manuell)' : 's (auto ' + klingDuration(r, sc) + ')'"></span>
+                          <span class="text-neutral-400 dark:text-neutral-500"
+                                x-show="!reSceneVal(r, sc, 'kling_secs')">(auto)</span>
                         </label>
                         <!-- Dialogue-vs-clip-length hint (the auto length no
                              longer extends for speech — user's call): -->
