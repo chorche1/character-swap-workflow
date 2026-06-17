@@ -2688,7 +2688,7 @@ class CompileVideosBody(BaseModel):
     target_wpm: float = Field(default=190.0, ge=80, le=400)
     threshold_db: float = -23.0
     min_silence_secs: float = Field(default=0.30, ge=0.05, le=5.0)
-    pad_secs: float = Field(default=0.04, ge=0.0, le=1.0)
+    pad_secs: float = Field(default=0.05, ge=0.0, le=1.0)
     # Opt-in word-gap trim (replaces level interior trim when on). max_gap =
     # the spoken-pause length that triggers a cut.
     enable_gap_trim: bool = False
@@ -3269,7 +3269,7 @@ async def editor_trim_silences(
     file: UploadFile = File(...),
     threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.04),
+    pad_secs: float = Form(0.05),
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
     `output/editor/<edit_id>/trimmed.mp4` and returns a MediaGeneration-shaped
@@ -3359,7 +3359,7 @@ async def editor_auto_edit(
     file: UploadFile = File(...),
     threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.04),
+    pad_secs: float = Form(0.05),
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),
@@ -3564,7 +3564,7 @@ async def editor_multi_auto_edit(
     script: str = Form(...),
     threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.04),
+    pad_secs: float = Form(0.05),
     voice_id: str | None = Form(None),
     template: str = Form("capcut-purple-pill"),
     overrides: str | None = Form(None),

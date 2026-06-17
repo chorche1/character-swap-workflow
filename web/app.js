@@ -156,7 +156,7 @@ function studio() {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30; Kling room tone)
       minSilenceSecs: 0.30,   // Hugo's preset
-      padSecs: 0.04,          // Hugo 2026-06-17 (was 0.03)
+      padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
       enableGapTrim: false,   // opt-in word-gap trim (replaces level interior trim)
       gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
       trimming: false,
@@ -241,7 +241,7 @@ function studio() {
         enableVoiceSwap: false,
         thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30)
         minSilenceSecs: 0.30,   // Hugo's preset
-        padSecs: 0.04,          // Hugo 2026-06-17 (was 0.03)
+        padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
@@ -250,7 +250,7 @@ function studio() {
       try {
         const saved = JSON.parse(localStorage.getItem('compile.settings.v2') || '{}');
         const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
-        // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.04. Bump a saved
+        // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.05. Bump a saved
         // value that still holds the OLD default to the new one (idempotent;
         // an intentionally-tuned value other than the old default survives).
         if (merged.thresholdDb === -30) merged.thresholdDb = defaults.thresholdDb;
@@ -272,10 +272,10 @@ function studio() {
         enableWpmNormalize: false,
         enableVoiceSwap: false,
         // Trim-tuning (Hugo 2026-06-17): now exposed in the ⚙ panel + sent to
-        // the backend (was hardcoded to the runner preset). -23 base / 0.04 pad.
+        // the backend (was hardcoded to the runner preset). -23 base / 0.05 pad.
         thresholdDb: -23,
         minSilenceSecs: 0.20,
-        padSecs: 0.04,
+        padSecs: 0.05,
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
@@ -1881,7 +1881,7 @@ function studio() {
         // Clamped to the backend's ReAssembleSettingsBody ge/le bounds.
         threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -23)),
         min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.20)),
-        pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.04)),
+        pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.05)),
         enable_gap_trim: !!s.enableGapTrim,
         gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
         enable_voice_swap: !!s.enableVoiceSwap,
@@ -2929,7 +2929,7 @@ function studio() {
           enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
           threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
           min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
-          pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
+          pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
           enable_gap_trim: !!this.compileSettings.enableGapTrim,
           gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
         };
@@ -2985,7 +2985,7 @@ function studio() {
         enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
         threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
         min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
-        pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
+        pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
         enable_gap_trim: !!this.compileSettings.enableGapTrim,
         gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
         char_ids: [charId],

@@ -362,7 +362,7 @@ def _detect_silences(input_path: Path, threshold_db: float = -23.0,
 
 def _invert_silences(silences: list[tuple[float, float]],
                      total_duration: float,
-                     pad_secs: float = 0.04) -> list[tuple[float, float]]:
+                     pad_secs: float = 0.05) -> list[tuple[float, float]]:
     """Return list of (start, end) speech-keep ranges by inverting silences.
     Adds a tiny `pad_secs` either side of each INTERIOR keep range so words
     don't get clipped — but NOT on the first keep range. Leading silence is
@@ -541,7 +541,7 @@ def trim_leading_silence(input_path: Path, output_path: Path, *,
 def trim_silences(input_path: Path, output_path: Path, *,
                   threshold_db: float = -23.0,
                   min_silence_secs: float = 0.4,
-                  pad_secs: float = 0.04,
+                  pad_secs: float = 0.05,
                   job_id: str | None = None) -> dict:
     """Remove silent gaps from `input_path`. Writes to `output_path`.
 
@@ -1923,7 +1923,7 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                    enable_interior_trim: bool = True,
                    threshold_db: float = -23.0,
                    min_silence_secs: float = 0.30,
-                   pad_secs: float = 0.04,
+                   pad_secs: float = 0.05,
                    job_id: str | None = None) -> dict:
     """Audio-onset trim + interior/trailing silence trim + scale + concat of
     N clips in ONE libx264 generation (2026-06-12).

@@ -589,7 +589,7 @@ async def compile_job_videos(
     target_wpm: float = 190.0,
     threshold_db: float = -23.0,
     min_silence_secs: float = 0.30,
-    pad_secs: float = 0.04,
+    pad_secs: float = 0.05,
     voice_override: str | None = None,
     enable_voice_swap: bool = True,
     char_ids: list[str] | None = None,

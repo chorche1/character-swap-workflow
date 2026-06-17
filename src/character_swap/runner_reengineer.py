@@ -1133,13 +1133,13 @@ ASSEMBLE_DEFAULTS: dict = {
     "enable_captions": True,
     "enable_wpm_normalize": False,
     "target_wpm": 190.0,
-    # Hugo 2026-06-17: level-trim base raised to −23 dB / pad 0.04 s (was
+    # Hugo 2026-06-17: level-trim base raised to −23 dB / pad 0.05 s (was
     # −30/0.02) — Kling's room tone sits ~−20..−25 dB, so −30 found almost
     # no silence and finals shipped with audible dead time. min-silence
     # stays 0.20 s. See also the opt-in word-gap trim below.
     "threshold_db": -23.0,
     "min_silence_secs": 0.20,
-    "pad_secs": 0.04,
+    "pad_secs": 0.05,
     # Opt-in word-gap trim (Hugo 2026-06-17): when ON, the level interior
     # trim is replaced by a Whisper-word-boundary pause cut — robust against
     # Kling room tone. Default OFF; max_gap tunable in the ⚙ panel.
