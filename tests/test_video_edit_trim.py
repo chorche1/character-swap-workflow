@@ -182,6 +182,28 @@ def test_word_gap_trailing_room_tone_dropped():
     assert keep == [(0.0, 2.05)]
 
 
+def test_word_gap_drops_word_past_eof_no_truncation():
+    """Regression (review 2026-06-17): a hallucinated Whisper word whose start
+    lands past EOF must NOT truncate the clip. The out-of-range word is dropped;
+    only the real trailing room tone is removed. Before the fix the keep-cursor
+    overshot total_duration and the tail keep was never appended → the clip got
+    chopped to ~2s."""
+    words = [Word("a", 0.0, 1.0), Word("b", 1.2, 2.0), Word("ghost", 100.0, 101.0)]
+    keep = _word_gap_keep_ranges(words, 5.0, max_gap_secs=0.35, pad_secs=0.05)
+    assert keep == [(0.0, 2.05)]                       # ghost dropped, tail cut
+    assert sum(b - a for a, b in keep) == pytest.approx(2.05)
+
+
+def test_word_gap_clamps_word_end_past_eof():
+    """A word whose END exceeds duration is clamped, not dropped — its speech
+    is real, only the timestamp overshoots."""
+    words = [Word("a", 0.0, 1.0), Word("b", 4.8, 6.0)]
+    keep = _word_gap_keep_ranges(words, 5.0, max_gap_secs=0.35, pad_secs=0.05)
+    # gap a→b is cut; b kept with end clamped to 5.0 (no trailing removal).
+    assert keep[0] == (0.0, 1.05)
+    assert keep[-1][1] == pytest.approx(5.0)
+
+
 def test_word_gap_short_pause_under_threshold_kept():
     """A pause shorter than max_gap is NOT cut (natural in-breath survives)."""
     words = [Word("a", 0.0, 1.0), Word("b", 1.3, 2.3)]   # 0.3s gap < 0.35
