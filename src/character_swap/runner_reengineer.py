@@ -1133,12 +1133,18 @@ ASSEMBLE_DEFAULTS: dict = {
     "enable_captions": True,
     "enable_wpm_normalize": False,
     "target_wpm": 190.0,
-    # Hugo 2026-06-13: the Editor-tab trim values he actually runs with
-    # (−30 dB / 0.20 s / 0.02 s) — tighter than the old 0.30/0.03 preset,
-    # so short pauses get cut and less padding survives around speech.
-    "threshold_db": -30.0,
+    # Hugo 2026-06-17: level-trim base raised to −23 dB / pad 0.04 s (was
+    # −30/0.02) — Kling's room tone sits ~−20..−25 dB, so −30 found almost
+    # no silence and finals shipped with audible dead time. min-silence
+    # stays 0.20 s. See also the opt-in word-gap trim below.
+    "threshold_db": -23.0,
     "min_silence_secs": 0.20,
-    "pad_secs": 0.02,
+    "pad_secs": 0.04,
+    # Opt-in word-gap trim (Hugo 2026-06-17): when ON, the level interior
+    # trim is replaced by a Whisper-word-boundary pause cut — robust against
+    # Kling room tone. Default OFF; max_gap tunable in the ⚙ panel.
+    "enable_gap_trim": False,
+    "gap_max_secs": 0.35,
     "enable_voice_swap": False,
     "voice_override": None,
     # Global playback speed (Hugo 2026-06-13 — the Editor tab's Speed
@@ -1365,6 +1371,8 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 threshold_db=cfg["threshold_db"],
                 min_silence_secs=cfg["min_silence_secs"],
                 pad_secs=cfg["pad_secs"],
+                enable_gap_trim=cfg["enable_gap_trim"],
+                gap_max_secs=cfg["gap_max_secs"],
                 voice_id=voice_id,
                 playback_speed=cfg["playback_speed"],
                 warn=_warn,

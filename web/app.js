@@ -154,9 +154,11 @@ function studio() {
     reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
-      thresholdDb: -30,       // Hugo's preset
+      thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30; Kling room tone)
       minSilenceSecs: 0.30,   // Hugo's preset
-      padSecs: 0.03,          // Hugo's preset
+      padSecs: 0.04,          // Hugo 2026-06-17 (was 0.03)
+      enableGapTrim: false,   // opt-in word-gap trim (replaces level interior trim)
+      gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
       trimming: false,
       template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
       captioning: false,
@@ -237,15 +239,23 @@ function studio() {
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
-        thresholdDb: -30,       // Hugo's preset
+        thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30)
         minSilenceSecs: 0.30,   // Hugo's preset
-        padSecs: 0.03,          // Hugo's preset
+        padSecs: 0.04,          // Hugo 2026-06-17 (was 0.03)
+        enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
+        gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
       };
       try {
         const saved = JSON.parse(localStorage.getItem('compile.settings.v2') || '{}');
-        return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+        const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+        // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.04. Bump a saved
+        // value that still holds the OLD default to the new one (idempotent;
+        // an intentionally-tuned value other than the old default survives).
+        if (merged.thresholdDb === -30) merged.thresholdDb = defaults.thresholdDb;
+        if (merged.padSecs === 0.03 || merged.padSecs === 0.02) merged.padSecs = defaults.padSecs;
+        return merged;
       } catch (_) { return defaults; }
     })(),
     // Reengineer ⚙ Slutvideo (Editor) settings — same shape as Step 6's
@@ -259,6 +269,13 @@ function studio() {
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
+        // Trim-tuning (Hugo 2026-06-17): now exposed in the ⚙ panel + sent to
+        // the backend (was hardcoded to the runner preset). -23 base / 0.04 pad.
+        thresholdDb: -23,
+        minSilenceSecs: 0.20,
+        padSecs: 0.04,
+        enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
+        gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
         playbackSpeed: 1.0,             // global speed (Editor's control); 1.0 = av
@@ -1840,6 +1857,14 @@ function studio() {
         target_wpm: Math.min(400, Math.max(80, Number(s.targetWpm) || 190)),
         // Clamped to the server's ge=0.5/le=2.0 for the same reason.
         playback_speed: Math.min(2, Math.max(0.5, Number(s.playbackSpeed) || 1)),
+        // Trim tuning (Hugo 2026-06-17): now sent so the ⚙ sliders actually
+        // take effect (previously dropped → server always used its preset).
+        // Clamped to the backend's ReAssembleSettingsBody ge/le bounds.
+        threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -23)),
+        min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.20)),
+        pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.04)),
+        enable_gap_trim: !!s.enableGapTrim,
+        gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
         enable_voice_swap: !!s.enableVoiceSwap,
         voice_override: s.voiceOverride || '',
       };
@@ -2883,9 +2908,11 @@ function studio() {
           target_wpm: Number(this.compileSettings.targetWpm) || 190,
           voice_override: this.compileSettings.voiceOverride || null,
           enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
-          threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -30,
-          min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.4,
-          pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
+          threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
+          min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
+          pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
+          enable_gap_trim: !!this.compileSettings.enableGapTrim,
+          gap_max_secs: Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35,
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
           method: 'POST',
@@ -2937,9 +2964,11 @@ function studio() {
         target_wpm: Number(this.compileSettings.targetWpm) || 190,
         voice_override: this.compileSettings.voiceOverride || null,
         enable_voice_swap: !!this.compileSettings.enableVoiceSwap,
-        threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -30,
-        min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.4,
-        pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
+        threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
+        min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
+        pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
+        enable_gap_trim: !!this.compileSettings.enableGapTrim,
+        gap_max_secs: Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35,
         char_ids: [charId],
       };
       const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
@@ -3570,6 +3599,8 @@ function studio() {
         fd.append('enable_wpm_normalize', this.editor.enableNormalizeWpm ? 'true' : 'false');
         fd.append('target_wpm', String(this.editor.targetWpm || 190));
         fd.append('playback_speed', String(this.editor.playbackSpeed || 1));
+        fd.append('enable_gap_trim', this.editor.enableGapTrim ? 'true' : 'false');
+        fd.append('gap_max_secs', String(this.editor.gapMaxSecs || 0.35));
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/multi_auto_edit', { method: 'POST', body: fd });
@@ -3610,6 +3641,8 @@ function studio() {
         fd.append('enable_captions', this.editor.enableCaptions ? 'true' : 'false');
         fd.append('enable_wpm_normalize', this.editor.enableNormalizeWpm ? 'true' : 'false');
         fd.append('target_wpm', String(this.editor.targetWpm || 190));
+        fd.append('enable_gap_trim', this.editor.enableGapTrim ? 'true' : 'false');
+        fd.append('gap_max_secs', String(this.editor.gapMaxSecs || 0.35));
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/auto_edit', { method: 'POST', body: fd });
