@@ -1676,9 +1676,21 @@ def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
     audio energy, so a pause is a pause even when the floor sits ~2 dB below
     speech and `silencedetect` finds nothing. ffmpeg-free → unit-testable.
     """
-    ws = sorted((w for w in words), key=lambda w: w.start)
-    if len(ws) < 1 or total_duration <= 0:
-        return [(0.0, total_duration)] if total_duration > 0 else []
+    if total_duration <= 0:
+        return []
+    # Clamp to the clip and DROP words that start past EOF. Whisper can
+    # hallucinate timestamps far beyond the file on trailing room tone (the
+    # exact Kling case this targets); an unclamped out-of-range word would push
+    # the keep-cursor past the end so the tail keep is never appended and the
+    # whole clip is silently truncated (review 2026-06-17).
+    ws = sorted(
+        (Word(w.text, max(0.0, min(w.start, total_duration)),
+              max(0.0, min(w.end, total_duration)))
+         for w in words if w.start < total_duration),
+        key=lambda w: w.start,
+    )
+    if not ws:
+        return [(0.0, total_duration)]
 
     removed: list[tuple[float, float]] = []
     # Leading silence before the first word (onset trim usually handled this
@@ -1691,7 +1703,7 @@ def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
         gap = ws[i].start - ws[i - 1].end
         if gap > max_gap_secs:
             s = ws[i - 1].end + pad_secs
-            e = ws[i].start - pad_secs
+            e = min(ws[i].start - pad_secs, total_duration)
             if e - s > 0.02:
                 removed.append((s, e))
     # Trailing room tone after the last word.
@@ -1747,12 +1759,16 @@ def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
     when Kling's room tone sits too close to speech for `silencedetect`
     (Hugo 2026-06-17).
 
-    Returns `(summary, adjusted_words)`. Passthrough (copy + unchanged words)
-    when there are <2 words or nothing exceeds the gap threshold, so it never
-    blocks a render. Preserves the input's native fps (no fps filter) — the
-    assemble step already picked the uniform rate.
+    Returns `(summary, words)`. `summary["trimmed"]` is the SINGLE source of
+    truth callers must key off: when False the input was NOT re-encoded, no
+    `output_path` is written, and the ORIGINAL `words` come back unchanged;
+    when True `output_path` holds the trimmed clip and `words` are re-timed to
+    it. Passthrough when there are <2 words or the removed total is < 0.05s, so
+    it never blocks a render. (Keying off a re-derived `removed_secs > x`
+    threshold would desync words vs video at the boundary — review 2026-06-17.)
+    Preserves the input's native fps (no fps filter) — the assemble step
+    already picked the uniform rate.
     """
-    import shutil as _shutil
     with record(phase="editor_trim_word_gaps", model="word-timestamp",
                 character="editor", job_id=job_id) as entry:
         duration = _probe_duration(input_path)
@@ -1761,14 +1777,15 @@ def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
                                       pad_secs=pad_secs)
                 if len(words) >= 2 and duration > 0 else [])
         removed_secs = (duration - sum(b - a for a, b in keep)) if keep else 0.0
-        if not keep or removed_secs < 0.05 or len(keep) == 0:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            _shutil.copyfile(input_path, output_path)
+        if not keep or removed_secs < 0.05:
+            # Passthrough: don't re-encode and DON'T copy (the caller keeps its
+            # existing `current` when trimmed is False — no file is needed).
             entry["trimmed"] = False
             entry["removed_secs"] = 0.0
             return ({"original_duration": round(duration, 2),
                      "trimmed_duration": round(duration, 2),
-                     "removed_secs": 0.0, "n_cuts": 0}, list(words))
+                     "removed_secs": 0.0, "n_cuts": 0,
+                     "trimmed": False}, list(words))
 
         parts: list[str] = []
         for i, (start, end) in enumerate(keep):
@@ -1795,7 +1812,7 @@ def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
         return ({"original_duration": round(duration, 2),
                  "trimmed_duration": round(trimmed, 2),
                  "removed_secs": round(removed_secs, 2),
-                 "n_cuts": len(keep) - 1}, adjusted)
+                 "n_cuts": len(keep) - 1, "trimmed": True}, adjusted)
 
 
 def _target_resolution(aspect_ratio: str) -> tuple[int, int]:

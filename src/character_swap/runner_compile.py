@@ -301,7 +301,11 @@ async def run_editor_pipeline(
                 video_edit.trim_word_gaps, current, gaptrimmed, words,
                 max_gap_secs=gap_max_secs, job_id=edit_id,
             )
-            if summary.get("removed_secs", 0.0) > 0.05:
+            # `trimmed` is the single source of truth: when True the file was
+            # written + words re-timed; when False keep the existing `current`
+            # and the original words (avoids a words-vs-video desync at the
+            # removed_secs rounding boundary — review 2026-06-17).
+            if summary.get("trimmed"):
                 current = gaptrimmed
         except Exception as gap_err:
             logger.warning("%s: word-gap trim skipped: %s: %s", edit_id,

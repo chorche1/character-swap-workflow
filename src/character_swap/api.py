@@ -2204,10 +2204,12 @@ def _repoint_scene(job: Job, state: dict, idx: int, old_sid: str,
 @app.post("/api/jobs/{job_id}/scenes/{scene_id}/duplicate")
 async def duplicate_scene(job_id: str, scene_id: str) -> dict:
     """Clone a scene slot: a new scene_id is inserted right after the source,
-    reusing the same background image, and every character's APPROVED variant
-    for that scene is cloned (same file on disk, new variant_id) and
-    pre-approved under the new scene. The duplicate gets its own movement
-    prompt + duration in Step 4 — the Higgsfield "duplicate slot" model."""
+    reusing the same background image, and every character's READY variant for
+    that scene is cloned (same file on disk, new variant_id). The copy MIRRORS
+    the source's approval — approved variants stay approved, un-approved ones
+    follow un-approved (Hugo 2026-06-17: duplicating before approving used to
+    leave the copy empty). The duplicate gets its own movement prompt +
+    duration in Step 4 — the Higgsfield "duplicate slot" model."""
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -3265,9 +3267,9 @@ async def editor_templates() -> list[dict]:
 async def editor_trim_silences(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    threshold_db: float = Form(-25.0),
+    threshold_db: float = Form(-23.0),
     min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.07),
+    pad_secs: float = Form(0.04),
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
     `output/editor/<edit_id>/trimmed.mp4` and returns a MediaGeneration-shaped
@@ -3366,7 +3368,7 @@ async def editor_auto_edit(
     enable_wpm_normalize: bool = Form(True),  # time-stretch to hit target_wpm
     target_wpm: float = Form(190.0),
     enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
-    gap_max_secs: float = Form(0.35),      # spoken-pause length that triggers a cut
+    gap_max_secs: float = Form(0.35, ge=0.05, le=3.0),  # spoken-pause length that triggers a cut
 ) -> dict:
     """One-shot pipeline. Each step is opt-out:
       - trim silences (enable_trim)
@@ -3478,11 +3480,19 @@ async def editor_auto_edit(
                 video_edit.trim_word_gaps, current, gaptrimmed, words,
                 max_gap_secs=gap_max_secs, job_id=edit_id,
             )
-            if gap_summary.get("removed_secs", 0.0) > 0.05:
+            # `trimmed` is the single source of truth (see trim_word_gaps) —
+            # keying off a re-derived removed_secs threshold would desync words
+            # vs video at the rounding boundary.
+            if gap_summary.get("trimmed"):
                 current = gaptrimmed
             gap_info = gap_summary
         except (RuntimeError, ValueError) as e:
-            raise HTTPException(500, f"Word-gap trim failed: {e}")
+            # Non-fatal, matching the Step-6 compile path: the gap trim is an
+            # opt-in enhancement, so a failure skips it (keeping `current` +
+            # its words) rather than 500-ing the whole render — which would
+            # discard the already-done onset trim / voice swap / transcribe
+            # (review 2026-06-17: consistency + reliability).
+            gap_info = {"trimmed": False, "error": f"{type(e).__name__}: {e}"}
 
     # Step 3b: WPM normalization (time-stretch so spoken pace ≈ target_wpm)
     wpm_info: dict | None = None
@@ -3563,7 +3573,7 @@ async def editor_multi_auto_edit(
     enable_wpm_normalize: bool = Form(True),
     target_wpm: float = Form(190.0),
     enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
-    gap_max_secs: float = Form(0.35),      # spoken-pause length that triggers a cut
+    gap_max_secs: float = Form(0.35, ge=0.05, le=3.0),  # spoken-pause length that triggers a cut
     # Global playback-speed multiplier applied to the FINAL stitched video
     # (pitch-preserving). 1.0 = no change, 1.5 = 50% faster, etc. Distinct
     # from WPM normalize (which equalizes per-clip pace) — this is a
@@ -3773,11 +3783,13 @@ async def editor_multi_auto_edit(
                 gap_summary, _ = await asyncio.to_thread(
                     video_edit.trim_word_gaps, current, gaptrimmed, gap_words,
                     max_gap_secs=gap_max_secs, job_id=edit_id)
-                if gap_summary.get("removed_secs", 0.0) > 0.05:
+                if gap_summary.get("trimmed"):
                     current = gaptrimmed
                 gap_info = gap_summary
         except (RuntimeError, ValueError) as e:
-            raise HTTPException(500, f"Word-gap trim failed: {e}")
+            # Non-fatal (matches the Step-6 compile path): skip the opt-in gap
+            # trim on failure rather than 500-ing the whole multi-clip render.
+            gap_info = {"trimmed": False, "error": f"{type(e).__name__}: {e}"}
 
     # 6.5. Global speed-up (pitch-preserving). Applied to the stitched result
     # BEFORE captions so the caption transcription below runs on the sped-up
@@ -5317,9 +5329,10 @@ async def reengineer_clear_direct(re_id: str, idx: int,
 
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/duplicate")
 async def reengineer_duplicate_scene(re_id: str, idx: int) -> dict:
-    """Duplicate a scene: same image, NEW scene_id, every character's approved
-    image cloned + auto-approved (zero image generations — only the new Kling
-    clip costs). Edit the copy's prompt to e.g. say a different line."""
+    """Duplicate a scene: same image, NEW scene_id, every character's READY
+    image cloned with the source's approval MIRRORED (zero image generations —
+    only the new Kling clip costs). Carries images even when nothing was
+    approved yet (Hugo 2026-06-17). Edit the copy's prompt to say a new line."""
     from character_swap import runner_reengineer
     state = _editable_reengineer_state(re_id)
     entry = _reengineer_entry(state, idx)

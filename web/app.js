@@ -254,7 +254,9 @@ function studio() {
         // value that still holds the OLD default to the new one (idempotent;
         // an intentionally-tuned value other than the old default survives).
         if (merged.thresholdDb === -30) merged.thresholdDb = defaults.thresholdDb;
-        if (merged.padSecs === 0.03 || merged.padSecs === 0.02) merged.padSecs = defaults.padSecs;
+        // Only bump the OLD compile default (0.03). 0.02 was never a compile
+        // default, so matching it would clobber a value the user typed.
+        if (merged.padSecs === 0.03) merged.padSecs = defaults.padSecs;
         return merged;
       } catch (_) { return defaults; }
     })(),
@@ -2912,7 +2914,7 @@ function studio() {
           min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
           pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
           enable_gap_trim: !!this.compileSettings.enableGapTrim,
-          gap_max_secs: Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35,
+          gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
           method: 'POST',
@@ -2968,7 +2970,7 @@ function studio() {
         min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
         pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.04,
         enable_gap_trim: !!this.compileSettings.enableGapTrim,
-        gap_max_secs: Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35,
+        gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
         char_ids: [charId],
       };
       const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
