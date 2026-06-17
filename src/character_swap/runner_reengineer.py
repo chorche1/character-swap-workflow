@@ -1215,6 +1215,68 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
     return clips, missing, waitable
 
 
+def _assembly_gaps(state: dict, job: Job) -> dict:
+    """Pre-flight coverage report for a MANUAL re-assembly ("Bygg ihop igen").
+
+    Hugo 2026-06-17: the rebuild must REFUSE LOUDLY instead of silently
+    shipping a stale or shorter final. Returns three buckets naming every
+    reason the run can't produce complete, up-to-date finals right now:
+
+      dirty   — scenes edited but not re-animated; their existing clips are
+                stale (pre-edit) → the user must ▶ Animera om ändrade first.
+      hard    — a scene the character should have whose clip FAILED / is gone,
+                or that has slots but no approved image → won't resolve on its
+                own (re-animate / approve, then rebuild).
+      pending — a scene whose clip is still rendering → simply not ready yet.
+
+    Per-(char, scene) rules mirror _collect_clips EXACTLY so the gate and the
+    actual build never disagree. All three buckets empty ⇒ a clean rebuild."""
+    entries = state.get("scenes") or []
+    dirty = [{"idx": e["idx"], "label": f"scen {e['idx'] + 1}"}
+             for e in entries if e.get("dirty")]
+    hard: list[dict] = []
+    pending: list[dict] = []
+
+    def _gap(bucket: list[dict], cid: str, name: str, e: dict,
+             reason: str) -> None:
+        bucket.append({"char_id": cid, "name": name, "idx": e["idx"],
+                       "label": f"scen {e['idx'] + 1}", "reason": reason})
+
+    for cid, jc in job.characters.items():
+        name = jc.name or cid
+        for e in entries:
+            if e.get("is_direct"):
+                shared = e.get("shared_clip_path")
+                if shared and Path(shared).exists():
+                    continue
+                if e.get("direct_error"):
+                    _gap(hard, cid, name, e, "direktklipp misslyckades")
+                else:
+                    _gap(pending, cid, name, e, "direktklipp ej klart")
+                continue
+            vid = _approved_variant_for(jc, e["scene_id"])
+            if vid is None:
+                # Slots but no approval = a true gap; no slots = never theirs.
+                if any(v.scene_id == e["scene_id"] for v in jc.images):
+                    _gap(hard, cid, name, e, "ingen godkänd bild")
+                continue
+            done = next((vv for vv in jc.videos
+                         if vv.status == VideoStatus.DONE
+                         and vv.source_variant_id == vid
+                         and vv.final_video_path
+                         and Path(vv.final_video_path).exists()), None)
+            if done is not None:
+                continue
+            rows = [vv for vv in jc.videos if vv.source_variant_id == vid]
+            if not rows or any(vv.status in {VideoStatus.PENDING,
+                                             VideoStatus.PROCESSING}
+                               for vv in rows):
+                _gap(pending, cid, name, e, "klippet renderas fortfarande")
+            else:
+                _gap(hard, cid, name, e, "klippet saknas/misslyckades")
+    return {"dirty": dirty, "hard": hard, "pending": pending}
+
+
 async def _do_assemble(re_id: str, state: dict) -> None:
     _update(re_id, status="assembling")
     job = store().get_job(state["job_id"])
@@ -1250,14 +1312,21 @@ async def _do_assemble(re_id: str, state: dict) -> None:
             if not clips:
                 finals[cid] = {"status": "failed", "error": "no finished clips"}
                 return
-            coverage_warning = None
+            # Hugo 2026-06-17: NEVER ship an incomplete final. A scene the
+            # character should have (approved variant) but whose clip didn't
+            # finish — failed, or still missing after the coverage wait — fails
+            # the WHOLE character loudly instead of silently concatenating a
+            # shorter video. The user re-animates the gap, then rebuilds (the
+            # manual "Bygg ihop igen" endpoint also refuses up front, but this
+            # guards the auto-assemble path and any direct call too).
             if missing:
-                coverage_warning = ("finalen saknar " + str(len(missing))
-                                    + " scen(er): " + ", ".join(missing)
-                                    + " — inget färdigt klipp; ta om scenen "
-                                    + "och bygg ihop igen")
-                _log.error("reengineer %s %s: %s", re_id, cid,
-                           coverage_warning)
+                err = ("finalen saknar " + str(len(missing)) + " scen(er): "
+                       + ", ".join(missing) + " — inget färdigt klipp; ta om "
+                       "scenen och bygg ihop igen")
+                _log.error("reengineer %s %s: %s", re_id, cid, err)
+                finals[cid] = {"status": "failed", "error": err,
+                               "n_clips": len(clips)}
+                return
 
             # One editor edit_id per character so the result also shows up
             # in the Editor tab (re-render captions etc. without re-billing).
@@ -1270,8 +1339,9 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 
             # Non-fatal step failures (caption render is the known one) must
             # be LOUD: logged + surfaced on the final's card via finals[cid].
-            warnings: list[str] = ([coverage_warning] if coverage_warning
-                                   else [])
+            # (Missing-clip coverage is now a hard failure above, not a
+            # warning — a final is either complete or it fails.)
+            warnings: list[str] = []
 
             async def _warn(message: str) -> None:
                 _log.warning("reengineer %s %s: %s", re_id, cid, message)

@@ -126,13 +126,46 @@ def test_assemble_waits_for_lagging_clip(monkeypatch, tmp_path):
         "saknar" not in (updates["finals"]["cA"].get("warning") or "")
 
 
-def test_assemble_warns_loudly_when_scene_truly_missing(monkeypatch, tmp_path):
+def test_assemble_fails_loudly_when_scene_truly_missing(monkeypatch, tmp_path):
+    """Hugo 2026-06-17: an incomplete final is NEVER built. A scene the
+    character should have whose clip FAILED fails the WHOLE character loudly
+    (with the missing scene named) instead of silently concatenating a
+    shorter video."""
     c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
     job = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
                 _clip_row("vd2", "v2", VideoStatus.FAILED)])
     updates, calls = _wire(monkeypatch, tmp_path, job)
 
     asyncio.run(runner_reengineer._do_assemble("re_t", _state()))
-    assert calls[0]["paths"] == [str(c1)]
-    w = updates["finals"]["cA"]["warning"]
-    assert "saknar 1 scen(er): scen 2" in w             # loud, never silent
+    assert calls == []                                  # no short final built
+    fin = updates["finals"]["cA"]
+    assert fin["status"] == "failed"
+    assert "saknar 1 scen(er): scen 2" in fin["error"]  # loud, never silent
+
+
+def test_assembly_gaps_categorizes_dirty_hard_pending(tmp_path):
+    """_assembly_gaps mirrors _collect_clips' inclusion rules and sorts every
+    incompleteness into dirty / hard / pending so the rebuild endpoint can
+    refuse with an actionable message."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+
+    # Clean: both clips DONE + on disk, no dirty scene → no gaps.
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+    clean = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                  _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))])
+    g = runner_reengineer._assembly_gaps(_state(), clean)
+    assert g == {"dirty": [], "hard": [], "pending": []}
+
+    # Scene 0 edited but not re-animated → dirty (even though its clip is DONE).
+    st = _state(); st["scenes"][0]["dirty"] = True
+    g = runner_reengineer._assembly_gaps(st, clean)
+    assert g["dirty"] == [{"idx": 0, "label": "scen 1"}]
+    assert g["hard"] == [] and g["pending"] == []
+
+    # FAILED clip → hard; in-flight clip → pending.
+    mixed = _job([_clip_row("vd1", "v1", VideoStatus.FAILED),
+                  _clip_row("vd2", "v2", VideoStatus.PROCESSING)])
+    g = runner_reengineer._assembly_gaps(_state(), mixed)
+    assert [x["label"] for x in g["hard"]] == ["scen 1"]
+    assert g["hard"][0]["char_id"] == "cA"
+    assert [x["label"] for x in g["pending"]] == ["scen 2"]

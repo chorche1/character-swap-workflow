@@ -4892,10 +4892,51 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     # character — refuse overlap instead of double-building the same finals.
     if state.get("status") == "assembling" or re_id in runner_reengineer._ASSEMBLING:
         raise HTTPException(409, "assembly already running for this run")
+    # Hugo 2026-06-17: "Bygg ihop igen" must REFUSE LOUDLY when the run can't
+    # produce complete, up-to-date finals — a scene edited but not re-animated
+    # (stale clip), a failed/missing clip, an un-approved image, or a clip
+    # still rendering — instead of silently shipping a shorter / stale video.
+    # The user fixes the named gap (▶ Animera om ändrade / ta om klippet /
+    # godkänn bild), then rebuilds. Existing finals are left untouched.
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    gaps = runner_reengineer._assembly_gaps(state, job)
+    if gaps["dirty"] or gaps["hard"] or gaps["pending"]:
+        raise HTTPException(409, detail={
+            "code": "incomplete_rebuild",
+            "message": _assembly_refusal_message(gaps),
+            "dirty": gaps["dirty"], "hard": gaps["hard"],
+            "pending": gaps["pending"],
+        })
     if _store_assemble_settings(state, body):
         _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
     return {"ok": True, "re_id": re_id}
+
+
+def _assembly_refusal_message(gaps: dict) -> str:
+    """Human, actionable one-liner for the 409 'Bygg ihop igen' refusal —
+    names which scenes/characters block a complete rebuild and what to do."""
+    def _by_char(items: list[dict]) -> str:
+        per: dict[str, list[str]] = {}
+        for g in items:
+            per.setdefault(g["name"], []).append(g["label"])
+        return "; ".join(f"{n}: {', '.join(labels)}"
+                         for n, labels in per.items())
+
+    parts: list[str] = []
+    if gaps["dirty"]:
+        labels = ", ".join(g["label"] for g in gaps["dirty"])
+        parts.append(f"{labels} är ändrad(e) men inte omanimerad(e) — klicka "
+                     "▶ Animera om ändrade först.")
+    if gaps["hard"]:
+        parts.append("Saknar färdigt klipp (ta om scenen/klippet): "
+                     + _by_char(gaps["hard"]) + ".")
+    if gaps["pending"]:
+        parts.append("Klipp renderas fortfarande (vänta): "
+                     + _by_char(gaps["pending"]) + ".")
+    return "Kan inte bygga ihop ännu. " + " ".join(parts)
 
 
 @app.delete("/api/reengineer/{re_id}")

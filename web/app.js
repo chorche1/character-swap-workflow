@@ -1861,7 +1861,19 @@ function studio() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this._reAsmBody()),
       });
-      if (!r.ok) { this.notifyError('Assemble failed: ' + await r.text()); return; }
+      if (!r.ok) {
+        // 409 'incomplete_rebuild' carries a structured detail (Hugo
+        // 2026-06-17): never silently build a stale/short final — show the
+        // user exactly which scene/character to fix before rebuilding.
+        let msg = '';
+        try {
+          const j = await r.json();
+          const d = (j && j.detail) || j;
+          msg = (d && d.message) || (typeof d === 'string' ? d : JSON.stringify(d));
+        } catch (_) { try { msg = await r.text(); } catch (__) { msg = r.status; } }
+        this.notifyError('Bygg ihop: ' + msg);
+        return;
+      }
       run.status = 'assembling';
       this._startReengineerPolling();
     },

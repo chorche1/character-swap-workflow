@@ -9,11 +9,13 @@ real ffmpeg path is covered by test_leading_silence_trim.py).
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import tempfile
 from pathlib import Path
 
 import pytest
-from fastapi import BackgroundTasks
+from fastapi import BackgroundTasks, HTTPException
 
 from character_swap import api, reengineer as reengineer_mod, runner, runner_reengineer
 from character_swap.models import (
@@ -168,7 +170,8 @@ def test_assemble_voice_swap_uses_character_preset(tmp_path, monkeypatch):
 
 # ------------------------------------------------- endpoint settings plumbing
 
-def _wire_api(monkeypatch, status: str = "awaiting_approval") -> dict:
+def _wire_api(monkeypatch, status: str = "awaiting_approval",
+              job: Job | None = None) -> dict:
     box = {"state": _state(status), "saved": None}
 
     def load_state(re_id):
@@ -179,6 +182,27 @@ def _wire_api(monkeypatch, status: str = "awaiting_approval") -> dict:
         box["saved"] = dict(s)
     monkeypatch.setattr(reengineer_mod, "load_state", load_state)
     monkeypatch.setattr(reengineer_mod, "save_state", save_state)
+
+    # The assemble endpoint now pre-flights coverage via store().get_job +
+    # _assembly_gaps (Hugo 2026-06-17), so wire a store. Default = a COMPLETE
+    # job (real clip on disk) so the settings-persistence path isn't refused;
+    # tests pass an incomplete `job` to exercise the refusal.
+    if job is None:
+        fd, clip = tempfile.mkstemp(suffix=".mp4"); os.close(fd)
+        Path(clip).write_bytes(b"mp4")
+        box["clip"] = clip
+        job = _job(clip=clip)
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def get_scene(self, sid):          # _reengineer_view builds scene URLs
+            return None
+
+        def get_character(self, cid):
+            return None
+    monkeypatch.setattr(api, "store", lambda: _S())
     return box
 
 
@@ -266,6 +290,60 @@ def test_assemble_endpoint_persists_and_clears_override(monkeypatch):
     assert cfg["voice_override"] is None               # "" clears it
     assert cfg["enable_voice_swap"] is False
     assert len(bg.tasks) == 1
+
+
+# ---------------------- refuse-loudly rebuild (Hugo 2026-06-17) -------------
+# "Bygg ihop igen" must NEVER silently ship a stale/shorter final: it refuses
+# (409) when a scene is edited-but-not-reanimated, has a failed/missing clip,
+# or is still rendering — naming what to fix — and leaves existing finals
+# untouched. Once the gap is fixed it proceeds normally.
+
+def _incomplete_job(*, status=VideoStatus.FAILED) -> Job:
+    v = GeneratedImage(variant_id="va", path="/a.png", prompt="p",
+                       scene_id="s1", status="ready")
+    jc = JobCharacter(char_id="cA", name="A", source_image_path="/c.png",
+                      status=CharStatus.APPROVED, images=[v],
+                      approved_variant_ids=["va"],
+                      videos=[VideoVariant(video_id="vidA", grok_job_id="g1",
+                                           status=status,
+                                           source_variant_id="va")])
+    return Job(job_id="j1", title="t", scene_id="s1", scene_ids=["s1"],
+               scene_image_path="/p.png", scene_image_paths=["/p.png"],
+               characters={"cA": jc}, origin="reengineer:re_t")
+
+
+def test_assemble_refuses_when_scene_dirty(monkeypatch):
+    box = _wire_api(monkeypatch, status="done")     # complete clips on disk
+    box["state"]["scenes"][0]["dirty"] = True        # edited, not re-animated
+    bg = BackgroundTasks()
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.reengineer_assemble("re_t", bg, None))
+    assert e.value.status_code == 409
+    d = e.value.detail
+    assert d["code"] == "incomplete_rebuild"
+    assert d["dirty"] == [{"idx": 0, "label": "scen 1"}]
+    assert "Animera om ändrade" in d["message"]
+    assert box["saved"] is None and len(bg.tasks) == 0   # nothing built
+
+
+def test_assemble_refuses_when_clip_failed(monkeypatch):
+    box = _wire_api(monkeypatch, status="done", job=_incomplete_job())
+    bg = BackgroundTasks()
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.reengineer_assemble("re_t", bg, None))
+    assert e.value.status_code == 409
+    d = e.value.detail
+    assert [g["label"] for g in d["hard"]] == ["scen 1"]
+    assert d["hard"][0]["name"] == "A"
+    assert "Saknar färdigt klipp" in d["message"]
+    assert len(bg.tasks) == 0
+
+
+def test_assemble_proceeds_when_complete(monkeypatch):
+    _wire_api(monkeypatch, status="done")            # default = complete job
+    bg = BackgroundTasks()
+    out = asyncio.run(api.reengineer_assemble("re_t", bg, None))
+    assert out["ok"] is True and len(bg.tasks) == 1
 
 
 # ------------------------------------------------- exact-prompt guarantees
