@@ -94,6 +94,53 @@ def test_duplicate_inserts_slot_after_source_and_clones_approved(monkeypatch):
         assert dup_imgs[0]["status"] == VariantStatus.READY.value
 
 
+def test_duplicate_carries_unapproved_images(monkeypatch):
+    """Regression (Hugo 2026-06-17): duplicating a scene BEFORE approving must
+    still carry every ready image to the copy — it used to clone only approved
+    variants, so a pre-approval duplicate came back empty ("ingen bild ännu").
+    The copy mirrors the source's approval state: images follow, but stay
+    un-approved when the source had no approval yet."""
+    job = _job_two_scenes()
+    # Two ready variants on s1 for cA, NONE approved on s1 (only s2 approved).
+    job.characters["cA"].images = [
+        _img("vA1a", "s1"), _img("vA1b", "s1"), _img("vA2", "s2"),
+    ]
+    job.characters["cA"].approved_variant_ids = ["vA2"]
+    job.characters["cA"].approved_variant_id = "vA2"
+    store = _with_store(job, monkeypatch)
+    result = _run(api.duplicate_scene("j_test", "s1"))
+    new_sid = [s["scene_id"] for s in result["scenes"]][1]
+    c = result["characters"]["cA"]
+    dup_imgs = [im for im in c["images"] if im["scene_id"] == new_sid]
+    # BOTH ready source images carried over...
+    assert len(dup_imgs) == 2
+    parents = {im["parent_variant_id"] for im in dup_imgs}
+    assert parents == {"vA1a", "vA1b"}
+    # ...but none auto-approved, since the source scene had no approval.
+    for im in dup_imgs:
+        assert im["variant_id"] not in c["approved_variant_ids"]
+
+
+def test_duplicate_skips_failed_and_generating(monkeypatch):
+    """Only READY variants carry to the copy — a failed/in-flight slot has no
+    usable image, so it is not cloned."""
+    job = _job_two_scenes()
+    bad = _img("vBad", "s1"); bad.status = VariantStatus.FAILED
+    pending = _img("vGen", "s1"); pending.status = VariantStatus.GENERATING
+    job.characters["cA"].images = [_img("vA1", "s1"), bad, pending,
+                                   _img("vA2", "s2")]
+    job.characters["cA"].approved_variant_ids = ["vA1", "vA2"]
+    job.characters["cA"].approved_variant_id = "vA1"
+    store = _with_store(job, monkeypatch)
+    result = _run(api.duplicate_scene("j_test", "s1"))
+    new_sid = [s["scene_id"] for s in result["scenes"]][1]
+    c = result["characters"]["cA"]
+    dup_imgs = [im for im in c["images"] if im["scene_id"] == new_sid]
+    assert len(dup_imgs) == 1                              # only the ready one
+    assert dup_imgs[0]["parent_variant_id"] == "vA1"
+    assert dup_imgs[0]["variant_id"] in c["approved_variant_ids"]
+
+
 def test_duplicate_reuses_same_file_path(monkeypatch):
     job = _job_two_scenes()
     job.characters["cA"].images[0].path = "/shared/frame.png"

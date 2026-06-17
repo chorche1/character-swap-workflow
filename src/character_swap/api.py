@@ -2085,25 +2085,41 @@ def _apply_scene_duplicate(job: Job, scene_id: str) -> str:
     scene_ids.insert(idx + 1, new_sid)
     scene_paths.insert(idx + 1, src_path)
 
-    # Clone each character's approved variant(s) for the source scene.
+    # Clone each character's variant(s) for the source scene so the copy
+    # starts with the SAME images. Hugo 2026-06-17: this used to clone ONLY
+    # APPROVED variants, so duplicating BEFORE approving (the common case at
+    # the gate) left the copy empty ("ingen bild ännu") and the user had to
+    # regenerate every image by hand. Now we carry EVERY ready variant of the
+    # source scene and MIRROR its approval: an approved source variant's clone
+    # is approved too; if nothing was approved yet, the images still follow
+    # (un-approved) and the gate's "✓ approve all" picks them up as usual.
+    # GENERATING/FAILED variants are skipped — there is no usable image to
+    # carry.
     for jc in job.characters.values():
         approved = set(jc.approved_variant_ids or [])
         if jc.approved_variant_id:
             approved.add(jc.approved_variant_id)
         clones: list[GeneratedImage] = []
+        new_approved: list[str] = []
         for v in jc.images:
-            if v.variant_id in approved and _belongs_to_scene(v, scene_id, primary):
-                clones.append(GeneratedImage(
+            if (v.status == VariantStatus.READY
+                    and _belongs_to_scene(v, scene_id, primary)):
+                clone = GeneratedImage(
                     variant_id="v_" + secrets.token_hex(5),
                     path=v.path,                 # same file on disk
                     prompt=v.prompt,
                     parent_variant_id=v.variant_id,
                     scene_id=new_sid,
                     status=VariantStatus.READY,
-                ))
+                )
+                clones.append(clone)
+                if v.variant_id in approved:
+                    new_approved.append(clone.variant_id)
         for c in clones:
             jc.images.append(c)
-            jc.approved_variant_ids = list(jc.approved_variant_ids or []) + [c.variant_id]
+        if new_approved:
+            jc.approved_variant_ids = (list(jc.approved_variant_ids or [])
+                                       + new_approved)
         if clones:
             jc.updated_at = datetime.utcnow()
         # Carry the already-generated end frame to the duplicated scene so the
