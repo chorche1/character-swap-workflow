@@ -1486,10 +1486,16 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
             if e.get("scene_id") != scene_id:
                 continue
             e.pop("transcribing", None)
-            # Only prefill when the user left the generated default prompt.
-            if spoken and e.get("motion_prompt", "").startswith(
-                    ADDED_SCENE_PROMPT[:40]):
-                e["motion_prompt"] = ADDED_SCENE_PROMPT + _speech_clause(spoken)
+            # Prefill the transcribed line when the user opted into "hämta
+            # dialog" AND hasn't written their own prompt — now that the
+            # default is EMPTY (Hugo 2026-06-17), prefill on empty too (still
+            # respects a legacy generic-default scene via the startswith). Fill
+            # ONLY the dialogue clause — no generic "continues the action"
+            # prefix, so the field stays clean.
+            current = e.get("motion_prompt", "") or ""
+            if spoken and (not current.strip()
+                           or current.startswith(ADDED_SCENE_PROMPT[:40])):
+                e["motion_prompt"] = _speech_clause(spoken).strip()
                 e["speech"] = spoken
         reengineer.save_state(state)
 

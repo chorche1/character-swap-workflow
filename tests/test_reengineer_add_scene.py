@@ -98,13 +98,15 @@ def test_add_scene_from_image(wired):
     assert len(bg.tasks) == 1                       # variant fan-out queued
 
 
-def test_add_scene_default_prompt_when_empty(wired):
+def test_add_scene_empty_prompt_stays_empty(wired):
+    """Hugo 2026-06-17: an added scene with no prompt keeps the Kling prompt
+    EMPTY — no generic 'continues the action' preset to clear first."""
     bg = BackgroundTasks()
     asyncio.run(api.reengineer_add_scene(
         "re_t", bg, file=_upload("extra.png", b"x"),
         motion_prompt="", duration=0.0, whisper=False, position=-1, direct=False))
     new = wired["states"]["re_t"]["scenes"][1]
-    assert new["motion_prompt"] == runner_reengineer.ADDED_SCENE_PROMPT
+    assert new["motion_prompt"] == ""               # empty, not a preset
     assert new["duration"] == 5.0                   # image default
 
 
@@ -207,3 +209,33 @@ def test_whisper_prefill_rewrites_default_prompt(wired, monkeypatch):
     assert ('The person says to the camera with an American accent: '
             '"grab four kiwis"') in entry["motion_prompt"]
     assert entry["speech"] == "grab four kiwis"
+
+
+def test_whisper_prefill_fills_empty_prompt_dialogue_only(wired, monkeypatch):
+    """Hugo 2026-06-17: with the default now EMPTY, "hämta dialog" still
+    prefills — and fills ONLY the transcribed dialogue, with no generic
+    'continues the action' preset prepended."""
+    state = wired["states"]["re_t"]
+    state["scenes"].append({
+        "idx": 1, "scene_id": "sc_new", "start": 0.0, "end": 4.0,
+        "duration": 4.0, "motion_prompt": "",           # empty, not the preset
+        "speech": "", "summary": "clip.mp4", "dirty": True,
+        "source": "video", "transcribing": True})
+
+    class _W:
+        def __init__(self, t):
+            self.text = t
+    monkeypatch.setattr(runner_reengineer.video_edit, "transcribe_words",
+                        lambda p, job_id=None: [_W("hello"), _W("there")])
+
+    async def fake_regen(*a, **k):
+        return None
+    monkeypatch.setattr(runner_reengineer.runner, "regen_scene_variants",
+                        fake_regen)
+    asyncio.run(runner_reengineer.generate_added_scene(
+        "re_t", "sc_new", whisper_source="/tmp/clip.mp4"))
+    entry = wired["states"]["re_t"]["scenes"][1]
+    assert entry["motion_prompt"] == (
+        'The person says to the camera with an American accent: "hello there"')
+    assert runner_reengineer.ADDED_SCENE_PROMPT not in entry["motion_prompt"]
+    assert entry["speech"] == "hello there"

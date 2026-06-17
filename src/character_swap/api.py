@@ -4725,7 +4725,9 @@ async def reengineer_from_images(
             # Manual length wins outright in _kling_duration; duration mirrors
             # it so the gate's "Längd" field + the JS AUTO fallback agree.
             "kling_secs": runner_reengineer._clamp_kling(length),
-            "motion_prompt": prompt or runner_reengineer.ADDED_SCENE_PROMPT,
+            # Empty when the user left the row blank (Hugo 2026-06-17) — no
+            # generic preset to clear before writing the Kling prompt.
+            "motion_prompt": prompt,
             "speech": "",
             "summary": (upload.filename or f"Scene {idx + 1}")[:80],
             "source": "image",
@@ -5206,8 +5208,11 @@ async def reengineer_add_scene(
         "start": 0.0,
         "end": round(duration, 3),
         "duration": round(duration, 3),
-        "motion_prompt": (motion_prompt.strip()
-                          or runner_reengineer.ADDED_SCENE_PROMPT),
+        # Hugo 2026-06-17: leave the Kling prompt EMPTY when the user gives
+        # none — no generic "continues the action" preset to clear first. The
+        # Whisper "hämta dialog" prefill (generate_added_scene) still fills the
+        # transcribed line when the user opts in.
+        "motion_prompt": motion_prompt.strip(),
         "speech": "",
         "summary": (file.filename or "Egen scen")[:80],
         "dirty": True,

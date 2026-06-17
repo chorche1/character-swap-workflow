@@ -108,7 +108,9 @@ def test_from_images_creates_run(wired):
 def test_blank_prompt_and_length_get_defaults(wired):
     out, _ = _call([_upload("a.png")], [""], [0])
     sc = wired["states"][out["re_id"]]["scenes"][0]
-    assert sc["motion_prompt"] == runner_reengineer.ADDED_SCENE_PROMPT
+    # Hugo 2026-06-17: a blank row keeps the Kling prompt EMPTY (no preset);
+    # only the length still falls back to the 5s default.
+    assert sc["motion_prompt"] == ""
     assert sc["kling_secs"] == 5                 # length 0 → default 5s
     assert sc["duration"] == 5.0
 
