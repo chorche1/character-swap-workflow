@@ -1079,7 +1079,11 @@
           <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden flex flex-col">
             <div class="aspect-[9/16] bg-black relative flex items-center justify-center">
               <template x-if="jc.compiled_video_url && jc.compile_status === 'done'">
-                <video :src="jc.compiled_video_url" controls class="w-full h-full"></video>
+                <!-- Cache-buster (Hugo 2026-06-17): re-compile overwrites the
+                     same compiled/<char>.mp4 path; compile_edit_id is fresh per
+                     compile so the browser fetches the new result, not the
+                     cached one (same bug as the Reengineer finals). -->
+                <video :src="jc.compiled_video_url + (jc.compile_edit_id ? ('?t=' + jc.compile_edit_id) : '')" controls class="w-full h-full"></video>
               </template>
               <template x-if="jc.compile_status === 'compiling'">
                 <div class="text-neutral-400 text-xs flex flex-col items-center gap-2 p-4 text-center animate-pulse">
@@ -1114,7 +1118,7 @@
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                   <a x-show="jc.compile_status === 'done' && jc.compiled_video_url"
-                     :href="jc.compiled_video_url"
+                     :href="jc.compiled_video_url + (jc.compile_edit_id ? ('?t=' + jc.compile_edit_id) : '')"
                      :download="`${jc.name}-final.mp4`"
                      title="Download MP4"
                      class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
@@ -1956,7 +1960,7 @@
             <summary class="px-3 py-2 text-xs font-medium cursor-pointer bg-neutral-50 dark:bg-neutral-950 hover:bg-neutral-100 dark:hover:bg-neutral-900">
               ⚙ Slutvideo (Editor)
               <span class="text-neutral-400 dark:text-neutral-500 ml-1 font-normal"
-                    x-text="`(${reAsmSettings.template}${reAsmSettings.enableCaptions ? '' : ' · inga captions'}${reAsmSettings.enableWpmNormalize ? ` · ${reAsmSettings.targetWpm} WPM` : ''}${Number(reAsmSettings.playbackSpeed || 1) !== 1 ? ` · ${reAsmSettings.playbackSpeed}×` : ''}${reAsmSettings.enableVoiceSwap ? ' · röstbyte' : ' · Kling-röst'})`"></span>
+                    x-text="`(${reAsmFor(r).template}${reAsmFor(r).enableCaptions ? '' : ' · inga captions'}${reAsmFor(r).enableWpmNormalize ? ` · ${reAsmFor(r).targetWpm} WPM` : ''}${Number(reAsmFor(r).playbackSpeed || 1) !== 1 ? ` · ${reAsmFor(r).playbackSpeed}×` : ''}${reAsmFor(r).enableVoiceSwap ? ' · röstbyte' : ' · Kling-röst'})`"></span>
             </summary>
             <div class="p-3 space-y-3 text-xs">
               <p class="text-[10px] text-neutral-400 dark:text-neutral-500">
@@ -1967,59 +1971,59 @@
                   <!-- x-effect re-sync: the option list loads async — without
                        it the browser DISPLAYS the first option (e.g. Mrbeast)
                        while the model correctly holds capcut-bluebox. -->
-                  <select x-model="reAsmSettings.template"
-                          x-effect="editorTemplates; $nextTick(() => $el.value = reAsmSettings.template)"
+                  <select x-model="reAsmFor(r).template"
+                          x-effect="editorTemplates; $nextTick(() => $el.value = reAsmFor(r).template)"
                           class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
                     <template x-for="t in editorTemplates" :key="'ra-'+t.slug">
                       <option :value="t.slug" x-text="t.label || t.slug"></option>
                     </template>
                   </select>
                 </label>
-                <label :class="reAsmSettings.enableWpmNormalize ? '' : 'opacity-40'">Mål-WPM
+                <label :class="reAsmFor(r).enableWpmNormalize ? '' : 'opacity-40'">Mål-WPM
                   <input type="number" min="80" max="400" step="5"
-                         x-model.number="reAsmSettings.targetWpm"
-                         :disabled="!reAsmSettings.enableWpmNormalize"
+                         x-model.number="reAsmFor(r).targetWpm"
+                         :disabled="!reAsmFor(r).enableWpmNormalize"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
-                <label :class="reAsmSettings.enableCaptions ? '' : 'opacity-40'">Caption-storlek
+                <label :class="reAsmFor(r).enableCaptions ? '' : 'opacity-40'">Caption-storlek
                   <input type="number" min="24" max="200" step="2"
-                         x-model.number="reAsmSettings.captionSize"
-                         :disabled="!reAsmSettings.enableCaptions"
+                         x-model.number="reAsmFor(r).captionSize"
+                         :disabled="!reAsmFor(r).enableCaptions"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
               </div>
               <div class="flex flex-wrap items-center gap-3">
                 <label class="flex items-center gap-1">
-                  <input type="checkbox" x-model="reAsmSettings.enableTrim" class="accent-indigo-500"> Trimma tystnader
+                  <input type="checkbox" x-model="reAsmFor(r).enableTrim" class="accent-indigo-500"> Trimma tystnader
                 </label>
                 <label class="flex items-center gap-1">
-                  <input type="checkbox" x-model="reAsmSettings.enableCaptions" class="accent-indigo-500"> Bränn in captions
+                  <input type="checkbox" x-model="reAsmFor(r).enableCaptions" class="accent-indigo-500"> Bränn in captions
                 </label>
                 <label class="flex items-center gap-1">
-                  <input type="checkbox" x-model="reAsmSettings.enableWpmNormalize" class="accent-indigo-500"> Normalisera tempo (WPM)
+                  <input type="checkbox" x-model="reAsmFor(r).enableWpmNormalize" class="accent-indigo-500"> Normalisera tempo (WPM)
                 </label>
                 <label class="flex items-center gap-1">
-                  <input type="checkbox" x-model="reAsmSettings.enableVoiceSwap" class="accent-indigo-500"> Röstbyte (ElevenLabs)
+                  <input type="checkbox" x-model="reAsmFor(r).enableVoiceSwap" class="accent-indigo-500"> Röstbyte (ElevenLabs)
                 </label>
               </div>
               <!-- Trim-tuning (Hugo 2026-06-17): now actually sent to the
                    backend (the sliders were dropped before). Hidden when
                    word-gap trim is on — that replaces the level trim. -->
               <div class="grid grid-cols-3 gap-2"
-                   x-show="reAsmSettings.enableTrim && !reAsmSettings.enableGapTrim">
+                   x-show="reAsmFor(r).enableTrim && !reAsmFor(r).enableGapTrim">
                 <label title="Ljud under denna nivå räknas som tystnad och klipps. Klings rumston ligger ~-20..-25 dB, så -23 är standard. Lägre (-30) = klipper mindre.">Tröskel (dB)
                   <input type="number" min="-60" max="0" step="1"
-                         x-model.number="reAsmSettings.thresholdDb"
+                         x-model.number="reAsmFor(r).thresholdDb"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
                 <label title="Pauser kortare än detta lämnas kvar.">Min paus (s)
                   <input type="number" min="0.05" max="5" step="0.05"
-                         x-model.number="reAsmSettings.minSilenceSecs"
+                         x-model.number="reAsmFor(r).minSilenceSecs"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
                 <label title="Liten marginal som behålls runt varje klipp så ord inte naggas.">Padding (s)
                   <input type="number" min="0" max="1" step="0.01"
-                         x-model.number="reAsmSettings.padSecs"
+                         x-model.number="reAsmFor(r).padSecs"
                          class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
               </div>
@@ -2029,13 +2033,13 @@
               <div class="flex flex-wrap items-center gap-3 pt-1 border-t border-neutral-200 dark:border-neutral-800">
                 <label class="flex items-center gap-1"
                        title="Klipper talpauser via Whisper-ordens tidsstämplar i stället för ljudnivå — funkar även när Klings rumston ligger nära talnivån. ERSÄTTER den nivåbaserade trimmen ovan.">
-                  <input type="checkbox" x-model="reAsmSettings.enableGapTrim" class="accent-indigo-500"> Ordglapp-trim (Whisper)
+                  <input type="checkbox" x-model="reAsmFor(r).enableGapTrim" class="accent-indigo-500"> Ordglapp-trim (Whisper)
                 </label>
-                <label class="flex items-center gap-1" :class="reAsmSettings.enableGapTrim ? '' : 'opacity-40'">
+                <label class="flex items-center gap-1" :class="reAsmFor(r).enableGapTrim ? '' : 'opacity-40'">
                   Max paus (s)
                   <input type="number" min="0.05" max="3" step="0.05"
-                         x-model.number="reAsmSettings.gapMaxSecs"
-                         :disabled="!reAsmSettings.enableGapTrim"
+                         x-model.number="reAsmFor(r).gapMaxSecs"
+                         :disabled="!reAsmFor(r).enableGapTrim"
                          class="ml-1 w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 </label>
               </div>
@@ -2046,17 +2050,17 @@
                      title="Snabba upp (eller sakta ner) hela slutvideon i fina 0,05×-steg (skriv valfritt värde 0,5–2,0). Pitch-bevarande — rösterna låter naturliga. Läggs ovanpå ev. WPM-normalisering; captions hålls i synk. 1.0 = av.">
                 <span>Hastighet</span>
                 <input type="range" min="0.5" max="2" step="0.05"
-                       x-model.number="reAsmSettings.playbackSpeed"
+                       x-model.number="reAsmFor(r).playbackSpeed"
                        class="w-24 accent-indigo-500 align-middle" />
                 <input type="number" min="0.5" max="2" step="0.01"
-                       x-model.number="reAsmSettings.playbackSpeed"
+                       x-model.number="reAsmFor(r).playbackSpeed"
                        class="w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
                 <span>×</span>
               </label>
-              <label class="block" :class="reAsmSettings.enableVoiceSwap ? '' : 'opacity-40'">
+              <label class="block" :class="reAsmFor(r).enableVoiceSwap ? '' : 'opacity-40'">
                 Röst-override (alla karaktärer)
-                <select x-model="reAsmSettings.voiceOverride"
-                        :disabled="!reAsmSettings.enableVoiceSwap || !elevenlabsAvailable()"
+                <select x-model="reAsmFor(r).voiceOverride"
+                        :disabled="!reAsmFor(r).enableVoiceSwap || !elevenlabsAvailable()"
                         class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
                   <option value="">— varje karaktärs preset-röst —</option>
                   <template x-for="v in elevenlabsVoices" :key="'ra-ov-'+v.voice_id">
@@ -2156,9 +2160,14 @@
               <template x-for="[cid, f] of Object.entries(r.finals || {})" :key="r.re_id+'-f-'+cid">
                 <div class="w-44">
                   <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
-                  <video x-show="f.final_url" :src="f.final_url" controls class="w-full rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
+                  <!-- Cache-buster on completed_at (Hugo 2026-06-17): "▶ Bygg
+                       ihop igen" overwrites the SAME final_*.mp4 path, so
+                       without ?t= the browser shows the cached old final and the
+                       rebuild (e.g. captions toggled off) looks like it didn't
+                       happen. completed_at changes on every assemble. -->
+                  <video x-show="f.final_url" :src="f.final_url + (r.completed_at ? ('?t=' + String(r.completed_at).replace(/\D/g, '')) : '')" controls class="w-full rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
                   <div class="flex items-center gap-3">
-                    <a x-show="f.final_url" :href="f.final_url" :download="(r.job?.characters?.[cid]?.name || cid) + '-reengineered.mp4'"
+                    <a x-show="f.final_url" :href="f.final_url + (r.completed_at ? ('?t=' + String(r.completed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || cid) + '-reengineered.mp4'"
                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
                     <!-- Re-edit in the Editor tab (Hugo 2026-06-13): the final
                          is an Editor edit — captions/words/trim/speed can be

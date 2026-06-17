@@ -328,6 +328,12 @@ class Job(BaseModel):
     # None when the user didn't upload one. Image models that don't support
     # 3+ references (e.g. grok-image is text-only) just ignore it.
     extra_reference_path: str | None = None
+    # Per-job Step-6 compile settings (Hugo 2026-06-17): the ⚙ panel values the
+    # job was last compiled with, so each job keeps its own editable preset
+    # (seeded from the global default for a fresh job). Stored as the snake_case
+    # CompileVideosBody shape; surfaced in _job_to_dict for the frontend to
+    # rehydrate the panel per job. None = never compiled → use the global default.
+    compile_settings: dict | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 

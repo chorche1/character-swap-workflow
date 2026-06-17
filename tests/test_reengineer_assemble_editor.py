@@ -531,7 +531,7 @@ def test_reasm_body_clamps_target_wpm():
     """The client clamps target_wpm to the server's ge=80/le=400 — a typed
     out-of-range value must never 422-block ▶ Generate videos."""
     js = _APP_JS.read_text(encoding="utf-8")
-    m = re.search(r"_reAsmBody\(\)\s*{(.*?)\n    },", js, re.S)
+    m = re.search(r"_reAsmBody\(run\)\s*{(.*?)\n    },", js, re.S)
     assert m, "_reAsmBody not found in app.js"
     assert "Math.min(400, Math.max(80," in m.group(1)
     # Global speed (2026-06-13): clamped to the server's ge=0.5/le=2.0.
@@ -619,7 +619,7 @@ def test_template_selects_resync_after_async_options():
     capcut-bluebox but the dropdown showed Mrbeast)."""
     html = (Path(__file__).resolve().parents[1] / "web" / "index.html"
             ).read_text(encoding="utf-8")
-    for model in ("reAsmSettings.template", "compileSettings.template"):
+    for model in ("reAsmFor(r).template", "compileSettings.template"):
         i = html.find(f'x-model="{model}"')
         assert i != -1, f"select for {model} not found"
         chunk = html[i:i + 400]
@@ -769,11 +769,11 @@ def test_panel_ui_has_caption_size_control():
     js = _APP_JS.read_text(encoding="utf-8")
     assert "template: 'capcut-bluebox'" in js
     assert "captionSize: 60" in js
-    body = js.split("_reAsmBody()")[1][:1200]
+    body = js.split("_reAsmBody(run)")[1][:1200]
     assert "overrides: { size:" in body
     html = (Path(__file__).resolve().parents[1] / "web" /
             "index.html").read_text(encoding="utf-8")
-    assert "reAsmSettings.captionSize" in html
+    assert "reAsmFor(r).captionSize" in html
     assert "Caption-storlek" in html
 
 

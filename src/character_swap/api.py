@@ -273,6 +273,9 @@ def _job_to_dict(job: Job) -> dict:
         "images_per_character": job.images_per_character,
         "videos_per_character": job.videos_per_character,
         "duration_secs": job.duration_secs,
+        # Per-job Step-6 compile settings so the ⚙ panel rehydrates per job
+        # (None until the job's first compile → frontend uses the global default).
+        "compile_settings": job.compile_settings or None,
         "compacted": job.compacted,
         "created_at": job.created_at.isoformat() + "Z",
         "updated_at": job.updated_at.isoformat() + "Z",
@@ -2701,6 +2704,11 @@ class CompileVideosBody(BaseModel):
     # Optional filter — when present, only compile these char_ids. Used by
     # the per-character retry button when ONE character's compile failed.
     char_ids: list[str] | None = None
+    # Whether to persist these settings as the job's saved preset (Hugo
+    # 2026-06-17). False for the "Compile → Resolve" one-off, which forces
+    # captions OFF for a clean MP4 — that transform must NOT become the job's
+    # remembered preset (it would silently reopen the panel captions-off).
+    persist_settings: bool = True
 
 
 @app.post("/api/jobs/{job_id}/compile_videos")
@@ -2733,6 +2741,14 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
             "No characters with both an approved variant AND a done video — "
             "finish Step 5 before compiling.",
         )
+    # Persist the per-job compile settings (Hugo 2026-06-17) so the ⚙ panel
+    # rehydrates to THIS job's last-used values next time it's opened — each
+    # job keeps its own editable preset. Excludes char_ids (a per-click filter)
+    # + persist_settings (a control flag). Skipped on the Resolve one-off
+    # (persist_settings=False) so its forced captions-off doesn't stick.
+    if body.persist_settings:
+        job.compile_settings = body.model_dump(
+            exclude={"char_ids", "persist_settings"})
     # Flip eligible chars to compiling state immediately (so the UI
     # spinner shows even before the runner actually starts).
     for cid in eligible:

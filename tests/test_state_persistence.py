@@ -251,6 +251,10 @@ def _synth_value(name: str, annotation, idx: int):
         return datetime(2026, 6, 10, 12, 0, idx % 60)
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         return list(annotation)[-1]                                   # non-first member
+    if annotation is dict:                                            # bare dict (e.g. compile_settings)
+        return {f"k_{name}_{idx}": idx}
+    if annotation is list:                                            # bare list
+        return [f"item_{name}_{idx}"]
     if origin is list:
         return [_synth_value(name, args[0] if args else str, idx)]
     if origin is dict:

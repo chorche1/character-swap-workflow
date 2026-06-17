@@ -232,7 +232,14 @@ function studio() {
     // as ONE versioned JSON blob so every choice — not just template/WPM —
     // survives reloads; the v2 key cleanly supersedes the old split keys + the
     // previous submagic-pro default.
-    compileSettings: (() => {
+    // Per-process settings (Hugo 2026-06-17). `_compileDefault` is the global
+    // SEED for a fresh job's Step-6 panel; `compileByJob[job_id]` is the
+    // editable per-job override (seeded from the seed + the job's persisted
+    // `compile_settings`). `compileSettings` (the getter below) resolves to the
+    // active job's override so the Step-6 panel + submit/retry stay per-job with
+    // zero markup changes (there's only ever one active job).
+    compileByJob: {},
+    _compileDefault: (() => {
       const defaults = {
         template: 'capcut-purple-pill',
         enableTrim: true,
@@ -260,10 +267,14 @@ function studio() {
         return merged;
       } catch (_) { return defaults; }
     })(),
-    // Reengineer ⚙ Slutvideo (Editor) settings — same shape as Step 6's
-    // compileSettings minus the trim-tuning knobs (the runner uses Hugo's
-    // preset values for those). Defaults keep Kling's voice + pacing.
-    reAsmSettings: (() => {
+    // The active job's Step-6 settings — resolves per job so each job keeps its
+    // own editable preset. Falls back to the global default when no job is open.
+    get compileSettings() { return this.compileFor(this.job); },
+    // Reengineer ⚙ Slutvideo (Editor): `_reAsmDefault` seeds a fresh run;
+    // `reAsmByRun[re_id]` is the editable per-run override (kept in a map keyed
+    // by re_id so the 5s poll's run-object replacement can't wipe edits).
+    reAsmByRun: {},
+    _reAsmDefault: (() => {
       const defaults = {
         template: 'capcut-bluebox',     // Hugo 2026-06-16: bluebox @ 60 is
         captionSize: 60,                // the Swap/Reengineer-final standard
@@ -1853,16 +1864,71 @@ function studio() {
       await this.refreshReengineer(run.re_id);
     },
 
+    // --- Per-process settings resolvers (Hugo 2026-06-17) ------------------
+    // Map the backend's snake_case stored settings onto the frontend camelCase
+    // shape so a run/job rehydrates its panel from what it was last run with.
+    _mapStoredToCompile(s) {
+      const o = {};
+      if (!s || typeof s !== 'object') return o;
+      if ('template' in s) o.template = s.template;
+      if ('enable_trim' in s) o.enableTrim = s.enable_trim;
+      if ('enable_captions' in s) o.enableCaptions = s.enable_captions;
+      if ('enable_wpm_normalize' in s) o.enableWpmNormalize = s.enable_wpm_normalize;
+      if ('enable_voice_swap' in s) o.enableVoiceSwap = s.enable_voice_swap;
+      if ('target_wpm' in s) o.targetWpm = s.target_wpm;
+      if ('threshold_db' in s) o.thresholdDb = s.threshold_db;
+      if ('min_silence_secs' in s) o.minSilenceSecs = s.min_silence_secs;
+      if ('pad_secs' in s) o.padSecs = s.pad_secs;
+      if ('enable_gap_trim' in s) o.enableGapTrim = s.enable_gap_trim;
+      if ('gap_max_secs' in s) o.gapMaxSecs = s.gap_max_secs;
+      if ('voice_override' in s) o.voiceOverride = s.voice_override || '';
+      return o;
+    },
+    _mapStoredToReAsm(s) {
+      const o = this._mapStoredToCompile(s);
+      if (s && s.overrides && typeof s.overrides === 'object' && 'size' in s.overrides) {
+        o.captionSize = s.overrides.size;
+      }
+      if (s && 'playback_speed' in s) o.playbackSpeed = s.playback_speed;
+      return o;
+    },
+    // Active job's Step-6 settings (one object per job_id, lazily seeded from
+    // the global default + the job's persisted compile_settings). Returns the
+    // global default when no job is open.
+    compileFor(job) {
+      // Return a COPY (not the shared singleton) when no job is open, so a
+      // stray x-model write while job is null can't corrupt _compileDefault —
+      // the seed for every future job (review 2026-06-17).
+      if (!job || !job.job_id) return { ...this._compileDefault };
+      const id = job.job_id;
+      if (!this.compileByJob[id]) {
+        this.compileByJob[id] = { ...this._compileDefault,
+                                  ...this._mapStoredToCompile(job.compile_settings) };
+      }
+      return this.compileByJob[id];
+    },
+    // Per-run Reengineer ⚙ settings (one object per re_id, lazily seeded from
+    // the global default + the run's persisted assemble_settings). Kept in a
+    // map so the 5s poll replacing the run object can't wipe in-progress edits.
+    reAsmFor(run) {
+      const id = run && run.re_id;
+      // Copy (not the shared singleton) when run has no id — same corruption
+      // guard as compileFor (review 2026-06-17).
+      if (!id) return { ...this._reAsmDefault };
+      if (!this.reAsmByRun[id]) {
+        this.reAsmByRun[id] = { ...this._reAsmDefault,
+                                ...this._mapStoredToReAsm(run.assemble_settings) };
+      }
+      return this.reAsmByRun[id];
+    },
+
     // ⚙ Slutvideo (Editor) settings for the Reengineer final build. Sent
     // with BOTH ▶ Generate videos (persisted server-side so the automatic
     // assemble after the video phase uses them) and ▶ Bygg ihop igen.
-    // Defaults mirror Swap Step 6 EXCEPT voice swap + WPM normalize, which
-    // stay OFF so Kling's own lip-synced voice and pacing survive.
-    _reAsmBody() {
-      try {
-        localStorage.setItem('reassemble.settings.v2', JSON.stringify(this.reAsmSettings));
-      } catch (_) { /* private window etc. */ }
-      const s = this.reAsmSettings;
+    // Per-run (Hugo 2026-06-17): reads reAsmFor(run); the run's own values
+    // persist server-side in assemble_settings, so no localStorage write here.
+    _reAsmBody(run) {
+      const s = this.reAsmFor(run);
       return {
         template: s.template,
         // Caption size rides as a style override (works for both caption
@@ -1892,7 +1958,7 @@ function studio() {
     async reengineerAnimate(run) {
       const r = await fetch(`/api/reengineer/${run.re_id}/animate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this._reAsmBody()),
+        body: JSON.stringify(this._reAsmBody(run)),
       });
       if (!r.ok) { this.notifyError('Animate failed: ' + await r.text()); return; }
       this.notifyInfo('Generating Kling clips with native audio…');
@@ -1903,7 +1969,7 @@ function studio() {
     async reengineerAssemble(run) {
       const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(this._reAsmBody()),
+        body: JSON.stringify(this._reAsmBody(run)),
       });
       if (!r.ok) {
         // 409 'incomplete_rebuild' carries a structured detail (Hugo
@@ -2914,11 +2980,9 @@ function studio() {
       const forResolve = !!opts?.forResolve;
       this.compiling = true;
       try {
-        // Persist all settings (one versioned blob) so they survive reloads.
-        try {
-          localStorage.setItem('compile.settings.v2', JSON.stringify(this.compileSettings));
-        } catch (_) { /* private window etc. */ }
-
+        // Per-job now (Hugo 2026-06-17): these settings persist server-side on
+        // the job (job.compile_settings) so the panel rehydrates per job — no
+        // global localStorage write (that would clobber the default seed).
         const body = {
           template: this.compileSettings.template,
           enable_trim: !!this.compileSettings.enableTrim,
@@ -2932,6 +2996,9 @@ function studio() {
           pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
           enable_gap_trim: !!this.compileSettings.enableGapTrim,
           gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
+          // Resolve one-off forces captions OFF — don't let that transform
+          // become the job's remembered preset (review 2026-06-17).
+          persist_settings: !forResolve,
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/compile_videos', {
           method: 'POST',
