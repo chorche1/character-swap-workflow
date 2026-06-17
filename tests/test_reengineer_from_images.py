@@ -199,6 +199,26 @@ def test_frontend_wiring_present():
     assert "x.from_images" in index
 
 
+def test_swap_engine_picker_reasserts_identity_first():
+    """Hugo 2026-06-17 bug: the Swap-tab <select x-model="swapFromImages.
+    imageModel"> renders before its x-for options exist, so the browser
+    auto-selected the first option ('GPT Image' = scene-first gpt-image) and
+    wrote it back over the gpt2-id-swap default — the user saw the Swap flow
+    silently run scene-first. loadGenModels must re-assert it (bounce through
+    '' then $nextTick to gpt2-id-swap), exactly like the Reengineer picker."""
+    from pathlib import Path
+    app_js = (Path(__file__).resolve().parent.parent / "web" / "app.js"
+              ).read_text(encoding="utf-8")
+    # The state default is identity-first…
+    assert "imageModel: 'gpt2-id-swap'" in app_js
+    # …AND it is re-asserted after the models load (the <select> fix).
+    assert "this.swapFromImages.imageModel = ''" in app_js
+    assert "this.swapFromImages.imageModel = swTarget" in app_js
+    assert "_avail('gpt2-id-swap') ? 'gpt2-id-swap'" in app_js
+    # …AND the pick is sticky like the Reengineer one.
+    assert "this.$watch('swapFromImages.imageModel'" in app_js
+
+
 def test_resume_routes_from_images(wired, monkeypatch):
     spawned = []
 

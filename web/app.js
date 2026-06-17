@@ -481,6 +481,10 @@ function studio() {
       // gpt2-id-swap is his GPT engine of choice — make it survive reloads).
       this.$watch('reengineerGen.imageModel',
                   v => v && localStorage.setItem('reengineerGen.imageModel', v));
+      // Swap-tab engine pick — same sticky preset (Hugo 2026-06-17): without
+      // this the picker silently reverted to scene-first 'gpt-image'.
+      this.$watch('swapFromImages.imageModel',
+                  v => v && localStorage.setItem('swapFromImages.imageModel', v));
       // Refresh daily cost every minute while the tab is open.
       this._dailyCostTimer = setInterval(() => this.loadDailyCost(), 60000);
       // 1-second tick so the elapsed-time labels in the status toast +
@@ -928,6 +932,19 @@ function studio() {
           : (firstImage ? firstImage.slug : this.reengineerGen.imageModel);
         this.reengineerGen.imageModel = '';
         this.$nextTick(() => { this.reengineerGen.imageModel = reTarget; });
+        // SAME re-assert for the Swap tab's engine picker (Hugo 2026-06-17).
+        // Its <select> also renders before its options exist, so the browser
+        // auto-selected the first option ('GPT Image' = scene-first gpt-image)
+        // and wrote it back over the gpt2-id-swap default — the user saw the
+        // Swap flow silently run scene-first. Bounce through '' so Alpine
+        // re-applies: sticky pick → preset gpt2-id-swap (identity-first) →
+        // first available.
+        const swStored = localStorage.getItem('swapFromImages.imageModel');
+        const swTarget = (swStored && _avail(swStored)) ? swStored
+          : _avail('gpt2-id-swap') ? 'gpt2-id-swap'
+          : (firstImage ? firstImage.slug : this.swapFromImages.imageModel);
+        this.swapFromImages.imageModel = '';
+        this.$nextTick(() => { this.swapFromImages.imageModel = swTarget; });
         const firstVideo = (this.models.video || []).find(m => m.available);
         if (firstVideo && !this.models.video.find(m => m.slug === this.videoGen.model)?.available) {
           this.videoGen.model = firstVideo.slug;
