@@ -131,6 +131,14 @@ class Settings(BaseSettings):
     # clamped to [-45, -25] dB. Off → the flow's fixed threshold_db.
     adaptive_silence_threshold: bool = Field(
         default=True, validation_alias="ADAPTIVE_SILENCE_THRESHOLD")
+    # Hybrid captions (Hugo 2026-06-17): when a known script (scene says-clauses)
+    # is available and Whisper's transcript matches it below this ratio, the
+    # captions are rebuilt from the script (Whisper hallucinates on Kling's
+    # synthetic voice). 1.0 = always prefer the script; 0.0 = always trust
+    # Whisper. 0.55 catches outright hallucinations + near-empty transcripts
+    # while keeping accurate Whisper timing on clean audio.
+    caption_script_fallback_ratio: float = Field(
+        default=0.55, validation_alias="CAPTION_SCRIPT_FALLBACK_RATIO")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")

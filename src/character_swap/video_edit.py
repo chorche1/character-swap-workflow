@@ -1648,6 +1648,46 @@ def words_from_json(raw: str) -> list[Word]:
             for w in json.loads(raw)]
 
 
+def caption_transcript_ratio(whisper_text: str, script: str) -> float:
+    """Similarity in [0,1] between a Whisper transcript and the KNOWN script
+    (the scene says-clause dialogue). Low = Whisper hallucinated or missed the
+    speech (common on Kling's synthetic voice — it invents a generic 'thanks
+    for watching' outro on unclear audio), so captions should fall back to the
+    script. Compared on normalized word tokens (lowercased, alphanumeric).
+    ffmpeg-free → unit-testable."""
+    import difflib
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return " ".join(_re.findall(r"[a-z0-9]+", (s or "").lower()))
+    a, b = _norm(whisper_text), _norm(script)
+    if not b:
+        return 1.0   # no script to compare against → trust Whisper
+    if not a:
+        return 0.0   # empty transcript → definitely fall back
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def script_fallback_words(script: str, duration: float) -> list[Word]:
+    """Build evenly-timed caption `Word`s from a known `script` string spread
+    across `duration` seconds. The reliable fallback when Whisper can't be
+    trusted on Kling audio — the WORDS are guaranteed correct (they're the
+    dialogue the user wrote), the timing is approximate (even slots). Returns
+    [] when there's no script or no duration. ffmpeg-free → unit-testable."""
+    import re as _re
+    tokens = [t for t in _re.split(r"\s+", (script or "").strip()) if t]
+    if not tokens or duration <= 0:
+        return []
+    slot = duration / len(tokens)
+    out: list[Word] = []
+    for i, tok in enumerate(tokens):
+        s = i * slot
+        e = (i + 1) * slot
+        out.append(Word(text=tok, start=round(s, 3),
+                        end=round(max(s + 0.05, e), 3)))
+    return out
+
+
 def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> list[Word]:
     """Keep words inside [start, end] and shift timestamps so the trimmed clip
     starts at 0. Used when re-rendering after a manual trim."""

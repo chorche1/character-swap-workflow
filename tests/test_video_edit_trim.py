@@ -16,6 +16,7 @@ import pytest
 from character_swap.video_edit import (
     _invert_silences, Word, shift_word_timestamps,
     _word_gap_keep_ranges, _shift_words_to_keeps,
+    caption_transcript_ratio, script_fallback_words,
 )
 
 
@@ -230,3 +231,43 @@ def test_shift_words_to_keeps_does_not_mutate_input():
     words = [Word("a", 0.0, 1.0), Word("b", 3.0, 4.0)]
     _shift_words_to_keeps(words, [(0.0, 1.05), (2.95, 4.0)])
     assert words[1].start == 3.0 and words[1].end == 4.0
+
+
+# --- hybrid captions: Whisper-vs-script reconciliation (Hugo 2026-06-17) -----
+
+
+def test_caption_ratio_high_when_transcript_matches_script():
+    script = "Rub coconut oil and baking soda on your neck before bed"
+    whisper = "rub coconut oil and baking soda on your neck before bed"
+    assert caption_transcript_ratio(whisper, script) > 0.9
+
+
+def test_caption_ratio_low_on_hallucination():
+    """Whisper's classic 'thanks for watching' outro vs the real script."""
+    script = "Rub coconut oil and baking soda on your neck before bed"
+    whisper = ("Thanks for watching, I hope you found this video helpful. "
+               "See you in the next video, bye!")
+    assert caption_transcript_ratio(whisper, script) < 0.55
+
+
+def test_caption_ratio_zero_when_transcript_empty():
+    assert caption_transcript_ratio("", "some real script here") == 0.0
+
+
+def test_caption_ratio_one_when_no_script():
+    # No script to compare against → trust Whisper (don't fall back).
+    assert caption_transcript_ratio("anything at all", "") == 1.0
+
+
+def test_script_fallback_words_even_timing_and_text():
+    words = script_fallback_words("hello there friend", 9.0)
+    assert [w.text for w in words] == ["hello", "there", "friend"]
+    assert words[0].start == 0.0
+    assert words[0].end == pytest.approx(3.0)
+    assert words[1].start == pytest.approx(3.0)
+    assert words[-1].end == pytest.approx(9.0)
+
+
+def test_script_fallback_words_empty_inputs():
+    assert script_fallback_words("", 10.0) == []
+    assert script_fallback_words("words here", 0.0) == []

@@ -289,6 +289,31 @@ async def run_editor_pipeline(
         except Exception:
             words = []
 
+    # Step 4a.1: HYBRID caption source (Hugo 2026-06-17). Whisper is unreliable
+    # on Kling's synthetic voice — on unclear audio it hallucinates a generic
+    # outro ("thanks for watching") or catches almost nothing. When a known
+    # script is available (script_hint = the scene says-clauses) and Whisper's
+    # transcript diverges badly from it, rebuild the caption words from the
+    # script, evenly timed. A Whisper transcript that matches the script keeps
+    # its accurate per-word timing. Runs before WPM/gap-trim so everything
+    # downstream (incl. the persisted words.json) uses the corrected words.
+    if (enable_captions or enable_wpm_normalize) and script_hint:
+        whisper_text = " ".join(getattr(w, "text", "") for w in words)
+        ratio = video_edit.caption_transcript_ratio(whisper_text, script_hint)
+        if ratio < settings.caption_script_fallback_ratio:
+            dur = await asyncio.to_thread(video_edit._probe_duration, current)
+            fallback = video_edit.script_fallback_words(script_hint, dur)
+            if fallback:
+                words = fallback
+                logger.warning(
+                    "%s: Whisper diverged from the script (ratio %.2f < %.2f)"
+                    " — captions rebuilt from the known script",
+                    edit_id, ratio, settings.caption_script_fallback_ratio)
+                if warn is not None:
+                    await warn(f"captions: Whisper matchade inte repliken "
+                               f"(likhet {ratio:.0%}) — byggde captions från "
+                               f"den kända repliken (jämn timing)")
+
     # Step 4a.5: WORD-GAP TRIM (opt-in, Hugo 2026-06-17). Replaces the
     # level-based interior trim (skipped above) — cuts spoken pauses longer
     # than `gap_max_secs` by Whisper word boundaries, robust against Kling's
