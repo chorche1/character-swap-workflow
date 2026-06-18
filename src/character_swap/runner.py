@@ -952,6 +952,24 @@ async def run_edit_variant(
 
 # --- video synthesis ----------------------------------------------------------------
 
+def _eff_video_model_for_scene(job: Job, scene_id: str | None) -> str:
+    """Effective video model for one scene: the per-scene override if set,
+    else the job-wide default, else grok-imagine. Single resolution point so
+    submit, end-frame gating, salvage re-poll and resume all agree on the
+    provider for a clip (a non-Kling scene override must be polled with its
+    OWN provider's poller on restart)."""
+    return (((job.video_models_by_scene or {}).get(scene_id) if scene_id else None)
+            or job.video_model or "grok-imagine")
+
+
+def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
+    """Effective video model for one VideoVariant — resolved from the scene of
+    the approved image it animates (VideoVariant stores no model field)."""
+    target = video.source_variant_id or jc.approved_variant_id
+    appr = next((v for v in jc.images if v.variant_id == target), None)
+    return _eff_video_model_for_scene(job, appr.scene_id if appr else None)
+
+
 async def _resolve_end_image(job: Job, jc: JobCharacter,
                              scene_id: str | None) -> Path | None:
     """Optional per-scene END FRAME (Kling 3.0 only): prefer the frame
@@ -961,7 +979,7 @@ async def _resolve_end_image(job: Job, jc: JobCharacter,
     batch, "+ N more" AND per-clip retries — the latter two previously
     DROPPED the end frame on regenerated clips (review 2026-06-13), which
     also broke Reengineer's reanimate path."""
-    if job.video_model != "kling-v3" or scene_id is None:
+    if scene_id is None or _eff_video_model_for_scene(job, scene_id) != "kling-v3":
         return None
     pre = (jc.end_frame_paths or {}).get(scene_id)
     if pre and Path(pre).exists():
@@ -991,11 +1009,11 @@ async def _animate_one_video(
     await _emit(job.job_id, "video.started",
                 char_id=jc.char_id, video_id=video.video_id)
 
-    # Submit. The `video_model` field on the Job (set in Step 4) chooses
-    # which provider — defaults to grok-imagine. All providers fail through
-    # the same VideoStatus.ERROR path so the UI doesn't need per-provider
-    # handling.
-    video_model = job.video_model or "grok-imagine"
+    # Submit. The effective video model is the per-scene override (Step 4 /
+    # Reengineer) if set, else the job-wide default, else grok-imagine. All
+    # providers fail through the same VideoStatus.ERROR path so the UI doesn't
+    # need per-provider handling.
+    video_model = _eff_video_model(job, jc, video)
     # Each VideoVariant remembers WHICH approved variant it animates via
     # `source_variant_id` — so multi-scene jobs (with multiple approved
     # variants per char) animate every approval in parallel and keep
@@ -1295,7 +1313,9 @@ async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool
     clip was recovered; False → caller proceeds with the normal fresh
     submit."""
     video = jc.videos[idx]
-    video_model = job.video_model or "grok-imagine"
+    # Re-poll on the SAME provider the clip was submitted under — a per-scene
+    # override means job.video_model may not be this clip's model.
+    video_model = _eff_video_model(job, jc, video)
     dest = _output_dir(job.job_id, jc.char_id) / f"video_{video.video_id}.mp4"
     video.status = VideoStatus.PROCESSING
     video.error = None
@@ -1671,7 +1691,7 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
             dest=dest,
             on_progress=_progress,
             app_job_id=job.job_id,
-            model=job.video_model or "grok-imagine",
+            model=_eff_video_model(job, jc, video),
         )
     except Exception as e:
         video.status = VideoStatus.ERROR

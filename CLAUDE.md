@@ -59,7 +59,7 @@ The Swap flow (6 steps): persistent left sidebar of past jobs + main panel:
 1. **Scene** — upload **one or more** scene images. Supports drop, click, and **Cmd+V paste** (multiple at once). Each scene becomes a separate reference background; the character gets variants for every scene. Per-tile ✕ to remove. Counter shows "(N scenes — each character gets variants for every scene)".
 2. **Character images** — pick one or more from a persistent library (upload new ones inline). Rename via inline ✎ icon. **Preset voice (🎤)** dropdown on each library card sets an ElevenLabs voice that auto-applies in Step 6 compile + Editor tab. Choose **N images per character** (1–4, default 1). Optionally edit the **Generation prompt** (per job override) or save it as the project's default via "★ save as project default". Two opt-in prompt-quality toggles: **✨ enrich** (cheap, gpt-4o single-shot expansion of the user's prompt) and **🎬 AI Director** (Claude Opus agent with vision + tool-use; writes a tailored prompt per (character × scene × variant) — see "AI Director" section below).
 3. **Generate** — GPT Image 2 (or Nano Banana / Nano Banana Pro / Grok Image, picked in Step 2) generates `images_per_character × N_scenes` variant images per character. When multiple scenes exist, variants render under per-scene subgroup headers inside each character section. **Multi-variant approval** — user picks ONE variant per (character × scene) by clicking the ✓ on each (re-click un-approves). **"✓ Approve all" button** auto-picks the first ready variant per (char, scene) for all characters at once. Variants can be **edited with a custom prompt** to spawn a new variant for comparison. **Per-variant retry** (↻) re-runs just one failed slot. Per-variant download with friendly filename.
-4. **Movement prompt** — **per-IMAGE rows** (one per approved image): each approved image gets its OWN motion prompt AND its own clip duration (the Higgsfield "per-slot" model), so every video can be completely different. Thumbnail + textarea + per-image duration picker per row, plus an "⤓ apply image 1 to all" convenience. **Video provider picker** (one model for the whole job) lets you pick any of: Grok Imagine, Veo 3, Veo 3 Fast, Kling 2.0/2.1/2.5/2.6/3.0 + Pro/Master variants, Runway Gen-4/Gen-3, Luma Ray-2, Pika 2.2, Hailuo 01/02, Sora 2, Wan 2.1/2.2, Seedance, Higgsfield variants. **Submit kicks off all approved images × M videos in parallel**, all using the chosen provider. Backend: `POST /movement` accepts `movement_prompts_by_variant` (variant_id → prompt) + `durations_by_variant` (variant_id → secs); the runner resolves per-image override → per-scene prompt → fallback, and a per-scene `movement_prompts` is derived from the per-image dict for back-compat + the Step 6 compile. Per-image prompts are used verbatim (AI Director / enrich are skipped when they're set). The older per-scene path still works for jobs that send `movement_prompts`.
+4. **Movement prompt** — **per-IMAGE rows** (one per approved image): each approved image gets its OWN motion prompt AND its own clip duration (the Higgsfield "per-slot" model), so every video can be completely different. Thumbnail + textarea + per-image duration picker per row, plus an "⤓ apply image 1 to all" convenience. **Video provider picker** (a job-wide DEFAULT) lets you pick any of: Grok Imagine, Veo 3, Veo 3 Fast, Veo 3.1 Fast (fal), Kling 2.0/2.1/2.5/2.6/3.0 + Pro/Master variants, Runway Gen-4/Gen-3, Luma Ray-2, Pika 2.2, Hailuo 01/02, Sora 2, Wan 2.1/2.2, Seedance, Higgsfield variants. **Per-clip model override (2026-06-18):** each scene row also has a small **Model** dropdown defaulting to "Samma som jobbet" — pick a different provider for one clip and that scene's duration options + generation follow it. Opt-in: empty → the job default; persisted as `Job.video_models_by_scene` (scene_id → slug), resolved per-clip in `runner._eff_video_model` at submit/salvage-repoll/resume + end-frame gating (a scene on a non-Kling model ignores its end pose — only `kling-v3` interpolates). `POST /movement` validates every chosen provider's key upfront. **Submit kicks off all approved images × M videos in parallel**, each scene using its effective provider. Backend: `POST /movement` accepts `movement_prompts_by_variant` (variant_id → prompt) + `durations_by_variant` (variant_id → secs); the runner resolves per-image override → per-scene prompt → fallback, and a per-scene `movement_prompts` is derived from the per-image dict for back-compat + the Step 6 compile. Per-image prompts are used verbatim (AI Director / enrich are skipped when they're set). The older per-scene path still works for jobs that send `movement_prompts`.
 5. **Videos** — chosen provider animates each approved image M times. Live progress + per-video download with friendly filename.
 6. **Compile final videos** — appears once every approved character has ≥1 DONE video. One click → for each character, concatenate that character's per-scene videos (in `scene_ids` order, picking the first DONE take per scene) into ONE final MP4 by running through the Editor pipeline (silence trim → voice swap → Whisper transcribe → WPM normalize → caption burn-in). All M characters compile **in parallel** using shared editor settings (template, target WPM, opt-out toggles). Each character's library-set preset voice auto-applies via ElevenLabs voice-changer; a batch-wide `voice_override` overrides all of them at once. Per-character cards show live `compiling → done / failed` status with preview + download. Failed compiles offer a per-character ↻ retry. Endpoint: `POST /api/jobs/{job_id}/compile_videos`; runner: [src/character_swap/runner_compile.py](src/character_swap/runner_compile.py). Output: `output/<job_id>/compiled/<char_id>.mp4` (plus full editor edit_id under `output/editor/<edit_id>/` so the compile result is also re-renderable from the Editor tab).
 
@@ -179,11 +179,13 @@ XAI_API_KEY=...
 ```
 
 Optional — each unlocks one or more models in the Image/Video model picker
-(14 image + 17 video models registered):
+(14 image + 18 video models registered):
 ```
 ANTHROPIC_API_KEY=...             # 🎬 AI Director (Claude Opus with vision; opt-in toggle
                                   # on Swap, Image, Video tabs). ~$0.05 per Director call.
 GEMINI_API_KEY=...                # Nano Banana + Nano Banana Pro + Veo 3 + Veo 3 Fast
+                                  # (Veo 3.1 Fast is fal-hosted — see FAL_API_KEY,
+                                  # billed on fal, no Gemini quota.)
 KLING_ACCESS_KEY=...              # Both required for Kling 2.0 / 2.1 Pro / 1.6
 KLING_SECRET_KEY=...
 BFL_API_KEY=...                   # FLUX 1.1 Pro Ultra / Pro / Schnell / Kontext
@@ -215,6 +217,11 @@ FAL_API_KEY=...                   # fal.ai — VEED captions AND the Swap instru
                                   # (Seedream 4.5, budget tier). These are Google/ByteDance
                                   # models HOSTED ON FAL — billed on the fal key, no Gemini
                                   # API quota. Swap default remains gpt-image.
+                                  # ALSO routes two VIDEO models through fal: "kling-v3"
+                                  # (Kling 3.0, see KLING_V3_TIER) and "veo-3.1-fast"
+                                  # (Veo 3.1 Fast i2v, clients/fal_veo.py — the Gemini
+                                  # path only carries Veo 3 / Veo 3 Fast; resolution via
+                                  # VEO_FAL_RESOLUTION). Both bill on the fal key.
 HEYGEN_API_KEY=...                # HeyGen Avatar 5 — talking-head videos (Avatar tab)
 ELEVENLABS_API_KEY=...            # ElevenLabs voice library (Audio tab + Editor voice swap +
                                   # optional voice source for HeyGen avatars)
@@ -258,6 +265,10 @@ KLING_V3_TIER=pro                 # fal Kling v3 tier: "pro" (1080p, default sin
                                   # flip while clips are in flight — fal request_ids
                                   # are endpoint-scoped, a resumed poll on the other
                                   # tier 404s (the ↻ retry recovers).
+VEO_FAL_RESOLUTION=1080p          # fal Veo 3.1 Fast (veo-3.1-fast) render resolution:
+                                  # "720p" / "1080p" / "4k". Default 1080p (Hugo
+                                  # 2026-06-18 — parity with KLING_V3_TIER=pro so
+                                  # mixed-model reels match); 720p is fal's own default.
 KLING_NEGATIVE_PROMPT="blur, distort, low quality, morphing face, frozen lips, warping fingers, extra limbs"
                                   # sent with every Kling submit (research 2026-06-12:
                                   # talking-head negative set; 5-8 terms beats long

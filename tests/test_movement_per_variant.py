@@ -61,6 +61,12 @@ def isolated(monkeypatch: pytest.MonkeyPatch):
     job = _job_two_approved_one_scene()
     store = _FakeStore(job)
     monkeypatch.setattr(api, "store", lambda: store)
+    # These tests exercise prompt/duration storage, not provider availability.
+    # set_movement now validates the chosen model's API key upfront (422 when
+    # locked) — disable that check so the storage assertions run regardless of
+    # which keys the test env has. Key-validation itself is covered in
+    # test_per_clip_video_model.py.
+    monkeypatch.setattr(api, "_require_video_model_available", lambda slug: None)
     return store
 
 
@@ -72,7 +78,7 @@ def test_per_variant_prompts_and_durations_stored(isolated: _FakeStore) -> None:
         },
         durations_by_variant={"v_a": 5, "v_b": 10},
         videos_per_character=1,
-        video_model="kling-v2-6",   # not in _VIDEO_MODEL_KEYS → no key required
+        video_model="kling-v2-6",   # provider faked-available by the fixture
     )
     _run(api.set_movement("j_test", body, BackgroundTasks()))
     job = isolated.get_job("j_test")

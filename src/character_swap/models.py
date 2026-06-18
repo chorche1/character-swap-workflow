@@ -293,6 +293,15 @@ class Job(BaseModel):
     # scene's approved images. Resolution order in the runner:
     # per-variant → per-scene → `duration_secs` → env default.
     durations_by_scene: dict[str, int] = Field(default_factory=dict)
+    # Per-SCENE video-model override (scene_id → model slug). Opt-in: empty →
+    # every scene animates with `video_model` (the job-wide default). When a
+    # scene has an entry, THAT scene's clip uses the override provider instead.
+    # Resolution order in the runner: per-scene → `video_model` → "grok-imagine".
+    # Mirrors `durations_by_scene` / `movement_prompts`; old jobs load empty.
+    # NOTE: only `kling-v3` honors per-scene END FRAMES — a scene overridden to
+    # a non-Kling model ignores its end pose (the Step-4 UI warns; Reengineer
+    # hides the control for that scene).
+    video_models_by_scene: dict[str, str] = Field(default_factory=dict)
     # Optional per-scene END-POSE reference (scene_id → uploaded image path).
     # Set on a scene in Step 1. During Step 3 the runner SWAPS each character
     # into the pose (so the end frame features the same person) and hands the

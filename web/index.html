@@ -727,7 +727,7 @@
           </template>
         </select>
         <span class="text-xs text-neutral-400 dark:text-neutral-500">
-          Duration is set per image below.
+          Job default — model &amp; duration can be overridden per scene below.
         </span>
       </div>
       <!-- End-frame / Kling-3.0 guard: end poses only animate with Kling 3.0.
@@ -787,18 +787,33 @@
                 rows="3"
                 class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
                 placeholder="e.g. He pours the mouthwash into the bowl and says to camera: 'Did you know…' Active camera. sound on."></textarea>
-              <div class="flex items-center gap-2 text-xs">
-                <label class="text-neutral-500 dark:text-neutral-400">Duration:</label>
-                <select :value="durationByScene[scene.scene_id] || videoDurationSpec().default"
+              <div class="flex items-center gap-2 text-xs flex-wrap">
+                <!-- Per-scene video-model override (opt-in). "" = use the
+                     job-wide pick above. Lets one reel mix providers. -->
+                <label class="text-neutral-500 dark:text-neutral-400">Model:</label>
+                <select :value="swapVideoModelsByScene[scene.scene_id] || ''"
+                        @change="swapVideoModelsByScene[scene.scene_id] = $event.target.value; onSceneVideoModelChange(scene)"
+                        class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
+                  <option value="" x-text="'Samma som jobbet (' + videoModelLabel() + ')'"></option>
+                  <template x-for="m in models.video" :key="'psm'+scene.scene_id+'-'+m.slug">
+                    <option :value="m.slug" :disabled="!m.available"
+                            x-text="m.label + (m.available ? '' : '  (locked)')"></option>
+                  </template>
+                </select>
+                <span x-show="(swapVideoModelsByScene[scene.scene_id] || '') && sceneVideoModel(scene) !== 'kling-v3' && hasEndPose(scene.scene_id)"
+                      class="text-amber-500 cursor-help"
+                      title="Bara Kling 3.0 tolkar slutposen — denna scen ignorerar den.">⚠ ignorerar slutpose</span>
+                <label class="text-neutral-500 dark:text-neutral-400 ml-1">Duration:</label>
+                <select :value="durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default"
                         @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
                         class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
-                  <template x-for="n in videoDurationSpec().options" :key="'psd'+scene.scene_id+'-'+n">
+                  <template x-for="n in sceneVideoDurationSpec(scene).options" :key="'psd'+scene.scene_id+'-'+n">
                     <option :value="n" x-text="n + 's'"></option>
                   </template>
                 </select>
                 <span class="text-neutral-400 dark:text-neutral-500"
-                      x-text="videoDurationSpec().options.length === 1
-                                ? `(${videoModelLabel()} only supports ${videoDurationSpec().options[0]}s)`
+                      x-text="sceneVideoDurationSpec(scene).options.length === 1
+                                ? `(${sceneVideoModelEntry(scene).label} only supports ${sceneVideoDurationSpec(scene).options[0]}s)`
                                 : ''"></span>
               </div>
             </div>
@@ -1607,36 +1622,69 @@
                       <!-- EXACT Kling prompt = the textarea text + these auto-appended
                            clauses (mirrors _with_accent server-side; updates live
                            while typing). Nothing else is added or rewritten. -->
-                      <p x-show="klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
                          class="text-[10px] text-neutral-400 dark:text-neutral-500 leading-snug">
                         <span class="font-medium text-neutral-500 dark:text-neutral-400">＋ Kling får exakt texten ovan plus:</span>
                         <span class="italic" x-text="klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"></span>
                       </p>
-                      <p x-show="!klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && !klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
                          class="text-[10px] text-emerald-600 dark:text-emerald-400">
                         ✓ Skickas till Kling exakt som ovan — inga auto-tillägg
                       </p>
-                      <div class="flex items-center gap-3 text-[10px] text-neutral-500">
+                      <div class="flex items-center gap-3 text-[10px] text-neutral-500 flex-wrap">
+                        <!-- Per-scene video-model override (opt-in, Hugo
+                             2026-06-18). "" = run default (Kling 3.0). A
+                             non-Kling scene loses end-frame interpolation +
+                             auto-length (soft degrade) — its End-frame control
+                             and Kling-specific hints below hide. -->
+                        <label class="flex items-center gap-1" title="Videomodell för just detta klipp (annars körens standard)">
+                          Modell
+                          <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                  :value="reSceneVal(r, sc, 'video_model') || ''"
+                                  @change="reSceneEdit(r, sc, 'video_model', $event.target.value); reengineerSaveScene(r, sc)">
+                            <option value="" x-text="'Kör-standard (' + (r.job?.video_model || 'kling-v3') + ')'"></option>
+                            <template x-for="m in models.video" :key="r.re_id+'-rsm-'+sc.idx+'-'+m.slug">
+                              <option :value="m.slug" :disabled="!m.available"
+                                      x-text="m.label + (m.available ? '' : '  (låst)')"></option>
+                            </template>
+                          </select>
+                        </label>
                         <!-- ONE Kling clip-length field (Hugo 2026-06-17):
                              collapsed the old "Längd (s)" + "→ Kling (auto/
                              manuell)" pair into a single 3–15 s control = the
                              clip length sent to Kling. Empty = auto from the
-                             original scene length (shown as the placeholder). -->
-                        <label class="flex items-center gap-1"
-                               :title="'Klipplängden (s) som skickas till Kling, 3–15. Tomt = auto från originalscenens längd (' + klingDuration(r, sc) + ' s).'">
-                          Kling-längd (s)
-                          <input type="number" min="3" max="15" step="1"
-                                 class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
-                                 :placeholder="klingDuration(r, sc)"
-                                 :value="reSceneVal(r, sc, 'kling_secs') || ''"
-                                 @input="reSceneEdit(r, sc, 'kling_secs', $event.target.value)"
-                                 @change="reengineerSaveScene(r, sc)" />
-                          <span class="text-neutral-400 dark:text-neutral-500"
-                                x-show="!reSceneVal(r, sc, 'kling_secs')">(auto)</span>
-                        </label>
+                             original scene length (shown as the placeholder).
+                             Kling-v3 scenes only. -->
+                        <template x-if="reSceneEffModel(r, sc) === 'kling-v3'">
+                          <label class="flex items-center gap-1"
+                                 :title="'Klipplängden (s) som skickas till Kling, 3–15. Tomt = auto från originalscenens längd (' + klingDuration(r, sc) + ' s).'">
+                            Kling-längd (s)
+                            <input type="number" min="3" max="15" step="1"
+                                   class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                   :placeholder="klingDuration(r, sc)"
+                                   :value="reSceneVal(r, sc, 'kling_secs') || ''"
+                                   @input="reSceneEdit(r, sc, 'kling_secs', $event.target.value)"
+                                   @change="reengineerSaveScene(r, sc)" />
+                            <span class="text-neutral-400 dark:text-neutral-500"
+                                  x-show="!reSceneVal(r, sc, 'kling_secs')">(auto)</span>
+                          </label>
+                        </template>
+                        <!-- Non-Kling: that model's own duration options. -->
+                        <template x-if="reSceneEffModel(r, sc) !== 'kling-v3'">
+                          <label class="flex items-center gap-1" title="Kliplängd (s) för vald modell">
+                            Längd (s)
+                            <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                    :value="reSceneDuration(r, sc)"
+                                    @change="reSceneEdit(r, sc, 'kling_secs', $event.target.value); reengineerSaveScene(r, sc)">
+                              <template x-for="n in reSceneDurationSpec(r, sc).options" :key="r.re_id+'-rsd-'+sc.idx+'-'+n">
+                                <option :value="n" x-text="n + 's'"></option>
+                              </template>
+                            </select>
+                          </label>
+                        </template>
                         <!-- Dialogue-vs-clip-length hint (the auto length no
                              longer extends for speech — user's call): -->
-                        <span x-show="klingSpeechSecs(r, sc) > klingDuration(r, sc)"
+                        <span x-show="reSceneEffModel(r, sc) === 'kling-v3' && klingSpeechSecs(r, sc) > klingDuration(r, sc)"
                               class="text-amber-500 cursor-help"
                               :title="'Repliken behöver ca ' + Math.ceil(klingSpeechSecs(r, sc)) + ' s för att hinna sägas, men klippet är ' + klingDuration(r, sc) + ' s — höj Kling-fältet om slutet klipps.'"
                               x-text="'⚠ replik ~' + Math.ceil(klingSpeechSecs(r, sc)) + 's'"></span>
@@ -1844,7 +1892,7 @@
                        swapped into it → the scene's Kling 3.0 clip
                        interpolates start → end. NOT a new scene. Only
                        kling-v3 honors it. -->
-                  <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && (r.job?.video_model || 'kling-v3') === 'kling-v3'"
+                  <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && reSceneEffModel(r, sc) === 'kling-v3'"
                        class="flex gap-2 mt-1 flex-wrap items-center text-[10px]">
                     <template x-if="!reSceneEndFrameUrl(r, sc)">
                       <label class="text-indigo-500 hover:underline cursor-pointer"

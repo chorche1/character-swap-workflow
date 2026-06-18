@@ -391,8 +391,10 @@ def test_gate_coverage_preview_wired(backlog_32=None):
     assert "reGateCoverage(r)" in js
     for field in ("approved", "total", "secs", "missing"):
         assert field in js.split("reGateCoverage(r)")[1][:1400]
-    # Billing math rides on the SAME klingDuration mirror the gate shows.
-    assert "this.klingDuration(r, sc)" in js.split("reGateCoverage(r)")[1][:1400]
+    # Billing math rides on the SAME model-aware duration the gate shows
+    # (reSceneDuration delegates to klingDuration for Kling-v3 scenes and to
+    # the per-scene model's own options when a clip overrides the provider).
+    assert "this.reSceneDuration(r, sc)" in js.split("reGateCoverage(r)")[1][:1400]
     html = (root / "web" / "index.html").read_text(encoding="utf-8")
     assert "reGateCoverage(r).missing" in html
     assert "Kling-sekunder" in html

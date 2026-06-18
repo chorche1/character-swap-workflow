@@ -433,6 +433,11 @@ function studio() {
     // For multiple clips from one image, duplicate the scene (Arrange panel).
     movementByScene: {},
     durationByScene: {},
+    // Per-SCENE video-model override (scene_id → slug). Opt-in: "" / missing →
+    // the job-wide swapVideoModel. Ephemeral like movementByScene/
+    // durationByScene (cleared on form-reset, not persisted to the job), sent
+    // as `video_models_by_scene` on submit. Lets one job mix providers.
+    swapVideoModelsByScene: {},
     editingVariant: null,    // {char_id, variant_id}
     editPrompt: '',
     editingTitle: false,
@@ -2048,6 +2053,36 @@ function studio() {
       return Math.max(3, Math.min(15, Math.floor(dur) + 2));
     },
 
+    // --- Per-scene video model (Reengineer opt-in override) -----------------
+
+    // Effective model for a Reengineer scene: per-scene override, else the run
+    // default (job.video_model), else kling-v3. Mirror of _scene_video_model.
+    reSceneEffModel(run, sc) {
+      return this.reSceneVal(run, sc, 'video_model')
+        || run.job?.video_model || 'kling-v3';
+    },
+
+    // Duration options for a NON-Kling scene's effective model.
+    reSceneDurationSpec(run, sc) {
+      const slug = this.reSceneEffModel(run, sc);
+      const m = (this.models.video || []).find(x => x.slug === slug);
+      if (m && m.duration_options && m.duration_options.length) {
+        return { options: m.duration_options, default: m.duration_default || m.duration_options[0] };
+      }
+      return { options: [5], default: 5 };
+    },
+
+    // Whole-second clip length, model-aware. Kling keeps the exact auto/
+    // override behavior; other models use their own options (mirror of
+    // _scene_duration). Used for the cost preview + the non-Kling length select.
+    reSceneDuration(run, sc) {
+      if (this.reSceneEffModel(run, sc) === 'kling-v3') return this.klingDuration(run, sc);
+      const spec = this.reSceneDurationSpec(run, sc);
+      const override = Number(this.reSceneVal(run, sc, 'kling_secs')) || 0;
+      if (override && spec.options.includes(override)) return override;
+      return spec.default;
+    },
+
     // Seconds the dialogue needs to be spoken (words / 2.2 + 1.0 — mirror
     // of _speech_secs). HINT only: shown as ⚠ at the gate when it exceeds
     // the clip length, so the user can bump the Kling field deliberately.
@@ -2075,7 +2110,7 @@ function studio() {
                                 ...(jc.approved_variant_id ? [jc.approved_variant_id] : [])]);
           const ok = (jc.images || []).some(v =>
             appr.has(v.variant_id) && (v.scene_id || firstSid) === sc.scene_id);
-          if (ok) { approved += 1; secs += this.klingDuration(r, sc); }
+          if (ok) { approved += 1; secs += this.reSceneDuration(r, sc); }
           else missing.push((jc.name || jc.char_id) + ' × scen ' + (sc.idx + 1));
         }
       }
@@ -2127,6 +2162,10 @@ function studio() {
       if (draft.kling_secs !== undefined
           && Number(draft.kling_secs || 0) !== (sc.kling_secs || 0)) {
         body.kling_secs = Number(draft.kling_secs) || 0;   // 0 = clear → auto
+      }
+      if (draft.video_model !== undefined
+          && (draft.video_model || '') !== (sc.video_model || '')) {
+        body.video_model = draft.video_model || '';   // '' = clear → run default
       }
       if (!Object.keys(body).length) {
         const { [key]: _, ...rest } = this.reSceneDrafts;
@@ -5919,11 +5958,15 @@ function studio() {
       const scenes = this.scenesNeedingMovementPrompts();
       const prompts = {};
       const durationsByScene = {};
-      const defaultDur = this.videoDurationSpec().default;
+      const modelsByScene = {};
       for (const sc of scenes) {
         const t = (this.movementByScene[sc.scene_id] || '').trim();
         if (t) prompts[sc.scene_id] = t;
-        durationsByScene[sc.scene_id] = this.durationByScene[sc.scene_id] || defaultDur;
+        // Default each scene's duration to ITS effective model's default.
+        durationsByScene[sc.scene_id] = this.durationByScene[sc.scene_id]
+          || this.sceneVideoDurationSpec(sc).default;
+        const m = this.swapVideoModelsByScene[sc.scene_id];
+        if (m) modelsByScene[sc.scene_id] = m;   // "" = same as job → omit
       }
       const missing = scenes.filter(sc => !prompts[sc.scene_id]);
       if (missing.length) {
@@ -5936,6 +5979,7 @@ function studio() {
         body: JSON.stringify({
           movement_prompts: prompts,
           durations_by_scene: durationsByScene,
+          video_models_by_scene: modelsByScene,
           videos_per_character: this.videosPerChar,
           video_model: this.swapVideoModel || 'kling-v3',
         }),
@@ -5961,15 +6005,18 @@ function studio() {
       return null;
     },
 
-    // Copy scene 1's prompt + duration onto every scene.
+    // Copy scene 1's prompt + duration + model override onto every scene.
     applyFirstMovementToAll() {
       const scenes = this.scenesNeedingMovementPrompts();
       if (!scenes.length) return;
       const first = scenes[0].scene_id;
       const prompt = this.movementByScene[first] || '';
-      const dur = this.durationByScene[first] || this.videoDurationSpec().default;
+      const model = this.swapVideoModelsByScene[first] || '';
+      const dur = this.durationByScene[first]
+        || this.sceneVideoDurationSpec(scenes[0]).default;
       for (const sc of scenes) {
         this.movementByScene[sc.scene_id] = prompt;
+        this.swapVideoModelsByScene[sc.scene_id] = model;
         this.durationByScene[sc.scene_id] = dur;
       }
     },
@@ -6515,6 +6562,43 @@ function studio() {
       this.swapDurationSecs = spec.default;
     },
 
+    // --- Per-SCENE video-model override (Step-4 opt-in) ---------------------
+
+    // Effective model for a scene: its override, else the job-wide pick.
+    sceneVideoModel(scene) {
+      const sid = scene?.scene_id;
+      return (sid && this.swapVideoModelsByScene[sid])
+        || this.swapVideoModel || 'kling-v3';
+    },
+
+    // The registry entry for a scene's effective model (stub before load).
+    sceneVideoModelEntry(scene) {
+      const slug = this.sceneVideoModel(scene);
+      return (this.models.video || []).find(m => m.slug === slug)
+        || { slug, label: slug, available: true };
+    },
+
+    // Duration spec gated to the SCENE's effective model — so a scene
+    // overridden to e.g. Veo (4/6/8s) shows that model's options, not the
+    // job model's. Falls back to [5] before models load.
+    sceneVideoDurationSpec(scene) {
+      const m = this.sceneVideoModelEntry(scene);
+      if (m.duration_options && m.duration_options.length) {
+        return { options: m.duration_options, default: m.duration_default || m.duration_options[0] };
+      }
+      return { options: [5], default: 5 };
+    },
+
+    // When a scene's model changes, snap its duration to a value the new
+    // model accepts (keep the old pick if still valid).
+    onSceneVideoModelChange(scene) {
+      const sid = scene?.scene_id;
+      if (!sid) return;
+      const spec = this.sceneVideoDurationSpec(scene);
+      const cur = this.durationByScene[sid];
+      if (!cur || !spec.options.includes(cur)) this.durationByScene[sid] = spec.default;
+    },
+
     openEdit(charId, variantId) {
       // 'edit' mode (ready variant) → spawns a NEW variant from a change prompt.
       this.editingVariant = { char_id: charId, variant_id: variantId, mode: 'edit' };
@@ -6638,6 +6722,9 @@ function studio() {
       this.swapModel = 'gpt2-id-swap';
       this.swapVideoModel = 'kling-v3';
       this.swapDurationSecs = null;
+      this.movementByScene = {};
+      this.durationByScene = {};
+      this.swapVideoModelsByScene = {};
     },
 
     connectWS(jobId) {

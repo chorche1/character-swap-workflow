@@ -881,6 +881,33 @@ def _kling_duration(entry: dict) -> int:
     return _clamp_kling(math.floor(float(entry.get("duration") or 0.0)) + 2.0)
 
 
+def _scene_video_model(entry: dict, state: dict) -> str:
+    """Effective video model for one Reengineer scene entry: the per-scene
+    override if set, else the run default, else kling-v3. The per-scene
+    override is how the user picks a different model for a single clip."""
+    return (entry.get("video_model")
+            or state.get("video_model") or "kling-v3")
+
+
+def _scene_duration(entry: dict, state: dict) -> int:
+    """Whole-second clip length for one scene, model-aware. Kling scenes keep
+    the exact `_kling_duration` auto/override behavior (3–15 s). A scene
+    overridden to a non-Kling model uses that model's own duration options:
+    the user's `kling_secs` field if it is a valid option for that model,
+    else the model's registered default (falling back to the Kling number
+    when the model is unknown)."""
+    model = _scene_video_model(entry, state)
+    if model == "kling-v3":
+        return _kling_duration(entry)
+    info = runner_media.VIDEO_MODELS.get(model) or {}
+    opts = info.get("duration_options") or []
+    override = entry.get("kling_secs")
+    if override and int(round(float(override))) in opts:
+        return int(round(float(override)))
+    default = info.get("duration_default")
+    return int(default) if default else _kling_duration(entry)
+
+
 def _with_accent(prompt: str) -> str:
     """Kling synthesizes voice AND ambience from the prompt — enforce three
     guarantees centrally, even if a scene's agent-written prompt forgot them:
@@ -947,7 +974,8 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
         await _persist_direct(re_id, scene_id, direct_error="direkt bild saknas")
         return
     prompt = _with_accent(entry.get("motion_prompt") or "")
-    dur = _kling_duration(entry)
+    model = _scene_video_model(entry, state)
+    dur = _scene_duration(entry, state)
     dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
     try:
         from character_swap import pipeline
@@ -955,13 +983,13 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
             pipeline.submit_video,
             image=image, movement_prompt=prompt,
             character_name="(delad scen)", job_id=job.job_id,
-            model=job.video_model or "kling-v3",
+            model=model,
             duration_secs=dur, generate_audio=job.video_audio)
         await asyncio.to_thread(
             pipeline.wait_for_video,
             job_id=provider_job_id, character_name="(delad scen)",
             dest=dest, app_job_id=job.job_id,
-            model=job.video_model or "kling-v3")
+            model=model)
         await _persist_direct(re_id, scene_id,
                               shared_clip_path=str(dest), direct_error=None)
         await events.publish(job.job_id, {"kind": "direct.clip.done",
@@ -992,7 +1020,9 @@ async def _do_animate(re_id: str, state: dict) -> None:
 
     movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"])
                         for e in state["scenes"]}
-    durations = {e["scene_id"]: _kling_duration(e) for e in state["scenes"]}
+    durations = {e["scene_id"]: _scene_duration(e, state) for e in state["scenes"]}
+    models_by_scene = {e["scene_id"]: _scene_video_model(e, state)
+                       for e in state["scenes"]}
 
     job.movement_prompts = movement_prompts
     job.movement_prompt = movement_prompts.get(job.scene_ids[0] if job.scene_ids
@@ -1003,6 +1033,9 @@ async def _do_animate(re_id: str, state: dict) -> None:
     job.enriched_movement_prompts = {}
     job.enriched_movement_prompt = None
     job.durations_by_scene = durations
+    # Per-scene model override (opt-in): each scene's clip animates with its
+    # own provider; scenes without an override resolve to job.video_model.
+    job.video_models_by_scene = models_by_scene
     job.videos_per_character = 1
     job.video_model = state.get("video_model") or "kling-v3"
     job.video_audio = True
@@ -1435,19 +1468,24 @@ def _speech_clause(spoken: str) -> str:
 
 def _sync_movement_from_state(job: Job, state: dict,
                               idxs: list[int] | None = None) -> None:
-    """Push edited per-scene prompts/durations from the run state into the
-    underlying job so retry_one_video / generate_more_videos resolve them
-    (they read job.movement_prompts[scene_id] + durations_by_scene)."""
+    """Push edited per-scene prompts/durations/models from the run state into
+    the underlying job so retry_one_video / generate_more_videos resolve them
+    (they read job.movement_prompts[scene_id] + durations_by_scene +
+    video_models_by_scene). Mirrors the same resolution `_do_animate` uses, so
+    a single-clip redo / reanimate honors a per-scene model override instead of
+    silently falling back to the run default."""
     entries = state.get("scenes") or []
     targets = (entries if idxs is None
                else [entries[i] for i in idxs if 0 <= i < len(entries)])
     job.movement_prompts = dict(job.movement_prompts or {})
     job.durations_by_scene = dict(job.durations_by_scene or {})
+    job.video_models_by_scene = dict(job.video_models_by_scene or {})
     enriched = dict(job.enriched_movement_prompts or {})
     for e in targets:
         sid = e["scene_id"]
         job.movement_prompts[sid] = _with_accent(e["motion_prompt"])
-        job.durations_by_scene[sid] = _kling_duration(e)
+        job.durations_by_scene[sid] = _scene_duration(e, state)
+        job.video_models_by_scene[sid] = _scene_video_model(e, state)
         # Drop any enriched/Director layer for the synced scene — it outranks
         # movement_prompts in the resolver, and the edited text the user SEES
         # must be exactly what the redo clip gets.

@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     # whole downstream chain targets a 1080-px short edge, and standard-tier
     # 720p clips were being upscaled 1.5× into fake 1080p finals.
     kling_v3_tier: str = Field(default="pro", validation_alias="KLING_V3_TIER")
+    # fal Veo 3.1 Fast (image-to-video) render resolution: "720p" / "1080p" /
+    # "4k". Default 1080p (Hugo 2026-06-18 — quality parity with kling_v3_tier=
+    # pro so clips from different models in one reel share sharpness); 720p is
+    # fal's own default (cheaper/faster). fal-routed Veo bills on FAL_API_KEY.
+    veo_fal_resolution: str = Field(default="1080p", validation_alias="VEO_FAL_RESOLUTION")
     # Local ffmpeg encode quality for EVERY intermediate/final re-encode in
     # video_edit.py (trims, concat, time-stretch, ASS caption burn). A clip
     # passes through 2-4 of these generations, so per-generation loss

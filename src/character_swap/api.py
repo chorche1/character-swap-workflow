@@ -1888,6 +1888,11 @@ class MovementBody(BaseModel):
     # the Step-4 picker in web/index.html sends this field so the user can pick
     # Kling / Veo / Runway / Luma / Pika / etc. for the swap flow too.
     video_model: str = "grok-imagine"
+    # Per-SCENE video-model override: scene_id → model slug. Opt-in — scenes
+    # without an entry animate with `video_model`. Each override is validated
+    # against the registry + its provider's API key before the job starts, so
+    # a single reel can mix providers (e.g. one Kling 3.0 scene + one Veo scene).
+    video_models_by_scene: dict[str, str] | None = None
     # Per-job duration override (seconds). When None, runner falls back to
     # `settings.video_duration_secs`. The UI's duration dropdown is gated by
     # each model's `duration_options` registry — so any value here that
@@ -1909,7 +1914,49 @@ _VIDEO_MODEL_KEYS: dict[str, str] = {
     "kling-2.1-pro": "kling",
     "kling-1.6": "kling",
     "kling-v3": "fal",   # Kling 3.0 routes through fal.ai, not the official Kling API
+    "veo-3.1-fast": "fal",  # Veo 3.1 Fast also routes through fal.ai
 }
+
+
+def _require_video_model_available(slug: str) -> None:
+    """Refuse upfront (422) if a chosen video model is unknown or its provider
+    key isn't configured — surfaces the locked-model error before kicking off
+    submits that would all fail with the same auth error. Resolves the provider
+    from the full registry (settings.has_provider correctly handles Kling's two
+    keys and the fal-hosted models), so it covers every model the picker offers,
+    not just the seven in `_VIDEO_MODEL_KEYS`."""
+    info = runner_media.VIDEO_MODELS.get(slug)
+    if info is None:
+        raise HTTPException(422, f"Unknown video model '{slug}'")
+    if not settings.has_provider(info["provider"]):
+        raise HTTPException(
+            422, f"{info['label']} is locked — add its API key in .env to use it.")
+
+
+def _clamp_scene_secs(model: str, secs: float) -> float:
+    """Snap a manual clip-length to what `model` accepts. Kling 3.0 takes any
+    whole second in [3,15]; every other model takes only its registered
+    `duration_options` — snap to the NEAREST so a longer pick (Sora-2 20s,
+    Higgsfield-Speak 30s) isn't silently clamped down to Kling's 15s ceiling."""
+    if model == "kling-v3":
+        return max(3.0, min(15.0, secs))
+    opts = (runner_media.VIDEO_MODELS.get(model, {}).get("duration_options")
+            or [int(max(3.0, min(15.0, secs)))])
+    return float(min(opts, key=lambda o: abs(o - secs)))
+
+
+def _preflight_video_keys(models) -> None:
+    """Require the API key for each provider in `models` — the effective
+    per-scene models of the clips about to be (re)submitted — so a locked
+    provider 422s upfront instead of silently 401-ing on the worker thread.
+    Keeps the existing `_VIDEO_MODEL_KEYS` leniency: models not in the map
+    (e.g. sora-2) aren't pre-checked, exactly as before. The point vs. the old
+    `job.video_model`-only check is that a per-scene override may point a
+    retried clip at a DIFFERENT provider than the job default."""
+    for m in models:
+        key_name = _VIDEO_MODEL_KEYS.get(m)
+        if key_name:
+            settings.require_keys(key_name)
 
 
 @app.post("/api/jobs/{job_id}/movement")
@@ -1923,9 +1970,14 @@ async def set_movement(job_id: str, body: MovementBody,
     sending a single `prompt` get it broadcast to every scene-with-approvals
     (1-scene jobs collapse to the historical behavior).
     """
-    key_name = _VIDEO_MODEL_KEYS.get(body.video_model)
-    if key_name:
-        settings.require_keys(key_name)
+    # Per-scene model overrides (opt-in). Drop blank values ("" = "same as
+    # job"). Validate the job default AND every distinct override upfront so a
+    # locked provider fails loudly before any submit fires.
+    models_by_scene_req = {sid: m.strip()
+                           for sid, m in (body.video_models_by_scene or {}).items()
+                           if (m or "").strip()}
+    for slug in {body.video_model or "grok-imagine", *models_by_scene_req.values()}:
+        _require_video_model_available(slug)
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -2006,13 +2058,22 @@ async def set_movement(job_id: str, body: MovementBody,
             f"that have approved images: {sorted(missing)}",
         )
 
-    # Per-scene durations (scene_id → secs), validated against the model's
-    # options. Scenes without approvals are ignored.
+    # Per-scene video-model overrides, restricted to scenes that have approvals
+    # (mirrors durations_by_scene). The runner resolves: per-scene → job default.
+    models_by_scene = {sid: m for sid, m in models_by_scene_req.items()
+                       if sid in scenes_with_approvals}
+
+    # Per-scene durations (scene_id → secs), validated against THAT scene's
+    # effective model's options (a non-Kling scene has different valid lengths
+    # than the job default). Scenes without approvals are ignored.
     durations_by_scene: dict[str, int] = {}
     if body.durations_by_scene:
-        spec = runner_media.video_duration_spec(body.video_model or "grok-imagine")
         for sid, d in body.durations_by_scene.items():
-            if sid in scenes_with_approvals and int(d) in spec["options"]:
+            if sid not in scenes_with_approvals:
+                continue
+            eff_model = models_by_scene.get(sid) or (body.video_model or "grok-imagine")
+            spec = runner_media.video_duration_spec(eff_model)
+            if int(d) in spec["options"]:
                 durations_by_scene[sid] = int(d)
 
     job.movement_prompts = prompts
@@ -2021,6 +2082,7 @@ async def set_movement(job_id: str, body: MovementBody,
     job.movement_prompts_by_variant = by_variant
     job.durations_by_variant = durations_by_variant
     job.durations_by_scene = durations_by_scene
+    job.video_models_by_scene = models_by_scene
     # Keep singular field in sync (first scene with a prompt) so legacy
     # `if job.movement_prompt:` lock checks stay truthy.
     job.movement_prompt = (
@@ -2585,22 +2647,30 @@ async def generate_more_videos(job_id: str, body: GenerateMoreVideosBody,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
-    if key_name:
-        settings.require_keys(key_name)
     if not job.movement_prompt:
         raise HTTPException(409, "Job has no movement prompt yet — submit Step 4 first")
     jc = job.characters.get(body.char_id)
     if jc is None:
         raise HTTPException(404, "Character not in job")
-    if not (jc.approved_variant_ids or jc.approved_variant_id):
+    approved = list(jc.approved_variant_ids or [])
+    if jc.approved_variant_id and jc.approved_variant_id not in approved:
+        approved.append(jc.approved_variant_id)
+    if not approved:
         raise HTTPException(409, "Character has no approved variant to animate")
     if body.source_variant_id is not None:
-        approved = set(jc.approved_variant_ids or [])
-        if jc.approved_variant_id:
-            approved.add(jc.approved_variant_id)
         if body.source_variant_id not in approved:
             raise HTTPException(404, "source_variant_id is not an approved variant")
+        in_scope = [body.source_variant_id]
+    else:
+        in_scope = approved
+    # Pre-flight the providers these clips will actually submit under (per-scene
+    # override → job default), not just job.video_model.
+    _models = {
+        runner._eff_video_model_for_scene(
+            job, next((g.scene_id for g in jc.images if g.variant_id == vid), None))
+        for vid in in_scope
+    }
+    _preflight_video_keys(_models or {job.video_model or "grok-imagine"})
     background.add_task(
         _run_async, runner.generate_more_videos,
         job_id, body.char_id, body.n,
@@ -2617,11 +2687,6 @@ async def retry_video(job_id: str, body: RetryVideoBody,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    # Whichever provider the job is configured for must have its key set —
-    # otherwise the retry would silently 401 on the worker thread.
-    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
-    if key_name:
-        settings.require_keys(key_name)
     if not job.movement_prompt:
         raise HTTPException(409, "Job has no movement prompt yet")
     jc = job.characters.get(body.char_id)
@@ -2630,6 +2695,10 @@ async def retry_video(job_id: str, body: RetryVideoBody,
     target = next((v for v in jc.videos if v.video_id == body.video_id), None)
     if target is None:
         raise HTTPException(404, "Video not found on this character")
+    # The clip's key must be set — and for the provider THIS clip resubmits
+    # under (its per-scene override), not just the job default — otherwise the
+    # retry would silently 401 on the worker thread.
+    _preflight_video_keys({runner._eff_video_model(job, jc, target)})
     # Allow retry on FAILED/ERROR (classic) AND DONE (Step 5 regen flow —
     # user wants a different take on a successful clip). Block PROCESSING
     # because we'd leak a running provider job.
@@ -2658,20 +2727,20 @@ async def retry_failed_videos(job_id: str, background: BackgroundTasks,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    key_name = _VIDEO_MODEL_KEYS.get(job.video_model or "grok-imagine")
-    if key_name:
-        settings.require_keys(key_name)
     if not job.movement_prompt:
         raise HTTPException(409, "Job has no movement prompt yet")
     char_id = body.char_id if body else None
     failed = [
-        v for cid, jc in job.characters.items()
+        (jc, v) for cid, jc in job.characters.items()
         if char_id is None or cid == char_id
         for v in jc.videos
         if v.status in {VideoStatus.FAILED, VideoStatus.ERROR}
     ]
     if not failed:
         raise HTTPException(409, "No failed videos to retry")
+    # Pre-flight the providers the failed clips resubmit under (per-scene
+    # override → job default), not just job.video_model.
+    _preflight_video_keys({runner._eff_video_model(job, jc, v) for jc, v in failed})
     background.add_task(_run_async, runner.retry_failed_videos, job_id, char_id)
     return _job_to_dict(job)
 
@@ -5101,6 +5170,11 @@ class ReSceneEditBody(BaseModel):
     # fitted auto duration outright. 0 (or negative) clears the override
     # back to auto.
     kling_secs: float | None = None
+    # Per-scene video-model override (Hugo 2026-06-18): pick a different
+    # provider for THIS scene's clip. "" / "same" clears it → run default
+    # (kling-v3). A real slug is validated against the registry. Non-Kling
+    # scenes lose End-frame interpolation + Kling auto-length (soft degrade).
+    video_model: str | None = None
     # Explicit dirty mark — the frontend sets it after approve-swaps /
     # variant-regens on an already-animated scene (new image ≠ old clip).
     dirty: bool | None = None
@@ -5126,11 +5200,29 @@ async def reengineer_edit_scene(re_id: str, idx: int, body: ReSceneEditBody) -> 
         if dur != entry.get("duration"):
             entry["duration"] = dur
             changed = True
+    # Apply the model override FIRST so the clip-length clamp below uses the
+    # effective model that will actually animate this scene (model + length can
+    # change in the same PATCH).
+    if body.video_model is not None:
+        slug = body.video_model.strip()
+        if slug in ("", "same"):                       # clear → run default
+            changed = entry.pop("video_model", None) is not None or changed
+        elif slug not in runner_media.VIDEO_MODELS:
+            raise HTTPException(422, f"Unknown video model '{slug}'")
+        elif slug != entry.get("video_model"):
+            entry["video_model"] = slug
+            changed = True
     if body.kling_secs is not None:
         if body.kling_secs <= 0:                      # clear → back to auto
             changed = entry.pop("kling_secs", None) is not None or changed
         else:
-            ks = max(3.0, min(15.0, float(body.kling_secs)))
+            # Model-aware clip-length clamp. Kling 3.0 takes any whole second in
+            # [3,15]; a non-Kling model only its registered options — snap to
+            # the nearest so a Sora-2 20s / Higgsfield-Speak 30s pick is NOT
+            # silently lowered to 15 (the old hardcoded [3,15] clamp did that).
+            eff_model = (entry.get("video_model")
+                         or state.get("video_model") or "kling-v3")
+            ks = _clamp_scene_secs(eff_model, float(body.kling_secs))
             if ks != entry.get("kling_secs"):
                 entry["kling_secs"] = ks
                 changed = True

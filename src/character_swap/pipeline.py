@@ -672,6 +672,18 @@ def submit_video(
             duration_secs=effective_dur,
             app_job_id=job_id,
         )
+    if model == "veo-3.1-fast":
+        # Veo 3.1 Fast routed through fal.ai (the Gemini path only carries Veo
+        # 3 / Veo 3 Fast). Native audio defaults ON (Veo's own default); a
+        # per-call override (Reengineer sets True) still wins.
+        from character_swap.clients import fal_veo
+        return fal_veo.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur,
+            aspect_ratio=effective_ar,
+            generate_audio=generate_audio if generate_audio is not None else True,
+            app_job_id=job_id,
+        )
     if model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         return kling.submit_kling(
             image=image, prompt=movement_prompt,
@@ -797,6 +809,9 @@ def wait_for_video(
         fal_kling.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
     elif model in {"veo", "veo-3-fast"}:
         google_genai.wait_for_veo(op_id=job_id, dest=dest)
+    elif model == "veo-3.1-fast":
+        from character_swap.clients import fal_veo
+        fal_veo.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
     elif model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         kling.wait_for_kling(task_id=job_id, dest=dest)
     elif model in {"runway-gen4", "runway-gen3-alpha"}:
