@@ -79,9 +79,20 @@ def clamp_duration(duration_secs: int | None) -> int:
     return min(_ALLOWED_DURATIONS, key=lambda v: abs(v - d))
 
 
-def _resolution() -> str:
+def _resolution(dur: int | None = None) -> str:
+    """Effective render resolution. fal's Veo 3.1 Fast only accepts 1080p (and
+    4k) at duration=8s — for 4s/6s clips it rejects anything above 720p with a
+    `value_error` ("1080p resolution is only supported with a duration of 8s").
+    Reengineer clip length is dictated by the scene, so we can't force 8s;
+    instead we downgrade to 720p for sub-8s clips so the clip RENDERS at 720p
+    instead of failing outright (Hugo 2026-06-19). 8s clips keep the configured
+    VEO_FAL_RESOLUTION (1080p by default)."""
     r = (settings.veo_fal_resolution or "1080p").strip().lower()
-    return r if r in _ALLOWED_RESOLUTIONS else "1080p"
+    if r not in _ALLOWED_RESOLUTIONS:
+        r = "1080p"
+    if dur is not None and dur != 8 and r in ("1080p", "4k"):
+        return "720p"
+    return r
 
 
 def _aspect_ratio(aspect_ratio: str | None) -> str:
@@ -125,7 +136,7 @@ def submit_image_to_video(
             "prompt": (prompt or "")[:2500],
             "duration": f"{dur}s",          # fal expects the enum as "<n>s"
             "aspect_ratio": _aspect_ratio(aspect_ratio),
-            "resolution": _resolution(),
+            "resolution": _resolution(dur),
             "generate_audio": generate_audio,
         }
         # Reuse the shared talking-head negative set (empty → field omitted).

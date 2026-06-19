@@ -42,6 +42,23 @@ def test_resolution_defaults_and_clamps(monkeypatch):
     assert fal_veo._resolution() == "1080p"   # invalid → default
 
 
+def test_resolution_downgrades_above_720p_for_sub_8s(monkeypatch):
+    """Regression: fal's Veo 3.1 Fast rejects 1080p/4k at 4s/6s with
+    "value_error, 1080p resolution is only supported with a duration of 8s",
+    so EVERY sub-8s clip failed. _resolution(dur) must downgrade 1080p/4k to
+    720p for non-8s clips while keeping the configured res at 8s."""
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "1080p")
+    assert fal_veo._resolution(8) == "1080p"   # 8s keeps configured res
+    assert fal_veo._resolution(6) == "720p"    # sub-8s → forced down
+    assert fal_veo._resolution(4) == "720p"
+    assert fal_veo._resolution(None) == "1080p"  # legacy/no-duration unchanged
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "4k")
+    assert fal_veo._resolution(8) == "4k"
+    assert fal_veo._resolution(6) == "720p"
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "720p")
+    assert fal_veo._resolution(4) == "720p"    # already 720p → stays
+
+
 def test_aspect_ratio_passthrough_else_auto():
     assert fal_veo._aspect_ratio("9:16") == "9:16"
     assert fal_veo._aspect_ratio("16:9") == "16:9"
@@ -133,3 +150,35 @@ def test_submit_builds_fal_arguments(monkeypatch):
     assert args["resolution"] == "1080p"
     assert args["aspect_ratio"] == "9:16"
     assert args["generate_audio"] is True
+
+
+def test_submit_downgrades_resolution_for_short_clip(monkeypatch):
+    """At the submit boundary: a sub-8s clip with VEO_FAL_RESOLUTION=1080p must
+    send resolution '720p' so fal accepts it (regression for the 10/20 failed
+    Veo clips in re_d2c6425f15)."""
+    captured = {}
+
+    class _Handler:
+        request_id = "rid6"
+
+    class _FakeFal:
+        Completed = object
+        @staticmethod
+        def upload_file(p):
+            return "https://fal.media/u.png"
+        @staticmethod
+        def submit(endpoint, arguments):
+            captured["arguments"] = arguments
+            return _Handler()
+
+    monkeypatch.setattr(fal_veo, "_client", lambda: _FakeFal)
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "1080p")
+
+    fal_veo.submit_image_to_video(
+        image=Path("/frame.png"), prompt="x", duration_secs=5,  # clamps to 4s
+        aspect_ratio="9:16", generate_audio=True,
+    )
+    args = captured["arguments"]
+    assert args["duration"] == "4s"
+    assert args["resolution"] == "720p"      # downgraded from 1080p for sub-8s
