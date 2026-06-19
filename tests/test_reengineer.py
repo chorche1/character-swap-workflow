@@ -329,14 +329,10 @@ def test_update_clears_error_on_non_failed_status(tmp_path, monkeypatch):
     assert reengineer.load_state("re_e")["error"] == "boom"
 
 
-def test_pre_v2_finals_rebuild_hint_in_ui():
-    """Backlog #38: finals built by the old assemble (no edit_id — the
-    duration-cap era with truncated dialogue) must surface a rebuild hint."""
-    from pathlib import Path
-    html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-        encoding="utf-8")
-    assert "f.status === 'done' && !f.edit_id" in html
-    assert "Bygg ihop igen" in html
+# Backlog #38's amber "pre-v2 finals were built by the old pipeline" rebuild
+# HINT was removed from the gate UI at Hugo's request (2026-06-19, along with
+# the end-pose / analyst-fallback / cross-scene-consistency disclaimers). The
+# rebuild path itself ("▶ Bygg ihop igen") is unchanged — only the banner is gone.
 
 
 # --- scene boundaries snap to word gaps (backlog #31, 2026-06-12) ------------

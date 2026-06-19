@@ -730,15 +730,6 @@
           Job default — model &amp; duration can be overridden per scene below.
         </span>
       </div>
-      <!-- End-frame / Kling-3.0 guard: end poses only animate with Kling 3.0.
-           Warn (non-blocking) + one-click switch when a different model is
-           picked while end poses are set. -->
-      <div x-show="anyEndPoseSet() && swapVideoModel !== 'kling-v3' && !job?.movement_prompt"
-           class="mb-3 text-xs px-3 py-2 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-900 flex items-center gap-2 flex-wrap">
-        <span>⚠ You set an <strong>end pose</strong>, but only <strong>Kling 3.0</strong> interpolates start→end. Other models ignore it.</span>
-        <button class="px-2 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-medium"
-                @click="swapVideoModel = 'kling-v3'; syncDurationToModel()">Switch to Kling 3.0</button>
-      </div>
       <div x-show="job?.movement_prompt" class="text-xs text-neutral-500 dark:text-neutral-500 mb-3">
         <span class="text-neutral-400 dark:text-neutral-500">Video model:</span>
         <span x-text="job?.video_model || 'grok-imagine'"></span> ·
@@ -1539,24 +1530,6 @@
           </div>
           <div x-show="r.error" class="text-xs px-3 py-2 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
                x-text="r.error"></div>
-          <!-- AI-analyst failure is never silent (backlog #23): generic
-               fallback prompts need human review before any Kling spend. -->
-          <div x-show="r.analyst_fallback"
-               class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300">
-            ⚠ AI-analysen misslyckades — motion-prompterna nedan är generiska
-            fallbacks (dialogen är korrekt från Whisper). Granska och redigera
-            dem innan du animerar.
-          </div>
-          <!-- Cross-scene consistency annotation (backlog #13): each image
-               passed solo QC, but wardrobe can wobble BETWEEN scenes. -->
-          <div x-show="r.consistency_warnings && Object.keys(r.consistency_warnings).length"
-               class="text-xs px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
-               x-text="'⚠ Konsistens mellan scener: ' +
-                 Object.entries(r.consistency_warnings || {}).flatMap(([cid, issues]) =>
-                   issues.map(i => (r.job?.characters?.[cid]?.name || cid) +
-                     ' (scen ' + i.scene_id + '): ' + i.issue)
-                 ).join(' · ') + ' — välj en annan variant eller regenerera innan du animerar.'">
-          </div>
 
           <!-- scene plan + approval strip -->
           <div x-show="(r.scenes || []).length" class="space-y-3">
@@ -2193,15 +2166,6 @@
           <!-- finals -->
           <div x-show="Object.keys(r.finals || {}).length" class="border-t border-neutral-100 dark:border-neutral-900 pt-3">
             <div class="text-sm font-medium mb-2">Final videos</div>
-            <!-- Pre-v2 finals lack edit_id (built by the old assemble that
-                 hard-capped clips to scene length → truncated dialogue).
-                 Backlog #38: flag them so a rebuild is one click away. -->
-            <div x-show="Object.values(r.finals || {}).some(f => f.status === 'done' && !f.edit_id)"
-                 class="text-xs px-3 py-2 mb-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300">
-              ⚠ Dessa finals byggdes med den gamla pipelinen (repliker kan vara
-              kapade). Klipp­filerna på disk är kompletta — "✎ Redigera" → "▶
-              Bygg ihop igen" ger talkompletta finals utan ny Kling-kostnad.
-            </div>
             <div class="flex gap-4 flex-wrap">
               <template x-for="[cid, f] of Object.entries(r.finals || {})" :key="r.re_id+'-f-'+cid">
                 <div class="w-44">

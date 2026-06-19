@@ -101,8 +101,7 @@ def test_consistency_warnings_per_character(monkeypatch, tmp_path):
     assert [sid for sid, _ in captured["variants"]] == ["s1", "s2"]
 
 
-def test_consistency_ui_banner_wired():
-    html = (Path(__file__).resolve().parents[1] / "web" /
-            "index.html").read_text(encoding="utf-8")
-    assert "r.consistency_warnings" in html
-    assert "Konsistens mellan scener" in html
+# The amber cross-scene-consistency BANNER was removed from the gate UI at
+# Hugo's request (2026-06-19, along with the end-pose / analyst-fallback /
+# old-pipeline disclaimers). The backend still computes consistency_warnings
+# (test above); there is just no banner to assert anymore.
