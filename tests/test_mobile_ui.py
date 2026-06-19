@@ -68,3 +68,18 @@ def test_motion_and_length_fields_use_x_model(_=None):
     assert ":value=\"movementByScene[scene.scene_id] || ''\"" not in _HTML
     # The lazily-seeded draft helper x-model binds against.
     assert "reSceneDraft(run, sc) {" in _JS
+
+
+def test_upload_submits_surface_network_errors(_=None):
+    # Hugo 2026-06-19: a reengineer video upload from the phone "loaded then
+    # stopped, no result at all". fetch() THROWS (not just !r.ok) when an upload
+    # is cut off mid-flight (mobile/Tailscale) — and the submit handlers had a
+    # try/finally with NO catch, so the failure was swallowed: spinner stops,
+    # no run, no error. Every upload submit must route a catch through the
+    # shared _submitError helper so the failure is LOUD.
+    assert "_submitError(label, e) {" in _JS
+    # reengineer (reported) + from_images + broll + audio + avatar×2 + image +
+    # video = 8 upload submits, each with a catch.
+    assert _JS.count("this._submitError(") >= 8
+    # The exact reported path must be covered.
+    assert "this._submitError('Reengineer', e)" in _JS

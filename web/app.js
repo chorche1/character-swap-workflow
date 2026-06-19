@@ -1365,6 +1365,8 @@ function studio() {
         // Preserve sourceAudio + script so users can iterate (tweak script
         // for TTS, or A/B different voices for VC). Use clearAudioForm()
         // to start fresh.
+      } catch (e) {
+        this._submitError('Ljud', e);
       } finally {
         this.audioGen.generating = false;
       }
@@ -1404,6 +1406,8 @@ function studio() {
         this.brollGen.source = null;
         this.notifyInfo(`B-roll queued (${job.broll_id}) — polling for progress`);
         this._startBrollPolling();
+      } catch (e) {
+        this._submitError('B-roll', e);
       } finally {
         this.brollGen.submitting = false;
       }
@@ -1465,6 +1469,18 @@ function studio() {
       if (i >= 0) ids.splice(i, 1); else ids.push(cid);
     },
 
+    // Surface a dropped/interrupted submit. fetch() THROWS (vs returning an
+    // HTTP !ok) when the request is cut off mid-flight — common on mobile over
+    // Tailscale when a large upload is interrupted or the page is backgrounded.
+    // Without a catch the spinner just stops and the user gets NOTHING (no run,
+    // no error) — exactly the "laddade och slutade, inget resultat" report
+    // (Hugo 2026-06-19). Every upload submit routes its catch through here.
+    _submitError(label, e) {
+      this.notifyError(label + ': anslutningen bröts under sändning '
+        + '(nätverk/uppladdning avbruten) — försök igen.');
+      console.warn(label + ' submit failed:', e);
+    },
+
     async submitReengineer() {
       const g = this.reengineerGen;
       if (!g.file || !g.charIds.length || g.submitting) return;
@@ -1500,6 +1516,8 @@ function studio() {
         this._startReengineerPolling();
         // Keep the form: Hugo iterates. Only the file is consumed.
         g.file = null; g.name = '';
+      } catch (e) {
+        this._submitError('Reengineer', e);
       } finally {
         g.submitting = false;
       }
@@ -1614,6 +1632,8 @@ function studio() {
         // Keep the settings (Hugo iterates); clear the consumed image rows.
         for (const row of g.rows) if (row.previewUrl) URL.revokeObjectURL(row.previewUrl);
         g.rows = [];
+      } catch (e) {
+        this._submitError('Swap', e);
       } finally {
         g.submitting = false;
       }
@@ -4379,6 +4399,8 @@ function studio() {
         this.avatarHistory = [gen, ...this.avatarHistory];
         this.notifyInfo('Avatar video queued — see the Avatar tab');
         this.photoAvatarModal.open = false;
+      } catch (e) {
+        this._submitError('Avatar', e);
       } finally {
         m.submitting = false;
       }
@@ -4409,6 +4431,8 @@ function studio() {
         // Avatar + voice are kept selected (batch-generation friendly).
         // Script preserved so users can iterate. Use clearAvatarForm()
         // to start fresh.
+      } catch (e) {
+        this._submitError('Avatar', e);
       } finally {
         this.avatarGen.generating = false;
       }
@@ -4604,6 +4628,8 @@ function studio() {
         // Form state is intentionally preserved so users can tweak prompt
         // and re-submit without re-uploading refs. Use the "Clear" button
         // or `clearImageForm()` to start fresh.
+      } catch (e) {
+        this._submitError('Bild', e);
       } finally {
         this.imageGen.generating = false;
       }
@@ -4644,6 +4670,8 @@ function studio() {
         this.videoHistory = [gen, ...this.videoHistory];
         // Preserve form so user can tweak the prompt and re-animate the
         // same reference image. Use clearVideoForm() to start fresh.
+      } catch (e) {
+        this._submitError('Video', e);
       } finally {
         this.videoGen.generating = false;
       }
