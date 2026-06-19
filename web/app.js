@@ -2046,6 +2046,25 @@ function studio() {
       return (d && d[field] !== undefined) ? d[field] : sc[field];
     },
 
+    // Stable per-(run, scene) draft object for the TEXT fields (motion prompt +
+    // Kling length) to x-model against. Mobile Safari drops keystrokes on a
+    // one-way :value-bound input (the reactive re-apply fights iOS autocorrect /
+    // predictive text — "first edit erased, second sticks"); x-model needs a
+    // real lvalue, so seed one lazily from the server values. The save-diff in
+    // reengineerSaveScene stays correct because the seed == sc until edited.
+    reSceneDraft(run, sc) {
+      const key = run.re_id + ':' + sc.idx;
+      let d = this.reSceneDrafts[key];
+      if (!d) {
+        d = {
+          motion_prompt: sc.motion_prompt ?? '',
+          kling_secs: sc.kling_secs ? String(sc.kling_secs) : '',
+        };
+        this.reSceneDrafts = { ...this.reSceneDrafts, [key]: d };
+      }
+      return this.reSceneDrafts[key];
+    },
+
     // EXACT mirror of runner_reengineer._kling_duration: the whole-second
     // clip length Kling actually gets — the scene's original length OR the
     // time the dialogue needs (words / 2.2 wps + 1.0s margin, parsed from

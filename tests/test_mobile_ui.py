@@ -51,3 +51,20 @@ def test_timeline_drag_supports_touch():
     assert "event.touches?.[0]?.clientX" in seek[:600]
     assert "@touchstart.self.passive=\"seekTimeline($event)\"" in _HTML
     assert _HTML.count("startHandleDrag($event, i,") == 4   # mouse+touch × 2
+
+
+def test_motion_and_length_fields_use_x_model(_=None):
+    # Hugo 2026-06-19: the motion-prompt textareas (Swap Step 4 + Reengineer
+    # gate) and the Reengineer Kling-length input must use x-model, NOT a
+    # one-way :value bind + @input. On mobile Safari that controlled-input
+    # pattern fights the iOS keyboard's autocorrect/predictive text — the first
+    # edit is wiped and you have to retype it. x-model is the two-way bind that
+    # doesn't re-apply value to a focused input.
+    assert 'x-model="movementByScene[scene.scene_id]"' in _HTML          # Swap motion
+    assert 'x-model="reSceneDraft(r, sc).motion_prompt"' in _HTML        # Reengineer motion
+    assert 'x-model="reSceneDraft(r, sc).kling_secs"' in _HTML           # Reengineer Kling length
+    # The fragile controlled-input pattern must not come back on these fields.
+    assert ":value=\"reSceneVal(r, sc, 'motion_prompt')\"" not in _HTML
+    assert ":value=\"movementByScene[scene.scene_id] || ''\"" not in _HTML
+    # The lazily-seeded draft helper x-model binds against.
+    assert "reSceneDraft(run, sc) {" in _JS
