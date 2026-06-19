@@ -360,6 +360,7 @@ def analyze_scenes(
             temperature=0.3,
             job_id=re_id,
             phase="reengineer_analyze",
+            timeout=settings.reengineer_analyst_timeout_secs,
         )
         data = anthropic_client.extract_tool_call(resp, "submit_scene_plan")
         if not data:

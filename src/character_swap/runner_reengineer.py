@@ -72,9 +72,15 @@ _log = logging.getLogger("reengineer")
 
 _POLL_SECS = 4.0
 # Analyst "low-fps video" sampling (Hugo 2026-06-12): ~2.5 fps per scene,
-# 3-8 frames each, ≤ ~90 images per run (Anthropic caps requests at 100).
+# 3-6 frames each, ≤ ~64 images per run. Trimmed from 8/90 (2026-06-20): the
+# binding limit is no longer Anthropic's 100-image cap but the analyst's
+# latency — a fuller request blew past the old 120s timeout and silently fell
+# back to a generic motion prompt. 6 frames per scene still reads each scene as
+# a low-fps video (enough to catch quick actions like a pour); the bigger lever
+# is the longer per-call timeout (settings.reengineer_analyst_timeout_secs).
 _ANALYST_FRAMES_PER_SEC = 2.5
-_ANALYST_TOTAL_FRAME_BUDGET = 90
+_ANALYST_PER_SCENE_CAP = 6
+_ANALYST_TOTAL_FRAME_BUDGET = 64
 # Generous ceiling so a hung provider can't spin the video watcher forever.
 # (The swap phase uses a PROGRESS-based watchdog instead — see
 # _watch_swap_phase + settings.swap_stall_timeout_secs.)
@@ -413,7 +419,7 @@ async def _analyze(re_id: str, state: dict, source: Path,
     # native 1 fps video sampling — capped per scene AND in total so a
     # 20-scene run stays under the Anthropic 100-images-per-request limit.
     frame_sem = asyncio.Semaphore(4)
-    per_scene_cap = max(3, min(8, _ANALYST_TOTAL_FRAME_BUDGET
+    per_scene_cap = max(3, min(_ANALYST_PER_SCENE_CAP, _ANALYST_TOTAL_FRAME_BUDGET
                                // max(1, len(spans))))
 
     async def _extract_at(i: int, t_abs: float, dest: Path) -> Path:

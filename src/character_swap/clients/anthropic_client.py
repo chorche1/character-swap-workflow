@@ -127,6 +127,7 @@ def messages_with_tools(
     phase: str,
     character: str = "director",
     model: str | None = None,
+    timeout: float | None = None,
 ) -> Any:
     """One Anthropic Messages API call wrapped in `call_log.record(...)`.
 
@@ -136,8 +137,15 @@ def messages_with_tools(
     `extract_tool_call(...)`.
 
     `model` defaults to `settings.claude_opus_model` (env-overridable).
+
+    `timeout` overrides the shared client's 120s per-attempt timeout for THIS
+    call only (via `with_options`). The Reengineer scene analyst sends a large
+    multi-scene vision request that legitimately needs longer than 120s — a too
+    tight timeout there fails the call and drops to a generic motion prompt.
     """
     client = _client()
+    if timeout is not None:
+        client = client.with_options(timeout=timeout)
     chosen_model = model or settings.claude_opus_model
     kwargs: dict[str, Any] = {
         "model": chosen_model,

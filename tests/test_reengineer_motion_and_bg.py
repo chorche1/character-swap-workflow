@@ -120,7 +120,7 @@ def _wire_analyze(monkeypatch, tmp_path, spans):
 
 
 def test_analyze_samples_dense_timestamped_sequence(monkeypatch, tmp_path):
-    """_analyze samples ~2.5 fps per scene (min 3, max 8 frames), keeps the
+    """_analyze samples ~2.5 fps per scene (min 3, max 6 frames), keeps the
     frame nearest the midpoint as the canonical scene-XX.png asset, and
     passes (path, offset) sequences to the analyst."""
     extracted, captured = _wire_analyze(monkeypatch, tmp_path,
@@ -129,8 +129,8 @@ def test_analyze_samples_dense_timestamped_sequence(monkeypatch, tmp_path):
         "re_t", {"scene_sensitivity": "high"}, tmp_path / "src.mp4", tmp_path))
 
     mf = captured["motion_frames"]
-    # 2.0s scene → ceil(2*2.5)=5 frames; 7.0s scene → ceil(17.5)→capped 8.
-    assert [len(seq) for seq in mf] == [5, 8]
+    # 2.0s scene → ceil(2*2.5)=5 frames; 7.0s scene → ceil(17.5)→capped 6.
+    assert [len(seq) for seq in mf] == [5, 6]
     # Offsets are chronological midpoints of equal slices.
     offs0 = [off for _, off in mf[0]]
     assert offs0 == sorted(offs0) and offs0[0] == pytest.approx(0.2)
@@ -144,16 +144,16 @@ def test_analyze_samples_dense_timestamped_sequence(monkeypatch, tmp_path):
 
 
 def test_analyze_frame_budget_scales_down_for_many_scenes(monkeypatch, tmp_path):
-    """20 scenes → per-scene cap drops (90-image budget / Anthropic's
-    100-images-per-request limit) instead of 20×8=160 frames."""
+    """20 scenes → per-scene cap drops (64-image budget keeps the one big
+    analyst call fast enough to beat its timeout) instead of 20×6=120 frames."""
     spans = [(float(i), float(i) + 6.0) for i in range(20)]
     extracted, captured = _wire_analyze(monkeypatch, tmp_path, spans)
     asyncio.run(runner_reengineer._analyze(
         "re_t", {"scene_sensitivity": "high"}, tmp_path / "src.mp4", tmp_path))
     mf = captured["motion_frames"]
     assert len(mf) == 20
-    assert all(len(seq) == 4 for seq in mf)          # 90 // 20 = 4
-    assert sum(len(seq) for seq in mf) <= 90
+    assert all(len(seq) == 3 for seq in mf)          # 64 // 20 = 3
+    assert sum(len(seq) for seq in mf) <= 64
 
 
 def test_qc_receives_replacement_background(monkeypatch, tmp_path):

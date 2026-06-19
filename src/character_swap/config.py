@@ -303,6 +303,17 @@ class Settings(BaseSettings):
     swap_phase_max_secs: int = Field(default=7200,
                                      validation_alias="SWAP_PHASE_MAX_SECS")
 
+    # Per-attempt timeout for the Reengineer scene analyst (one Claude vision
+    # call that reads every scene's dense frame sequence + dialogue and writes
+    # the action-describing motion prompts). The shared Anthropic client caps
+    # at 120s, but a multi-scene recipe sends ~40 images to Opus and routinely
+    # needs >120s — at 120s it timed out (2 attempts ≈ 250s) and SILENTLY fell
+    # back to a generic "continues the action" prompt that doesn't describe the
+    # motion (Hugo 2026-06-20). The analyst runs alone before image gen and has
+    # no other watchdog, so a generous single-attempt budget is safe.
+    reengineer_analyst_timeout_secs: float = Field(
+        default=300.0, validation_alias="REENGINEER_ANALYST_TIMEOUT_SECS")
+
     # Opt-in SQLite state backend. Default off — JSON file remains canonical
     # until the user runs `character-swap migrate` + flips this on. Once stable
     # the JSON path will be deleted.
