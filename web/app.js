@@ -1626,7 +1626,17 @@ function studio() {
         const list = await r.json();
         // The list view is light (no scenes/job) — fetch details for visible runs.
         this.reengineerHistory = list;
-        for (const row of list.slice(0, 8)) this.refreshReengineer(row.re_id);
+        // Hydrate the newest runs PLUS every run parked at an interactive gate
+        // (Hugo 2026-06-19): an awaiting_approval / awaiting_assembly run renders
+        // a scene+image strip that NEEDS r.scenes + r.job (both omitted by the
+        // light list), but those aren't "active" once their images finish QC, so
+        // the 5s poll skips them. Before this, any approval gate older than the 8
+        // newest showed an EMPTY gate — the swap images existed on disk and the
+        // detail endpoint returned them, but the light history row never got them.
+        const gate = x => ['awaiting_approval', 'awaiting_assembly'].includes(x.status);
+        const toHydrate = new Set(list.slice(0, 8).map(x => x.re_id));
+        for (const x of list) if (gate(x)) toHydrate.add(x.re_id);
+        for (const id of toHydrate) this.refreshReengineer(id);
         if (list.some(x => this._reengineerIsActive(x))) this._startReengineerPolling();
       } catch (_) {}
     },
