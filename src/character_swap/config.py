@@ -141,6 +141,12 @@ class Settings(BaseSettings):
         default=0.55, validation_alias="CAPTION_SCRIPT_FALLBACK_RATIO")
     video_poll_interval_secs: int = Field(default=12, validation_alias="VIDEO_POLL_INTERVAL_SECS")
     video_timeout_secs: int = Field(default=600, validation_alias="VIDEO_TIMEOUT_SECS")
+    # Reengineer video-PHASE ceiling (all clips together) — the absolute backstop
+    # for the whole animate/reanimate phase, distinct from the per-clip
+    # video_timeout_secs. Keep it comfortably ABOVE video_timeout_secs so one
+    # slow clip can't blow the whole phase. Default 1 h; raise via env.
+    video_phase_timeout_secs: int = Field(default=3600,
+                                          validation_alias="VIDEO_PHASE_TIMEOUT_SECS")
     video_duration_secs: int = Field(default=10, validation_alias="VIDEO_DURATION_SECS")
     video_aspect_ratio: str = Field(default="9:16", validation_alias="VIDEO_ASPECT_RATIO")
     video_resolution: str = Field(default="720p", validation_alias="VIDEO_RESOLUTION")

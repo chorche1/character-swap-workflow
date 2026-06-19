@@ -78,7 +78,8 @@ _ANALYST_TOTAL_FRAME_BUDGET = 90
 # Generous ceiling so a hung provider can't spin the video watcher forever.
 # (The swap phase uses a PROGRESS-based watchdog instead — see
 # _watch_swap_phase + settings.swap_stall_timeout_secs.)
-_VIDEO_PHASE_TIMEOUT_SECS = 60 * 60
+# Env-tunable via VIDEO_PHASE_TIMEOUT_SECS (Hugo 2026-06-20).
+_VIDEO_PHASE_TIMEOUT_SECS = settings.video_phase_timeout_secs
 
 
 def _now() -> str:
