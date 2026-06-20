@@ -1762,6 +1762,27 @@
                                       @click.stop="openPromptView(r, sc, v, jc.name)">📝</button>
                             </div>
                           </template>
+                          <!-- QC-rejected takes of THIS image (Hugo 2026-06-20):
+                               every image vision-QC threw away before landing the
+                               final result, shown BY DEFAULT so nothing is hidden.
+                               Dimmed red thumbs; hover/tap shows the QC reason,
+                               click opens full size. Empty when QC passed first try. -->
+                          <template x-if="(v.qc_rejects || []).length">
+                            <div class="w-14 mt-0.5">
+                              <div class="text-[8px] text-rose-400 leading-tight"
+                                   :title="v.qc_rejects.length + ' bild(er) underkända av QC innan den slutliga'"
+                                   x-text="'⚠ QC ✕' + v.qc_rejects.length"></div>
+                              <div class="flex gap-0.5 flex-wrap mt-0.5">
+                                <template x-for="(rej, ri) in v.qc_rejects" :key="v.variant_id + '-qcrej-' + ri">
+                                  <a :href="rej.url" target="_blank"
+                                     :title="'QC underkände tagning ' + (ri+1) + ': ' + (rej.reason || '(ingen orsak angavs)')">
+                                    <img :src="rej.url" loading="lazy"
+                                         class="w-6 h-6 rounded object-cover border border-rose-400/70 opacity-60 hover:opacity-100 cursor-zoom-in" />
+                                  </a>
+                                </template>
+                              </div>
+                            </div>
+                          </template>
                           <!-- The generated CLIP for THIS image, shown directly under
                                the image it was animated from (Hugo 2026-06-13). Only the
                                approved/source variant has a matching video, so the
@@ -1793,6 +1814,20 @@
                                         title="Regenerera klippet med ändrad rörelse-prompt"
                                         @click.stop="openReClipRegenModal(r, cid, reClipForVariant(jc, v.variant_id), v.scene_id)">✎↻ prompt</button>
                               </div>
+                              <!-- QC-rejected takes of THIS clip (Hugo 2026-06-20):
+                                   every clip video-QC threw away before the final
+                                   take, shown by default. Empty when QC passed. -->
+                              <template x-if="((reClipForVariant(jc, v.variant_id) || {}).qc_rejects || []).length">
+                                <div class="mt-0.5">
+                                  <div class="text-[8px] text-rose-400 leading-tight"
+                                       x-text="'⚠ QC ✕' + reClipForVariant(jc, v.variant_id).qc_rejects.length + ' underkända tagningar'"></div>
+                                  <template x-for="(rej, ri) in reClipForVariant(jc, v.variant_id).qc_rejects" :key="v.variant_id + '-vqcrej-' + ri">
+                                    <video :src="rej.url" controls preload="metadata"
+                                           class="w-20 rounded border border-rose-400/70 opacity-70 bg-black mt-0.5"
+                                           :title="'QC underkände tagning ' + (ri+1) + ': ' + (rej.reason || '(ingen orsak angavs)')"></video>
+                                  </template>
+                                </div>
+                              </template>
                             </div>
                           </template>
                           <div x-show="v.status === 'generating'" class="w-14 h-24 skeleton rounded relative"

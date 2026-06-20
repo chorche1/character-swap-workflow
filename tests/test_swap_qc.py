@@ -17,6 +17,7 @@ from character_swap.models import (
     GeneratedImage,
     Job,
     JobCharacter,
+    QCReject,
     VariantStatus,
 )
 from character_swap.swap_qc import QCVerdict
@@ -98,6 +99,71 @@ def test_qc_exhausted_keeps_image_with_flag(monkeypatch, tmp_path):
     assert v.qc_reason == "wrong person"
     assert v.qc_attempts == 1 + runner.settings.swap_qc_max_retries
     assert len(prompts) == v.qc_attempts
+
+
+def test_qc_rejects_preserved_for_every_failed_take(monkeypatch, tmp_path):
+    """Hugo 2026-06-20: every image QC rejects must be SAVED (snapshotted before
+    the next attempt overwrites it), not lost, so the user can see them. One
+    reject per retry; the FINAL kept take stays at variant.path (not duplicated
+    into qc_rejects)."""
+    job, jc, v = _job(tmp_path)
+    prompts: list = []
+    bad = QCVerdict(False, "wrong person", "fix it")
+    _stub(monkeypatch, job, [bad, bad, bad], prompts)
+    _run(job, jc, v)
+    n_retries = runner.settings.swap_qc_max_retries
+    assert len(v.qc_rejects) == n_retries          # intermediates only
+    for i, rej in enumerate(v.qc_rejects, start=1):
+        assert rej.attempt == i
+        assert rej.kind == "swap"
+        assert rej.reason == "wrong person"
+        assert Path(rej.path).exists()             # actually on disk, not overwritten
+    assert Path(v.path).exists()                   # final kept take still there
+
+
+def test_qc_rejects_accumulate_across_inplace_regeneration(monkeypatch, tmp_path):
+    """retry_single_variant / ✎↻ / 🪄 re-run the SAME variant_id with attempt
+    reset to 1. A re-roll must NOT overwrite the rejects preserved from the
+    previous run — every QC-failed image must survive, and the snapshot files
+    must stay distinct (regression for the attempt-based filename collision)."""
+    job, jc, v = _job(tmp_path)
+    bad = QCVerdict(False, "wrong person", "fix it")
+    n = runner.settings.swap_qc_max_retries
+    # Run 1: exhaust retries → n preserved rejects.
+    _stub(monkeypatch, job, [bad] * (n + 1), [])
+    _run(job, jc, v)
+    assert len(v.qc_rejects) == n
+    # Run 2: in-place regen of the SAME variant → rejects ACCUMULATE on top.
+    _stub(monkeypatch, job, [bad] * (n + 1), [])
+    _run(job, jc, v)
+    paths = [r.path for r in v.qc_rejects]
+    assert len(paths) == 2 * n
+    assert len(set(paths)) == 2 * n             # no filename collisions
+    for p in paths:
+        assert Path(p).exists()                 # nothing overwritten/destroyed
+
+
+def test_qc_rejects_serialized_in_job_dict(tmp_path):
+    """The preserved rejects reach the frontend with web-servable /files URLs."""
+    from character_swap import api
+    from character_swap.config import settings
+    job, jc, v = _job(tmp_path)
+    rp = settings.output_dir / "j1" / "cA" / "variant_v1.qcreject1.png"
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_bytes(b"x")
+    v.status = VariantStatus.READY
+    v.qc_status = "failed"
+    v.qc_reason = "wrong person"
+    v.qc_rejects = [QCReject(path=str(rp), reason="wrong person",
+                             attempt=1, kind="swap")]
+    d = api._job_to_dict(job)
+    img = d["characters"]["cA"]["images"][0]
+    assert img["qc_status"] == "failed"
+    assert len(img["qc_rejects"]) == 1
+    rej = img["qc_rejects"][0]
+    assert rej["url"].startswith("/files/output/")
+    assert rej["reason"] == "wrong person"
+    assert rej["attempt"] == 1
 
 
 def test_qc_unavailable_skips_single_attempt(monkeypatch, tmp_path):
