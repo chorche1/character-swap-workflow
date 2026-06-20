@@ -2523,6 +2523,33 @@ async def regen_scene_end_frame(job_id: str, scene_id: str,
     return _job_to_dict(job)
 
 
+def _purge_qc_reject_sidecars(base: Path | None, rejects: list | None) -> int:
+    """Reclaim the QC-reject snapshot sidecars left next to a variant/video that
+    compact_job is purging. The parent row is being dropped, so these files
+    (`<stem>.qcrejectN.png|.mp4` + the legacy repair-mode `<stem>.qcfail.png`)
+    would otherwise be orphaned forever — never referenced, never re-counted
+    (Hugo 2026-06-20 QC-reject preservation). Globs both sidecar families next
+    to `base`, and also sweeps any explicitly-recorded reject paths to catch a
+    clip that errored before its `final_video_path` (= the glob stem) was set.
+    Best-effort: per-file OSErrors are swallowed. Returns bytes freed."""
+    targets: set[Path] = set()
+    if base is not None:
+        with contextlib.suppress(OSError):
+            targets.update(base.parent.glob(f"{base.stem}.qcreject*"))
+            targets.update(base.parent.glob(f"{base.stem}.qcfail*"))
+    for r in rejects or []:
+        rp = getattr(r, "path", None)
+        if rp:
+            targets.add(Path(rp))
+    freed = 0
+    for sidecar in targets:
+        with contextlib.suppress(OSError):
+            if sidecar.is_file():
+                freed += sidecar.stat().st_size
+                sidecar.unlink()
+    return freed
+
+
 @app.post("/api/jobs/{job_id}/compact")
 async def compact_job(job_id: str) -> dict:
     s = store()
@@ -2546,11 +2573,15 @@ async def compact_job(job_id: str) -> dict:
             if v.variant_id in keep_variants:
                 remaining_images.append(v)
                 continue
+            p = Path(v.path)
             with contextlib.suppress(OSError):
-                p = Path(v.path)
                 if p.exists():
                     bytes_freed += p.stat().st_size
                     p.unlink()
+            # Drop this variant's QC-reject sidecars too — its row is being
+            # purged, so they'd be orphaned otherwise (kept variants' rejects
+            # stay; they're still shown in the UI).
+            bytes_freed += _purge_qc_reject_sidecars(p, v.qc_rejects)
         jc.images = remaining_images
 
         remaining_videos: list[VideoVariant] = []
@@ -2558,12 +2589,14 @@ async def compact_job(job_id: str) -> dict:
             if vv.status == VideoStatus.DONE and vv.final_video_path:
                 remaining_videos.append(vv)
                 continue
-            if vv.final_video_path:
+            base = Path(vv.final_video_path) if vv.final_video_path else None
+            if base is not None:
                 with contextlib.suppress(OSError):
-                    p = Path(vv.final_video_path)
-                    if p.exists():
-                        bytes_freed += p.stat().st_size
-                        p.unlink()
+                    if base.exists():
+                        bytes_freed += base.stat().st_size
+                        base.unlink()
+            # Same for the clip's QC-reject sidecars (DONE clips keep theirs).
+            bytes_freed += _purge_qc_reject_sidecars(base, vv.qc_rejects)
         jc.videos = remaining_videos
 
     job.compacted = True
