@@ -179,6 +179,7 @@ def _create(language="en"):
         auto_mode=False, outfit_mode="scene", outfit_text="",
         scene_sensitivity="high", language=language,
         use_director=False, background_file=None,
+        background_source="character",
         character_source_image_ids=""))
 
 

@@ -144,33 +144,78 @@ _OUTFIT_CLAUSES = {
 }
 
 
+# Background source for the swap phase (Hugo 2026-06-21):
+#   "scene"       — preserve the scene's own background exactly (pre-2026-06-21
+#                   default, "Option B").
+#   "character"   — the surroundings come from the CHARACTER reference image;
+#                   the scene only supplies pose/framing/props (the new STANDARD).
+#   "replacement" — the surroundings come from a separate uploaded "Image 3"
+#                   (the existing extra-reference path).
+SWAP_BACKGROUND_MODES = ("scene", "character", "replacement")
+
+
+def _resolve_bg_mode(background_mode: str | None, background: bool) -> str:
+    """Back-compat shim: new callers pass `background_mode`; legacy callers
+    (and existing tests) pass the `background: bool` (True = the old Image-3
+    replacement). `background_mode` wins when supplied."""
+    mode = (background_mode if background_mode is not None
+            else ("replacement" if background else "scene"))
+    if mode not in SWAP_BACKGROUND_MODES:
+        raise ValueError(f"Unknown background_mode '{mode}'")
+    return mode
+
+
+def _strip_bg_protection(line: str, *, from_image2: bool) -> str:
+    """Drop the background-protection phrases from a per-outfit constraint line
+    when the background is being REPLACED. Always removes "background" from the
+    "do not alter ... from Image 1" clause; when `from_image2` (character-bg
+    mode, where the new background IS Image 2) it also removes "background"
+    from the "do not carry ... over from Image 2" clause."""
+    out = line.replace(
+        "do not alter the framing, camera, background, objects",
+        "do not alter the framing, camera, objects", 1)
+    if from_image2:
+        out = (out.replace(
+                   "do not carry any clothing, background or objects over from Image 2",
+                   "do not carry any clothing or objects over from Image 2")
+                  .replace(
+                   "do not carry any background or objects over from Image 2",
+                   "do not carry any objects over from Image 2"))
+    return out
+
+
 def build_edit_swap_prompt(outfit_mode: str = "scene",
                            outfit_text: str | None = None,
-                           background: bool = False) -> str:
+                           background: bool = False,
+                           background_mode: str | None = None) -> str:
     """Assemble the instruction-edit swap prompt.
 
     Outfit modes:
     - "scene" (default): wear exactly the original person's clothes from the
       scene — the bake-off-validated wording; byte-identical to
-      EDIT_SWAP_PROMPT when background=False.
+      EDIT_SWAP_PROMPT when background_mode == "scene".
     - "character": wear the character reference's own clothes.
     - "custom": wear `outfit_text` (a free-text description).
 
-    `background=True` adds Image 3 as a replacement environment: the person,
-    pose, framing and every object they interact with stay from Image 1, but
-    the surroundings become Image 3's location — and the person + kept
-    foreground objects are RELIT with Image 3's light (direction, color
-    temperature, shadows, white balance, grain) so nothing looks pasted in.
+    Background modes (`background_mode`; legacy `background=True` == "replacement"):
+    - "scene" (default): keep Image 1's background exactly.
+    - "character": the finished photo takes place in IMAGE 2's surroundings
+      (the character reference's own environment); the person + kept foreground
+      objects are RELIT with Image 2's light. Pose/framing/props stay from
+      Image 1.
+    - "replacement": Image 3 is the new environment (the separate upload); the
+      person + kept objects are relit with Image 3's light.
     """
     if outfit_mode not in _OUTFIT_CLAUSES:
         raise ValueError(f"Unknown outfit_mode '{outfit_mode}'")
     if outfit_mode == "custom" and not (outfit_text or "").strip():
         raise ValueError("outfit_mode 'custom' requires outfit_text")
+    mode = _resolve_bg_mode(background_mode, background)
     outfit_clause, constraint_line = _OUTFIT_CLAUSES[outfit_mode]
     if outfit_mode == "custom":
         outfit_clause = outfit_clause.format(outfit=outfit_text.strip())
 
-    if background:
+    if mode == "replacement":
         roles = (
             "Image 1 is the master scene for the subject: it fixes the framing, "
             "the person's pose, and every object they interact with. Image 2 is "
@@ -211,9 +256,53 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
             "do not invent an environment that is not Image 3's; do not leave "
             "the person's lighting inconsistent with Image 3; "
         )
-        constraint_line = bg_constraints + constraint_line.replace(
-            "do not alter the framing, camera, background, objects",
-            "do not alter the framing, camera, objects", 1)
+        constraint_line = bg_constraints + _strip_bg_protection(
+            constraint_line, from_image2=False)
+    elif mode == "character":
+        roles = (
+            "Image 1 is the master scene for the SUBJECT: it fixes the framing, "
+            "the person's pose, and every object they interact with. Image 2 is "
+            "the identity reference for the replacement person AND the source of "
+            "the BACKGROUND — the finished photo takes place in Image 2's own "
+            "surroundings/environment.\n"
+        )
+        preserve = (
+            "Keep from Image 1: the framing, composition, crop, camera angle, "
+            "camera height, camera distance, focal-length appearance, "
+            "perspective, subject scale and headroom, the person's exact "
+            "placement in the frame, and every object, product and prop the "
+            "person touches, holds or uses — same position relative to the "
+            "person, size, orientation, color, material and physical state, with "
+            "all text and brand labels legible and unchanged. Replace everything "
+            "else — the surroundings, surfaces, walls, floor/ground, furniture "
+            "and backdrop — with the environment visible in Image 2, matching "
+            "Image 2's setting faithfully and extending it naturally where "
+            "Image 2 does not cover the frame.\n"
+        )
+        integration = (
+            "Integration — this decides whether the image is usable: relight "
+            "the person AND the kept foreground objects entirely with Image 2's "
+            "environment light. Use Image 2's light direction, color "
+            "temperature, intensity and softness; discard the lighting baked "
+            "into Image 1. Ground the person in the new environment with correct "
+            "contact shadows where body or objects meet surfaces and a cast "
+            "shadow consistent with Image 2's light. Match Image 2's white "
+            "balance, exposure, sharpness, depth of field and image grain "
+            "across the ENTIRE frame — person, props and background must read "
+            "as one single photograph taken in Image 2's location, never as a "
+            "person cut out and pasted onto a backdrop. ONLY Image 2's "
+            "environment and look are borrowed: keep Image 1's framing, crop "
+            "and subject scale — do NOT adopt Image 2's framing, headroom or "
+            "any empty space above the head.\n"
+        )
+        bg_constraints = (
+            "do not keep Image 1's background, walls, floors or surroundings; "
+            "the surroundings come from Image 2; do not invent an environment "
+            "that is not Image 2's; do not leave the person's lighting "
+            "inconsistent with Image 2; "
+        )
+        constraint_line = bg_constraints + _strip_bg_protection(
+            constraint_line, from_image2=True)
     else:
         roles = (
             "Image 1 is the fixed master scene and ground truth. Image 2 is only the "
@@ -237,6 +326,16 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
             "surfaces.\n"
         )
 
+    # The trailing Style sentence's ambient-light phrase: in scene mode it
+    # anchors to the scene's own light; in a replaced background it would
+    # CONTRADICT the Integration block above (which relit to the new
+    # environment), so it points at the new environment's light instead.
+    style_light = ("the scene's own mundane ambient light (daylight, lamp light "
+                   "or evening mix - as the scene actually has it)"
+                   if mode == "scene" else
+                   "the new environment's own ordinary ambient light as it "
+                   "actually appears there")
+
     return (
         roles
         + preserve
@@ -252,8 +351,7 @@ def build_edit_swap_prompt(outfit_mode: str = "scene",
         + integration
         + "Style: a completely ordinary, unedited iPhone photo taken quickly by "
         "another person — plain, slightly dull phone-camera colors, neutral white "
-        "balance, the scene's own mundane ambient light (daylight, lamp light "
-        "or evening mix - as the scene actually has it), slightly uneven exposure, mild "
+        "balance, " + style_light + ", slightly uneven exposure, mild "
         "softness, subtle sensor noise, natural non-polished skin with visible "
         "pores, imperfect casual framing, small background distractions. It "
         "should look like a normal photo from someone's camera roll, not an "
@@ -304,13 +402,22 @@ _GPT_OUTFIT_CLAUSES = {
 
 def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
                              outfit_text: str | None = None,
-                             background: bool = False) -> str:
+                             background: bool = False,
+                             background_mode: str | None = None) -> str:
     """Compact identity-first prompt for gpt2-id-swap (flipped roles:
-    Image 1 = character/identity, Image 2 = scene, Image 3 = new environment)."""
+    Image 1 = character/identity, Image 2 = scene, Image 3 = new environment).
+
+    Background modes (`background_mode`; legacy `background=True` == "replacement"):
+    - "scene" (default): keep Image 2's (the scene's) background exactly.
+    - "character": the finished photo takes place in IMAGE 1's surroundings
+      (the character reference doubles as the background source); pose/framing/
+      props stay from Image 2.
+    - "replacement": Image 3 is the new environment (the separate upload)."""
     if outfit_mode not in _GPT_OUTFIT_CLAUSES:
         raise ValueError(f"Unknown outfit_mode '{outfit_mode}'")
     if outfit_mode == "custom" and not (outfit_text or "").strip():
         raise ValueError("outfit_mode 'custom' requires outfit_text")
+    mode = _resolve_bg_mode(background_mode, background)
     outfit = _GPT_OUTFIT_CLAUSES[outfit_mode]
     if outfit_mode == "custom":
         outfit = outfit.format(outfit=outfit_text.strip())
@@ -333,13 +440,15 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
                   "text and brand labels legible and unchanged."
                   + framing_lock)
     bg_part = ""
-    if background:
-        roles += (" Image 3 is the NEW ENVIRONMENT: the finished photo takes "
-                  "place in Image 3's location.")
+    if mode != "scene":
+        # Background comes from elsewhere → don't re-anchor it to Image 2.
         scene_keep = ("Recreate Image 2's framing, crop, camera angle, "
                       "perspective, subject scale, pose and every object the "
                       "person touches — exact positions and states, brand "
                       "labels legible." + framing_lock)
+    if mode == "replacement":
+        roles += (" Image 3 is the NEW ENVIRONMENT: the finished photo takes "
+                  "place in Image 3's location.")
         bg_part = (" Replace the surroundings with Image 3's environment and "
                    "relight the person and the kept objects entirely with "
                    "Image 3's light — matching its direction, color "
@@ -350,19 +459,40 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
                    "horizon or open sky, and do NOT add any empty space or "
                    "scenery above the head that Image 2 does not have; the "
                    "subject keeps Image 2's exact vertical placement and size.")
+    elif mode == "character":
+        roles += (" Image 1 is ALSO the source of the BACKGROUND/environment — "
+                  "the finished photo takes place in Image 1's own surroundings.")
+        bg_part = (" Replace the surroundings with Image 1's environment and "
+                   "relight the person and the kept objects entirely with "
+                   "Image 1's light — matching its direction, color "
+                   "temperature, shadows, white balance and grain so "
+                   "everything reads as one photo taken there. Only Image 1's "
+                   "environment and LOOK are borrowed: crop it behind the "
+                   "subject to fit Image 2's framing — do NOT adopt Image 1's "
+                   "headroom, horizon or open sky, and do NOT add any empty "
+                   "space or scenery above the head that Image 2 does not "
+                   "have; the subject keeps Image 2's exact vertical placement "
+                   "and size.")
     # Lighting INTEGRATION (2026-06-17): the non-background gpt2-id-swap path
     # was the lone swap prompt with NO relight/contact-shadow directive, so
     # gpt-image-2 kept the identity photo's baked-in light → the "pasted-in"
     # look. One compact sentence anchored to the scene's own light (OpenAI's
     # prompting guide: match lighting/shadows/colour temperature so it
     # "integrates photorealistically, without looking pasted on"). Skipped when
-    # background=True — bg_part already relights to Image 3 and this would
-    # contradict it.
-    integration = ("" if background else
+    # a non-scene background — bg_part already relights to that environment
+    # and this would contradict it.
+    integration = ("" if mode != "scene" else
                    " Match the scene's own existing light on them — its light "
                    "direction and color temperature — and add real contact and "
                    "cast shadows where the body and held objects meet surfaces, "
                    "with softly blended edges, so they are not pasted in.")
+    # Ambient-light phrase: scene mode anchors to the scene's own light; a
+    # replaced background points at the new environment's light so it doesn't
+    # contradict bg_part's relight directive (review 2026-06-21).
+    style_light = ("the scene's own mundane ambient light as it actually appears"
+                   if mode == "scene" else
+                   "the new environment's own ordinary ambient light as it "
+                   "actually appears")
     return (
         f"{roles}\n{scene_keep}{bg_part}\n"
         "Replace the person in Image 2 with the person from Image 1. The face "
@@ -371,8 +501,8 @@ def build_gpt_id_swap_prompt(outfit_mode: str = "scene",
         "most important requirement. " + outfit + " They look directly into "
         "the camera with a natural, composed expression." + integration + "\n"
         "Style: a completely ordinary, unedited iPhone photo — plain, "
-        "slightly dull phone-camera colors, neutral white balance, the scene's "
-        "own mundane ambient light as it actually appears, slightly uneven exposure, mild softness, subtle "
+        "slightly dull phone-camera colors, neutral white balance, " + style_light
+        + ", slightly uneven exposure, mild softness, subtle "
         "sensor noise, natural non-polished skin with visible pores. Not "
         "staged, not professional: no studio lighting, no cinematic grading, "
         "no glossy highlights, no retouching, no portrait-mode blur."
@@ -386,6 +516,23 @@ def _flip_image_roles(prompt: str) -> str:
     return (prompt.replace("Image 1", "\x00")
                   .replace("Image 2", "Image 1")
                   .replace("\x00", "Image 2"))
+
+
+def stock_swap_prompts(outfit_mode: str = "scene",
+                       outfit_text: str | None = None) -> set[str]:
+    """Every "stock" (non-user-customized) swap prompt for an outfit mode,
+    across ALL background modes. The dispatch + `engine_effective_swap_prompt`
+    use this to decide whether a job's stored prompt is a template (→ rebuild
+    it engine-appropriately for the resolved background mode) or a genuine
+    user-custom prompt (→ pass through verbatim)."""
+    out = {GENERATION_PROMPT, EDIT_SWAP_PROMPT}
+    for m in SWAP_BACKGROUND_MODES:
+        try:
+            out.add(build_edit_swap_prompt(outfit_mode, outfit_text,
+                                           background_mode=m))
+        except ValueError:
+            pass
+    return out
 
 
 def generate_image(
@@ -433,6 +580,7 @@ def generate_variant(
     extra_reference_image: Path | None = None,
     outfit_mode: str = "scene",
     outfit_text: str | None = None,
+    background_mode: str | None = None,
 ) -> Path:
     """Swap-variant generation on the chosen model only.
 
@@ -452,6 +600,7 @@ def generate_variant(
         character_name=character_name, prompt=prompt, dest=dest, job_id=job_id,
         extra_reference_image=extra_reference_image,
         outfit_mode=outfit_mode, outfit_text=outfit_text,
+        background_mode=background_mode,
     )
 
 
@@ -467,6 +616,7 @@ def _dispatch_variant(
     extra_reference_image: Path | None = None,
     outfit_mode: str = "scene",
     outfit_text: str | None = None,
+    background_mode: str | None = None,
 ) -> Path:
     """
     Dispatch a swap-variant generation to the right model. Used by runner.py
@@ -485,15 +635,28 @@ def _dispatch_variant(
     When `extra_reference_image` is supplied, models that accept references
     receive it as ref #3 (after scene, character) — useful for "match this
     background" or "use this outfit/prop" hints.
+
+    `background_mode` ("scene" | "character" | "replacement") decides where the
+    output's background comes from. When a job carries a STOCK prompt, every
+    engine rebuilds it for the resolved mode; a user-custom prompt passes
+    through untouched (its wording already encodes the intent).
     """
+    bg_mode = _resolve_bg_mode(background_mode, extra_reference_image is not None)
+    _stock = stock_swap_prompts(outfit_mode, outfit_text)
     if model == "gpt-image":
+        eff_prompt = prompt
+        if bg_mode != "scene" and prompt in _stock:
+            # GENERATION_PROMPT hard-codes "keep Image 1's background" — for a
+            # non-scene background, rebuild a mode-aware stock prompt instead.
+            eff_prompt = build_edit_swap_prompt(outfit_mode, outfit_text,
+                                                background_mode=bg_mode)
         return generate_image(
             scene_image=scene_image,
             character_image=character_image,
             character_name=character_name,
             dest=dest,
             job_id=job_id,
-            prompt=prompt,
+            prompt=eff_prompt,
             extra_reference_image=extra_reference_image,
         )
     if model == "grok-image":
@@ -511,8 +674,12 @@ def _dispatch_variant(
         refs: list[Path] = [scene_image, character_image]
         if extra_reference_image is not None:
             refs.append(extra_reference_image)
+        nb_prompt = prompt
+        if bg_mode != "scene" and prompt in _stock:
+            nb_prompt = build_edit_swap_prompt(outfit_mode, outfit_text,
+                                               background_mode=bg_mode)
         data = google_genai.generate_nano_banana(
-            prompt=prompt,
+            prompt=nb_prompt,
             reference_images=refs,
             app_job_id=job_id,
             model=model,
@@ -528,7 +695,9 @@ def _dispatch_variant(
         # default prompt is swapped for EDIT_SWAP_PROMPT; custom prompts pass
         # through verbatim.
         from character_swap.clients import fal_image
-        effective = EDIT_SWAP_PROMPT if prompt == GENERATION_PROMPT else prompt
+        effective = (build_edit_swap_prompt(outfit_mode, outfit_text,
+                                            background_mode=bg_mode)
+                     if prompt in _stock else prompt)
         data = fal_image.swap_image(
             model_slug=model,
             scene_image=scene_image,
@@ -547,18 +716,9 @@ def _dispatch_variant(
         # measurably hurts GPT). Stock prompts are rebuilt in flipped-role
         # form; custom prompts get their Image 1/2 references swapped
         # mechanically so they stay correct.
-        background = extra_reference_image is not None
-        stock = {GENERATION_PROMPT, EDIT_SWAP_PROMPT}
-        try:
-            stock.add(build_edit_swap_prompt(outfit_mode, outfit_text,
-                                             background=background))
-            stock.add(build_edit_swap_prompt(outfit_mode, outfit_text,
-                                             background=False))
-        except ValueError:
-            pass
         effective = (build_gpt_id_swap_prompt(outfit_mode, outfit_text,
-                                              background=background)
-                     if prompt in stock else _flip_image_roles(prompt))
+                                              background_mode=bg_mode)
+                     if prompt in _stock else _flip_image_roles(prompt))
         refs: list[Path] = [character_image, scene_image]
         if extra_reference_image is not None:
             refs.append(extra_reference_image)

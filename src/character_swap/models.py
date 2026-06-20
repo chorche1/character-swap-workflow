@@ -359,6 +359,14 @@ class Job(BaseModel):
     # None when the user didn't upload one. Image models that don't support
     # 3+ references (e.g. grok-image is text-only) just ignore it.
     extra_reference_path: str | None = None
+    # Where the OUTPUT background comes from in the swap phase (Hugo 2026-06-21).
+    # New standard "character": the surroundings/environment are taken from the
+    # CHARACTER reference image (the scene only supplies pose, action, framing
+    # and held props; the person is relit to the character's own environment).
+    # Opt-out "scene": preserve the scene's background exactly (the pre-2026-06-21
+    # default — "Option B"). An explicitly-uploaded replacement (extra_reference_path
+    # = "Image 3") always wins over both — see runner._swap_background_mode().
+    background_source: str = "character"
     # Per-job Step-6 compile settings (Hugo 2026-06-17): the ⚙ panel values the
     # job was last compiled with, so each job keeps its own editable preset
     # (seeded from the global default for a fresh job). Stored as the snake_case

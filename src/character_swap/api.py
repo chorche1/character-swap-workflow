@@ -278,6 +278,11 @@ def _job_to_dict(job: Job) -> dict:
             job.prompt, runner._swap_image_model(job)) if job.prompt else None),
         "image_model": job.image_model,
         "video_model": job.video_model,
+        # Where the output background came from (Hugo 2026-06-21): "character"
+        # (standard) / "scene" (opt-out). Lets the Step-2 toggle rehydrate on
+        # reopen. The effective mode is "replacement" when an Image 3 exists,
+        # but that's surfaced separately via extra_reference.
+        "background_source": job.background_source or "character",
         # Legacy single + new per-scene dict. The UI prefers the dict;
         # the singular is the "first" scene's value for old code paths.
         "movement_prompt": job.movement_prompt,
@@ -344,9 +349,16 @@ def _job_to_dict(job: Job) -> dict:
                         # USER-facing orientation for the ✎↻ edit modal —
                         # identity-first for gpt2-id-swap (the plain-Swap modal
                         # prefills from this; the Reengineer modal fetches the
-                        # same via /scenes/{idx}/swap_prompt). WYSIWYG 2026-06-16.
+                        # same via /scenes/{idx}/swap_prompt). Resolve the
+                        # ENGINE-EFFECTIVE text first (stock templates like
+                        # GENERATION_PROMPT are substituted at gen time — e.g.
+                        # the character-background prompt), else the modal would
+                        # prefill scene-mode wording the engine never ran and an
+                        # edit would silently revert the background to the scene
+                        # (review 2026-06-21). Mirrors /scenes/{idx}/swap_prompt.
                         "prompt_display": (_flip_swap_orientation_for_idfirst(
-                            v.prompt, runner._swap_image_model(job))
+                            runner.engine_effective_swap_prompt(job, v.prompt),
+                            runner._swap_image_model(job))
                             if v.prompt else None),
                         "parent_variant_id": v.parent_variant_id,
                         "scene_id": v.scene_id,
@@ -1006,6 +1018,11 @@ class CreateJobBody(BaseModel):
     # returned by `POST /api/jobs/extra_ref`. None when the user didn't
     # upload one.
     extra_reference_filename: str | None = None
+    # Where the OUTPUT background comes from in the swap phase (Hugo 2026-06-21):
+    # "character" (new standard — the surroundings are taken from the character
+    # reference image) or "scene" (opt-out — preserve the scene's background).
+    # An uploaded `extra_reference_filename` ("Image 3") always overrides both.
+    background_source: str = "character"
     # Optional per-scene END-POSE reference: owner scene_id → scene_id of an
     # uploaded pose image (uploaded via POST /api/scenes like any scene). In
     # Step 3 the runner swaps each character into the pose so the scene's Kling
@@ -1083,6 +1100,10 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
 
     title = (body.title or "").strip() or _auto_title(char_names)
 
+    background_source = (body.background_source or "character").strip()
+    if background_source not in ("character", "scene"):
+        raise HTTPException(400, f"Unknown background_source '{background_source}'")
+
     image_model = (body.image_model or "gpt-image").strip()
     if image_model not in runner_media.IMAGE_MODELS:
         raise HTTPException(400, f"Unknown image_model '{image_model}'")
@@ -1141,6 +1162,7 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         enrich_prompt=body.enrich_prompt,
         use_director=body.use_director,
         extra_reference_path=extra_ref_abs,
+        background_source=background_source,
         end_frames_by_scene=end_frames_by_scene,
     )
     s.add_job(job)
@@ -3060,7 +3082,8 @@ async def get_gen_models() -> dict:
 
 @app.get("/api/swap/defaults")
 async def get_swap_defaults(project_id: str | None = None,
-                            image_model: str | None = None) -> dict:
+                            image_model: str | None = None,
+                            background_source: str | None = None) -> dict:
     """Defaults for the Swap-tab Step-2 form (prompt + model).
 
     If `project_id` is given AND that project has a custom `default_prompt`,
@@ -3077,6 +3100,12 @@ async def get_swap_defaults(project_id: str | None = None,
     default engine since 2026-06-16)."""
     from character_swap import pipeline
     model = (image_model or "gpt2-id-swap").strip()
+    # Background source (Hugo 2026-06-21): the box must show the prompt the
+    # engine actually runs (WYSIWYG), so the default reflects whether the
+    # background comes from the character ref ("character", the new standard)
+    # or the scene ("scene", opt-out). Only the GLOBAL default is mode-aware;
+    # a project default is a stored custom prompt that carries its own intent.
+    bg_mode = "scene" if (background_source or "character").strip() == "scene" else "character"
     global_prompt = pipeline.GENERATION_PROMPT
     project_prompt: str | None = None
     if project_id:
@@ -3089,7 +3118,7 @@ async def get_swap_defaults(project_id: str | None = None,
     # prompt; otherwise flip the (scene-first) project/global text into the
     # engine's view so the textarea is WYSIWYG.
     if _swap_engine_is_identity_first(model) and not project_prompt:
-        active_prompt = pipeline.build_gpt_id_swap_prompt()
+        active_prompt = pipeline.build_gpt_id_swap_prompt(background_mode=bg_mode)
     else:
         active_prompt = _flip_swap_orientation_for_idfirst(
             project_prompt or global_prompt, model)
@@ -4623,6 +4652,11 @@ async def reengineer_create(
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
+    # Where the OUTPUT background comes from (Hugo 2026-06-21): "character"
+    # (new standard — borrow it from the character ref) or "scene" (opt-out —
+    # keep the original video frame's background). An uploaded background_file
+    # always overrides both.
+    background_source: str = Form("character"),
     # Optional JSON dict {char_id: image_id}: which of the character's gallery
     # images to use as the identity reference (e.g. a specific outfit). Falls
     # back to the character's primary image.
@@ -4658,6 +4692,8 @@ async def reengineer_create(
         raise HTTPException(400, f"Unknown scene_sensitivity '{scene_sensitivity}'")
     if language not in ("en", "es"):
         raise HTTPException(400, f"Unknown language '{language}' (en | es)")
+    if background_source not in ("character", "scene"):
+        raise HTTPException(400, f"Unknown background_source '{background_source}'")
     source_overrides: dict[str, str] = {}
     if character_source_image_ids.strip():
         try:
@@ -4715,6 +4751,7 @@ async def reengineer_create(
         "language": language,
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "background_path": background_path,
+        "background_source": background_source,
         "character_source_image_ids": source_overrides,
         "scenes": [],
         "job_id": None,
@@ -4739,6 +4776,7 @@ async def reengineer_from_images(
     auto_mode: bool = Form(False),
     use_director: bool = Form(False),
     background_file: UploadFile | None = File(None),
+    background_source: str = Form("character"),
     character_source_image_ids: str = Form(""),
 ) -> dict:
     """The Swap tab: start a Reengineer run from reference IMAGES (no source
@@ -4769,6 +4807,8 @@ async def reengineer_from_images(
         raise HTTPException(400, f"Unknown outfit_mode '{outfit_mode}'")
     if outfit_mode == "custom" and not outfit_text.strip():
         raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
+    if background_source not in ("character", "scene"):
+        raise HTTPException(400, f"Unknown background_source '{background_source}'")
     source_overrides: dict[str, str] = {}
     if character_source_image_ids.strip():
         try:
@@ -4878,6 +4918,7 @@ async def reengineer_from_images(
         "outfit_text": outfit_text.strip(),
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "background_path": background_path,
+        "background_source": background_source,
         "character_source_image_ids": source_overrides,
         "scenes": scene_entries,
         "n_scenes": len(scene_entries),
@@ -5821,6 +5862,10 @@ async def reengineer_rewrite_scene_prompt(re_id: str, idx: int,
         prompt_director.direct_scene_prompt_rewrite,
         scene_id=scene_id, frame_path=frame, current_prompt=director_current,
         change_request=change, background_path=background,
+        # New character-bg standard (Hugo 2026-06-21): the rewriter must not
+        # re-anchor the discarded scene background when it comes from the
+        # character ref instead.
+        background_mode=runner._swap_background_mode(job),
         job_id=job.job_id)
     if not new_prompt:
         raise HTTPException(502, "AI Director kunde inte skriva om prompten — "

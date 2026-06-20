@@ -553,12 +553,19 @@ async def _create_job_and_swap(re_id: str, state: dict,
     background_path = state.get("background_path")
     if background_path and not Path(background_path).exists():
         raise RuntimeError(f"Background image missing on disk: {background_path}")
+    # Where the OUTPUT background comes from (Hugo 2026-06-21): an uploaded
+    # replacement ("Image 3") always wins; otherwise the per-run choice —
+    # "character" (new standard: borrow it from the character ref) or "scene"
+    # (opt-out: preserve the scene's own background).
+    background_source = state.get("background_source") or "character"
+    bg_mode = ("replacement" if background_path
+               else ("scene" if background_source == "scene" else "character"))
     swap_prompt: str | None = None
-    if outfit_mode != "scene" or background_path:
+    if outfit_mode != "scene" or bg_mode != "scene":
         from character_swap import pipeline
         swap_prompt = pipeline.build_edit_swap_prompt(
             outfit_mode, state.get("outfit_text"),
-            background=bool(background_path))
+            background_mode=bg_mode)
 
     # Optional AI Director (checkbox at upload, off by default): ONE Claude
     # call LOOKS at every scene frame and writes a tailored compact swap
@@ -575,6 +582,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
             outfit_mode=outfit_mode,
             outfit_text=state.get("outfit_text"),
             background_path=Path(background_path) if background_path else None,
+            background_mode=bg_mode,
             job_id=job_id,
         )
         if result is not None:
@@ -606,6 +614,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         image_model=image_model,
         prompt=swap_prompt,
         extra_reference_path=background_path,
+        background_source=background_source,
         video_model=state.get("video_model") or "kling-v3",
         video_audio=True,
         outfit_mode=state.get("outfit_mode") or "scene",

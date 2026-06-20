@@ -1308,9 +1308,18 @@
                  x-model="swapFromImages.outfitText"
                  placeholder="t.ex. en enkel vit t-shirt och mörka jeans"
                  class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 w-72" />
+          <label class="text-sm flex items-center gap-2"
+                 title="Var bakgrunden kommer ifrån. Standard: karaktärsbildens egen miljö (scenen ger bara pose/komposition/props). Alternativ: behåll scenens egen bakgrund.">
+            <span class="text-neutral-500 dark:text-neutral-400">Bakgrund från:</span>
+            <select x-model="swapFromImages.backgroundSource"
+                    class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+              <option value="character">Karaktärsbilden (standard)</option>
+              <option value="scene">Behåll scenens bakgrund</option>
+            </select>
+          </label>
           <label class="text-sm flex items-center gap-2 cursor-pointer"
-                 title="Valfritt: byt miljön i varje scen mot den här bilden. Karaktären + props behålls; ljuset matchas så inget ser inklistrat ut.">
-            <span class="text-neutral-500 dark:text-neutral-400">Bakgrund:</span>
+                 title="Valfritt: byt miljön i varje scen mot den här bilden. Åsidosätter valet ovan. Karaktären + props behålls; ljuset matchas så inget ser inklistrat ut.">
+            <span class="text-neutral-500 dark:text-neutral-400">Bakgrund (egen bild):</span>
             <template x-if="!swapFromImages.background">
               <span class="px-2 py-1 rounded-lg text-sm border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400">+ bild (valfritt)</span>
             </template>
@@ -1441,9 +1450,18 @@
                  x-model="reengineerGen.outfitText"
                  placeholder="e.g. a plain white t-shirt and dark jeans"
                  class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 w-72" />
+          <label class="text-sm flex items-center gap-2"
+                 title="Where the background comes from. Default: the character image's own environment (the video only supplies pose/composition/props). Alternative: keep the original video's background.">
+            <span class="text-neutral-500 dark:text-neutral-400">Background from:</span>
+            <select x-model="reengineerGen.backgroundSource"
+                    class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+              <option value="character">Character image (default)</option>
+              <option value="scene">Keep the scene's background</option>
+            </select>
+          </label>
           <label class="text-sm flex items-center gap-2 cursor-pointer"
-                 title="Optional: replace the environment in EVERY scene with this image. The character and the products they hold stay from the video; lighting is matched to the new background so nothing looks pasted in.">
-            <span class="text-neutral-500 dark:text-neutral-400">Background:</span>
+                 title="Optional: replace the environment in EVERY scene with this image. Overrides the choice above. The character and the products they hold stay from the video; lighting is matched to the new background so nothing looks pasted in.">
+            <span class="text-neutral-500 dark:text-neutral-400">Background (own image):</span>
             <template x-if="!reengineerGen.background">
               <span class="px-2 py-1 rounded-lg text-sm border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400">+ image (optional)</span>
             </template>

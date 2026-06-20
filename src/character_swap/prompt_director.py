@@ -242,10 +242,7 @@ EVERY PROMPT MUST ENFORCE THE FOLLOWING — this is what makes the output good:
   a cup). Forbid ingredient/material mutation.
 - BRANDING: keep brand labels legible and correctly spelled; forbid warping
   them into gibberish or different fonts.
-- BACKGROUND — DO NOT CHANGE (default): describe the scene's background
-  concretely and lock it in a standalone clause — keep room, surfaces,
-  furniture, fixtures, decor, and lighting EXACTLY. Only deviate if the user
-  EXPLICITLY asked to change or replace the background.
+{background_rule}
 - CLOTHING — KEEP THE SCENE'S OUTFIT: the swapped person must wear EXACTLY the
   same outfit as the original person already in the scene. Describe the scene
   subject's garments concretely (clothing items, colors, patterns, fit,
@@ -340,6 +337,34 @@ Use the exact scene_ids from the user message verbatim. Every scene the user
 lists must appear in your output."""
 
 
+# Background rule injected into SWAP_DIRECTOR_SYSTEM's {background_rule} slot.
+# "scene" keeps the scene's background (pre-2026-06-21 default); "character"
+# borrows the background from the character reference image (the new standard).
+_SWAP_BG_RULE_SCENE = (
+    "- BACKGROUND — DO NOT CHANGE: describe the scene's background concretely "
+    "and lock it in a standalone clause — keep room, surfaces, furniture, "
+    "fixtures, decor, and lighting EXACTLY. Only deviate if the user EXPLICITLY "
+    "asked to change or replace the background.")
+_SWAP_BG_RULE_CHARACTER = (
+    "- BACKGROUND — USE THE CHARACTER'S OWN ENVIRONMENT: the finished photo "
+    "takes place in the CHARACTER reference's own surroundings, NOT the "
+    "scene's. In a standalone clause, instruct: replace the scene's room/walls/"
+    "floor/furniture/backdrop with the environment visible in the character's "
+    "photo (name 1-2 of its actual visible background features if you can see "
+    "them), and relight the person and the kept props entirely to that "
+    "environment's light. Keep the SCENE's framing, crop, camera angle, "
+    "subject scale, pose, hand positions and every held/foreground prop "
+    "EXACTLY — only the character photo's environment and light are borrowed, "
+    "never its framing, headroom or any empty space above the head. STRICTLY "
+    "FORBIDDEN: re-describing or locking the scene's original background — it "
+    "is being thrown away.")
+
+
+def _swap_bg_rule(background_mode: str) -> str:
+    return (_SWAP_BG_RULE_CHARACTER if background_mode == "character"
+            else _SWAP_BG_RULE_SCENE)
+
+
 # --- Public entry points ---------------------------------------------------
 
 def direct_swap(
@@ -348,6 +373,7 @@ def direct_swap(
     characters: list[tuple[str, str, Path]],   # [(char_id, name, ref_path)]
     scenes: list[tuple[str, Path]],            # [(scene_id, scene_path)]
     images_per_character: int,
+    background_mode: str = "scene",
     job_id: str | None = None,
 ) -> SwapDirectorPlan | None:
     """ONE Claude call. Returns the structured plan or None on any failure.
@@ -397,7 +423,8 @@ def direct_swap(
 
     try:
         response = anthropic_client.messages_with_tools(
-            system=SWAP_DIRECTOR_SYSTEM,
+            system=SWAP_DIRECTOR_SYSTEM.format(
+                background_rule=_swap_bg_rule(background_mode)),
             messages=[{"role": "user", "content": content}],
             tools=[SWAP_DIRECTOR_TOOL],
             tool_choice={"type": "tool", "name": "submit_swap_plan"},
@@ -763,6 +790,7 @@ def direct_reengineer_swap(
     outfit_mode: str = "scene",
     outfit_text: str | None = None,
     background_path: Path | None = None,
+    background_mode: str = "scene",
     job_id: str | None = None,
 ) -> tuple[str, dict[str, str], dict[str, dict]] | None:
     """ONE Claude call with every scene frame → (intent, {scene_id: prompt},
@@ -818,6 +846,35 @@ def direct_reengineer_swap(
             "'even', 'flattering', 'golden', 'cinematic' or 'studio' light. "
             "The inserted person and kept props are relit by exactly that "
             "ordinary light, never by the original scene's light.")
+    elif background_mode == "character":
+        bg_role = (
+            "There is no Image 3. The finished photo takes place in the "
+            "PERSON'S OWN environment — the surroundings from the identity "
+            "reference (Image 2), NOT the scene's. In your framing-anchor "
+            "sentence say the surroundings are replaced with Image 2's own "
+            "environment and the person plus kept objects are relit entirely "
+            "with Image 2's light. You do NOT see Image 2, so do not name its "
+            "specific features — refer to it generically as 'Image 2's "
+            "surroundings'. Only Image 2's environment and look are borrowed: "
+            "the framing, crop, subject scale and subject position stay "
+            "exactly as Image 1, and Image 2's environment is cropped behind "
+            "the subject to fit Image 1's framing, so the subject must NOT "
+            "shrink or move and no headroom, horizon or open sky may appear "
+            "above the head. STRICTLY FORBIDDEN: naming or describing ANYTHING "
+            "visible only in the scene frame's original background (the "
+            "original room, walls, sky, signage, flags, location) — the "
+            "original environment is being thrown away, so your framing "
+            "anchors must cover ONLY the person, the held/foreground props and "
+            "the camera distance/crop.")
+        light_rule = (
+            "Describe the light as it would look in the PERSON'S OWN "
+            "environment (Image 2's surroundings) in an ORDINARY phone "
+            "snapshot — flat, uneven, everyday/ambient, slightly harsh or dim, "
+            "mixed/imperfect color temperature. NEVER use flattering "
+            "photographic words: no 'soft', 'diffused', 'even', 'flattering', "
+            "'golden', 'cinematic' or 'studio' light. The inserted person and "
+            "kept props are relit by exactly that ordinary light, never by the "
+            "original scene's light.")
     else:
         bg_role = ("There is no Image 3 — the scene's own background is "
                    "preserved exactly.")
@@ -958,6 +1015,24 @@ the change touches the light description, describe ordinary phone-snapshot
 light (flat, uneven, everyday) — never 'soft', 'diffused', 'flattering',
 'golden', 'cinematic' or 'studio'."""
 
+# Character-background mode (Hugo 2026-06-21): the output's surroundings come
+# from the PERSON'S OWN reference photo (Image 2 at generation time), not the
+# scene. The rewriter never sees Image 2 (it's per-character), so it must keep
+# the existing character-environment directives and never re-anchor the scene's
+# original background.
+_REWRITE_CHAR_BG_RULE = """
+The finished photo takes place in the PERSON'S OWN environment — the
+surroundings from the identity reference (Image 2 at generation time), NOT the
+scene's original background. Keep the current prompt's character-environment
+directives intact wherever the change doesn't touch them. STRICTLY FORBIDDEN:
+re-introducing, naming or locking the scene frame's original background
+(buildings, walls, sky, signage, location) — it is thrown away, so anchors
+cover ONLY the person, the held/foreground props and the camera distance/crop;
+only Image 1's framing, crop and subject scale are kept, never Image 2's
+headroom or horizon. If the change touches the light description, describe
+ordinary phone-snapshot light (flat, uneven, everyday) — never 'soft',
+'diffused', 'flattering', 'golden', 'cinematic' or 'studio'."""
+
 
 SCENE_REWRITE_TOOL: dict[str, Any] = {
     "name": "submit_rewritten_swap_prompt",
@@ -989,6 +1064,7 @@ def direct_scene_prompt_rewrite(
     current_prompt: str,
     change_request: str,
     background_path: Path | None = None,
+    background_mode: str = "scene",
     job_id: str | None = None,
 ) -> str | None:
     """ONE Claude call: scene frame + current swap prompt + the user's
@@ -1027,9 +1103,13 @@ def direct_scene_prompt_rewrite(
                  "CHANGE REQUEST:\n"
                  f"{change_request.strip()}"),
     })
-    system = SCENE_REWRITE_DIRECTOR_SYSTEM.format(
-        bg_rule=(_REWRITE_BG_RULE if background_path is not None
-                 else _REWRITE_NO_BG_RULE))
+    if background_path is not None:
+        bg_rule = _REWRITE_BG_RULE
+    elif background_mode == "character":
+        bg_rule = _REWRITE_CHAR_BG_RULE
+    else:
+        bg_rule = _REWRITE_NO_BG_RULE
+    system = SCENE_REWRITE_DIRECTOR_SYSTEM.format(bg_rule=bg_rule)
     try:
         resp = anthropic_client.messages_with_tools(
             system=system,

@@ -102,6 +102,15 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
     dest = out_dir / f"endframe_{safe_scene}.png"
     if dest.exists() and not force:
         return dest
+    # Resolve the uploaded replacement environment ("Image 3") the same way the
+    # start-frame path does — otherwise a replacement-background job would build
+    # a prompt that names Image 3 but never supply it, so the end frame's
+    # background diverges from the start frame (review 2026-06-21).
+    end_extra_ref: Path | None = None
+    if job.extra_reference_path:
+        cand = Path(job.extra_reference_path)
+        if cand.exists():
+            end_extra_ref = cand
     pipeline.generate_variant(
         model=_swap_image_model(job),
         scene_image=Path(pose_path),
@@ -110,6 +119,12 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
         prompt=job.prompt or pipeline.GENERATION_PROMPT,
         dest=dest,
         job_id=job.job_id,
+        extra_reference_image=end_extra_ref,
+        outfit_mode=job.outfit_mode or "scene",
+        outfit_text=job.outfit_text,
+        # Same background source as the start frame so the Kling interpolation
+        # doesn't drift environments between first and last frame.
+        background_mode=_swap_background_mode(job),
     )
     if not dest.exists():
         raise RuntimeError("end-frame swap produced no output file")
@@ -201,6 +216,11 @@ async def _generate_one_variant(
         candidate = Path(job.extra_reference_path)
         if candidate.exists():
             extra_ref = candidate
+    # Where the output background comes from (Hugo 2026-06-21): "character"
+    # (new standard — borrow it from the character ref) / "scene" (opt-out) /
+    # "replacement" (an uploaded Image 3 wins). Drives both the prompt the
+    # engine rebuilds AND the QC judge's background_replaced flag.
+    bg_mode = _swap_background_mode(job)
 
     # Generate → vision-QC → regenerate-with-corrective-hint loop. QC
     # checks identity (right person?) + obvious defects; a failed verdict
@@ -266,6 +286,7 @@ async def _generate_one_variant(
                     extra_reference_image=extra_ref,
                     outfit_mode=job.outfit_mode or "scene",
                     outfit_text=job.outfit_text,
+                    background_mode=bg_mode,
                 )
                 try:
                     await asyncio.to_thread(
@@ -340,10 +361,14 @@ async def _generate_one_variant(
                 scene_image=scene_path,
                 character_image=char_path,
                 result_image=dest,
-                background_replaced=extra_ref is not None,
+                # True for BOTH replacement (Image 3) and the new "character"
+                # standard: in either case the RESULT's background is SUPPOSED
+                # to differ from SCENE, so the judge must not fail the change.
+                background_replaced=bg_mode != "scene",
                 # The judge SEES the replacement environment — without it a
                 # result that kept the ORIGINAL background passed QC
-                # (observed 2026-06-12, scene 1 of re_10fe66db8b).
+                # (observed 2026-06-12, scene 1 of re_10fe66db8b). None in
+                # character-bg mode: the judge already sees the character ref.
                 background_image=extra_ref,
                 # Primary signal is the job's outfit_mode field; the prompt
                 # sniff survives only for legacy jobs created before the
@@ -465,6 +490,18 @@ def _replace_variant(job: Job, jc: JobCharacter, variant: GeneratedImage) -> Non
         s.update_job(job)
 
 
+def _swap_background_mode(job: Job) -> str:
+    """Where the OUTPUT background comes from for this job's swap variants
+    (Hugo 2026-06-21). An explicitly-uploaded replacement environment
+    (`extra_reference_path` = "Image 3") always wins; otherwise the per-job
+    `background_source` — "character" (new standard: take the background from
+    the character reference image) or "scene" (opt-out: preserve the scene's
+    own background, the pre-2026-06-21 default)."""
+    if job.extra_reference_path and Path(job.extra_reference_path).exists():
+        return "replacement"
+    return "scene" if (job.background_source or "character") == "scene" else "character"
+
+
 def engine_effective_swap_prompt(job: Job, prompt: str) -> str:
     """The prompt the image was ACTUALLY generated with. Slots store stock
     templates verbatim (e.g. GENERATION_PROMPT), but pipeline's dispatch
@@ -473,25 +510,18 @@ def engine_effective_swap_prompt(job: Job, prompt: str) -> str:
     stored stock string would rewrite text the engine never saw AND bypass
     the substitution on regen. gpt2's prompt is returned in standard
     Image1=scene orientation (dispatch re-flips it mechanically)."""
-    background = bool(job.extra_reference_path)
+    bg_mode = _swap_background_mode(job)
     outfit_mode = job.outfit_mode or "scene"
-    stock = {pipeline.GENERATION_PROMPT, pipeline.EDIT_SWAP_PROMPT}
-    try:
-        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=background))
-        stock.add(pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=False))
-    except ValueError:
-        pass
+    stock = pipeline.stock_swap_prompts(outfit_mode, job.outfit_text)
     if prompt not in stock:
         return prompt
     try:
         if _swap_image_model(job) == "gpt2-id-swap":
             return pipeline._flip_image_roles(
                 pipeline.build_gpt_id_swap_prompt(outfit_mode, job.outfit_text,
-                                                  background=background))
+                                                  background_mode=bg_mode))
         return pipeline.build_edit_swap_prompt(outfit_mode, job.outfit_text,
-                                               background=background)
+                                               background_mode=bg_mode)
     except ValueError:
         return pipeline.EDIT_SWAP_PROMPT
 
@@ -844,6 +874,7 @@ async def _maybe_run_director_swap(job: Job, s) -> None:
         characters=chars,
         scenes=scenes,
         images_per_character=n,
+        background_mode=_swap_background_mode(job),
         job_id=job.job_id,
     )
     if plan is None:

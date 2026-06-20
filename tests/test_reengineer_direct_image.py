@@ -92,6 +92,7 @@ def test_from_images_direct_flag_in_state(wired):
         character_ids=json.dumps(["cA"]),
         image_model="gpt2-id-swap", outfit_mode="scene", outfit_text="",
         auto_mode=False, use_director=False, background_file=None,
+        background_source="character",
         character_source_image_ids=""))
     scenes = box["states"][out["re_id"]]["scenes"]
     assert "is_direct" not in scenes[0]

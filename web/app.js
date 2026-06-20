@@ -114,6 +114,7 @@ function studio() {
                                      // localStorage)
       background: null,              // optional File: replacement environment
       backgroundUrl: '',             // object URL for the thumbnail
+      backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -131,6 +132,7 @@ function studio() {
       outfitText: '',
       background: null,
       backgroundUrl: '',
+      backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       sourceOverrides: {},            // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -353,6 +355,11 @@ function studio() {
     higgsfieldPolling: false,
     swapPrompt: '',
     swapModel: 'gpt2-id-swap',   // Hugo 2026-06-16: identity-first is the Swap default
+    // Where the OUTPUT background comes from (Hugo 2026-06-21): "character"
+    // (new standard — borrow it from the character ref) or "scene" (opt-out —
+    // preserve the scene's own background). Drives the WYSIWYG default prompt
+    // and rides to POST /api/jobs as background_source.
+    swapBackgroundSource: 'character',
     // Optional 3rd reference image for the swap flow's image model. Filename
     // is what we send back to POST /api/jobs; URL is for the inline preview.
     extraRefFilename: '',
@@ -873,6 +880,9 @@ function studio() {
         const params = new URLSearchParams();
         if (this.currentProjectId) params.set('project_id', this.currentProjectId);
         if (this.swapModel) params.set('image_model', this.swapModel);
+        // Background source drives the WYSIWYG default (the engine takes the
+        // background from the character ref unless the user opts out to scene).
+        params.set('background_source', this.swapBackgroundSource || 'character');
         const qs = params.toString();
         const r = await fetch('/api/swap/defaults' + (qs ? '?' + qs : ''));
         if (!r.ok) return;
@@ -889,6 +899,15 @@ function studio() {
     // overwrite the box when it still holds the previous engine's default — a
     // user-typed prompt is never clobbered.
     async onSwapModelChange() {
+      const wasDefault = this.swapPromptIsDefault();
+      await this.loadSwapDefaults();
+      if (wasDefault) this.swapPrompt = this.swapDefaultPrompt;
+    },
+
+    // Switching the background source rewrites the default prompt (the engine
+    // takes the background from the character ref vs the scene). Same
+    // never-clobber-a-typed-prompt rule as the engine switch.
+    async onSwapBackgroundSourceChange() {
       const wasDefault = this.swapPromptIsDefault();
       await this.loadSwapDefaults();
       if (wasDefault) this.swapPrompt = this.swapDefaultPrompt;
@@ -1510,6 +1529,7 @@ function studio() {
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
         fd.append('language', g.language || 'en');
+        fd.append('background_source', g.backgroundSource || 'character');
         if (g.background) fd.append('background_file', g.background);
         const pickedOverrides = {};
         for (const cid of g.charIds) {
@@ -1625,6 +1645,7 @@ function studio() {
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
+        fd.append('background_source', g.backgroundSource || 'character');
         if (g.background) fd.append('background_file', g.background);
         const pickedOverrides = {};
         for (const cid of g.charIds) {
@@ -5638,6 +5659,9 @@ function studio() {
             // Optional 3rd reference image (background/outfit/prop hint).
             // Lands as ref #3 in the model call after scene + character.
             extra_reference_filename: this.extraRefFilename || null,
+            // Where the output background comes from: character (standard) or
+            // scene (opt-out). Image 3 above still overrides both.
+            background_source: this.swapBackgroundSource || 'character',
           }),
         });
         if (!r.ok) { this.notifyError('Job creation failed: ' + await r.text()); return; }
@@ -5702,6 +5726,7 @@ function studio() {
       // gpt2-id-swap); job.prompt itself is scene-first storage (2026-06-16).
       this.swapPrompt = this.job.prompt_display || this.swapDefaultPrompt;
       this.swapModel = this.job.image_model || 'gpt-image';
+      this.swapBackgroundSource = this.job.background_source || 'character';
       this.swapVideoModel = this.job.video_model || 'kling-v3';
       this.swapDurationSecs = this.job.duration_secs || null;
       this.editingVariant = null;

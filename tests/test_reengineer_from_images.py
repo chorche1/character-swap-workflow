@@ -81,6 +81,7 @@ def _call(files, motion, lengths, **kw):
         auto_mode=kw.get("auto_mode", False),
         use_director=kw.get("use_director", False),
         background_file=kw.get("background_file"),
+        background_source=kw.get("background_source", "character"),
         character_source_image_ids=kw.get("character_source_image_ids", ""),
     ))
     return out, bg
