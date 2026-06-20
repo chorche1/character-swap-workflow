@@ -773,6 +773,7 @@
             </div>
             <div class="flex-1 min-w-0 space-y-2">
               <textarea
+                data-keep-focus
                 x-model="movementByScene[scene.scene_id]"
                 rows="3"
                 class="w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
@@ -1220,14 +1221,18 @@
                           x-model="row.motion_prompt"
                           class="w-full px-2 py-1.5 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"></textarea>
                 <div class="flex items-center gap-3 text-sm flex-wrap">
-                  <!-- ONE Kling clip-length field (Hugo 2026-06-17): the value
-                       here IS the clip length sent to Kling (3–15 s) — no
-                       separate derived label. -->
+                  <!-- ONE Kling clip-length MENU (Hugo 2026-06-21): pick the
+                       clip length sent to Kling (3–15 s) from a dropdown instead
+                       of typing it. -->
                   <label class="flex items-center gap-1 text-neutral-500 dark:text-neutral-400"
                          title="Klipplängden (s) som skickas till Kling, 3–15.">
                     Kling-längd (s)
-                    <input type="number" min="3" max="15" step="1" x-model.number="row.length"
-                           class="w-16 px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950" />
+                    <select @change="row.length = parseInt($event.target.value)"
+                            class="px-2 py-1 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950">
+                      <template x-for="n in klingLengthOptions" :key="row.uid+'-len-'+n">
+                        <option :value="n" :selected="n === row.length" x-text="n + 's'"></option>
+                      </template>
+                    </select>
                   </label>
                   <label class="flex items-center gap-1 text-xs cursor-pointer"
                          :class="row.direct ? 'text-indigo-600 dark:text-indigo-400' : 'text-neutral-500 dark:text-neutral-400'"
@@ -1598,6 +1603,7 @@
                   <template x-if="r.status === 'awaiting_approval' || reEdit[r.re_id]">
                     <div class="mt-1 space-y-1">
                       <textarea rows="3"
+                                data-keep-focus
                                 class="w-full text-[11px] px-2 py-1.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950 text-neutral-700 dark:text-neutral-300"
                                 placeholder="Motion prompt + dialog (The person says: …)"
                                 x-model="reSceneDraft(r, sc).motion_prompt"
@@ -1632,23 +1638,22 @@
                             </template>
                           </select>
                         </label>
-                        <!-- ONE Kling clip-length field (Hugo 2026-06-17):
-                             collapsed the old "Längd (s)" + "→ Kling (auto/
-                             manuell)" pair into a single 3–15 s control = the
-                             clip length sent to Kling. Empty = auto from the
-                             original scene length (shown as the placeholder).
+                        <!-- ONE Kling clip-length MENU (Hugo 2026-06-21): pick
+                             the clip length sent to Kling from a 3–15 s dropdown
+                             instead of typing it. Pre-selects the effective
+                             length (klingDuration = manual override, else the
+                             original scene length); picking a value persists it.
                              Kling-v3 scenes only. -->
                         <template x-if="reSceneEffModel(r, sc) === 'kling-v3'">
                           <label class="flex items-center gap-1"
-                                 :title="'Klipplängden (s) som skickas till Kling, 3–15. Tomt = auto från originalscenens längd (' + klingDuration(r, sc) + ' s).'">
+                                 title="Klipplängden (s) som skickas till Kling, 3–15.">
                             Kling-längd (s)
-                            <input type="number" min="3" max="15" step="1"
-                                   class="w-16 px-1.5 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
-                                   :placeholder="klingDuration(r, sc)"
-                                   x-model="reSceneDraft(r, sc).kling_secs"
-                                   @change="reengineerSaveScene(r, sc)" />
-                            <span class="text-neutral-400 dark:text-neutral-500"
-                                  x-show="!reSceneVal(r, sc, 'kling_secs')">(auto)</span>
+                            <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
+                                    @change="reSceneEdit(r, sc, 'kling_secs', $event.target.value); reengineerSaveScene(r, sc)">
+                              <template x-for="n in klingLengthOptions" :key="r.re_id+'-klen-'+sc.idx+'-'+n">
+                                <option :value="n" :selected="n === klingDuration(r, sc)" x-text="n + 's'"></option>
+                              </template>
+                            </select>
                           </label>
                         </template>
                         <!-- Non-Kling: that model's own duration options. -->

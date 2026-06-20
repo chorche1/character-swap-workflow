@@ -55,19 +55,61 @@ def test_timeline_drag_supports_touch():
 
 def test_motion_and_length_fields_use_x_model(_=None):
     # Hugo 2026-06-19: the motion-prompt textareas (Swap Step 4 + Reengineer
-    # gate) and the Reengineer Kling-length input must use x-model, NOT a
-    # one-way :value bind + @input. On mobile Safari that controlled-input
-    # pattern fights the iOS keyboard's autocorrect/predictive text — the first
-    # edit is wiped and you have to retype it. x-model is the two-way bind that
-    # doesn't re-apply value to a focused input.
+    # gate) must use x-model, NOT a one-way :value bind + @input. On mobile
+    # Safari that controlled-input pattern fights the iOS keyboard's autocorrect/
+    # predictive text — the first edit is wiped and you have to retype it.
+    # x-model is the two-way bind that doesn't re-apply value to a focused input.
     assert 'x-model="movementByScene[scene.scene_id]"' in _HTML          # Swap motion
     assert 'x-model="reSceneDraft(r, sc).motion_prompt"' in _HTML        # Reengineer motion
-    assert 'x-model="reSceneDraft(r, sc).kling_secs"' in _HTML           # Reengineer Kling length
     # The fragile controlled-input pattern must not come back on these fields.
     assert ":value=\"reSceneVal(r, sc, 'motion_prompt')\"" not in _HTML
     assert ":value=\"movementByScene[scene.scene_id] || ''\"" not in _HTML
     # The lazily-seeded draft helper x-model binds against.
     assert "reSceneDraft(run, sc) {" in _JS
+
+
+def test_clip_length_is_a_dropdown_not_a_typed_number(_=None):
+    # Hugo 2026-06-21: the two Kling clip-length fields (Reengineer scene gate +
+    # Swap "from images" rows) became <select> menus — pick 3–15 s instead of
+    # typing the number. The old free-text number inputs must be gone.
+    assert "<input type=\"number\" min=\"3\" max=\"15\" step=\"1\" x-model.number=\"row.length\"" not in _HTML
+    assert 'x-model="reSceneDraft(r, sc).kling_secs"' not in _HTML
+    # Reengineer Kling-length is now a <select>; each <option> self-selects via
+    # :selected so the right value shows regardless of x-for render order (an
+    # x-model / :value / x-effect on the select alone shows the first option
+    # because it runs before the nested option x-for populates). @change writes
+    # the override.
+    assert ':selected="n === klingDuration(r, sc)"' in _HTML
+    assert "reSceneEdit(r, sc, 'kling_secs', $event.target.value)" in _HTML
+    # Swap "from images" length: same :selected idiom, writes row.length on change.
+    assert ':selected="n === row.length"' in _HTML
+    assert "row.length = parseInt($event.target.value)" in _HTML
+    # Both render their options from the shared 3–15 s option list.
+    assert "n in klingLengthOptions" in _HTML
+    assert "klingLengthOptions: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in _JS
+
+
+def test_background_refresh_defers_while_typing(_=None):
+    # Hugo's recurring "I have to type the prompt twice for it to stick" bug:
+    # the 5s poll / WS refresh replaced the whole job/run object mid-keystroke,
+    # churning Alpine's x-for scope and re-firing x-model on the focused
+    # textarea (iOS drops the in-flight char). Fix = pause the refresh while a
+    # protected field is focused, then flush on blur.
+    # The protected textareas are tagged.
+    assert _HTML.count("data-keep-focus") >= 2
+    # The guard helper + both churn paths must check it.
+    assert "_isTypingProtectedField() {" in _JS
+    assert "el.closest('[data-keep-focus]')" in _JS
+    # Reengineer poll/WS refresh defers and retries.
+    re_refresh = _JS.split("async refreshReengineer(reId) {")[1][:600]
+    assert "_isTypingProtectedField()" in re_refresh
+    # Swap WS handler defers the job replacement.
+    handle = _JS.split("async handleEvent(evt) {")[1][:500]
+    assert "_isTypingProtectedField()" in handle
+    assert "this._pendingJobRefresh = true" in handle
+    # A blur flush catches the deferred refresh back up.
+    assert "_flushDeferredRefresh() {" in _JS
+    assert "addEventListener('focusout'" in _JS
 
 
 def test_upload_submits_surface_network_errors(_=None):

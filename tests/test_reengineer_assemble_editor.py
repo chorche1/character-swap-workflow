@@ -820,5 +820,8 @@ def test_kling_override_ui_wired():
     assert "kling_secs" in body                    # JS mirror honors override
     html = (Path(__file__).resolve().parents[1] / "web" /
             "index.html").read_text(encoding="utf-8")
-    assert "reSceneVal(r, sc, 'kling_secs')" in html
+    # The override is set from the Kling-length <select> (Hugo 2026-06-21:
+    # dropdown replaced the typed number field) — picking a value writes
+    # kling_secs onto the scene draft.
+    assert "reSceneEdit(r, sc, 'kling_secs', $event.target.value)" in html
     assert "reengineerUploadOwnImage" in html      # own-image upload button

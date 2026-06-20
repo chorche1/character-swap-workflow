@@ -149,6 +149,14 @@ function studio() {
     // the next 5s poll tick.
     _reengineerSockets: {},
     _reRefreshTimers: {},
+    // A WS job-refresh that was DEFERRED because the user was typing in a
+    // protected field (see _isTypingProtectedField); flushed on blur so Step 4
+    // catches up the moment they tap away.
+    _pendingJobRefresh: false,
+    // Clip-length menu options (Hugo 2026-06-21): 3–15 s, every whole second.
+    // Drives the Kling-length <select>s in the Reengineer gate + Swap "from
+    // images" flow (replaced the free-text number inputs).
+    klingLengthOptions: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     // Edit mode (opt-in iteration on a finished run / at the gate):
     // re_id → bool toggle; drafts keyed `${re_id}:${idx}` so the 5s poll
     // can't clobber a half-typed prompt; per-run add-scene form state.
@@ -523,6 +531,15 @@ function studio() {
       // OS-level notifications: ask permission once (browser remembers the
       // answer); persist the user's toggle picks across reloads.
       this._requestNotifPermission();
+      // When the user leaves a protected text field (motion prompt etc.), flush
+      // any background refresh we deferred while they were typing so the UI
+      // catches up. Tiny delay lets focus settle on the next element first.
+      document.addEventListener('focusout', (e) => {
+        const t = e.target;
+        if (t && typeof t.closest === 'function' && t.closest('[data-keep-focus]')) {
+          setTimeout(() => this._flushDeferredRefresh(), 250);
+        }
+      });
       this.$watch('notif.os',    v => localStorage.setItem('notif.os',    v ? '1' : '0'));
       this.$watch('notif.sound', v => localStorage.setItem('notif.sound', v ? '1' : '0'));
       // Persist enrichment toggles per-pipeline.
@@ -1713,7 +1730,47 @@ function studio() {
       this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 400);
     },
 
+    // True while the user is actively typing in a field we must NOT interrupt
+    // with a background refresh. The 5s poll / WS refresh replaces the whole
+    // job/run object, which churns Alpine's x-for scope and re-fires x-model on
+    // the focused <textarea> — on iOS Safari that drops the in-flight keystroke,
+    // so the first attempt is "eaten" and you have to type it twice (Hugo's
+    // long-standing bug). Protected inputs carry data-keep-focus on themselves
+    // or an ancestor. Selects/checkboxes don't have the typing problem, so only
+    // text inputs + textareas count.
+    _isTypingProtectedField() {
+      const el = typeof document !== 'undefined' ? document.activeElement : null;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag !== 'TEXTAREA' && tag !== 'INPUT') return false;
+      return typeof el.closest === 'function' && !!el.closest('[data-keep-focus]');
+    },
+
+    // Catch up any refresh that was deferred while the user typed, run shortly
+    // after they leave a protected field (focusout listener wired in init()).
+    async _flushDeferredRefresh() {
+      if (this._isTypingProtectedField()) return;   // moved to another such field
+      if (this._pendingJobRefresh && this.job && this.job.job_id) {
+        this._pendingJobRefresh = false;
+        try {
+          const r = await fetch('/api/jobs/' + this.job.job_id);
+          if (r.ok) this.job = await r.json();
+        } catch (_) {}
+      }
+      for (const run of (this.reengineerHistory || [])) {
+        if (this._reengineerIsActive(run)) this.refreshReengineer(run.re_id);
+      }
+    },
+
     async refreshReengineer(reId) {
+      // Don't churn the run object (and thus the x-for scope) while the user is
+      // typing in a scene field — re-rendering eats the keystroke. Defer and
+      // retry; the field's blur (or the next poll tick) lets it through.
+      if (this._isTypingProtectedField()) {
+        clearTimeout(this._reRefreshTimers[reId]);
+        this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 700);
+        return;
+      }
       try {
         // slim=1: variant prompts (~3.3KB × 45) are never rendered here.
         const r = await fetch('/api/reengineer/' + reId + '?slim=1');
@@ -6817,6 +6874,10 @@ function studio() {
 
     async handleEvent(evt) {
       if (!evt || !evt.kind) return;
+      // While the user types in a movement/scene field, replacing this.job would
+      // re-render Step 4 and eat the keystroke (the "type it twice" bug). Defer
+      // the refresh; _flushDeferredRefresh picks it up the moment they blur.
+      if (this._isTypingProtectedField()) { this._pendingJobRefresh = true; return; }
       if (evt.kind === 'snapshot') {
         this.job = evt.job;
         this._fireSwapMilestones(this.job);
