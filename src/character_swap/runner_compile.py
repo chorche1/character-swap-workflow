@@ -606,17 +606,17 @@ def _compile_push_spec(ok: int, total: int) -> tuple[str, str, int, list[str]] |
 async def compile_job_videos(
     job_id: str,
     *,
-    template: str = "capcut-purple-pill",   # matches the UI default; was submagic-pro
+    template: str = "capcut-bluebox",   # Hugo 2026-06-21: editor-wide standard
     overrides: dict | None = None,
     enable_trim: bool = True,
     enable_captions: bool = True,
-    enable_wpm_normalize: bool = True,
+    enable_wpm_normalize: bool = False,
     target_wpm: float = 190.0,
-    threshold_db: float = -23.0,
-    min_silence_secs: float = 0.30,
-    pad_secs: float = 0.05,
+    threshold_db: float = -24.0,
+    min_silence_secs: float = 0.4,
+    pad_secs: float = 0.1,
     voice_override: str | None = None,
-    enable_voice_swap: bool = True,
+    enable_voice_swap: bool = False,
     char_ids: list[str] | None = None,
     enable_transcribe: bool = True,
     enable_gap_trim: bool = False,

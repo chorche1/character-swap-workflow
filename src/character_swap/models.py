@@ -95,6 +95,20 @@ class ProjectAsset(BaseModel):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class QCReject(BaseModel):
+    """One QC-rejected take, preserved so the user can SEE what QC threw away
+    (Hugo 2026-06-20). When a generated image/clip fails vision/clip QC and is
+    regenerated, the rejected file is normally overwritten by the next attempt;
+    we snapshot it to a sidecar path and record it here instead. The FINAL
+    kept-after-exhausted-retries take is NOT recorded here — it stays at the
+    variant's own `path`/`final_video_path` with qc_status="failed" (⚠ chip)."""
+    path: str
+    reason: str | None = None
+    attempt: int = 0                         # 1-based attempt that produced this reject
+    kind: str = "swap"                       # "swap" (image) | "video" (clip)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class GeneratedImage(BaseModel):
     """One generated image variant for a character within a job."""
     variant_id: str
@@ -121,6 +135,10 @@ class GeneratedImage(BaseModel):
     # a deviation the user asked for (review 2026-06-13: the judge restored
     # the original prop because it only ever saw job.prompt).
     qc_intent: str | None = None
+    # Every image QC rejected on the way to this slot's final result, each
+    # snapshotted before the next attempt overwrote it (Hugo 2026-06-20 — "show
+    # me every image failed by QC"). Empty for slots that passed first try.
+    qc_rejects: list[QCReject] = Field(default_factory=list)
     # Set when the slot auto-fell-back to a different engine after the job's
     # chosen model rejected the prompt on CONTENT-POLICY grounds even after
     # prompt softening (e.g. gpt-image → "nbp-swap"). This is the sanctioned,
@@ -158,6 +176,10 @@ class VideoVariant(BaseModel):
     qc_status: str | None = None
     qc_reason: str | None = None
     qc_attempts: int = 0
+    # Every clip QC rejected before this take's final result (Hugo 2026-06-20),
+    # snapshotted before the next take overwrote it. Empty for clips that
+    # passed first try.
+    qc_rejects: list[QCReject] = Field(default_factory=list)
 
 
 class JobCharacter(BaseModel):

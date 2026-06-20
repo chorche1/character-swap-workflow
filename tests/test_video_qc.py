@@ -100,10 +100,17 @@ def test_image_qc_fail_then_repair_pass(monkeypatch, tmp_path):
     # Attempt 1: original scene + base prompt.
     assert gen_calls[0]["scene_image"] == Path(job.scene_image_path)
     assert gen_calls[0]["prompt"] == "BASE PROMPT"
-    # Attempt 2 = REPAIR: failed image as scene + repair prompt with the hint.
-    assert ".qcfail" in str(gen_calls[1]["scene_image"])
+    # Attempt 2 = REPAIR: the PRESERVED reject snapshot becomes the scene input
+    # (Hugo 2026-06-20 — the rejected image is kept, not overwritten) + repair
+    # prompt with the hint.
+    assert ".qcreject" in str(gen_calls[1]["scene_image"])
     assert "match the reference face" in gen_calls[1]["prompt"]
     assert "as little" in gen_calls[1]["prompt"].lower()
+    # The rejected attempt-1 image is preserved on disk + recorded.
+    assert len(v.qc_rejects) == 1
+    assert v.qc_rejects[0].reason == "wrong person"
+    assert v.qc_rejects[0].attempt == 1
+    assert Path(v.qc_rejects[0].path).exists()
 
 
 def test_image_qc_exhausted_keeps_image_flagged(monkeypatch, tmp_path):
@@ -156,9 +163,12 @@ def test_grok_repair_skipped_falls_back_to_reroll(monkeypatch, tmp_path):
 
     asyncio.run(runner._generate_one_variant(job, jc, v, asyncio.Semaphore(1)))
 
-    assert ".qcfail" not in str(gen_calls[1]["scene_image"])
+    assert ".qcreject" not in str(gen_calls[1]["scene_image"])
     assert "fix the face" in gen_calls[1]["prompt"]
     assert gen_calls[1]["prompt"].startswith("BASE PROMPT")
+    # Even on a re-roll the rejected take is still preserved for review.
+    assert len(v.qc_rejects) == 1
+    assert Path(v.qc_rejects[0].path).exists()
 
 
 # --------------------------------------------------------------- video QC loop
@@ -196,6 +206,11 @@ def test_video_qc_retry_then_pass(monkeypatch, tmp_path):
     assert len(submits) == 2
     assert "baking soda" in submits[1]["movement_prompt"]
     assert "rejected by quality control" in submits[1]["movement_prompt"]
+    # The QC-rejected take-1 clip is preserved + recorded (Hugo 2026-06-20).
+    assert len(video.qc_rejects) == 1
+    assert video.qc_rejects[0].kind == "video"
+    assert 'baking goda' in (video.qc_rejects[0].reason or "")
+    assert Path(video.qc_rejects[0].path).exists()
 
 
 def test_video_qc_disabled_single_attempt(monkeypatch, tmp_path):

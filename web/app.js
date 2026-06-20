@@ -166,13 +166,13 @@ function studio() {
     reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
-      thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30; Kling room tone)
-      minSilenceSecs: 0.30,   // Hugo's preset
-      padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
+      thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+      minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
+      padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
       enableGapTrim: false,   // opt-in word-gap trim (replaces level interior trim)
       gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
       trimming: false,
-      template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
+      template: 'capcut-bluebox',   // Hugo 2026-06-21: editor-wide standard (was capcut-purple-pill)
       captioning: false,
       autoEditing: false,
       voiceId: '',
@@ -180,7 +180,7 @@ function studio() {
       enableCaptions: true,
       enableNormalizeWpm: false,      // Hugo's preset: WPM normalize OFF
       targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
-      playbackSpeed: 1.1,             // Hugo's preset: 10% global speed-up
+      playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.1)
       // Auto-fire the Resolve pipeline (Phase 4) after a successful render.
       // Persisted to localStorage so the toggle survives reloads.
       autoExportResolve: (typeof localStorage !== 'undefined'
@@ -189,7 +189,7 @@ function studio() {
       _pipelinePoll: null,            // setInterval handle while polling
       rerendering: false,
       rerenderOpen: false,                    // shows the edit-result panel
-      rerenderTemplate: 'capcut-purple-pill', // independent of editor.template so you can A/B
+      rerenderTemplate: 'capcut-bluebox', // independent of editor.template so you can A/B
       rerenderTrimStart: 0,
       rerenderTrimEnd: 0,
       rerenderOverrides: {
@@ -239,11 +239,10 @@ function studio() {
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
-    // Step 6 defaults: capcut-purple-pill + trim + captions, with WPM normalize
-    // and voice swap OFF ("nothing else from the multiclip editor"). Persisted
-    // as ONE versioned JSON blob so every choice — not just template/WPM —
-    // survives reloads; the v2 key cleanly supersedes the old split keys + the
-    // previous submagic-pro default.
+    // Step 6 defaults (Hugo 2026-06-21 editor-wide standard): capcut-bluebox +
+    // trim + captions, with WPM normalize and voice swap OFF. Persisted as ONE
+    // versioned JSON blob so every choice — not just template/WPM — survives
+    // reloads; the v3 key cleanly supersedes older keys + their defaults.
     // Per-process settings (Hugo 2026-06-17). `_compileDefault` is the global
     // SEED for a fresh job's Step-6 panel; `compileByJob[job_id]` is the
     // editable per-job override (seeded from the seed + the job's persisted
@@ -253,21 +252,21 @@ function studio() {
     compileByJob: {},
     _compileDefault: (() => {
       const defaults = {
-        template: 'capcut-purple-pill',
+        template: 'capcut-bluebox',   // Hugo 2026-06-21: editor-wide standard
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
-        thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30)
-        minSilenceSecs: 0.30,   // Hugo's preset
-        padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
+        thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+        minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
+        padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
       };
       try {
-        const saved = JSON.parse(localStorage.getItem('compile.settings.v2') || '{}');
+        const saved = JSON.parse(localStorage.getItem('compile.settings.v3') || '{}');
         const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
         // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.05. Bump a saved
         // value that still holds the OLD default to the new one (idempotent;
@@ -296,19 +295,19 @@ function studio() {
         enableVoiceSwap: false,
         // Trim-tuning (Hugo 2026-06-17): now exposed in the ⚙ panel + sent to
         // the backend (was hardcoded to the runner preset). -23 base / 0.05 pad.
-        thresholdDb: -23,
-        minSilenceSecs: 0.20,
-        padSecs: 0.05,
+        thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+        minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.20)
+        padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
-        playbackSpeed: 1.0,             // global speed (Editor's control); 1.0 = av
+        playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.0)
       };
       try {
         // v2 (2026-06-16): supersedes v1 so the new bluebox @ 60 default
         // replaces any saved 68 from before; older reAsm prefs reset to current.
-        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v2') || '{}');
+        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v3') || '{}');
         return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
       } catch (_) { return defaults; }
     })(),
@@ -2058,6 +2057,7 @@ function studio() {
     },
 
     async reengineerAnimate(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/animate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this._reAsmBody(run)),
@@ -2069,6 +2069,7 @@ function studio() {
     },
 
     async reengineerAssemble(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this._reAsmBody(run)),
@@ -2301,6 +2302,29 @@ function studio() {
       this.reSceneDrafts = rest;
     },
 
+    // Commit any typed-but-UNBLURRED scene field edits (Kling-längd, motion
+    // prompt) BEFORE a generation trigger reads server state. Those fields
+    // only persist on blur (@change → reengineerSaveScene); a value the user
+    // typed and then immediately clicked ▶ Generate / ▶ Animera om ändrade /
+    // ↻ Ta om scen / ▶ Bygg ihop on was silently dropped, so the clip
+    // rendered at the OLD stored length (Hugo 2026-06-21: set 9 s, got a 4 s
+    // clip — the 9 lived only in the draft, the server still saw the previous
+    // value). Awaiting each save guarantees the value the user SEES in the
+    // field is the value the server uses. Returns the freshest run view
+    // (reengineerSaveScene splices the history on each save).
+    async _flushReSceneDrafts(run) {
+      const prefix = run.re_id + ':';
+      const idxs = Object.keys(this.reSceneDrafts)
+        .filter(k => k.startsWith(prefix))
+        .map(k => Number(k.slice(prefix.length)));
+      for (const idx of idxs) {
+        const cur = this.reengineerHistory.find(x => x.re_id === run.re_id) || run;
+        const sc = (cur.scenes || []).find(s => s.idx === idx);
+        if (sc) await this.reengineerSaveScene(cur, sc);
+      }
+      return this.reengineerHistory.find(x => x.re_id === run.re_id) || run;
+    },
+
     // Upload an image created ELSEWHERE as a variant for one (char × scene)
     // slot (Hugo 2026-06-12). Server marks it READY (QC skipped) and
     // auto-approves it for the scene, replacing the previous approval.
@@ -2522,6 +2546,7 @@ function studio() {
     },
 
     async reengineerRedoClip(run, sc, cid) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ char_id: cid }),
@@ -2534,6 +2559,7 @@ function studio() {
 
     async reengineerRedoScene(run, sc) {
       if (!confirm(`Ta om scen ${sc.idx + 1} för ALLA karaktärer? (en Kling-rendering per karaktär)`)) return;
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -2549,6 +2575,7 @@ function studio() {
     },
 
     async reengineerAnimateDirty(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/animate_scenes`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -2748,7 +2775,14 @@ function studio() {
         const r = await fetch('/api/editor/templates');
         if (r.ok) this.editorTemplates = await r.json();
         // Restore last-used template, or fall back to the first available
-        // (or the existing `editor.template` default which is popout-yellow).
+        // (or the existing `editor.template` default which is capcut-bluebox).
+        // 2026-06-21 (Hugo): capcut-bluebox is the new editor-wide standard.
+        // One-time reset of a stale saved editor.template so the new default
+        // applies; picking another template afterwards still persists.
+        if (!localStorage.getItem('editor.tpl.std.v2')) {
+          localStorage.removeItem('editor.template');
+          localStorage.setItem('editor.tpl.std.v2', '1');
+        }
         const saved = localStorage.getItem('editor.template');
         if (saved && this.editorTemplates.some(t => t.slug === saved)) {
           this.editor.template = saved;
@@ -6508,7 +6542,12 @@ function studio() {
         // retry_one_video in place + final marked stale. The live poll keeps
         // refreshing because the new clip is pending/processing.
         if (this.regenModal.reRun) {
-          const run = this.regenModal.reRun;
+          // Commit any typed-but-unblurred Kling-längd before regen: this path
+          // resolves clip length from job.durations_by_scene, which is only
+          // refreshed by the scene PATCH (reengineerSaveScene). Without the
+          // flush a length typed in the inline row but not blurred is dropped
+          // and the clip regenerates at the OLD length (same bug as ▶ Generate).
+          const run = await this._flushReSceneDrafts(this.regenModal.reRun);
           const rr = await fetch(`/api/reengineer/${run.re_id}/regen_clip`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

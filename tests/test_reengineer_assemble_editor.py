@@ -113,12 +113,11 @@ def test_assemble_passes_full_clips_with_kling_defaults(tmp_path, monkeypatch):
     assert kw["enable_captions"] is True
     assert kw["enable_wpm_normalize"] is False         # Kling pacing kept
     assert kw["voice_id"] is None                      # Kling voice kept
-    assert kw["playback_speed"] == 1.0                 # global speed off
-    # Hugo 2026-06-17: level-trim base raised to -23 dB / pad 0.05 (Kling room
-    # tone sits ~-20..-25 dB; -30 found almost no silence). min-silence kept.
-    assert kw["threshold_db"] == -23.0
-    assert kw["min_silence_secs"] == 0.20
-    assert kw["pad_secs"] == 0.05
+    assert kw["playback_speed"] == 1.05                # Hugo 2026-06-21 standard
+    # Hugo 2026-06-21: editor-wide standard — -24 dB / 0.4 s / 0.1 s.
+    assert kw["threshold_db"] == -24.0
+    assert kw["min_silence_secs"] == 0.4
+    assert kw["pad_secs"] == 0.1
     # Word-gap trim defaults OFF (opt-in), max_gap 0.35.
     assert kw["enable_gap_trim"] is False
     assert kw["gap_max_secs"] == 0.35
