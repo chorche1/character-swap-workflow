@@ -2001,6 +2001,7 @@ function studio() {
     },
 
     async reengineerAnimate(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/animate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this._reAsmBody(run)),
@@ -2012,6 +2013,7 @@ function studio() {
     },
 
     async reengineerAssemble(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/assemble`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(this._reAsmBody(run)),
@@ -2244,6 +2246,29 @@ function studio() {
       this.reSceneDrafts = rest;
     },
 
+    // Commit any typed-but-UNBLURRED scene field edits (Kling-längd, motion
+    // prompt) BEFORE a generation trigger reads server state. Those fields
+    // only persist on blur (@change → reengineerSaveScene); a value the user
+    // typed and then immediately clicked ▶ Generate / ▶ Animera om ändrade /
+    // ↻ Ta om scen / ▶ Bygg ihop on was silently dropped, so the clip
+    // rendered at the OLD stored length (Hugo 2026-06-21: set 9 s, got a 4 s
+    // clip — the 9 lived only in the draft, the server still saw the previous
+    // value). Awaiting each save guarantees the value the user SEES in the
+    // field is the value the server uses. Returns the freshest run view
+    // (reengineerSaveScene splices the history on each save).
+    async _flushReSceneDrafts(run) {
+      const prefix = run.re_id + ':';
+      const idxs = Object.keys(this.reSceneDrafts)
+        .filter(k => k.startsWith(prefix))
+        .map(k => Number(k.slice(prefix.length)));
+      for (const idx of idxs) {
+        const cur = this.reengineerHistory.find(x => x.re_id === run.re_id) || run;
+        const sc = (cur.scenes || []).find(s => s.idx === idx);
+        if (sc) await this.reengineerSaveScene(cur, sc);
+      }
+      return this.reengineerHistory.find(x => x.re_id === run.re_id) || run;
+    },
+
     // Upload an image created ELSEWHERE as a variant for one (char × scene)
     // slot (Hugo 2026-06-12). Server marks it READY (QC skipped) and
     // auto-approves it for the scene, replacing the previous approval.
@@ -2465,6 +2490,7 @@ function studio() {
     },
 
     async reengineerRedoClip(run, sc, cid) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ char_id: cid }),
@@ -2477,6 +2503,7 @@ function studio() {
 
     async reengineerRedoScene(run, sc) {
       if (!confirm(`Ta om scen ${sc.idx + 1} för ALLA karaktärer? (en Kling-rendering per karaktär)`)) return;
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/redo`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -2492,6 +2519,7 @@ function studio() {
     },
 
     async reengineerAnimateDirty(run) {
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/animate_scenes`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({}),
@@ -6451,7 +6479,12 @@ function studio() {
         // retry_one_video in place + final marked stale. The live poll keeps
         // refreshing because the new clip is pending/processing.
         if (this.regenModal.reRun) {
-          const run = this.regenModal.reRun;
+          // Commit any typed-but-unblurred Kling-längd before regen: this path
+          // resolves clip length from job.durations_by_scene, which is only
+          // refreshed by the scene PATCH (reengineerSaveScene). Without the
+          // flush a length typed in the inline row but not blurred is dropped
+          // and the clip regenerates at the OLD length (same bug as ▶ Generate).
+          const run = await this._flushReSceneDrafts(this.regenModal.reRun);
           const rr = await fetch(`/api/reengineer/${run.re_id}/regen_clip`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
