@@ -148,6 +148,27 @@ def _file_url(path: Path | str | None) -> str | None:
         return None
 
 
+def _qc_rejects_dicts(rejects: list | None) -> list[dict]:
+    """Serialize a variant's/clip's preserved QC-rejected takes for the frontend
+    (Hugo 2026-06-20). Each carries a web-servable `url`, the judge's `reason`,
+    and the 1-based `attempt`. Rejects whose file went missing are dropped so the
+    UI never renders a broken thumbnail."""
+    out: list[dict] = []
+    for r in (rejects or []):
+        if not r.path or not Path(r.path).exists():
+            continue
+        url = _file_url(r.path)
+        if not url:
+            continue
+        out.append({
+            "url": url,
+            "reason": r.reason,
+            "attempt": r.attempt,
+            "kind": r.kind,
+        })
+    return out
+
+
 def _variant_download_name(jc: JobCharacter, variant: GeneratedImage) -> str:
     """1-based index among same-kind variants for this character."""
     stem = _safe_filename_stem(jc.name)
@@ -335,6 +356,10 @@ def _job_to_dict(job: Job) -> dict:
                         "qc_status": v.qc_status,
                         "qc_reason": v.qc_reason,
                         "qc_attempts": v.qc_attempts,
+                        # Every image QC rejected before this slot's final
+                        # result — shown inline so the user sees what QC threw
+                        # away (Hugo 2026-06-20).
+                        "qc_rejects": _qc_rejects_dicts(v.qc_rejects),
                         "fallback_model": v.fallback_model,
                         "download_name": _variant_download_name(jc, v),
                     }
@@ -348,6 +373,12 @@ def _job_to_dict(job: Job) -> dict:
                         "url": _file_url(vv.final_video_path),
                         "source_variant_id": vv.source_variant_id,
                         "error": vv.error,
+                        "qc_status": vv.qc_status,
+                        "qc_reason": vv.qc_reason,
+                        "qc_attempts": vv.qc_attempts,
+                        # Every clip QC rejected before this take's final
+                        # result (Hugo 2026-06-20).
+                        "qc_rejects": _qc_rejects_dicts(vv.qc_rejects),
                         "download_name": _video_download_name(jc, vv),
                         # Per-video override + the fallback per-scene prompt,
                         # so the Step 5 regen modal can pre-fill correctly

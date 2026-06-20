@@ -20,6 +20,7 @@ from character_swap.models import (
     GeneratedImage,
     Job,
     JobCharacter,
+    QCReject,
     VariantStatus,
     VideoStatus,
     VideoVariant,
@@ -380,6 +381,28 @@ async def _generate_one_variant(
                 await _emit(job.job_id, "variant.qc_retry",
                             char_id=jc.char_id, variant_id=variant.variant_id,
                             attempt=attempt, reason=verdict.reason)
+                # Preserve the rejected image before the next attempt overwrites
+                # `dest` — Hugo 2026-06-20 wants to SEE every image QC failed.
+                # The snapshot doubles as the repair-mode input below, so no
+                # second copy. Failure to copy must never block the retry.
+                # Number by the CUMULATIVE reject count (not the per-run
+                # `attempt`): retry_single_variant / ✎↻ / 🪄 re-run the SAME
+                # variant_id with attempt reset to 1, so an attempt-based name
+                # would clobber an earlier run's preserved reject + lose it.
+                reject_path: Path | None = dest.with_name(
+                    f"{dest.stem}.qcreject{len(variant.qc_rejects) + 1}.png")
+                try:
+                    await asyncio.to_thread(shutil.copyfile, dest, reject_path)
+                except OSError:
+                    reject_path = None
+                else:
+                    variant.qc_rejects.append(QCReject(
+                        path=str(reject_path), reason=verdict.reason,
+                        attempt=attempt, kind="swap"))
+                    await asyncio.to_thread(_replace_variant, job, jc, variant)
+                    await _emit(job.job_id, "variant.qc_reject",
+                                char_id=jc.char_id, variant_id=variant.variant_id,
+                                attempt=attempt, reason=verdict.reason)
                 hint = (verdict.corrective_hint or verdict.reason or "").strip()
                 if (attempt == 1 and effective_model != "grok-image"
                         and not swap_qc.needs_reroll(verdict.reason)):
@@ -388,9 +411,12 @@ async def _generate_one_variant(
                     # background, wrong framing, broken image) — repair's
                     # keep-everything contract fights those corrections
                     # (backlog #12); they re-roll fresh below instead.
-                    failed_copy = dest.with_name(dest.stem + ".qcfail.png")
-                    await asyncio.to_thread(shutil.copyfile, dest, failed_copy)
-                    attempt_scene = failed_copy
+                    if reject_path is None:
+                        # Snapshot copy failed above — make a dedicated repair
+                        # copy so the failed image still feeds the edit.
+                        reject_path = dest.with_name(dest.stem + ".qcfail.png")
+                        await asyncio.to_thread(shutil.copyfile, dest, reject_path)
+                    attempt_scene = reject_path
                     prompt = swap_qc.repair_prompt(hint)
                 else:
                     # Fresh re-roll from the original scene + hint.
@@ -1115,6 +1141,20 @@ async def _animate_one_video(
                 await _emit(job.job_id, "video.qc_retry",
                             char_id=jc.char_id, video_id=video.video_id,
                             attempt=attempt, reason=verdict.reason)
+                # Preserve the rejected clip before the next take overwrites
+                # `dest` — Hugo 2026-06-20 wants every QC-failed clip visible.
+                # Cumulative count, not per-run attempt (a reused slot resets
+                # attempt to 1) — see the image path for the rationale.
+                reject_clip = dest.with_name(
+                    f"{dest.stem}.qcreject{len(video.qc_rejects) + 1}.mp4")
+                try:
+                    await asyncio.to_thread(shutil.copyfile, dest, reject_clip)
+                except OSError:
+                    pass
+                else:
+                    video.qc_rejects.append(QCReject(
+                        path=str(reject_clip), reason=verdict.reason,
+                        attempt=attempt, kind="video"))
                 hint = (verdict.corrective_hint or verdict.reason or "").strip()
                 prompt_text = movement_prompt + (
                     f" IMPORTANT — the previous take was rejected by quality "

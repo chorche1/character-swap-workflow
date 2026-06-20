@@ -234,6 +234,8 @@ def _synth_value(name: str, annotation, idx: int):
     from datetime import datetime
     from enum import Enum
 
+    from pydantic import BaseModel
+
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
     if origin is typing.Union or str(origin) == "types.UnionType":   # Optional[X] / X | None
@@ -261,6 +263,8 @@ def _synth_value(name: str, annotation, idx: int):
         k = _synth_value(name + "_k", args[0] if args else str, idx)
         v = _synth_value(name + "_v", args[1] if len(args) > 1 else str, idx)
         return {k: v}
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _populated(annotation)                                    # nested model (e.g. QCReject)
     raise NotImplementedError(
         f"_synth_value: add a synthesizer for field '{name}': {annotation!r} "
         "(a new model field type needs round-trip coverage)")
