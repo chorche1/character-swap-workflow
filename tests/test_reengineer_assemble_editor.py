@@ -678,26 +678,34 @@ def test_speech_secs_still_parses_bare_says():
 
 
 def test_kling_suffix_js_mirrors_with_accent():
-    """The gate UI's klingSuffix(text) must stay byte-identical with
-    _with_accent's clauses — it is the 'exact prompt' promise. Edit both
-    together or this test fails."""
+    """The gate UI's klingSuffix(text, lang) must stay byte-identical with
+    _with_accent's clauses — it is the 'exact prompt' promise. Now language-
+    aware (en/es); edit both together or this test fails."""
     js = _APP_JS.read_text(encoding="utf-8")
-    m = re.search(r"klingSuffix\(text\)\s*{(.*?)\n    },", js, re.S)
+    m = re.search(r"klingSuffix\(text, lang\)\s*{(.*?)\n    },", js, re.S)
     assert m, "klingSuffix not found in app.js"
     body = m.group(0)
-    clauses = re.findall(r"const clause = '([^']+)';", body)
-    assert len(clauses) == 3
+    # Accent clauses live in the lang-select object literal; pronounce + music
+    # are still `const clause = '...'`.
+    found = [a or b for a, b in
+             re.findall(r"clause: '([^']+)'|const clause = '([^']+)';", body)]
+    en_accent = runner_reengineer._ACCENT_CLAUSE["en"][0]
+    es_accent = runner_reengineer._ACCENT_CLAUSE["es"][0]
+    pronounce = " Every word is pronounced clearly, correctly and distinctly."
+    music = " No background music — natural ambient room sound only."
+    for clause in (en_accent, es_accent, pronounce, music):
+        assert clause in found, f"missing JS clause: {clause!r}"
 
-    accent, pronounce, music = clauses
-    # Byte-identical with the Python source of truth:
-    assert runner_reengineer._with_accent("x") == "x" + accent + pronounce + music
-    assert runner_reengineer._with_accent("") == accent + pronounce + music
+    # Byte-identical with the Python source of truth, BOTH languages:
+    assert runner_reengineer._with_accent("x", "en") == "x" + en_accent + pronounce + music
+    assert runner_reengineer._with_accent("x", "es") == "x" + es_accent + pronounce + music
+    assert runner_reengineer._with_accent("") == en_accent + pronounce + music
     # Same guards (case-insensitive substring checks) on both sides.
-    assert "american" in body and "pronounc" in body and "music" in body
+    assert all(k in body for k in ("american", "spanish", "pronounc", "music"))
     p = runner_reengineer._with_accent(
         "An American narrator pronounces this. No music.")
     assert p == "An American narrator pronounces this. No music."
-    # The new analyst attribution covers accent+pronunciation… the central
+    # The analyst attribution already covers accent+pronunciation… the central
     # layer still adds ONLY the music guarantee.
     attributed = ('The person says, in a casual conversational tone with a '
                   'natural American accent: "hi there folks, pronounced well"')

@@ -451,10 +451,11 @@ async def _analyze(re_id: str, state: dict, source: Path,
               for i, seq in enumerate(sequences)]
 
     # --- agent analysis (fallback never blocks the pipeline) -------------
+    language = state.get("language") or "en"
     plans = await asyncio.to_thread(
         reengineer.analyze_scenes,
         frames=frames, spans=spans, words=words, re_id=re_id,
-        motion_frames=sequences,
+        motion_frames=sequences, language=language,
     )
     if plans is None:
         # Backlog #23 (2026-06-12): this used to be invisible — generic
@@ -465,6 +466,12 @@ async def _analyze(re_id: str, state: dict, source: Path,
                      "fallback motion prompts", re_id)
         state["analyst_fallback"] = True
         plans = reengineer.fallback_plans(spans, words)
+        # A Spanish run must never ship English fallback dialogue — translate
+        # the verbatim transcript into Spanish (visible + editable at the gate;
+        # on translate failure the English text stays for the user to fix).
+        if language == "es":
+            plans = await asyncio.to_thread(
+                reengineer.spanishize_plans, plans, re_id=re_id)
 
     # --- register frames as scenes + persist the plan ---------------------
     scene_entries: list[dict] = []
@@ -915,19 +922,32 @@ def _scene_duration(entry: dict, state: dict) -> int:
     return int(default) if default else _kling_duration(entry)
 
 
-def _with_accent(prompt: str) -> str:
+# Per-language accent clause + the keyword that marks "already covered" so the
+# clause is never doubled. Spanish (Hugo 2026-06-20) only changes WHICH accent
+# is enforced — the dialogue itself is written in Spanish upstream (analyst /
+# fallback translation). Mirrored in app.js klingSuffix().
+_ACCENT_CLAUSE: dict[str, tuple[str, str]] = {
+    "en": (" The person speaks fluent American English with a natural "
+           "American accent.", "american"),
+    "es": (" The person speaks fluent, natural Latin American Spanish with a "
+           "neutral Latin American Spanish accent.", "spanish"),
+}
+
+
+def _with_accent(prompt: str, language: str = "en") -> str:
     """Kling synthesizes voice AND ambience from the prompt — enforce three
     guarantees centrally, even if a scene's agent-written prompt forgot them:
-    American accent + clear pronunciation (Hugo 2026-06-11; garbled words
-    like "baking goda" observed) and NO music bed (research 2026-06-12:
-    generate_audio invents background music unless told otherwise; there is
-    no API switch, suppression is prompt-level). Each clause is skipped when
-    the prompt already covers it. Mirrored in app.js klingSuffix() —
-    a pytest keeps the clause strings byte-identical."""
+    the run's spoken-language accent + clear pronunciation (Hugo 2026-06-11;
+    garbled words like "baking goda" observed) and NO music bed (research
+    2026-06-12: generate_audio invents background music unless told otherwise;
+    there is no API switch, suppression is prompt-level). The pronunciation +
+    no-music directives stay English (they are instructions, not speech). Each
+    clause is skipped when the prompt already covers it. Mirrored in app.js
+    klingSuffix()."""
     out = prompt
-    if "american" not in out.lower():
-        out = (out.rstrip() + " The person speaks fluent American English "
-               "with a natural American accent.")
+    clause, key = _ACCENT_CLAUSE.get(language, _ACCENT_CLAUSE["en"])
+    if key not in out.lower():
+        out = out.rstrip() + clause
     if "pronounc" not in out.lower():
         out = (out.rstrip() + " Every word is pronounced clearly, correctly "
                "and distinctly.")
@@ -980,7 +1000,8 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     if not image.exists():
         await _persist_direct(re_id, scene_id, direct_error="direkt bild saknas")
         return
-    prompt = _with_accent(entry.get("motion_prompt") or "")
+    prompt = _with_accent(entry.get("motion_prompt") or "",
+                          state.get("language") or "en")
     model = _scene_video_model(entry, state)
     dur = _scene_duration(entry, state)
     dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
@@ -1025,7 +1046,8 @@ async def _do_animate(re_id: str, state: dict) -> None:
     if not approved_any and not direct_scenes:
         raise RuntimeError("no approved variants — approve images first")
 
-    movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"])
+    _lang = state.get("language") or "en"
+    movement_prompts = {e["scene_id"]: _with_accent(e["motion_prompt"], _lang)
                         for e in state["scenes"]}
     durations = {e["scene_id"]: _scene_duration(e, state) for e in state["scenes"]}
     models_by_scene = {e["scene_id"]: _scene_video_model(e, state)
@@ -1465,10 +1487,13 @@ ADDED_SCENE_PROMPT = (
     "looking at the camera.")
 
 
-def _speech_clause(spoken: str) -> str:
+def _speech_clause(spoken: str, language: str = "en") -> str:
     """Dialogue attribution, simple Kling style (Hugo 2026-06-13): accent
     folded into the attribution, nothing else. Gender-neutral — this
-    fallback never sees the frames."""
+    fallback never sees the frames. Spanish runs mark the line as spoken in
+    Spanish (the text itself is translated upstream)."""
+    if language == "es":
+        return reengineer.spanish_speech_clause(spoken)
     return (' The person says to the camera with an American accent: '
             f'"{spoken}"')
 
@@ -1482,6 +1507,7 @@ def _sync_movement_from_state(job: Job, state: dict,
     a single-clip redo / reanimate honors a per-scene model override instead of
     silently falling back to the run default."""
     entries = state.get("scenes") or []
+    lang = state.get("language") or "en"
     targets = (entries if idxs is None
                else [entries[i] for i in idxs if 0 <= i < len(entries)])
     job.movement_prompts = dict(job.movement_prompts or {})
@@ -1490,7 +1516,7 @@ def _sync_movement_from_state(job: Job, state: dict,
     enriched = dict(job.enriched_movement_prompts or {})
     for e in targets:
         sid = e["scene_id"]
-        job.movement_prompts[sid] = _with_accent(e["motion_prompt"])
+        job.movement_prompts[sid] = _with_accent(e["motion_prompt"], lang)
         job.durations_by_scene[sid] = _scene_duration(e, state)
         job.video_models_by_scene[sid] = _scene_video_model(e, state)
         # Drop any enriched/Director layer for the synced scene — it outranks
@@ -1527,6 +1553,14 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
         except Exception:
             _log.exception("reengineer %s: whisper prefill failed", re_id)
         state = reengineer.load_state(re_id) or state
+        lang = state.get("language") or "en"
+        # Spanish run → translate the transcribed line before prefilling so an
+        # added scene speaks Spanish like the rest (English stays on failure).
+        if spoken and lang == "es":
+            translated = await asyncio.to_thread(
+                reengineer.translate_dialogue, [spoken], re_id=re_id)
+            if translated and translated[0].strip():
+                spoken = translated[0].strip()
         for e in state.get("scenes") or []:
             if e.get("scene_id") != scene_id:
                 continue
@@ -1540,7 +1574,7 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
             current = e.get("motion_prompt", "") or ""
             if spoken and (not current.strip()
                            or current.startswith(ADDED_SCENE_PROMPT[:40])):
-                e["motion_prompt"] = _speech_clause(spoken).strip()
+                e["motion_prompt"] = _speech_clause(spoken, lang).strip()
                 e["speech"] = spoken
         reengineer.save_state(state)
 

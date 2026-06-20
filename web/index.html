@@ -1419,6 +1419,15 @@
           </label>
           <span class="text-sm text-neutral-500 dark:text-neutral-400">Video: Kling 3.0 <span class="text-emerald-600 dark:text-emerald-400">🔊 native audio</span></span>
           <label class="text-sm flex items-center gap-2"
+                 title="Spoken language of the generated videos. Español translates every spoken line to neutral Latin American Spanish — the rest of the prompts stay English.">
+            <span class="text-neutral-500 dark:text-neutral-400">🗣 Språk:</span>
+            <select x-model="reengineerGen.language"
+                    class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+              <option value="en">English (som originalet)</option>
+              <option value="es">Español (latinamerikansk)</option>
+            </select>
+          </label>
+          <label class="text-sm flex items-center gap-2"
                  title="What the swapped characters wear in every scene">
             <span class="text-neutral-500 dark:text-neutral-400">Outfit:</span>
             <select x-model="reengineerGen.outfitMode"
@@ -1496,6 +1505,9 @@
                     'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300': ['failed','partial_success'].includes(r.status),
                   }"
                   x-text="r.status"></span>
+            <span x-show="r.language === 'es'"
+                  class="text-[11px] px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
+                  title="Replikerna i videorna genereras på neutral latinamerikansk spanska">🗣 ES</span>
             <span class="text-xs text-neutral-400" x-text="(r.scenes?.length || r.n_scenes || 0) + ' scenes'"></span>
             <span class="text-xs text-amber-600 dark:text-amber-400"
                   x-show="r.status === 'swapping' && jobImageProgress(r.job)"
@@ -1593,12 +1605,12 @@
                       <!-- EXACT Kling prompt = the textarea text + these auto-appended
                            clauses (mirrors _with_accent server-side; updates live
                            while typing). Nothing else is added or rewritten. -->
-                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && klingSuffix(reSceneVal(r, sc, 'motion_prompt'), r.language)"
                          class="text-[10px] text-neutral-400 dark:text-neutral-500 leading-snug">
                         <span class="font-medium text-neutral-500 dark:text-neutral-400">＋ Kling får exakt texten ovan plus:</span>
-                        <span class="italic" x-text="klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"></span>
+                        <span class="italic" x-text="klingSuffix(reSceneVal(r, sc, 'motion_prompt'), r.language)"></span>
                       </p>
-                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && !klingSuffix(reSceneVal(r, sc, 'motion_prompt'))"
+                      <p x-show="reSceneEffModel(r, sc) === 'kling-v3' && !klingSuffix(reSceneVal(r, sc, 'motion_prompt'), r.language)"
                          class="text-[10px] text-emerald-600 dark:text-emerald-400">
                         ✓ Skickas till Kling exakt som ovan — inga auto-tillägg
                       </p>

@@ -108,6 +108,10 @@ function studio() {
       outfitMode: 'scene',           // scene | character | custom
       outfitText: '',                // clothing description for custom mode
       sceneSensitivity: 'high',      // normal | high | max cut detection
+      language: 'en',                // spoken language of the videos: en | es
+                                     // (es = dialogue translated to neutral
+                                     // Latin American Spanish; sticky via
+                                     // localStorage)
       background: null,              // optional File: replacement environment
       backgroundUrl: '',             // object URL for the thumbnail
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
@@ -499,6 +503,11 @@ function studio() {
       // gpt2-id-swap is his GPT engine of choice — make it survive reloads).
       this.$watch('reengineerGen.imageModel',
                   v => v && localStorage.setItem('reengineerGen.imageModel', v));
+      // Spoken-language pick is sticky too (Hugo 2026-06-20).
+      const reLang = localStorage.getItem('reengineerGen.language');
+      if (reLang) this.reengineerGen.language = reLang;
+      this.$watch('reengineerGen.language',
+                  v => v && localStorage.setItem('reengineerGen.language', v));
       // Swap-tab engine pick — same sticky preset (Hugo 2026-06-17): without
       // this the picker silently reverted to scene-first 'gpt-image'.
       this.$watch('swapFromImages.imageModel',
@@ -1500,6 +1509,7 @@ function studio() {
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
+        fd.append('language', g.language || 'en');
         if (g.background) fd.append('background_file', g.background);
         const pickedOverrides = {};
         for (const cid of g.charIds) {
@@ -2171,13 +2181,16 @@ function studio() {
     // Shown live under the gate textarea so "the prompt you see" + this
     // suffix == the literal Kling input. A pytest keeps the clause strings
     // byte-identical with the Python side — edit both together.
-    klingSuffix(text) {
+    klingSuffix(text, lang) {
       let out = String(text || '');
       let suffix = '';
-      if (!out.toLowerCase().includes('american')) {
-        const clause = ' The person speaks fluent American English with a natural American accent.';
-        out = out.replace(/\s+$/, '') + clause;
-        suffix += clause;
+      // Mirror of runner_reengineer._with_accent — keep clause strings in sync.
+      const accent = (lang === 'es')
+        ? { clause: ' The person speaks fluent, natural Latin American Spanish with a neutral Latin American Spanish accent.', key: 'spanish' }
+        : { clause: ' The person speaks fluent American English with a natural American accent.', key: 'american' };
+      if (!out.toLowerCase().includes(accent.key)) {
+        out = out.replace(/\s+$/, '') + accent.clause;
+        suffix += accent.clause;
       }
       if (!out.toLowerCase().includes('pronounc')) {
         const clause = ' Every word is pronounced clearly, correctly and distinctly.';

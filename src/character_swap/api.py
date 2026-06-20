@@ -4581,6 +4581,10 @@ async def reengineer_create(
     outfit_text: str = Form(""),
     # Cut sensitivity: normal/high/max -> ffmpeg scene-score thresholds.
     scene_sensitivity: str = Form("high"),
+    # Spoken language of the GENERATED videos (Hugo 2026-06-20). "en" = as the
+    # source (American English); "es" = all dialogue translated to neutral
+    # Latin American Spanish (everything else in the prompts stays English).
+    language: str = Form("en"),
     # 🎬 AI Director: one Claude call looks at every scene frame and writes a
     # tailored compact swap prompt per scene (props named with position/size,
     # camera distance anchored). Off by default; needs ANTHROPIC_API_KEY.
@@ -4621,6 +4625,8 @@ async def reengineer_create(
         raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
     if scene_sensitivity not in reengineer_mod.SENSITIVITY_THRESHOLDS:
         raise HTTPException(400, f"Unknown scene_sensitivity '{scene_sensitivity}'")
+    if language not in ("en", "es"):
+        raise HTTPException(400, f"Unknown language '{language}' (en | es)")
     source_overrides: dict[str, str] = {}
     if character_source_image_ids.strip():
         try:
@@ -4675,6 +4681,7 @@ async def reengineer_create(
         "outfit_mode": outfit_mode,
         "outfit_text": outfit_text.strip(),
         "scene_sensitivity": scene_sensitivity,
+        "language": language,
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "background_path": background_path,
         "character_source_image_ids": source_overrides,

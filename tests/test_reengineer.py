@@ -295,7 +295,7 @@ def test_analyst_failure_sets_fallback_flag(tmp_path, monkeypatch):
 
 
 def test_analyst_success_does_not_set_fallback_flag(tmp_path, monkeypatch):
-    def fake_analyze(*, frames, spans, words, re_id, motion_frames):
+    def fake_analyze(*, frames, spans, words, re_id, motion_frames, language="en"):
         return [reengineer.ScenePlan(idx=i, motion_prompt=f"plan {i}",
                                      speech="", summary="")
                 for i in range(len(frames))]

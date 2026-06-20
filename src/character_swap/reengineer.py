@@ -282,6 +282,37 @@ Rules:
   hints belong to the pipeline, not you) — just mark the dialogue.
 """
 
+# Appended to REENGINEER_ANALYST_SYSTEM when a run requests a non-English
+# spoken language (Hugo 2026-06-20: the Spanish Reengineer mode). Kling
+# synthesizes the voice from the prompt, so the ONLY thing that changes is the
+# quoted dialogue + its attribution clause — every stage direction stays
+# English. This block OVERRIDES the base prompt's "use the spoken words EXACTLY
+# / American accent" rules for the dialogue, nothing else.
+REENGINEER_SPANISH_DIRECTIVE = """
+
+OUTPUT LANGUAGE OVERRIDE — SPANISH DIALOGUE (highest priority):
+- Write ALL spoken DIALOGUE (only the text inside the quotes) in natural,
+  idiomatic, NEUTRAL LATIN AMERICAN Spanish. TRANSLATE the transcribed words
+  into Spanish — convey the same meaning and tone, do NOT translate word-for-
+  word, and do NOT keep the original English words. This OVERRIDES the
+  "use the spoken words EXACTLY as transcribed" rule (that rule still means:
+  do not change the MEANING — just render it in Spanish).
+- In the attribution clause, say the dialogue is spoken in Spanish instead of
+  naming an English accent — e.g. 'While pouring, he says enthusiastically to
+  the camera in neutral Latin American Spanish: "<diálogo>"'. NEVER write
+  "American accent" or "American English" for a Spanish run.
+- The digit/units rule applies in Spanish: spell numbers and units as Spanish
+  words ("cuarenta", not "40" or "forty").
+- EVERYTHING ELSE stays in ENGLISH: the physical-action description and all
+  stage directions remain English exactly as instructed above. ONLY the quoted
+  dialogue + its in-Spanish attribution are Spanish.
+"""
+
+# Attribution wording for a Spanish run's dialogue clause (fallback path +
+# added-scene prefill). Mirrors what the analyst is told to write so
+# _with_accent / _DIALOGUE_RE treat both paths identically.
+SPANISH_SPEECH_ATTRIBUTION = "in neutral Latin American Spanish"
+
 REENGINEER_ANALYST_TOOL: dict = {
     "name": "submit_scene_plan",
     "description": "Submit the per-scene reengineering plan.",
@@ -319,6 +350,7 @@ def analyze_scenes(
     words: list[Word],
     re_id: str,
     motion_frames: list[list[tuple[Path, float]]] | None = None,
+    language: str = "en",
 ) -> list[ScenePlan] | None:
     """ONE Claude vision call: per-scene motion+speech plan. None on any
     failure — the caller falls back to transcript-derived prompts.
@@ -351,8 +383,11 @@ def analyze_scenes(
                 if off is not None and len(seq) > 1:
                     content.append({"type": "text", "text": f"t=+{off:.1f}s:"})
                 content.append(anthropic_client._file_to_image_block(fp))
+        system = REENGINEER_ANALYST_SYSTEM
+        if language == "es":
+            system += REENGINEER_SPANISH_DIRECTIVE
         resp = anthropic_client.messages_with_tools(
-            system=REENGINEER_ANALYST_SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": content}],
             tools=[REENGINEER_ANALYST_TOOL],
             tool_choice={"type": "tool", "name": "submit_scene_plan"},
@@ -445,5 +480,86 @@ def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[
                            "image naturally." + speech),
             speech=spoken,
             summary=spoken[:80] or f"Scene {i + 1}",
+        ))
+    return out
+
+
+def translate_dialogue(lines: list[str], *,
+                       re_id: str | None = None) -> list[str] | None:
+    """Translate each line to neutral Latin American Spanish (one GPT-4o call).
+    Returns a list aligned 1:1 with `lines`, or None on any failure — the
+    caller then leaves the English text in place (visible + editable at the
+    gate, never silently shipped as final). Empty strings pass through."""
+    idx = [i for i, ln in enumerate(lines) if ln.strip()]
+    if not idx:
+        return list(lines)
+    payload = {str(j): lines[i] for j, i in enumerate(idx)}
+    try:
+        import json as _json
+
+        from character_swap.call_log import record
+        from character_swap.clients import openai_image
+        client = openai_image._client()
+        system = (
+            "You translate short spoken lines from a video script into "
+            "natural, idiomatic NEUTRAL LATIN AMERICAN Spanish (the kind used "
+            "in widely-distributed social content — no country-specific slang, "
+            "no Spain 'vosotros'/'th' seseo). Convey meaning and tone, not a "
+            "word-for-word translation. Spell numbers and units as Spanish "
+            "words. Return STRICT JSON: the SAME keys you were given, each "
+            "mapped to its Spanish translation. No extra keys, no commentary.")
+        with record(phase="reengineer_translate", model="gpt-4o",
+                    character="es", job_id=re_id):
+            resp = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "system", "content": system},
+                          {"role": "user",
+                           "content": _json.dumps(payload, ensure_ascii=False)}],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=1200,
+            )
+        raw = (resp.choices[0].message.content or "").strip()
+        data = _json.loads(raw)
+    except Exception as e:
+        logger.warning("reengineer translate (%s) failed: %s: %s",
+                       re_id, type(e).__name__, e)
+        return None
+    out = list(lines)
+    for j, i in enumerate(idx):
+        val = data.get(str(j))
+        if isinstance(val, str) and val.strip():
+            out[i] = val.strip()
+        else:
+            return None          # incomplete → don't half-translate
+    return out
+
+
+def spanish_speech_clause(spoken_es: str) -> str:
+    """Spanish-run dialogue attribution (fallback + added-scene prefill);
+    mirrors what the analyst is told to write."""
+    return (f' The person says to the camera {SPANISH_SPEECH_ATTRIBUTION}: '
+            f'"{spoken_es}"')
+
+
+def spanishize_plans(plans: list[ScenePlan], *,
+                     re_id: str | None = None) -> list[ScenePlan]:
+    """Rewrite agent-less fallback plans into Spanish: translate each scene's
+    dialogue and rebuild its motion prompt with the Spanish attribution.
+    Translation failure → plans returned unchanged (English shows at the gate
+    for the user to fix; never silently finalized)."""
+    translated = translate_dialogue([p.speech or "" for p in plans], re_id=re_id)
+    if translated is None:
+        return plans
+    out: list[ScenePlan] = []
+    for p, es in zip(plans, translated):
+        es = (es or "").strip()
+        clause = spanish_speech_clause(es) if es else ""
+        out.append(ScenePlan(
+            idx=p.idx,
+            motion_prompt=("The person continues the action visible in the "
+                           "image naturally." + clause),
+            speech=es,
+            summary=(es[:80] or p.summary),
         ))
     return out
