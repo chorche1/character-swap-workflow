@@ -5108,6 +5108,55 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     return {"ok": True, "re_id": re_id}
 
 
+class ReAddCharactersBody(BaseModel):
+    character_ids: list[str]
+    # Optional {char_id: image_id}: which gallery image to swap in per new
+    # character (e.g. a specific outfit). Falls back to the library primary.
+    character_source_image_ids: dict[str, str] = {}
+    # True → fully automatic (auto-approve → animate → assemble); False → stop
+    # at the image-approval gate as usual.
+    auto: bool = False
+
+
+@app.post("/api/reengineer/{re_id}/add_characters")
+async def reengineer_add_characters(re_id: str, background_tasks: BackgroundTasks,
+                                    body: ReAddCharactersBody) -> dict:
+    """Run the SAME recipe (scenes + current swap/motion prompts + durations +
+    per-clip models + end-frame poses + background + language) for ADDITIONAL
+    characters on a FINISHED run — they join the SAME run as new columns. char 1
+    is untouched. `auto` → fully automatic; else stop at the approval gate."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    if state.get("status") not in {"done", "partial_success", "failed"}:
+        raise HTTPException(409, "cannot add characters while run status is "
+                            f"'{state.get('status')}' — wait until it finishes")
+    if (re_id in runner_reengineer._ANIMATING
+            or re_id in runner_reengineer._ASSEMBLING):
+        raise HTTPException(409, "run is busy — try again in a moment")
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    new_ids = [c for c in (body.character_ids or []) if c]
+    if not new_ids:
+        raise HTTPException(400, "Pick at least one character")
+    for cid in new_ids:
+        if store().get_character(cid) is None:
+            raise HTTPException(404, f"Character not found: {cid}")
+        if cid in job.characters:
+            raise HTTPException(409, f"Character already in this run: {cid}")
+    if runner_reengineer._recipe_reference_char(job) is None:
+        raise HTTPException(409, "no completed character to clone the recipe from")
+    overrides = {str(k): str(v)
+                 for k, v in (body.character_source_image_ids or {}).items() if v}
+    background_tasks.add_task(_run_async, runner_reengineer.add_characters,
+                             re_id, new_ids, overrides, auto=bool(body.auto))
+    return {"ok": True, "re_id": re_id, "character_ids": new_ids}
+
+
 def _assembly_refusal_message(gaps: dict) -> str:
     """Human, actionable one-liner for the 409 'Bygg ihop igen' refusal —
     names which scenes/characters block a complete rebuild and what to do."""

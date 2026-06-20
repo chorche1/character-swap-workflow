@@ -164,6 +164,12 @@ function studio() {
     reSceneDrafts: {},
     rePersonChoices: {},   // "${re_id}:${idx}" → {swap_person_idx}
     reAdd: {},
+    // "Kör samma recept för fler karaktärer" (Hugo 2026-06-21): per-run picker
+    // state for adding characters to a FINISHED run. re_id → {open, charIds:[],
+    // sourceOverrides:{}, submitting}. The new chars replay char 1's exact
+    // recipe (same scenes/prompts/lengths/end-frames) as new columns.
+    reMoreChars: {},
+    reMorePickerChar: null,  // "${re_id}:${char_id}" whose source popover is open
     editor: {
       sourceVideo: null,           // {file, url, name}
       thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
@@ -1492,6 +1498,93 @@ function studio() {
       const ids = this.reengineerGen.charIds;
       const i = ids.indexOf(cid);
       if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+    },
+
+    // ---- Add characters to a FINISHED run (same recipe) -------------------
+    // PURE read (no writes during render): returns the run's picker state or a
+    // fresh default. The write methods below spread from this and replace the
+    // whole entry, so the entry need not pre-exist.
+    reMoreState(r) {
+      return this.reMoreChars[r.re_id]
+        || { open: false, charIds: [], sourceOverrides: {}, submitting: false };
+    },
+    // Library characters not already in this run (pre-exclude existing columns).
+    reMoreCandidates(r) {
+      const existing = new Set(Object.keys((r.job && r.job.characters) || {}));
+      return this.library.filter(ch => !existing.has(ch.char_id));
+    },
+    canAddMoreChars(r) {
+      return ['done', 'partial_success', 'failed'].includes(r.status)
+        && !!r.job_id && this.reMoreCandidates(r).length > 0;
+    },
+    toggleMoreCharsPanel(r) {
+      const st = this.reMoreState(r);
+      this.reMoreChars = { ...this.reMoreChars,
+        [r.re_id]: { ...st, open: !st.open } };
+    },
+    toggleMoreChar(r, cid) {
+      const st = this.reMoreState(r);
+      const ids = st.charIds.slice();
+      const i = ids.indexOf(cid);
+      if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+      this.reMoreChars = { ...this.reMoreChars, [r.re_id]: { ...st, charIds: ids } };
+    },
+    reMoreThumb(r, ch) {
+      const picked = this.reMoreState(r).sourceOverrides[ch.char_id];
+      if (picked) {
+        const img = (ch.images || []).find(i => i.image_id === picked);
+        if (img) return img.url;
+      }
+      return ch.url;
+    },
+    pickMoreSource(r, charId, imageId) {
+      const st = this.reMoreState(r);
+      const next = { ...st.sourceOverrides };
+      const ch = this.library.find(c => c.char_id === charId);
+      if (ch && imageId === ch.primary_image_id) delete next[charId];
+      else next[charId] = imageId;
+      this.reMoreChars = { ...this.reMoreChars,
+        [r.re_id]: { ...st, sourceOverrides: next } };
+      this.reMorePickerChar = null;
+    },
+    async submitMoreChars(r, auto) {
+      const st = this.reMoreState(r);
+      if (!st.charIds.length || st.submitting) return;
+      this.reMoreChars = { ...this.reMoreChars,
+        [r.re_id]: { ...st, submitting: true } };
+      try {
+        const overrides = {};
+        for (const cid of st.charIds) {
+          if (st.sourceOverrides[cid]) overrides[cid] = st.sourceOverrides[cid];
+        }
+        const res = await fetch(`/api/reengineer/${r.re_id}/add_characters`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            character_ids: st.charIds,
+            character_source_image_ids: overrides,
+            auto: !!auto,
+          }),
+        });
+        if (!res.ok) {
+          this.notifyError('Kunde inte lägga till karaktärer: ' + await res.text());
+          return;
+        }
+        this.notifyInfo(auto
+          ? 'Kör samma recept för fler karaktärer (helautomatiskt)…'
+          : 'Genererar bilder för fler karaktärer — godkänn när de är klara…');
+        // Reset + close the panel; new columns arrive via polling/WS.
+        this.reMoreChars = { ...this.reMoreChars,
+          [r.re_id]: { open: false, charIds: [], sourceOverrides: {}, submitting: false } };
+        this._startReengineerPolling();
+        await this.refreshReengineer(r.re_id);
+      } catch (e) {
+        this._submitError('Lägg till karaktärer', e);
+      } finally {
+        const cur = this.reMoreChars[r.re_id] || {};
+        this.reMoreChars = { ...this.reMoreChars,
+          [r.re_id]: { ...cur, submitting: false } };
+      }
     },
 
     // Surface a dropped/interrupted submit. fetch() THROWS (vs returning an

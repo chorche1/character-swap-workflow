@@ -862,8 +862,13 @@ async def run_image_generation(job_id: str, char_ids: list[str] | None = None) -
     job = s.get_job(job_id)
     if job is None:
         return
-    if job.movement_prompt:
+    if job.movement_prompt and not job.from_reengineer:
         # Approvals locked after movement submission; refuse to disrupt.
+        # Relaxed for Reengineer-origin jobs (consistent with
+        # retry_single_variant / regen_scene_variants): adding characters or
+        # edit-mode regen legitimately runs image gen AFTER videos exist — the
+        # Reengineer approval flow gates the expensive work itself, and only
+        # non-progressing chars (QUEUED) are targeted, so DONE chars are safe.
         return
 
     # Coerce away any Google/Gemini model left on an older job (Swap no longer

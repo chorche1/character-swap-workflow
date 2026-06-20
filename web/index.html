@@ -1540,12 +1540,69 @@
                              reCanRetryFailed(r) ? '' : 'ml-auto']"
                     title="Redigera körningen: ändra prompter, gör om/lägg till/ta bort scener, bygg ihop igen"
                     @click="toggleReengineerEdit(r)">✎ Redigera</button>
+            <button class="text-sm px-2 py-1 rounded"
+                    x-show="canAddMoreChars(r)"
+                    :class="reMoreState(r).open
+                              ? 'bg-emerald-600 text-white'
+                              : 'text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950'"
+                    title="Kör exakt samma process (samma prompts, scener, klipplängder, end frames) för fler karaktärer — de läggs till i samma körning som nya kolumner"
+                    @click="toggleMoreCharsPanel(r)">👥 Fler karaktärer</button>
             <button class="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
                     :class="(reEditable(r) || reCanRetryFailed(r)) ? '' : 'ml-auto'"
                     @click="deleteReengineer(r)">✕</button>
           </div>
           <div x-show="r.error" class="text-xs px-3 py-2 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
                x-text="r.error"></div>
+
+          <!-- "Kör samma recept för fler karaktärer" panel -->
+          <div x-show="reMoreState(r).open"
+               class="rounded-lg border border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 p-3 space-y-2">
+            <div class="text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              Välj fler karaktärer — de får exakt samma scener, prompts, klipplängder, end frames och slutbygge som denna körning.</div>
+            <div class="flex flex-wrap gap-2">
+              <template x-for="ch in reMoreCandidates(r)" :key="r.re_id + '-more-' + ch.char_id">
+                <div class="relative">
+                  <button class="flex items-center gap-1.5 px-2 py-1 rounded-lg border text-sm"
+                          :class="reMoreState(r).charIds.includes(ch.char_id)
+                                    ? 'border-emerald-500 bg-emerald-100 dark:bg-emerald-900/40'
+                                    : 'border-neutral-200 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800'"
+                          @click="toggleMoreChar(r, ch.char_id)">
+                    <img :src="reMoreThumb(r, ch)" class="w-6 h-6 rounded object-cover" />
+                    <span x-text="ch.name"></span>
+                    <span x-show="reMoreState(r).charIds.includes(ch.char_id)" class="text-emerald-600 dark:text-emerald-400">✓</span>
+                  </button>
+                  <!-- per-character source (outfit) picker — only when 2+ images -->
+                  <button x-show="(ch.images || []).length > 1 && reMoreState(r).charIds.includes(ch.char_id)"
+                          class="absolute -top-1.5 -right-1.5 text-[9px] px-1 py-0.5 rounded-full bg-neutral-700 text-white"
+                          @click.stop="reMorePickerChar = (reMorePickerChar === r.re_id + ':' + ch.char_id) ? null : r.re_id + ':' + ch.char_id"
+                          x-text="(ch.images || []).length + ' bild'"></button>
+                  <div x-show="reMorePickerChar === r.re_id + ':' + ch.char_id"
+                       @click.outside="reMorePickerChar = null"
+                       class="absolute z-20 mt-1 p-1.5 rounded-lg bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 shadow-lg flex flex-wrap gap-1 w-40">
+                    <template x-for="img in (ch.images || [])" :key="'more-img-' + img.image_id">
+                      <button class="relative" @click="pickMoreSource(r, ch.char_id, img.image_id)">
+                        <img :src="img.url" class="w-12 h-12 rounded object-cover border-2"
+                             :class="(reMoreState(r).sourceOverrides[ch.char_id] || ch.primary_image_id) === img.image_id
+                                       ? 'border-emerald-500' : 'border-transparent'" />
+                      </button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+              <span x-show="!reMoreCandidates(r).length" class="text-xs text-neutral-400">Alla karaktärer finns redan i körningen.</span>
+            </div>
+            <div class="flex items-center gap-2 pt-1">
+              <button class="text-sm px-3 py-1.5 rounded bg-emerald-600 text-white disabled:opacity-50"
+                      :disabled="!reMoreState(r).charIds.length || reMoreState(r).submitting"
+                      @click="submitMoreChars(r, true)"
+                      x-text="reMoreState(r).submitting ? 'Startar…' : '⚡ Kör helautomatiskt'"></button>
+              <button class="text-sm px-3 py-1.5 rounded border border-emerald-500 text-emerald-700 dark:text-emerald-300 disabled:opacity-50"
+                      :disabled="!reMoreState(r).charIds.length || reMoreState(r).submitting"
+                      @click="submitMoreChars(r, false)"
+                      x-text="reMoreState(r).submitting ? 'Startar…' : '✔︎ Godkänn i steg'"></button>
+              <span class="text-[11px] text-neutral-400" x-text="reMoreState(r).charIds.length + ' vald(a)'"></span>
+            </div>
+          </div>
 
           <!-- scene plan + approval strip -->
           <div x-show="(r.scenes || []).length" class="space-y-3">

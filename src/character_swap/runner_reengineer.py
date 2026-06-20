@@ -669,6 +669,144 @@ async def _resolve_people_and_swap(re_id: str) -> None:
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
 
 
+def _recipe_reference_char(job: Job) -> JobCharacter | None:
+    """The existing character whose APPROVED variants cover the most scenes —
+    the source of the CURRENT recipe when cloning it to new characters. None
+    when no character was ever approved (nothing to clone)."""
+    best: JobCharacter | None = None
+    best_n = -1
+    for jc in job.characters.values():
+        approved = set(jc.approved_variant_ids or
+                       ([jc.approved_variant_id] if jc.approved_variant_id else []))
+        if not approved:
+            continue
+        n = len({v.scene_id for v in jc.images if v.variant_id in approved})
+        if n > best_n:
+            best, best_n = jc, n
+    return best
+
+
+def _ref_scene_prompt(jc: JobCharacter, scene_id: str) -> str | None:
+    """The reference char's CURRENT swap prompt for one scene: its approved
+    variant's prompt (carries 🪄 ändra-bild edits) — else the first READY
+    variant's. Canonical scene-first text, exactly as _kick_char stored it."""
+    vid = _approved_variant_for(jc, scene_id)
+    if vid is not None:
+        for v in jc.images:
+            if v.variant_id == vid and (v.prompt or "").strip():
+                return v.prompt
+    for v in jc.images:
+        if (v.scene_id == scene_id and v.status == VariantStatus.READY
+                and (v.prompt or "").strip()):
+            return v.prompt
+    return None
+
+
+async def add_characters(re_id: str, char_ids: list[str],
+                         source_overrides: dict[str, str] | None = None,
+                         *, auto: bool = False) -> None:
+    """Run the EXACT same recipe for ADDITIONAL characters on a FINISHED run
+    (Hugo 2026-06-21, "kör samma recept för fler karaktärer").
+
+    The new characters join the SAME run as extra columns; char 1 is untouched.
+    The whole pipeline is character-keyed, so a DONE char is skipped for free:
+    run_image_generation skips DONE chars, _auto_approve skips DONE chars, and
+    run_video_synthesis only animates APPROVED chars. Assembly is the one phase
+    that rebuilds everyone, so it is SCOPED to the new chars via
+    state["add_scope_char_ids"] (read by _do_animate + _do_assemble), leaving
+    char 1's existing final and shared direct clips alone.
+
+    Swap prompts are character-agnostic: we reconstruct the per-scene prompt
+    from the reference char's CURRENT approved slots (carries every edit) and
+    replicate it across the new chars via plan_from_scene_prompts. Per-scene
+    motion prompts / durations / models / end-frame poses / background /
+    language already live job-wide and are shared. Each new char's end-frame
+    swaps regenerate per-identity inside _kick_char.
+
+    `auto`: True → fully automatic (auto-approve → animate → assemble); False →
+    stop at the image-approval gate as usual. Mirrors the swap-watch tail of
+    _resolve_people_and_swap so the stall watchdog + gate handling are shared.
+    """
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None:
+        _update(re_id, status="failed", error="underlying job disappeared")
+        return
+    try:
+        new_ids = [c for c in (char_ids or []) if c and c not in job.characters]
+        if not new_ids:
+            return
+        source_overrides = source_overrides or {}
+
+        # Reference char = current recipe source (post-edit approved prompts).
+        ref_jc = _recipe_reference_char(job)
+        if ref_jc is None:
+            raise RuntimeError("ingen färdig karaktär att kopiera receptet från")
+
+        # Build the new JobCharacters — same resolution as _create_job_and_swap.
+        for cid in new_ids:
+            ch = s.get_character(cid)
+            if ch is None:
+                raise ValueError(f"Character not found: {cid}")
+            src = settings.characters_dir / ch.resolve_source_filename(
+                source_overrides.get(cid))
+            if not src.exists():
+                raise RuntimeError(f"Character file missing on disk: {src}")
+            job.characters[cid] = JobCharacter(char_id=cid, name=ch.name,
+                                               source_image_path=str(src),
+                                               status=CharStatus.QUEUED)
+
+        # Replicate the recipe into the Director plan so _kick_char gives the new
+        # chars char 1's CURRENT per-scene prompt (fresh prompt_version so it is
+        # accepted by _parse_director_plan and never re-billed by the Director).
+        from character_swap import prompt_director
+        direct_ids = set(job.direct_scene_ids or [])
+        scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
+        scene_prompts: dict[str, str] = {}
+        for sid in scene_ids:
+            if sid in direct_ids:
+                continue
+            prompt = _ref_scene_prompt(ref_jc, sid)
+            if prompt:
+                scene_prompts[sid] = prompt
+        if scene_prompts:
+            existing_plan = runner._parse_director_plan(job)
+            intent = (existing_plan.intent if existing_plan
+                      else (job.prompt or "")) or ""
+            plan = prompt_director.plan_from_scene_prompts(
+                intent, scene_prompts,
+                [(cid, jc.name) for cid, jc in job.characters.items()])
+            job.director_prompts_json = plan.model_dump_json()
+        s.update_job(job)
+
+        # Persist the additions + the assembly scope onto the run state.
+        merged_ids = list(state.get("character_ids") or [])
+        for cid in new_ids:
+            if cid not in merged_ids:
+                merged_ids.append(cid)
+        merged_overrides = dict(state.get("character_source_image_ids") or {})
+        for cid in new_ids:
+            if source_overrides.get(cid):
+                merged_overrides[cid] = source_overrides[cid]
+        _update(re_id, status="swapping", auto_mode=bool(auto),
+                character_ids=merged_ids,
+                character_source_image_ids=merged_overrides,
+                add_scope_char_ids=new_ids)
+
+        swap_task = asyncio.create_task(
+            runner.run_image_generation(job.job_id, char_ids=new_ids))
+        await _watch_swap_phase(re_id, job.job_id, tasks=[swap_task])
+        with contextlib.suppress(asyncio.CancelledError):
+            await swap_task
+    except Exception as e:
+        _log.exception("reengineer %s add_characters failed", re_id)
+        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}",
+                add_scope_char_ids=None)
+
+
 def _variants_terminal(job: Job) -> bool:
     all_v = [v for jc in job.characters.values() for v in jc.images]
     return bool(all_v) and all(v.status in {VariantStatus.READY, VariantStatus.FAILED}
@@ -1077,17 +1215,22 @@ async def _do_animate(re_id: str, state: dict) -> None:
     # Full animate covers every scene — any edit-mode dirty flags are moot.
     # Re-read before writing back (backlog #35): edits saved while the job
     # fields were being prepared must survive — never write the snapshot.
+    # When ADDING characters (scope set), the shared direct clips already exist
+    # from the first character's run — reuse them, never reset/re-render.
+    scope = state.get("add_scope_char_ids")
     current = reengineer.load_state(re_id) or state
     for e in current.get("scenes") or []:
         e.pop("dirty", None)
-        if e.get("is_direct"):       # full (re)animate re-renders the shared clip
+        if e.get("is_direct") and not scope:  # re-render the shared clip
             e["shared_clip_path"] = None
             e.pop("direct_error", None)
     _update(re_id, status="animating", scenes=current.get("scenes") or [])
 
-    # ONE shared Kling clip per direct scene (no swap), reused by all characters.
-    direct_tasks = [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
-                    for e in (current.get("scenes") or []) if e.get("is_direct")]
+    # ONE shared Kling clip per direct scene (no swap), reused by all
+    # characters. Skipped when scoped to newly-added chars (clips already exist).
+    direct_tasks = ([] if scope else
+                    [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
+                     for e in (current.get("scenes") or []) if e.get("is_direct")])
     # Per-character clips only when there are swap scenes (skip for all-direct).
     swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
     video_task = (asyncio.create_task(runner.run_video_synthesis(job.job_id))
@@ -1351,7 +1494,11 @@ async def _do_assemble(re_id: str, state: dict) -> None:
         raise RuntimeError("underlying job disappeared")
     run_dir = reengineer.reengineer_dir(re_id)
     cfg = _assemble_settings(state)
-    finals: dict[str, dict] = {}
+    # Adding characters: build ONLY the new chars and PRESERVE every existing
+    # final (char 1 is already done — never re-bill or risk it). Seed from the
+    # persisted finals; the scoped chars overwrite their own entries below.
+    scope = state.get("add_scope_char_ids")
+    finals: dict[str, dict] = dict(state.get("finals") or {}) if scope else {}
 
     async def _one_character(cid: str, jc: JobCharacter) -> None:
         try:
@@ -1450,14 +1597,18 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 
     # All characters in parallel, like Step 6 — Whisper calls overlap and the
     # Remotion caption renders are gated process-wide in remotion_render.py.
-    await asyncio.gather(*[_one_character(cid, jc)
-                           for cid, jc in job.characters.items()])
+    # When scoped (adding chars), only the new chars are (re)built; the rest
+    # keep their seeded finals untouched.
+    targets = [(cid, jc) for cid, jc in job.characters.items()
+               if not scope or cid in scope]
+    await asyncio.gather(*[_one_character(cid, jc) for cid, jc in targets])
 
-    ok = [f for f in finals.values() if f["status"] == "done"]
+    ok = [f for f in finals.values() if f.get("status") == "done"]
     status = ("done" if len(ok) == len(finals) and ok
               else "partial_success" if ok else "failed")
+    # Clear the add-scope: this cycle is finished (no-op for normal rebuilds).
     _update(re_id, status=status, finals=finals, finals_stale=False,
-            completed_at=_now())
+            completed_at=_now(), add_scope_char_ids=None)
 
 
 # --------------------------------------------------------------------------- edit mode
