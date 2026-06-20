@@ -158,13 +158,13 @@ function studio() {
     reAdd: {},
     editor: {
       sourceVideo: null,           // {file, url, name}
-      thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30; Kling room tone)
-      minSilenceSecs: 0.30,   // Hugo's preset
-      padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
+      thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+      minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
+      padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
       enableGapTrim: false,   // opt-in word-gap trim (replaces level interior trim)
       gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
       trimming: false,
-      template: 'capcut-purple-pill',   // Hugo's preferred default (was popout-yellow)
+      template: 'capcut-bluebox',   // Hugo 2026-06-21: editor-wide standard (was capcut-purple-pill)
       captioning: false,
       autoEditing: false,
       voiceId: '',
@@ -172,7 +172,7 @@ function studio() {
       enableCaptions: true,
       enableNormalizeWpm: false,      // Hugo's preset: WPM normalize OFF
       targetWpm: 190,                 // 190 WPM is the canonical "engaging pace" baseline
-      playbackSpeed: 1.1,             // Hugo's preset: 10% global speed-up
+      playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.1)
       // Auto-fire the Resolve pipeline (Phase 4) after a successful render.
       // Persisted to localStorage so the toggle survives reloads.
       autoExportResolve: (typeof localStorage !== 'undefined'
@@ -181,7 +181,7 @@ function studio() {
       _pipelinePoll: null,            // setInterval handle while polling
       rerendering: false,
       rerenderOpen: false,                    // shows the edit-result panel
-      rerenderTemplate: 'capcut-purple-pill', // independent of editor.template so you can A/B
+      rerenderTemplate: 'capcut-bluebox', // independent of editor.template so you can A/B
       rerenderTrimStart: 0,
       rerenderTrimEnd: 0,
       rerenderOverrides: {
@@ -231,11 +231,10 @@ function studio() {
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
-    // Step 6 defaults: capcut-purple-pill + trim + captions, with WPM normalize
-    // and voice swap OFF ("nothing else from the multiclip editor"). Persisted
-    // as ONE versioned JSON blob so every choice — not just template/WPM —
-    // survives reloads; the v2 key cleanly supersedes the old split keys + the
-    // previous submagic-pro default.
+    // Step 6 defaults (Hugo 2026-06-21 editor-wide standard): capcut-bluebox +
+    // trim + captions, with WPM normalize and voice swap OFF. Persisted as ONE
+    // versioned JSON blob so every choice — not just template/WPM — survives
+    // reloads; the v3 key cleanly supersedes older keys + their defaults.
     // Per-process settings (Hugo 2026-06-17). `_compileDefault` is the global
     // SEED for a fresh job's Step-6 panel; `compileByJob[job_id]` is the
     // editable per-job override (seeded from the seed + the job's persisted
@@ -245,21 +244,21 @@ function studio() {
     compileByJob: {},
     _compileDefault: (() => {
       const defaults = {
-        template: 'capcut-purple-pill',
+        template: 'capcut-bluebox',   // Hugo 2026-06-21: editor-wide standard
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
         enableVoiceSwap: false,
-        thresholdDb: -23,       // Hugo 2026-06-17: -23 base (was -30)
-        minSilenceSecs: 0.30,   // Hugo's preset
-        padSecs: 0.05,          // Hugo 2026-06-17 (was 0.03)
+        thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+        minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
+        padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
       };
       try {
-        const saved = JSON.parse(localStorage.getItem('compile.settings.v2') || '{}');
+        const saved = JSON.parse(localStorage.getItem('compile.settings.v3') || '{}');
         const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
         // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.05. Bump a saved
         // value that still holds the OLD default to the new one (idempotent;
@@ -288,19 +287,19 @@ function studio() {
         enableVoiceSwap: false,
         // Trim-tuning (Hugo 2026-06-17): now exposed in the ⚙ panel + sent to
         // the backend (was hardcoded to the runner preset). -23 base / 0.05 pad.
-        thresholdDb: -23,
-        minSilenceSecs: 0.20,
-        padSecs: 0.05,
+        thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
+        minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.20)
+        padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
         voiceOverride: '',
-        playbackSpeed: 1.0,             // global speed (Editor's control); 1.0 = av
+        playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.0)
       };
       try {
         // v2 (2026-06-16): supersedes v1 so the new bluebox @ 60 default
         // replaces any saved 68 from before; older reAsm prefs reset to current.
-        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v2') || '{}');
+        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v3') || '{}');
         return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
       } catch (_) { return defaults; }
     })(),
@@ -2719,7 +2718,14 @@ function studio() {
         const r = await fetch('/api/editor/templates');
         if (r.ok) this.editorTemplates = await r.json();
         // Restore last-used template, or fall back to the first available
-        // (or the existing `editor.template` default which is popout-yellow).
+        // (or the existing `editor.template` default which is capcut-bluebox).
+        // 2026-06-21 (Hugo): capcut-bluebox is the new editor-wide standard.
+        // One-time reset of a stale saved editor.template so the new default
+        // applies; picking another template afterwards still persists.
+        if (!localStorage.getItem('editor.tpl.std.v2')) {
+          localStorage.removeItem('editor.template');
+          localStorage.setItem('editor.tpl.std.v2', '1');
+        }
         const saved = localStorage.getItem('editor.template');
         if (saved && this.editorTemplates.some(t => t.slug === saved)) {
           this.editor.template = saved;

@@ -2783,15 +2783,15 @@ class CompileVideosBody(BaseModel):
     `voice_override` if set wins over each character's preset voice_id; if
     null, falls back to the character's preset.
     """
-    template: str = "capcut-purple-pill"   # matches the UI default; was submagic-pro
+    template: str = "capcut-bluebox"   # Hugo 2026-06-21: editor-wide standard
     overrides: dict | None = None
     enable_trim: bool = True
     enable_captions: bool = True
-    enable_wpm_normalize: bool = True
+    enable_wpm_normalize: bool = False
     target_wpm: float = Field(default=190.0, ge=80, le=400)
-    threshold_db: float = -23.0
-    min_silence_secs: float = Field(default=0.30, ge=0.05, le=5.0)
-    pad_secs: float = Field(default=0.05, ge=0.0, le=1.0)
+    threshold_db: float = -24.0
+    min_silence_secs: float = Field(default=0.4, ge=0.05, le=5.0)
+    pad_secs: float = Field(default=0.1, ge=0.0, le=1.0)
     # Opt-in word-gap trim (replaces level interior trim when on). max_gap =
     # the spoken-pause length that triggers a cut.
     enable_gap_trim: bool = False
@@ -2800,7 +2800,7 @@ class CompileVideosBody(BaseModel):
     # When False, keep the original generated/Kling audio — skip the ElevenLabs
     # voice swap entirely, ignoring both `voice_override` and each character's
     # library preset voice. The Step-6 "Voice swap" checkbox drives this.
-    enable_voice_swap: bool = True
+    enable_voice_swap: bool = False
     # Optional filter — when present, only compile these char_ids. Used by
     # the per-character retry button when ONE character's compile failed.
     char_ids: list[str] | None = None
@@ -3383,9 +3383,9 @@ async def editor_templates() -> list[dict]:
 async def editor_trim_silences(
     background: BackgroundTasks,
     file: UploadFile = File(...),
-    threshold_db: float = Form(-23.0),
-    min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-24.0),
+    min_silence_secs: float = Form(0.4),
+    pad_secs: float = Form(0.1),
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
     `output/editor/<edit_id>/trimmed.mp4` and returns a MediaGeneration-shaped
@@ -3423,7 +3423,7 @@ async def editor_trim_silences(
 @app.post("/api/editor/captions")
 async def editor_captions(
     file: UploadFile = File(...),
-    template: str = Form("tiktok"),
+    template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
 ) -> dict:
     """Transcribe with Whisper, then burn captions into the video using the
@@ -3473,15 +3473,15 @@ async def editor_captions(
 @app.post("/api/editor/auto_edit")
 async def editor_auto_edit(
     file: UploadFile = File(...),
-    threshold_db: float = Form(-23.0),
-    min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-24.0),
+    min_silence_secs: float = Form(0.4),
+    pad_secs: float = Form(0.1),
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
-    template: str = Form("capcut-purple-pill"),
+    template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),        # opt-out of auto silence-trim
     enable_captions: bool = Form(True),    # opt-out of caption burn-in
-    enable_wpm_normalize: bool = Form(True),  # time-stretch to hit target_wpm
+    enable_wpm_normalize: bool = Form(False),  # OFF by default (Hugo 2026-06-21); true → time-stretch to target_wpm
     target_wpm: float = Form(190.0),
     enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
     gap_max_secs: float = Form(0.35, ge=0.05, le=3.0),  # spoken-pause length that triggers a cut
@@ -3678,15 +3678,15 @@ async def editor_auto_edit(
 async def editor_multi_auto_edit(
     files: list[UploadFile] = File(...),
     script: str = Form(...),
-    threshold_db: float = Form(-23.0),
-    min_silence_secs: float = Form(0.30),
-    pad_secs: float = Form(0.05),
+    threshold_db: float = Form(-24.0),
+    min_silence_secs: float = Form(0.4),
+    pad_secs: float = Form(0.1),
     voice_id: str | None = Form(None),
-    template: str = Form("capcut-purple-pill"),
+    template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
     enable_trim: bool = Form(True),
     enable_captions: bool = Form(True),
-    enable_wpm_normalize: bool = Form(True),
+    enable_wpm_normalize: bool = Form(False),
     target_wpm: float = Form(190.0),
     enable_gap_trim: bool = Form(False),   # word-gap trim (replaces level trim)
     gap_max_secs: float = Form(0.35, ge=0.05, le=3.0),  # spoken-pause length that triggers a cut
@@ -3694,7 +3694,7 @@ async def editor_multi_auto_edit(
     # (pitch-preserving). 1.0 = no change, 1.5 = 50% faster, etc. Distinct
     # from WPM normalize (which equalizes per-clip pace) — this is a
     # deliberate overall speed-up of the whole reel. Clamped to [0.5, 2.0].
-    playback_speed: float = Form(1.0),
+    playback_speed: float = Form(1.05),
 ) -> dict:
     """Multi-clip auto-edit:
       1. Save each uploaded clip.
@@ -3974,7 +3974,7 @@ async def editor_multi_auto_edit(
 @app.post("/api/editor/rerender")
 async def editor_rerender(
     edit_id: str = Form(...),
-    template: str = Form("capcut-purple-pill"),
+    template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
     trim_start_secs: float = Form(0.0),
     trim_end_secs: float = Form(0.0),   # 0 = until end
