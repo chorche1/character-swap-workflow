@@ -2483,6 +2483,11 @@ function studio() {
     },
 
     async reengineerDuplicateScene(run, sc) {
+      // Commit pending field drafts FIRST: drafts are keyed by list position
+      // (idx), and duplicate/delete/reorder remap idxs — flushing while the
+      // idxs are still valid pins each typed value to its correct scene
+      // instead of aliasing it onto whichever scene later lands at that idx.
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}/duplicate`,
                             { method: 'POST' });
       if (!r.ok) { this.notifyError('Kunde inte duplicera: ' + await r.text()); return; }
@@ -2492,6 +2497,8 @@ function studio() {
 
     async reengineerDeleteScene(run, sc) {
       if (!confirm(`Ta bort scen ${sc.idx + 1} ur finalen?`)) return;
+      // Flush before the delete renumbers idxs (see reengineerDuplicateScene).
+      run = await this._flushReSceneDrafts(run);
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`,
                             { method: 'DELETE' });
       if (!r.ok) { this.notifyError('Kunde inte ta bort: ' + await r.text()); return; }
@@ -2499,6 +2506,8 @@ function studio() {
     },
 
     async reengineerMoveScene(run, sc, dir) {
+      // Flush before the reorder remaps idxs (see reengineerDuplicateScene).
+      run = await this._flushReSceneDrafts(run);
       const n = (run.scenes || []).length;
       const j = sc.idx + dir;
       if (j < 0 || j >= n) return;
