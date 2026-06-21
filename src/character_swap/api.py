@@ -5135,7 +5135,8 @@ async def reengineer_add_characters(re_id: str, background_tasks: BackgroundTask
         raise HTTPException(409, "cannot add characters while run status is "
                             f"'{state.get('status')}' — wait until it finishes")
     if (re_id in runner_reengineer._ANIMATING
-            or re_id in runner_reengineer._ASSEMBLING):
+            or re_id in runner_reengineer._ASSEMBLING
+            or re_id in runner_reengineer._ADDING):
         raise HTTPException(409, "run is busy — try again in a moment")
     job = store().get_job(state["job_id"])
     if job is None:
@@ -5152,6 +5153,10 @@ async def reengineer_add_characters(re_id: str, background_tasks: BackgroundTask
         raise HTTPException(409, "no completed character to clone the recipe from")
     overrides = {str(k): str(v)
                  for k, v in (body.character_source_image_ids or {}).items() if v}
+    # Acquire the in-flight guard SYNCHRONOUSLY (no await between here and
+    # scheduling) so a second concurrent POST is rejected before the deferred
+    # add_characters task flips the run status — add_characters releases it.
+    runner_reengineer._ADDING.add(re_id)
     background_tasks.add_task(_run_async, runner_reengineer.add_characters,
                              re_id, new_ids, overrides, auto=bool(body.auto))
     return {"ok": True, "re_id": re_id, "character_ids": new_ids}

@@ -172,7 +172,7 @@ def test_add_characters_replicates_recipe(wired, monkeypatch):
         job.director_prompts_json)
     assert plan.prompt_version == prompt_director.prompt_fingerprint()
     by_id = {c.char_id: c for c in plan.characters}
-    assert set(by_id) == {"c1", "c2"}
+    assert set(by_id) == {"c2"}            # only the NEW char (no prior plan)
     assert by_id["c2"].scenes[0].scene_id == "s1"
     assert by_id["c2"].scenes[0].variants[0].prompt == "SCENE-PROMPT-1"
 
@@ -340,6 +340,7 @@ def ep_box(monkeypatch):
                         lambda rid: dict(box["state"]) if box["state"] else None)
     runner_reengineer._ANIMATING.discard("re_t")
     runner_reengineer._ASSEMBLING.discard("re_t")
+    runner_reengineer._ADDING.discard("re_t")
     return box
 
 
@@ -543,3 +544,147 @@ def test_consistency_warnings_scoped(monkeypatch):
     monkeypatch.setattr(runner_reengineer.swap_qc, "inspect_consistency", fake_inspect)
     asyncio.run(runner_reengineer._consistency_warnings(job, char_ids=["c2"]))
     assert inspected == ["/c2.png"]            # c1 skipped entirely
+
+
+# ----------------------------------------------- ultra-review (2nd pass) fixes
+
+def test_videos_terminal_scoped():
+    """The new char with no clips yet must NOT let the existing char's DONE
+    videos end the video phase (premature assemble + orphaned Kling billing)."""
+    c1 = JobCharacter(char_id="c1", name="One", source_image_path="/c1.png",
+                      status=CharStatus.DONE,
+                      videos=[VideoVariant(video_id="vd1", source_variant_id="x",
+                                           grok_job_id="g1", status=VideoStatus.DONE,
+                                           final_video_path="/c1.mp4")])
+    c2 = JobCharacter(char_id="c2", name="Two", source_image_path="/c2.png",
+                      status=CharStatus.APPROVED, videos=[])   # not started yet
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1"], scene_image_paths=["/p.png"], direct_scene_ids=[],
+              characters={"c1": c1, "c2": c2}, origin="reengineer:re_t")
+    assert runner_reengineer._videos_terminal(job) is True          # global: bug
+    assert runner_reengineer._videos_terminal(job, ["c2"]) is False  # scoped: wait
+    assert runner_reengineer._swap_videos_done(job, ["c2"]) is False
+
+
+def test_auto_approve_scoped_leaves_existing_failed_char():
+    c1 = JobCharacter(char_id="c1", name="One", source_image_path="/c1.png",
+                      status=CharStatus.FAILED,
+                      images=[GeneratedImage(variant_id="v1", path="/v1.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)],
+                      approved_variant_ids=["v1"])
+    c2 = JobCharacter(char_id="c2", name="Two", source_image_path="/c2.png",
+                      status=CharStatus.AWAITING_APPROVAL,
+                      images=[GeneratedImage(variant_id="v2", path="/v2.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)])
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1"], scene_image_paths=["/p.png"],
+              characters={"c1": c1, "c2": c2}, origin="reengineer:re_t")
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def update_job(self, j):
+            pass
+    import character_swap.runner_reengineer as RR
+    import pytest as _p
+    mp = _p.MonkeyPatch()
+    try:
+        mp.setattr(RR, "store", lambda: _S())
+        RR._auto_approve(job, ["c2"])
+    finally:
+        mp.undo()
+    assert job.characters["c1"].status == CharStatus.FAILED       # untouched
+    assert job.characters["c2"].status == CharStatus.APPROVED
+
+
+def test_ref_scene_prompt_falls_back_to_any_variant():
+    """On a partial/failed origin, a scene whose only variant FAILED still
+    carries the recipe prompt — _ref_scene_prompt must recover it."""
+    jc = JobCharacter(char_id="c1", name="One", source_image_path="/c1.png",
+                      status=CharStatus.FAILED,
+                      images=[GeneratedImage(variant_id="v1", path="/v1.png",
+                                             prompt="RECIPE-FOR-S1", scene_id="s1",
+                                             status=VariantStatus.FAILED)])
+    assert runner_reengineer._ref_scene_prompt(jc, "s1") == "RECIPE-FOR-S1"
+    assert runner_reengineer._ref_scene_prompt(jc, "s2") is None
+
+
+def test_assembly_gaps_scoped_ignores_existing_char_gap(tmp_path):
+    """The manual rebuild gate must mirror the scoped build: a pre-existing
+    char's gap must NOT block assembling the newly-added char."""
+    vid = tmp_path / "c2.mp4"
+    vid.write_bytes(b"v")
+    c1 = JobCharacter(char_id="c1", name="One", source_image_path="/c1.png",
+                      status=CharStatus.DONE,
+                      images=[GeneratedImage(variant_id="va1", path="/va1.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)],
+                      approved_variant_ids=["va1"],
+                      videos=[VideoVariant(video_id="vd1", source_variant_id="va1",
+                                           grok_job_id="g1",
+                                           status=VideoStatus.FAILED)])  # failed clip → hard gap
+    c2 = JobCharacter(char_id="c2", name="Two", source_image_path="/c2.png",
+                      status=CharStatus.APPROVED,
+                      images=[GeneratedImage(variant_id="va2", path="/va2.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)],
+                      approved_variant_ids=["va2"],
+                      videos=[VideoVariant(video_id="vd2", source_variant_id="va2",
+                                           grok_job_id="g2", status=VideoStatus.DONE,
+                                           final_video_path=str(vid))])
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1"], scene_image_paths=["/p.png"], direct_scene_ids=[],
+              characters={"c1": c1, "c2": c2}, origin="reengineer:re_t")
+    state = {"re_id": "re_t", "scenes": [{"idx": 0, "scene_id": "s1"}]}
+    # Unscoped: char 1's missing clip is a hard gap.
+    gaps = runner_reengineer._assembly_gaps(state, job)
+    assert gaps["hard"]
+    # Scoped to the new char: char 1's gap is ignored, clean rebuild.
+    state["add_scope_char_ids"] = ["c2"]
+    gaps = runner_reengineer._assembly_gaps(state, job)
+    assert not gaps["hard"] and not gaps["pending"] and not gaps["dirty"]
+
+
+def test_add_characters_merges_into_existing_plan(wired, monkeypatch):
+    """An existing rich Director plan for char 1 must be PRESERVED (merged), not
+    overwritten, when new chars are added."""
+    from character_swap import prompt_director
+    job = wired["job"]
+    # Seed a prior plan for char 1 with a fresh prompt_version so it parses.
+    prior = prompt_director.plan_from_scene_prompts(
+        "intent", {"s1": "CHAR1-ORIGINAL-PROMPT"}, [("c1", "One")])
+    job.director_prompts_json = prior.model_dump_json()
+
+    async def fake_gen(job_id, char_ids=None):
+        pass
+    monkeypatch.setattr(runner_reengineer.runner, "run_image_generation", fake_gen)
+
+    async def fake_watch(*a, **k):
+        pass
+    monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", fake_watch)
+
+    asyncio.run(runner_reengineer.add_characters("re_t", ["c2"], {}, auto=False))
+    plan = prompt_director.SwapDirectorPlan.model_validate_json(
+        wired["job"].director_prompts_json)
+    by_id = {c.char_id: c for c in plan.characters}
+    assert set(by_id) == {"c1", "c2"}                                  # merged
+    assert by_id["c1"].scenes[0].variants[0].prompt == "CHAR1-ORIGINAL-PROMPT"
+    assert by_id["c2"].scenes[0].variants[0].prompt == "SCENE-PROMPT-1"
+
+
+def test_endpoint_rejects_concurrent_add(ep_box):
+    """The synchronous _ADDING guard blocks a second concurrent add request."""
+    bg = BackgroundTasks()
+    out = asyncio.run(api.reengineer_add_characters(
+        "re_t", bg, api.ReAddCharactersBody(character_ids=["c2"])))
+    assert out["character_ids"] == ["c2"]
+    assert "re_t" in runner_reengineer._ADDING
+    # Second request while the first's add_characters task hasn't released yet.
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.reengineer_add_characters(
+            "re_t", BackgroundTasks(), api.ReAddCharactersBody(character_ids=["c2"])))
+    assert e.value.status_code == 409
+    runner_reengineer._ADDING.discard("re_t")

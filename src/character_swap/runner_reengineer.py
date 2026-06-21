@@ -689,7 +689,12 @@ def _recipe_reference_char(job: Job) -> JobCharacter | None:
 def _ref_scene_prompt(jc: JobCharacter, scene_id: str) -> str | None:
     """The reference char's CURRENT swap prompt for one scene: its approved
     variant's prompt (carries 🪄 ändra-bild edits) — else the first READY
-    variant's. Canonical scene-first text, exactly as _kick_char stored it."""
+    variant's — else ANY variant's stored prompt. Canonical scene-first text,
+    exactly as _kick_char stored it. The final any-variant fallback recovers the
+    recipe on partial_success/failed-origin runs where a scene's variant FAILED
+    QC: the prompt IS the recipe regardless of the variant's outcome, so the new
+    chars still run the same recipe instead of silently falling back to the
+    generic GENERATION_PROMPT."""
     vid = _approved_variant_for(jc, scene_id)
     if vid is not None:
         for v in jc.images:
@@ -699,7 +704,19 @@ def _ref_scene_prompt(jc: JobCharacter, scene_id: str) -> str | None:
         if (v.scene_id == scene_id and v.status == VariantStatus.READY
                 and (v.prompt or "").strip()):
             return v.prompt
+    for v in jc.images:
+        if v.scene_id == scene_id and (v.prompt or "").strip():
+            return v.prompt
     return None
+
+
+# In-flight guard for the add-characters swap phase. The run's status only
+# flips to "swapping" inside the deferred background task, so two near-
+# simultaneous POSTs (double-click / two tabs) would both pass the endpoint's
+# status check and clobber each other's add_scope_char_ids. The endpoint adds
+# the re_id synchronously before scheduling; add_characters discards it when the
+# swap phase ends (after which the persisted status guards further adds).
+_ADDING: set[str] = set()
 
 
 async def add_characters(re_id: str, char_ids: list[str],
@@ -778,10 +795,17 @@ async def add_characters(re_id: str, char_ids: list[str],
             existing_plan = runner._parse_director_plan(job)
             intent = (existing_plan.intent if existing_plan
                       else (job.prompt or "")) or ""
-            plan = prompt_director.plan_from_scene_prompts(
+            # Build per-scene plans for the NEW chars only, then MERGE into the
+            # existing plan — never overwrite char 1's CharacterPlan (it may hold
+            # richer per-variant prompts than this flattened single-variant one).
+            new_plan = prompt_director.plan_from_scene_prompts(
                 intent, scene_prompts,
-                [(cid, jc.name) for cid, jc in job.characters.items()])
-            job.director_prompts_json = plan.model_dump_json()
+                [(cid, job.characters[cid].name) for cid in new_ids])
+            if existing_plan is not None:
+                keep = [c for c in existing_plan.characters
+                        if c.char_id not in new_ids]
+                new_plan.characters = keep + new_plan.characters
+            job.director_prompts_json = new_plan.model_dump_json()
         s.update_job(job)
 
         # Persist the additions + the assembly scope onto the run state.
@@ -814,6 +838,11 @@ async def add_characters(re_id: str, char_ids: list[str],
         # char 1's final. Dropping the scope here would make "Bygg ihop igen"
         # rebuild (and re-bill) every existing character.
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
+    finally:
+        # Release the in-flight guard. In auto mode this spans the whole cycle;
+        # in step mode the run is now "swapping"/"awaiting_approval", whose
+        # status guard blocks further adds.
+        _ADDING.discard(re_id)
 
 
 def _variants_terminal(job: Job) -> bool:
@@ -911,7 +940,7 @@ async def _watch_swap_phase(
                      re_id, e)
 
     if state.get("auto_mode"):
-        _auto_approve(job)
+        _auto_approve(job, scope)
         await animate(re_id)
     else:
         _update(re_id, status="awaiting_approval")
@@ -942,10 +971,14 @@ async def _consistency_warnings(job: Job, char_ids: list[str] | None = None
     return out
 
 
-def _auto_approve(job: Job) -> None:
-    """First READY variant per (character, scene) — mirror of approve_all."""
+def _auto_approve(job: Job, char_ids: list[str] | None = None) -> None:
+    """First READY variant per (character, scene) — mirror of approve_all.
+    `char_ids` (add-characters) scopes approval to the NEW chars so a
+    pre-existing non-DONE char (e.g. one left FAILED) isn't flipped to APPROVED."""
     s = store()
-    for jc in job.characters.values():
+    for cid, jc in job.characters.items():
+        if char_ids is not None and cid not in char_ids:
+            continue
         if jc.status in {CharStatus.REJECTED, CharStatus.ANIMATING, CharStatus.DONE}:
             continue
         approved = list(jc.approved_variant_ids or [])
@@ -1281,22 +1314,30 @@ def _approved_variant_for(jc: JobCharacter, scene_id: str) -> str | None:
     return None
 
 
-def _videos_terminal(job: Job) -> bool:
-    vids = [v for jc in job.characters.values() for v in jc.videos]
+def _videos_terminal(job: Job, char_ids: list[str] | None = None) -> bool:
+    vids = [v for cid, jc in job.characters.items()
+            if char_ids is None or cid in char_ids
+            for v in jc.videos]
     return bool(vids) and all(v.status in {VideoStatus.DONE, VideoStatus.FAILED,
                                            VideoStatus.ERROR} for v in vids)
 
 
-def _swap_videos_done(job: Job) -> bool:
+def _swap_videos_done(job: Job, char_ids: list[str] | None = None) -> bool:
     """Per-character (swap-scene) clips done. Trivially True when every scene is
     a direct image — no per-character clips are expected, so the empty-videos
-    case must NOT block the phase (that's the all-direct landmine)."""
+    case must NOT block the phase (that's the all-direct landmine). `char_ids`
+    (add-characters) scopes the check to the NEW chars: an existing char's
+    already-DONE videos must NOT end the phase before the new chars even create
+    their first clip placeholder (which can lag behind an end-frame swap)."""
     swap = set(job.scene_ids) - set(job.direct_scene_ids or [])
-    return True if not swap else _videos_terminal(job)
+    return True if not swap else _videos_terminal(job, char_ids)
 
 
 async def _watch_video_phase(re_id: str, job_id: str, *,
                              direct_tasks: list = ()) -> None:
+    # When ADDING characters, scope the terminal check to the new chars so the
+    # existing char's DONE videos don't end the phase prematurely.
+    scope = (reengineer.load_state(re_id) or {}).get("add_scope_char_ids")
     deadline = asyncio.get_event_loop().time() + _VIDEO_PHASE_TIMEOUT_SECS
     while True:
         await asyncio.sleep(_POLL_SECS)
@@ -1304,7 +1345,7 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
         if job is None:
             _update(re_id, status="failed", error="underlying job disappeared")
             return
-        if _swap_videos_done(job) and all(t.done() for t in direct_tasks):
+        if _swap_videos_done(job, scope) and all(t.done() for t in direct_tasks):
             break
         if asyncio.get_event_loop().time() > deadline:
             _update(re_id, status="failed", error="video phase timed out")
@@ -1468,8 +1509,14 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
       pending — a scene whose clip is still rendering → simply not ready yet.
 
     Per-(char, scene) rules mirror _collect_clips EXACTLY so the gate and the
-    actual build never disagree. All three buckets empty ⇒ a clean rebuild."""
+    actual build never disagree. All three buckets empty ⇒ a clean rebuild.
+
+    When ADDING characters (state["add_scope_char_ids"]), the gate is scoped to
+    the NEW chars — matching _do_assemble's scoped target list — so a
+    pre-existing char's old gap (on a partial_success/failed-origin run) doesn't
+    falsely block assembling the newly-added char's final."""
     entries = state.get("scenes") or []
+    scope = state.get("add_scope_char_ids")
     dirty = [{"idx": e["idx"], "label": f"scen {e['idx'] + 1}"}
              for e in entries if e.get("dirty")]
     hard: list[dict] = []
@@ -1481,6 +1528,8 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
                        "label": f"scen {e['idx'] + 1}", "reason": reason})
 
     for cid, jc in job.characters.items():
+        if scope and cid not in scope:
+            continue
         name = jc.name or cid
         for e in entries:
             if e.get("is_direct"):
