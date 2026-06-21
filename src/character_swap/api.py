@@ -4738,7 +4738,8 @@ async def reengineer_create(
     auto_mode: bool = Form(False),
     # Outfit ("Kläder"): scene = wear the original video person's clothes;
     # character = the character reference's own clothes; custom = outfit_text.
-    outfit_mode: str = Form("scene"),
+    # Default "character" (Hugo 2026-06-21) — mirrors background_source.
+    outfit_mode: str = Form("character"),
     outfit_text: str = Form(""),
     # Cut sensitivity: normal/high/max -> ffmpeg scene-score thresholds.
     scene_sensitivity: str = Form("high"),
@@ -4872,10 +4873,10 @@ async def reengineer_from_images(
     direct: str = Form("[]"),                # JSON array of bools — "no swap" scenes
     character_ids: str = Form(...),          # JSON array of char ids
     image_model: str = Form("gpt2-id-swap"),
-    outfit_mode: str = Form("scene"),
+    outfit_mode: str = Form("character"),    # default: character's own clothes (Hugo 2026-06-21)
     outfit_text: str = Form(""),
     auto_mode: bool = Form(False),
-    use_director: bool = Form(False),
+    use_director: bool = Form(False),        # UI presets this ON; API stays opt-in (billed)
     background_file: UploadFile | None = File(None),
     background_source: str = Form("character"),
     character_source_image_ids: str = Form(""),

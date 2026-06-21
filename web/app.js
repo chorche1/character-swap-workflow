@@ -104,8 +104,8 @@ function studio() {
       imageModel: 'gpt2-id-swap',    // Hugo's preset (2026-06-11) — sticky via
                                      // localStorage; loadGenModels re-asserts
       autoMode: false,               // skip the image-approval gate
-      useDirector: false,            // 🎬 tailored per-scene swap prompts (Claude)
-      outfitMode: 'scene',           // scene | character | custom
+      useDirector: true,             // 🎬 ON by default (Hugo 2026-06-21); still gated by anthropic_key
+      outfitMode: 'character',       // default: character's own clothes (Hugo 2026-06-21); scene | character | custom
       outfitText: '',                // clothing description for custom mode
       sceneSensitivity: 'high',      // normal | high | max cut detection
       language: 'en',                // spoken language of the videos: en | es
@@ -127,8 +127,8 @@ function studio() {
       charIds: [],
       imageModel: 'gpt2-id-swap',
       autoMode: false,
-      useDirector: false,
-      outfitMode: 'scene',
+      useDirector: true,              // 🎬 ON by default (Hugo 2026-06-21); still gated by anthropic_key
+      outfitMode: 'character',        // default: character's own clothes (Hugo 2026-06-21)
       outfitText: '',
       background: null,
       backgroundUrl: '',
