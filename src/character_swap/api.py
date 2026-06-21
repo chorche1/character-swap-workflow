@@ -5746,8 +5746,16 @@ async def reengineer_redo_scene(re_id: str, idx: int,
                                 background_tasks: BackgroundTasks,
                                 body: ReRedoBody | None = None) -> dict:
     """New take of a scene's Kling clip(s) — for ONE character (`char_id`)
-    or all. Same prompt unless the scene was edited (edits sync onto the
-    job). Keeps the dirty flag: a redo isn't a re-animation of an edit."""
+    or all. Same prompt unless the scene was edited (edits sync onto the job
+    before re-animating).
+
+    Dirty-flag handling (Hugo 2026-06-21): a WHOLE-scene redo (`char_id`
+    None) regenerates EVERY non-imported clip with the synced prompt, so the
+    scene is back in sync → clear the "ändrad" flag, exactly like "▶ Animera
+    om ändrade". This removes the dead-end where redoing all of a scene's
+    clips left the flag stuck and "▶ Bygg ihop igen" refused forever even
+    though every clip already matched the current prompt. A SINGLE-character
+    redo keeps the flag (the siblings may still be stale)."""
     from character_swap import runner_reengineer
     state = _editable_reengineer_state(
         re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
@@ -5756,7 +5764,8 @@ async def reengineer_redo_scene(re_id: str, idx: int,
         raise HTTPException(409, "animation already running for this run")
     char_id = body.char_id if body else None
     background_tasks.add_task(_run_async, runner_reengineer.reanimate,
-                              re_id, [idx], char_id=char_id, clear_dirty=False)
+                              re_id, [idx], char_id=char_id,
+                              clear_dirty=(char_id is None))
     return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
 
 
