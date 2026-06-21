@@ -1,9 +1,10 @@
-"""The Step-6 compile must default to capcut-purple-pill everywhere.
+"""The Step-6 compile must default to the editor-wide standard everywhere.
 
-The UI default is capcut-purple-pill, but the backend used to default to
-submagic-pro — so any compile path that didn't explicitly send a template (or a
-stale client) fell back to the wrong style. Lock both backend defaults so they
-stay in sync with the UI.
+Hugo 2026-06-21 made capcut-bluebox @ 60 / WPM-norm off / voice-swap off /
+-24 dB / 0.4 s / 0.1 s the default across ALL editor surfaces. Lock the
+backend compile defaults (CompileVideosBody + the runner signature) so a
+compile path that doesn't explicitly send settings (or a stale client) uses
+the same standard the UI now shows.
 """
 from __future__ import annotations
 
@@ -20,15 +21,25 @@ from character_swap.models import (
 )
 
 
-def test_compile_body_default_template_is_purple_pill():
-    assert api.CompileVideosBody().template == "capcut-purple-pill"
+def test_compile_body_defaults_are_editor_standard():
+    b = api.CompileVideosBody()
+    assert b.template == "capcut-bluebox"
+    assert b.enable_wpm_normalize is False
+    assert b.enable_voice_swap is False
+    assert b.threshold_db == -24.0
+    assert b.min_silence_secs == 0.4
+    assert b.pad_secs == 0.1
+    assert b.target_wpm == 190.0
 
 
-def test_compile_runner_default_template_is_purple_pill():
-    default = inspect.signature(
-        runner_compile.compile_job_videos
-    ).parameters["template"].default
-    assert default == "capcut-purple-pill"
+def test_compile_runner_defaults_are_editor_standard():
+    params = inspect.signature(runner_compile.compile_job_videos).parameters
+    assert params["template"].default == "capcut-bluebox"
+    assert params["enable_wpm_normalize"].default is False
+    assert params["enable_voice_swap"].default is False
+    assert params["threshold_db"].default == -24.0
+    assert params["min_silence_secs"].default == 0.4
+    assert params["pad_secs"].default == 0.1
 
 
 # --- per-job compile settings (Hugo 2026-06-17) ----------------------------

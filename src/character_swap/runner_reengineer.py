@@ -1194,8 +1194,8 @@ async def assemble(re_id: str) -> None:
 # both are opt-in via the ⚙ panel. Only keys listed here are accepted from
 # state["assemble_settings"] (anything else is ignored).
 ASSEMBLE_DEFAULTS: dict = {
-    # Hugo 2026-06-16: capcut-bluebox at size 60 is the Swap/Reengineer-final
-    # standard (the classic Step-6 compile keeps its own purple-pill default).
+    # capcut-bluebox at size 60 is the editor-wide standard (Hugo 2026-06-21 —
+    # the Step-6 compile + standalone Editor tab now default here too).
     # The size rides as a caption style override and is user-tunable in the ⚙
     # panel. (Matches the baked capcut-bluebox template size in video_edit.py.)
     "template": "capcut-bluebox",
@@ -1204,13 +1204,12 @@ ASSEMBLE_DEFAULTS: dict = {
     "enable_captions": True,
     "enable_wpm_normalize": False,
     "target_wpm": 190.0,
-    # Hugo 2026-06-17: level-trim base raised to −23 dB / pad 0.05 s (was
-    # −30/0.02) — Kling's room tone sits ~−20..−25 dB, so −30 found almost
-    # no silence and finals shipped with audible dead time. min-silence
-    # stays 0.20 s. See also the opt-in word-gap trim below.
-    "threshold_db": -23.0,
-    "min_silence_secs": 0.20,
-    "pad_secs": 0.05,
+    # Hugo 2026-06-21: editor-wide standard — −24 dB threshold / 0.4 s
+    # min-silence / 0.1 s pad (Kling's room tone sits ~−20..−25 dB). See
+    # also the opt-in word-gap trim below.
+    "threshold_db": -24.0,
+    "min_silence_secs": 0.4,
+    "pad_secs": 0.1,
     # Opt-in word-gap trim (Hugo 2026-06-17): when ON, the level interior
     # trim is replaced by a Whisper-word-boundary pause cut — robust against
     # Kling room tone. Default OFF; max_gap tunable in the ⚙ panel.
@@ -1218,9 +1217,9 @@ ASSEMBLE_DEFAULTS: dict = {
     "gap_max_secs": 0.35,
     "enable_voice_swap": False,
     "voice_override": None,
-    # Global playback speed (Hugo 2026-06-13 — the Editor tab's Speed
-    # control): pitch-preserving, captions stay in sync. 1.0 = off.
-    "playback_speed": 1.0,
+    # Global playback speed (the Editor tab's Speed control): pitch-preserving,
+    # captions stay in sync. 1.0 = off. Hugo 2026-06-21: 1.05 editor-wide standard.
+    "playback_speed": 1.05,
 }
 
 
