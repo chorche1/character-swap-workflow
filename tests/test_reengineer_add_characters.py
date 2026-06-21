@@ -385,3 +385,161 @@ def test_endpoint_404_unknown_char(ep_box):
             "re_t", BackgroundTasks(),
             api.ReAddCharactersBody(character_ids=["nope"])))
     assert e.value.status_code == 404
+
+
+# --------------------------------------------- char-1-untouched (review fixes)
+
+def test_run_video_synthesis_scoped_to_char_ids(monkeypatch):
+    """run_video_synthesis(char_ids=[...]) animates ONLY the listed chars — an
+    existing DONE/APPROVED char is never re-animated when scoped."""
+    def _approved(cid, vid):
+        return JobCharacter(
+            char_id=cid, name=cid, source_image_path=f"/{cid}.png",
+            status=CharStatus.APPROVED,
+            images=[GeneratedImage(variant_id=vid, path=f"/{vid}.png", prompt="P",
+                                   scene_id="s1", status=VariantStatus.READY)],
+            approved_variant_ids=[vid])
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1"], scene_image_paths=["/p.png"],
+              characters={"c1": _approved("c1", "v1"), "c2": _approved("c2", "v2")},
+              origin="reengineer:re_t", videos_per_character=1,
+              movement_prompt="a", movement_prompts={"s1": "a"})
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def update_job(self, j):
+            pass
+    monkeypatch.setattr(runner, "store", lambda: _S())
+    animated: list[str] = []
+
+    async def fake_anim(job_, jc_, m, prompt_for_scene):
+        animated.append(jc_.char_id)
+    monkeypatch.setattr(runner, "_animate_character", fake_anim)
+
+    asyncio.run(runner.run_video_synthesis("j1", char_ids=["c2"]))
+    assert animated == ["c2"]
+    animated.clear()
+    asyncio.run(runner.run_video_synthesis("j1", char_ids=None))
+    assert sorted(animated) == ["c1", "c2"]
+
+
+@pytest.fixture
+def animate_wired(monkeypatch, tmp_path):
+    c1 = JobCharacter(char_id="c1", name="One", source_image_path="/c1.png",
+                      status=CharStatus.DONE,
+                      images=[GeneratedImage(variant_id="v1", path="/v1.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)],
+                      approved_variant_ids=["v1"])
+    c2 = JobCharacter(char_id="c2", name="Two", source_image_path="/c2.png",
+                      status=CharStatus.APPROVED,
+                      images=[GeneratedImage(variant_id="v2", path="/v2.png",
+                                             prompt="P", scene_id="s1",
+                                             status=VariantStatus.READY)],
+                      approved_variant_ids=["v2"])
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1"], scene_image_paths=["/p.png"], direct_scene_ids=[],
+              characters={"c1": c1, "c2": c2}, origin="reengineer:re_t",
+              videos_per_character=1, movement_prompt="a", movement_prompts={"s1": "a"})
+    state = {"re_id": "re_t", "status": "swapping", "job_id": "j1",
+             "scenes": [{"idx": 0, "scene_id": "s1", "duration": 5.0,
+                         "motion_prompt": "p", "summary": "one"}],
+             "add_scope_char_ids": ["c2"]}
+    box = {"job": job, "states": {"re_t": state}, "vs_char_ids": "UNSET"}
+
+    class _S:
+        def get_job(self, jid):
+            return box["job"]
+
+        def update_job(self, j):
+            box["job"] = j
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+    from character_swap import reengineer as reengineer_mod
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda rid: dict(box["states"].get(rid) or {}))
+    monkeypatch.setattr(reengineer_mod, "save_state",
+                        lambda s: box["states"].__setitem__(s["re_id"], dict(s)))
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
+                        lambda rid: dict(box["states"].get(rid) or {}))
+    monkeypatch.setattr(runner_reengineer.reengineer, "save_state",
+                        lambda s: box["states"].__setitem__(s["re_id"], dict(s)))
+
+    async def fake_vs(job_id, char_ids=None):
+        box["vs_char_ids"] = char_ids
+    monkeypatch.setattr(runner_reengineer.runner, "run_video_synthesis", fake_vs)
+
+    async def fake_watch(*a, **k):
+        pass
+    monkeypatch.setattr(runner_reengineer, "_watch_video_phase", fake_watch)
+
+    async def fake_publish(*a, **k):
+        pass
+    monkeypatch.setattr(runner_reengineer.events, "publish", fake_publish)
+    return box
+
+
+def test_do_animate_scoped_does_not_reanimate_char1(animate_wired):
+    """The critical fix: _do_animate must NOT flip the existing DONE char back
+    to APPROVED, and must pass char_ids=scope to run_video_synthesis."""
+    asyncio.run(runner_reengineer._do_animate(
+        "re_t", dict(animate_wired["states"]["re_t"])))
+    job = animate_wired["job"]
+    assert job.characters["c1"].status == CharStatus.DONE   # NOT re-approved
+    assert job.characters["c2"].status == CharStatus.APPROVED
+    assert animate_wired["vs_char_ids"] == ["c2"]           # video phase scoped
+
+
+def test_do_assemble_restores_auto_mode(assemble_wired):
+    st0 = assemble_wired["states"]["re_t"]
+    st0["auto_mode"] = True               # add cycle set it
+    st0["add_prev_auto_mode"] = False     # run was originally manual
+    asyncio.run(runner_reengineer._do_assemble("re_t", dict(st0)))
+    st = assemble_wired["states"]["re_t"]
+    assert st["auto_mode"] is False        # restored to the pre-add value
+    assert st.get("add_scope_char_ids") is None
+
+
+def test_add_characters_failure_keeps_scope(wired, monkeypatch):
+    """On a swap-phase failure the new chars stay persisted, so the scope must
+    be KEPT — a later rebuild must not run unscoped (which would rebuild char 1)."""
+    async def boom(job_id, char_ids=None):
+        raise RuntimeError("provider exploded")
+    monkeypatch.setattr(runner_reengineer.runner, "run_image_generation", boom)
+
+    async def fake_watch(*a, **k):
+        pass
+    monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", fake_watch)
+
+    asyncio.run(runner_reengineer.add_characters("re_t", ["c2"], {}, auto=False))
+    st = wired["states"]["re_t"]
+    assert st["status"] == "failed"
+    assert st["add_scope_char_ids"] == ["c2"]   # scope preserved on failure
+
+
+def test_consistency_warnings_scoped(monkeypatch):
+    """_consistency_warnings(char_ids=[...]) only inspects the listed chars."""
+    def _ready_char(cid):
+        return JobCharacter(
+            char_id=cid, name=cid, source_image_path=f"/{cid}.png",
+            status=CharStatus.APPROVED,
+            images=[GeneratedImage(variant_id=f"{cid}a", path=f"/{cid}a.png",
+                                   prompt="P", scene_id="s1", status=VariantStatus.READY),
+                    GeneratedImage(variant_id=f"{cid}b", path=f"/{cid}b.png",
+                                   prompt="P", scene_id="s2", status=VariantStatus.READY)])
+    job = Job(job_id="j1", title="t", scene_id="s1", scene_image_path="/p.png",
+              scene_ids=["s1", "s2"], scene_image_paths=["/p.png", "/p2.png"],
+              characters={"c1": _ready_char("c1"), "c2": _ready_char("c2")},
+              origin="reengineer:re_t")
+    inspected: list[str] = []
+    # Files don't exist on disk → _consistency_warnings skips the QC call, but we
+    # still assert it only ITERATES the scoped char (via Path.exists patch).
+    monkeypatch.setattr(runner_reengineer.Path, "exists", lambda self: True)
+
+    def fake_inspect(*, variants, character_image, job_id):
+        inspected.append(str(character_image))
+        return []
+    monkeypatch.setattr(runner_reengineer.swap_qc, "inspect_consistency", fake_inspect)
+    asyncio.run(runner_reengineer._consistency_warnings(job, char_ids=["c2"]))
+    assert inspected == ["/c2.png"]            # c1 skipped entirely

@@ -1490,7 +1490,10 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
     await _animate_one_video(job, jc, fresh, movement_prompt, duration, end_image)
 
 
-async def run_video_synthesis(job_id: str) -> None:
+async def run_video_synthesis(job_id: str, char_ids: list[str] | None = None) -> None:
+    """Animate every APPROVED character's clips. `char_ids` (Reengineer
+    add-characters) scopes the run to the listed chars only, so an already-DONE
+    character is never re-animated/re-billed even if a caller left it APPROVED."""
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -1604,6 +1607,7 @@ async def run_video_synthesis(job_id: str) -> None:
         jc for jc in job.characters.values()
         if jc.status == CharStatus.APPROVED
         and (jc.approved_variant_ids or jc.approved_variant_id)
+        and (char_ids is None or jc.char_id in char_ids)
     ]
     if not targets:
         return

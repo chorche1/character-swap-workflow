@@ -709,12 +709,14 @@ async def add_characters(re_id: str, char_ids: list[str],
     (Hugo 2026-06-21, "kör samma recept för fler karaktärer").
 
     The new characters join the SAME run as extra columns; char 1 is untouched.
-    The whole pipeline is character-keyed, so a DONE char is skipped for free:
-    run_image_generation skips DONE chars, _auto_approve skips DONE chars, and
-    run_video_synthesis only animates APPROVED chars. Assembly is the one phase
-    that rebuilds everyone, so it is SCOPED to the new chars via
-    state["add_scope_char_ids"] (read by _do_animate + _do_assemble), leaving
-    char 1's existing final and shared direct clips alone.
+    Every phase is EXPLICITLY scoped to the new chars via
+    state["add_scope_char_ids"]: run_image_generation gets char_ids=new_ids;
+    _do_animate only (re)approves the new chars + passes char_ids to
+    run_video_synthesis (so an existing DONE/APPROVED char is never re-animated
+    or re-billed) + reuses the shared direct clips; _watch_swap_phase scopes its
+    "every variant failed" guard + consistency QC to the new chars; _do_assemble
+    seeds + preserves the existing finals and rebuilds only the new chars. char
+    1's existing final and shared direct clips are left alone.
 
     Swap prompts are character-agnostic: we reconstruct the per-scene prompt
     from the reference char's CURRENT approved slots (carries every edit) and
@@ -791,7 +793,11 @@ async def add_characters(re_id: str, char_ids: list[str],
         for cid in new_ids:
             if source_overrides.get(cid):
                 merged_overrides[cid] = source_overrides[cid]
+        # auto_mode is overwritten for THIS add cycle (the shared watchers read
+        # it); stash the run's prior value so _do_assemble can restore it when
+        # the cycle finishes, instead of permanently pinning the run's mode.
         _update(re_id, status="swapping", auto_mode=bool(auto),
+                add_prev_auto_mode=state.get("auto_mode"),
                 character_ids=merged_ids,
                 character_source_image_ids=merged_overrides,
                 add_scope_char_ids=new_ids)
@@ -803,8 +809,11 @@ async def add_characters(re_id: str, char_ids: list[str],
             await swap_task
     except Exception as e:
         _log.exception("reengineer %s add_characters failed", re_id)
-        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}",
-                add_scope_char_ids=None)
+        # KEEP add_scope_char_ids: the new chars are already persisted on the
+        # job, so a later manual rebuild must stay SCOPED to them and preserve
+        # char 1's final. Dropping the scope here would make "Bygg ihop igen"
+        # rebuild (and re-bill) every existing character.
+        _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
 
 
 def _variants_terminal(job: Job) -> bool:
@@ -875,8 +884,16 @@ async def _watch_swap_phase(
             return
 
     job = store().get_job(job_id)
+    # When ADDING characters, only the new chars' variants are in scope — char 1's
+    # pre-existing READY variants must NOT mask a total failure of the new chars
+    # (refuse loudly at the image gate), and consistency QC must not re-bill the
+    # untouched chars.
+    state = reengineer.load_state(re_id) or {}
+    scope = state.get("add_scope_char_ids")
     any_ready = any(v.status == VariantStatus.READY
-                    for jc in job.characters.values() for v in jc.images)
+                    for cid, jc in job.characters.items()
+                    if not scope or cid in scope
+                    for v in jc.images)
     if not any_ready:
         _update(re_id, status="failed", error="every swap variant failed")
         return
@@ -886,14 +903,13 @@ async def _watch_swap_phase(
     # glasses wobbled between scenes of the same final. One cheap vision
     # call per character; advisory only (amber chips at the gate).
     try:
-        warnings = await _consistency_warnings(job)
+        warnings = await _consistency_warnings(job, char_ids=scope)
         if warnings:
             _update(re_id, consistency_warnings=warnings)
     except Exception as e:
         _log.warning("reengineer %s: consistency annotation failed: %s",
                      re_id, e)
 
-    state = reengineer.load_state(re_id) or {}
     if state.get("auto_mode"):
         _auto_approve(job)
         await animate(re_id)
@@ -901,12 +917,16 @@ async def _watch_swap_phase(
         _update(re_id, status="awaiting_approval")
 
 
-async def _consistency_warnings(job: Job) -> dict[str, list[dict]]:
+async def _consistency_warnings(job: Job, char_ids: list[str] | None = None
+                                ) -> dict[str, list[dict]]:
     """{char_id: [{scene_id, issue}, ...]} for characters whose READY
     variants contradict each other across scenes. Never raises past the
-    caller's guard; unavailable QC → no annotation."""
+    caller's guard; unavailable QC → no annotation. `char_ids` (add-characters)
+    scopes the vision QC to the new chars so untouched chars aren't re-billed."""
     out: dict[str, list[dict]] = {}
     for cid, jc in job.characters.items():
+        if char_ids is not None and cid not in char_ids:
+            continue
         ready = [(v.scene_id or "", Path(v.path)) for v in jc.images
                  if v.status == VariantStatus.READY and v.path
                  and Path(v.path).exists()]
@@ -1206,7 +1226,13 @@ async def _do_animate(re_id: str, state: dict) -> None:
     job.videos_per_character = 1
     job.video_model = state.get("video_model") or "kling-v3"
     job.video_audio = True
+    # When ADDING characters (scope set), only the NEW chars are (re)approved
+    # for animation — never flip an existing DONE char back to APPROVED, which
+    # would make run_video_synthesis re-animate (and re-bill) its clips.
+    scope = state.get("add_scope_char_ids")
     for jc in job.characters.values():
+        if scope and jc.char_id not in scope:
+            continue
         if jc.status == CharStatus.APPROVED or jc.approved_variant_ids:
             jc.status = CharStatus.APPROVED
     s.update_job(job)
@@ -1217,7 +1243,6 @@ async def _do_animate(re_id: str, state: dict) -> None:
     # fields were being prepared must survive — never write the snapshot.
     # When ADDING characters (scope set), the shared direct clips already exist
     # from the first character's run — reuse them, never reset/re-render.
-    scope = state.get("add_scope_char_ids")
     current = reengineer.load_state(re_id) or state
     for e in current.get("scenes") or []:
         e.pop("dirty", None)
@@ -1232,8 +1257,11 @@ async def _do_animate(re_id: str, state: dict) -> None:
                     [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
                      for e in (current.get("scenes") or []) if e.get("is_direct")])
     # Per-character clips only when there are swap scenes (skip for all-direct).
+    # Scoped to the NEW chars when adding (char 1 already has its clips) —
+    # belt-and-suspenders with the status-flip scoping above.
     swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
-    video_task = (asyncio.create_task(runner.run_video_synthesis(job.job_id))
+    video_task = (asyncio.create_task(
+                      runner.run_video_synthesis(job.job_id, char_ids=scope))
                   if swap_present else None)
     await _watch_video_phase(re_id, job.job_id, direct_tasks=direct_tasks)
     if video_task is not None:
@@ -1607,8 +1635,14 @@ async def _do_assemble(re_id: str, state: dict) -> None:
     status = ("done" if len(ok) == len(finals) and ok
               else "partial_success" if ok else "failed")
     # Clear the add-scope: this cycle is finished (no-op for normal rebuilds).
+    # Restore the run's pre-add auto_mode that add_characters overwrote for the
+    # cycle, so the run's mode isn't permanently pinned to the add's choice.
+    extra: dict = {}
+    if scope and "add_prev_auto_mode" in state:
+        extra["auto_mode"] = state.get("add_prev_auto_mode")
+        extra["add_prev_auto_mode"] = None
     _update(re_id, status=status, finals=finals, finals_stale=False,
-            completed_at=_now(), add_scope_char_ids=None)
+            completed_at=_now(), add_scope_char_ids=None, **extra)
 
 
 # --------------------------------------------------------------------------- edit mode
