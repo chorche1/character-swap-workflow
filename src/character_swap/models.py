@@ -180,6 +180,10 @@ class VideoVariant(BaseModel):
     # snapshotted before the next take overwrote it. Empty for clips that
     # passed first try.
     qc_rejects: list[QCReject] = Field(default_factory=list)
+    # User-imported clip (Hugo 2026-06-21): this slot's video was replaced by
+    # an uploaded file instead of being generated. QC is skipped, re-animation
+    # never clobbers it, and assembly prefers it over a generated take.
+    imported: bool = False
 
 
 class JobCharacter(BaseModel):

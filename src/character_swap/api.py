@@ -118,6 +118,42 @@ async def _save_upload(upload: UploadFile, dest: Path) -> bytes:
     return data
 
 
+# Imported-clip uploads are real videos — far bigger than the 25 MB image cap
+# in `_read_capped`. Stream them straight to disk instead of buffering, under a
+# generous video ceiling (Hugo 2026-06-21, "importera eget klipp").
+_VIDEO_UPLOAD_CAP = 1024 * 1024 * 1024  # 1 GiB
+
+
+async def _stream_upload_to(upload: UploadFile, dest: Path,
+                            *, cap: int = _VIDEO_UPLOAD_CAP) -> Path:
+    """Stream an UploadFile to `dest` in 1 MB chunks (no full-file buffer).
+
+    Writes to a sibling `.tmp` then atomically replaces. Raises 413 past `cap`,
+    400 on an empty upload; cleans up the temp file on any error."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    total = 0
+    try:
+        with tmp.open("wb") as fh:
+            while True:
+                chunk = await upload.read(1 << 20)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > cap:
+                    raise HTTPException(
+                        413, f"File too large (>{cap // (1024 * 1024)} MB).")
+                fh.write(chunk)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    if total == 0:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, "Empty upload")
+    tmp.replace(dest)
+    return dest
+
+
 def _file_url(path: Path | str | None) -> str | None:
     """Map a filesystem path to a /files/... URL served by one of the mounts.
 
@@ -391,6 +427,8 @@ def _job_to_dict(job: Job) -> dict:
                         # Every clip QC rejected before this take's final
                         # result (Hugo 2026-06-20).
                         "qc_rejects": _qc_rejects_dicts(vv.qc_rejects),
+                        # User-imported clip (Hugo 2026-06-21) → UI badge.
+                        "imported": vv.imported,
                         "download_name": _video_download_name(jc, vv),
                         # Per-video override + the fallback per-scene prompt,
                         # so the Step 5 regen modal can pre-fill correctly
@@ -2762,6 +2800,57 @@ async def retry_video(job_id: str, body: RetryVideoBody,
         body.prompt_override,
     )
     return _job_to_dict(job)
+
+
+async def _import_clip_common(job_id: str, char_id: str, file: UploadFile, *,
+                              variant_id: str | None = None,
+                              video_id: str | None = None):
+    """Stage an uploaded video to disk (streamed, no 25 MB image cap), then
+    point one (char × scene) slot's clip at it via `runner.attach_imported_clip`.
+    Shared by the Swap step-5 and the Reengineer per-cell import endpoints.
+    Returns the fresh VideoVariant. Raises 404/409 with a clear message when the
+    job/char/slot can't be resolved."""
+    ext = _safe_ext(file.filename or "clip.mp4", allow_video=True)
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if char_id not in (job.characters or {}):
+        raise HTTPException(404, "Character not in job")
+    # Stage next to the char's outputs (same filesystem → cheap), then attach
+    # copies it to the canonical imported_<vid> name and we drop the staging.
+    staging = (settings.output_dir / job_id / char_id
+               / f".import_{secrets.token_hex(4)}{ext}")
+    await _stream_upload_to(file, staging)
+    try:
+        variant = await runner.attach_imported_clip(
+            job_id, char_id, staging,
+            variant_id=variant_id, video_id=video_id)
+    finally:
+        staging.unlink(missing_ok=True)
+    if variant is None:
+        raise HTTPException(409, "Kunde inte hitta klippet att ersätta — finns "
+                                 "en godkänd bild för den här karaktären/scenen?")
+    return variant
+
+
+@app.post("/api/jobs/{job_id}/import_clip")
+async def import_clip(job_id: str,
+                      char_id: str = Form(...),
+                      file: UploadFile = File(...),
+                      video_id: str | None = Form(None),
+                      variant_id: str | None = Form(None)) -> dict:
+    """Replace ONE Swap step-5 clip with a user-imported video (Hugo 2026-06-21).
+    Identify the slot by `video_id` (the clip card) or `variant_id` (the approved
+    image). The imported clip is treated like a generated one when the final is
+    compiled in step 6."""
+    if not (video_id or "").strip() and not (variant_id or "").strip():
+        raise HTTPException(400, "video_id or variant_id required")
+    await _import_clip_common(
+        job_id, char_id, file,
+        variant_id=(variant_id or "").strip() or None,
+        video_id=(video_id or "").strip() or None)
+    return _job_to_dict(store().get_job(job_id))
 
 
 class RetryFailedVideosBody(BaseModel):
@@ -5692,6 +5781,69 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
     background_tasks.add_task(_run_async, runner.retry_one_video,
                               job_id, body.char_id, body.video_id, prompt_override)
     return _reengineer_view(state, slim=True)
+
+
+def _scene_fully_covered(job: Job, scene_id: str) -> bool:
+    """True when every character that SHOULD have a clip for `scene_id` now has
+    a usable DONE clip on disk. Mirrors _collect_clips / _assembly_gaps so a
+    dirty-clear can never hide a sibling character's stale clip."""
+    from character_swap import runner, runner_reengineer
+    for jc in (job.characters or {}).values():
+        avid = runner_reengineer._approved_variant_for(jc, scene_id)
+        if avid is None:
+            # Slots but no approval = a real gap; no slots = never theirs.
+            if any(im.scene_id == scene_id for im in jc.images):
+                return False
+            continue
+        if runner.pick_clip_for_variant(jc, avid) is None:
+            return False
+    return True
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/import_clip")
+async def reengineer_import_clip(re_id: str, idx: int,
+                                 char_id: str = Form(...),
+                                 file: UploadFile = File(...)) -> dict:
+    """Replace ONE character's clip for the scene at `idx` with a user-imported
+    video (Hugo 2026-06-21). The scene's approved variant is resolved server-
+    side; the imported clip rides into "▶ Bygg ihop igen" like a generated one
+    (trimmed in the assemble pass). Re-animation never clobbers it."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(
+        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    entry = _reengineer_entry(state, idx)
+    if entry.get("is_direct"):
+        raise HTTPException(409, "Import stöds inte för direkt-scener ännu")
+    job_id = state.get("job_id")
+    job = store().get_job(job_id or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    jc = (job.characters or {}).get(char_id)
+    if jc is None:
+        raise HTTPException(404, "character not in run")
+    scene_id = entry["scene_id"]
+    approved = runner_reengineer._approved_variant_for(jc, scene_id)
+    if approved is None:
+        raise HTTPException(409, "ingen godkänd bild för den här karaktären/scenen")
+
+    variant = await _import_clip_common(
+        job_id, char_id, file, variant_id=approved)
+
+    # Finished finals are now stale → the run must "▶ Bygg ihop igen".
+    _mark_finals_stale(state)
+    # Clear the scene's dirty flag ONLY if every character's slot for this
+    # scene now has a usable clip (dirty is per-scene, shared across chars —
+    # clearing blindly could hide a sibling's stale clip). Single-character
+    # runs always clear, which also avoids the re-animate deadlock (the import
+    # guard skips imported clips, so dirty would otherwise never clear itself).
+    if _scene_fully_covered(store().get_job(job_id), scene_id):
+        entry.pop("dirty", None)
+    _save_reengineer_state(state)
+    view = _reengineer_view(state, slim=True)
+    view["regen_variants"] = {char_id: variant.video_id}
+    return view
 
 
 # ------------------------------------------ scene-level image rewrite + regen

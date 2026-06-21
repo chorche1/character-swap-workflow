@@ -1273,11 +1273,8 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
             if any(v.scene_id == e["scene_id"] for v in jc.images):
                 missing.append(f"scen {e['idx'] + 1} (ingen godkänd bild)")
             continue
-        video = next((vv for vv in jc.videos
-                      if vv.status == VideoStatus.DONE
-                      and vv.source_variant_id == vid_variant
-                      and vv.final_video_path
-                      and Path(vv.final_video_path).exists()), None)
+        # Prefer a user-imported take over a generated one (Hugo 2026-06-21).
+        video = runner.pick_clip_for_variant(jc, vid_variant)
         if video is not None:
             clips.append(Path(video.final_video_path))
             continue
@@ -1691,6 +1688,12 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
             vid = _approved_variant_for(jc, sid)
             if vid is None:
                 continue            # not approved yet — surfaced by the API
+            # A user-imported clip is authoritative — a bulk re-animate must
+            # NEVER overwrite it (Hugo 2026-06-21). Other characters' stale
+            # clips in this scene still re-animate normally.
+            if any(v.source_variant_id == vid and v.imported
+                   for v in jc.videos):
+                continue
             existing = next((v for v in jc.videos
                              if v.source_variant_id == vid), None)
             if existing is not None and existing.status in {

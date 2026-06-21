@@ -1240,6 +1240,105 @@ def _maybe_complete_char(job: Job, jc: JobCharacter) -> None:
         )
 
 
+def pick_clip_for_variant(jc: JobCharacter, source_variant_id: str) -> VideoVariant | None:
+    """The DONE clip that assembly/compile should use for one (char × variant)
+    slot. Prefers a user-IMPORTED take over a generated one (Hugo 2026-06-21);
+    otherwise the first DONE take. Only returns clips whose file still exists."""
+    cands = [vv for vv in jc.videos
+             if vv.status == VideoStatus.DONE
+             and vv.source_variant_id == source_variant_id
+             and vv.final_video_path
+             and Path(vv.final_video_path).exists()]
+    if not cands:
+        return None
+    return next((vv for vv in cands if vv.imported), cands[0])
+
+
+async def attach_imported_clip(
+    job_id: str, char_id: str, src_path: Path | str, *,
+    variant_id: str | None = None, video_id: str | None = None,
+) -> VideoVariant | None:
+    """Replace ONE (char × scene) slot's clip with a user-imported video file.
+
+    The slot is identified either by `video_id` — replace THAT take in place
+    (Swap step-5 card) — or by `variant_id` = the approved image variant —
+    find-or-create the clip for that image (Reengineer cell). The uploaded file
+    is copied into the character's output dir under a DISTINCT name so a later
+    regen of the original `video_id` can't overwrite it. The resulting
+    VideoVariant is DONE + imported with QC fields cleared; assembly/compile
+    pick it up automatically and `pick_clip_for_variant` prefers it over a
+    generated take. Re-animation skips it. Returns the new variant, or None when
+    the slot can't be resolved."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        return None
+    jc = job.characters.get(char_id)
+    if jc is None:
+        return None
+
+    # Resolve the approved image variant this clip animates + whether we are
+    # replacing an existing take in place.
+    src_variant_id = variant_id
+    replace_idx: int | None = None
+    if video_id is not None:
+        replace_idx = next((i for i, v in enumerate(jc.videos)
+                            if v.video_id == video_id), None)
+        if replace_idx is not None:
+            src_variant_id = src_variant_id or jc.videos[replace_idx].source_variant_id
+    if not src_variant_id:
+        # Single-slot jobs: fall back to the (only) approved variant.
+        src_variant_id = (jc.approved_variant_ids[0] if jc.approved_variant_ids
+                          else jc.approved_variant_id)
+    if not src_variant_id:
+        return None
+
+    # Copy the upload into the char's output dir under a UNIQUE name: never
+    # collides with a generated `video_<id>.mp4` (so a later regen is safe),
+    # and a fresh token each time forces a new URL so the <video> tag can't
+    # show a cached same-path clip on re-import.
+    old_imported_path: str | None = None
+    if replace_idx is not None:
+        prev = jc.videos[replace_idx]
+        new_vid = prev.video_id
+        if prev.imported and prev.final_video_path:
+            old_imported_path = prev.final_video_path   # clean up after
+    else:
+        new_vid = _short("vd_")
+    ext = Path(src_path).suffix.lower() or ".mp4"
+    out_dir = _output_dir(job_id, char_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"imported_{new_vid}_{secrets.token_hex(2)}{ext}"
+    await asyncio.to_thread(shutil.copyfile, str(src_path), str(dest))
+    if old_imported_path and old_imported_path != str(dest):
+        try:
+            Path(old_imported_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    fresh = VideoVariant(
+        video_id=new_vid,
+        grok_job_id="",
+        status=VideoStatus.DONE,
+        source_variant_id=src_variant_id,
+        final_video_path=str(dest),
+        completed_at=datetime.utcnow(),
+        imported=True,
+    )
+    if replace_idx is not None:
+        jc.videos[replace_idx] = fresh
+    else:
+        jc.videos.append(fresh)
+    # structural: a full re-flush of the char's rows — no orphan/ghost video
+    # rows whether we replaced in place or appended a new take.
+    _persist(job, jc, structural=True)
+    await _emit(job.job_id, "video.ready",
+                char_id=jc.char_id, video_id=fresh.video_id,
+                path=str(dest), imported=True)
+    _maybe_complete_char(job, jc)
+    return fresh
+
+
 async def _animate_character(
     job: Job, jc: JobCharacter, m_videos: int,
     prompt_for_scene,

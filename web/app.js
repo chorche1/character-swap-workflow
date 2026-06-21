@@ -145,6 +145,10 @@ function studio() {
     // SAME file path, so the thumbnail <img> needs a cache-busting query to
     // show the regenerated image instead of the browser-cached old one.
     reengineerRetryNonce: {},
+    // While a user-imported clip is uploading: "cid|variant_id" (Reengineer) or
+    // "cid|video_id" (Swap) of the slot being replaced, so its button shows a
+    // spinner. Null when idle (Hugo 2026-06-21).
+    importingClipKey: null,
     // job_id → WebSocket. Reengineer runs ride the same /ws/jobs/{job_id}
     // stream the Swap tab uses — every variant.* event triggers a debounced
     // slim refetch so thumbnails/progress land in ~real time instead of on
@@ -2573,6 +2577,36 @@ function studio() {
       const name = (jc?.name || 'clip').toLowerCase()
         .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
       return `${name || 'clip'}-scen-${(sc?.idx ?? 0) + 1}.mp4`;
+    },
+
+    // Replace ONE character's scene clip with the user's own imported video
+    // (Hugo 2026-06-21). The slot is keyed server-side by scene idx + char; the
+    // imported clip is treated like a generated one when "▶ Bygg ihop igen"
+    // assembles (trimmed in the assemble pass). Re-animation never clobbers it.
+    async importReClip(run, sc, cid, variantId, ev) {
+      const file = ev?.target?.files?.[0];
+      if (ev?.target) ev.target.value = '';   // allow re-picking the same file
+      if (!file) return;
+      const key = cid + '|' + variantId;
+      this.importingClipKey = key;
+      try {
+        const fd = new FormData();
+        fd.append('char_id', cid);
+        fd.append('file', file);
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/scenes/${sc.idx}/import_clip`,
+          { method: 'POST', body: fd });
+        if (!r.ok) {
+          this.notifyError('Kunde inte importera klippet: ' + await r.text());
+          return;
+        }
+        this._spliceReengineerView(await r.json());
+        this.notifyInfo('Klippet ersatt med ditt importerade klipp — klicka "▶ Bygg ihop igen".');
+      } catch (e) {
+        this.notifyError('Import misslyckades: ' + e);
+      } finally {
+        this.importingClipKey = null;
+      }
     },
 
     async reengineerRedoClip(run, sc, cid) {
@@ -6629,6 +6663,32 @@ function studio() {
       });
       if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
       this.job = await r.json();
+    },
+
+    // Replace ONE Swap step-5 clip with the user's own imported video
+    // (Hugo 2026-06-21). The imported clip is used like a generated one when
+    // step 6 compiles the final.
+    async importSwapClip(charId, videoId, ev) {
+      const file = ev?.target?.files?.[0];
+      if (ev?.target) ev.target.value = '';
+      if (!file || !this.job) return;
+      const key = charId + '|' + videoId;
+      this.importingClipKey = key;
+      try {
+        const fd = new FormData();
+        fd.append('char_id', charId);
+        fd.append('video_id', videoId);
+        fd.append('file', file);
+        const r = await fetch('/api/jobs/' + this.job.job_id + '/import_clip', {
+          method: 'POST', body: fd });
+        if (!r.ok) { this.notifyError('Import misslyckades: ' + await r.text()); return; }
+        this.job = await r.json();
+        this.notifyInfo('Klippet ersatt med ditt importerade klipp.');
+      } catch (e) {
+        this.notifyError('Import misslyckades: ' + e);
+      } finally {
+        this.importingClipKey = null;
+      }
     },
 
     // Reengineer card: show "↻ Ta om misslyckade" once clips exist and some

@@ -78,20 +78,26 @@ def _ordered_scene_videos(
         if approved_variant is None:
             missing.append(f"{sid} (no approved variant)")
             continue
-        # First DONE video whose source_variant_id matches.
-        video = next(
-            (vv for vv in jc.videos
-             if vv.source_variant_id == approved_variant.variant_id
-             and vv.status == VideoStatus.DONE
-             and vv.final_video_path),
-            None,
-        )
-        if video is None:
-            missing.append(f"{sid} (no finished video)")
-        elif not Path(video.final_video_path).exists():
-            missing.append(f"{sid} (video file missing on disk)")
-        else:
+        # DONE videos for this slot whose file is on disk. Prefer a
+        # user-IMPORTED take over a generated one (Hugo 2026-06-21; mirrors
+        # runner.pick_clip_for_variant); otherwise the first DONE take.
+        cands = [vv for vv in jc.videos
+                 if vv.source_variant_id == approved_variant.variant_id
+                 and vv.status == VideoStatus.DONE
+                 and vv.final_video_path
+                 and Path(vv.final_video_path).exists()]
+        video = next((vv for vv in cands if vv.imported),
+                     cands[0] if cands else None)
+        if video is not None:
             paths.append(Path(video.final_video_path))
+            continue
+        # No usable clip — keep the granular reason (backlog #9): a DONE row
+        # with its file gone vs. nothing finished at all.
+        done_any = any(vv.source_variant_id == approved_variant.variant_id
+                       and vv.status == VideoStatus.DONE and vv.final_video_path
+                       for vv in jc.videos)
+        missing.append(f"{sid} (video file missing on disk)" if done_any
+                       else f"{sid} (no finished video)")
     return paths, missing
 
 
