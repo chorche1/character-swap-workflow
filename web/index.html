@@ -795,11 +795,14 @@
                       class="text-amber-500 cursor-help"
                       title="Bara Kling 3.0 tolkar slutposen — denna scen ignorerar den.">⚠ ignorerar slutpose</span>
                 <label class="text-neutral-500 dark:text-neutral-400 ml-1">Duration:</label>
-                <select :value="durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default"
-                        @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
+                <!-- Per-option :selected, NOT a select-level :value — the latter
+                     evaluates before the option x-for populates and silently
+                     reverts the pick (same defect as the Reengineer Veo length
+                     menu, Hugo 2026-06-22: 8s picked, 4s rendered). -->
+                <select @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
                         class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
                   <template x-for="n in sceneVideoDurationSpec(scene).options" :key="'psd'+scene.scene_id+'-'+n">
-                    <option :value="n" x-text="n + 's'"></option>
+                    <option :value="n" :selected="n === (durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default)" x-text="n + 's'"></option>
                   </template>
                 </select>
                 <span class="text-neutral-400 dark:text-neutral-500"
@@ -1692,11 +1695,18 @@
                         <template x-if="reSceneEffModel(r, sc) !== 'kling-v3'">
                           <label class="flex items-center gap-1" title="Kliplängd (s) för vald modell">
                             Längd (s)
+                            <!-- Each <option> self-selects via :selected — same idiom
+                                 as the Kling-length menu above. A :value / x-model /
+                                 x-effect on the <select> ITSELF is the broken pattern:
+                                 it evaluates before the nested option x-for populates,
+                                 so the pick silently reverts and never persists (Hugo
+                                 2026-06-22: Veo scene set to 8s rendered 4s — the 8
+                                 lived only in the unsaved select, server kept the old
+                                 length). @change writes the override. -->
                             <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
-                                    :value="reSceneDuration(r, sc)"
                                     @change="reSceneEdit(r, sc, 'kling_secs', $event.target.value); reengineerSaveScene(r, sc)">
                               <template x-for="n in reSceneDurationSpec(r, sc).options" :key="r.re_id+'-rsd-'+sc.idx+'-'+n">
-                                <option :value="n" x-text="n + 's'"></option>
+                                <option :value="n" :selected="n === reSceneDuration(r, sc)" x-text="n + 's'"></option>
                               </template>
                             </select>
                           </label>

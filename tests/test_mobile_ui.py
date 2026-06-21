@@ -89,6 +89,27 @@ def test_clip_length_is_a_dropdown_not_a_typed_number(_=None):
     assert "klingLengthOptions: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in _JS
 
 
+def test_non_kling_length_select_uses_selected_not_value(_=None):
+    # Hugo 2026-06-22: a Reengineer scene overridden to a NON-Kling model (Veo
+    # 3.1 Fast) ignored the length the user picked — set 8s, every clip rendered
+    # 4s. Root cause: the per-scene "Längd (s)" <select> (the non-Kling clip
+    # length) was the ONE length menu still using a select-level :value bind
+    # (`:value="reSceneDuration(r, sc)"`). That binding evaluates before the
+    # nested option x-for populates, so the user's pick silently reverts and is
+    # never persisted — _scene_duration then animates the stale stored length.
+    # Fix = the same per-option :selected idiom the Kling menu uses.
+    assert ':selected="n === reSceneDuration(r, sc)"' in _HTML
+    # The fragile select-level bind must not come back on this field.
+    assert ':value="reSceneDuration(r, sc)"' not in _HTML
+    # Still writes the override on change (shared handler with the Kling menu).
+    assert "reSceneEdit(r, sc, 'kling_secs', $event.target.value)" in _HTML
+    # Same defect lived on the Swap/Animate tab's per-scene Duration menu — it
+    # must use the per-option :selected idiom too, never a select-level :value.
+    assert (':selected="n === (durationByScene[scene.scene_id] '
+            '|| sceneVideoDurationSpec(scene).default)"') in _HTML
+    assert ':value="durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default"' not in _HTML
+
+
 def test_background_refresh_defers_while_typing(_=None):
     # Hugo's recurring "I have to type the prompt twice for it to stick" bug:
     # the 5s poll / WS refresh replaced the whole job/run object mid-keystroke,
