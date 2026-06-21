@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from character_swap import runner, runner_reengineer
 from character_swap.models import (
     CharStatus,
@@ -176,3 +178,111 @@ def test_reanimate_skips_imported(tmp_path, monkeypatch):
     # cB's stale generated clip re-animates; cA's imported clip is untouched.
     assert retried == [("cB", "vd_gen")]
     assert generated == []
+
+
+# ----------------------------------------------- review fixes (2026-06-21)
+
+def test_reimport_replaces_not_appends(tmp_path):
+    """Reengineer re-import (variant_id, no video_id) must REPLACE the prior
+    imported clip in place — not append a duplicate that pick_clip_for_variant
+    would resolve to the OLDER take while the UI shows the newer."""
+    a = tmp_path / "a.mp4"; a.write_bytes(b"clip-A")
+    b = tmp_path / "b.mp4"; b.write_bytes(b"clip-B")
+    job = _job([], job_id="j_reimport")
+    store().add_job(job)
+
+    asyncio.run(runner.attach_imported_clip("j_reimport", "cA", a, variant_id="v1"))
+    asyncio.run(runner.attach_imported_clip("j_reimport", "cA", b, variant_id="v1"))
+
+    fresh = store().get_job("j_reimport")
+    imported = [v for v in fresh.characters["cA"].videos
+                if v.source_variant_id == "v1" and v.imported]
+    assert len(imported) == 1                       # replaced, not appended
+    from pathlib import Path
+    picked = runner.pick_clip_for_variant(fresh.characters["cA"], "v1")
+    assert Path(picked.final_video_path).read_bytes() == b"clip-B"  # the NEWER one
+
+
+def test_import_refuses_inflight_clip(tmp_path):
+    """Importing over a still-rendering take must refuse (ClipBusyError) — the
+    in-flight generation would otherwise write back by video_id and clobber it."""
+    src = tmp_path / "mine.mp4"; src.write_bytes(b"x")
+    job = _job([_clip("vd_busy", "v1", VideoStatus.PROCESSING)], job_id="j_busy")
+    store().add_job(job)
+    with pytest.raises(runner.ClipBusyError):
+        asyncio.run(runner.attach_imported_clip(
+            "j_busy", "cA", src, video_id="vd_busy"))
+    # The slot is untouched.
+    assert store().get_job("j_busy").characters["cA"].videos[0].status \
+        == VideoStatus.PROCESSING
+
+
+def test_import_stale_video_id_returns_none(tmp_path):
+    """A video_id that matches no take must refuse (→ None → 409), not silently
+    retarget scene 1's approval in a multi-scene job."""
+    src = tmp_path / "mine.mp4"; src.write_bytes(b"x")
+    job = _job([_clip("vd_real", "v1", VideoStatus.DONE, "/x.mp4")],
+               job_id="j_stale")
+    store().add_job(job)
+    out = asyncio.run(runner.attach_imported_clip(
+        "j_stale", "cA", src, video_id="vd_GONE"))
+    assert out is None
+
+
+def test_scene_all_imported_and_assembly_gap(tmp_path):
+    """An all-imported dirty scene is NOT a dirty gap; a sibling's generated
+    clip in the same dirty scene keeps it blocked."""
+    imp = tmp_path / "imp.mp4"; imp.write_bytes(b"i")
+    gen = tmp_path / "gen.mp4"; gen.write_bytes(b"g")
+
+    # Single char, imported → all-imported → no dirty gap.
+    job1 = _job([_clip("vd_imp", "v1", VideoStatus.DONE, str(imp), imported=True)],
+                job_id="ja")
+    assert runner_reengineer._scene_all_imported(job1, "s1") is True
+    state = _state(job_id="ja"); state["scenes"][0]["dirty"] = True
+    assert runner_reengineer._assembly_gaps(state, job1)["dirty"] == []
+
+    # Two chars: A imported, B generated (stale) → NOT all-imported → dirty stays.
+    cA = job1.characters["cA"]
+    cB = JobCharacter(char_id="cB", name="B", source_image_path="/b.png",
+                      images=[_img("vB", "s1")], approved_variant_ids=["vB"],
+                      videos=[_clip("vd_gen", "vB", VideoStatus.DONE, str(gen))])
+    job2 = Job(job_id="jb", title="t", scene_id="s1", scene_ids=["s1"],
+               scene_image_path="/p.png", scene_image_paths=["/p.png"],
+               characters={"cA": cA, "cB": cB}, origin="reengineer:re_t",
+               movement_prompt="x")
+    assert runner_reengineer._scene_all_imported(job2, "s1") is False
+    assert runner_reengineer._assembly_gaps(state, job2)["dirty"] != []
+
+
+def test_reanimate_clears_dirty_for_all_imported(tmp_path, monkeypatch):
+    """The single-char deadlock fix: editing a scene whose only clip is imported
+    re-flags it dirty, but re-animate must clear it (nothing to re-animate)."""
+    imp = tmp_path / "imp.mp4"; imp.write_bytes(b"i")
+    job = _job([_clip("vd_imp", "v1", VideoStatus.DONE, str(imp), imported=True)],
+               job_id="j_dl")
+    store().add_job(job)
+
+    retried, generated, captured = [], [], {}
+
+    async def fake_retry(*a, **k): retried.append(a)
+    async def fake_more(*a, **k): generated.append(a)
+
+    monkeypatch.setattr(runner, "retry_one_video", fake_retry)
+    monkeypatch.setattr(runner, "generate_more_videos", fake_more)
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
+                        lambda re_id: dict(_state(re_id="re_dl", job_id="j_dl"),
+                                           scenes=[{"idx": 0, "scene_id": "s1",
+                                                    "duration": 2.0, "motion_prompt": "a",
+                                                    "speech": "", "summary": "",
+                                                    "dirty": True}]))
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda re_id, **kw: captured.update(kw))
+    monkeypatch.setattr(runner_reengineer, "_finalize_reanimate",
+                        lambda re_id, **kw: None)
+
+    asyncio.run(runner_reengineer._do_reanimate(
+        "re_dl", [0], char_id=None, clear_dirty=True))
+
+    assert retried == [] and generated == []        # nothing to re-animate
+    assert captured.get("reanimate_idxs") == [0]     # scene marked acted → dirty clears

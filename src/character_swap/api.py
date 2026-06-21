@@ -123,6 +123,11 @@ async def _save_upload(upload: UploadFile, dest: Path) -> bytes:
 # generous video ceiling (Hugo 2026-06-21, "importera eget klipp").
 _VIDEO_UPLOAD_CAP = 1024 * 1024 * 1024  # 1 GiB
 
+# An imported clip MUST be a video — `_safe_ext(allow_video=True)` also lets
+# image extensions through (it unions ALLOWED_IMAGE_EXTS), so a .png would be
+# accepted and only blow up later in ffmpeg assembly (review 2026-06-21).
+_IMPORT_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v"}
+
 
 async def _stream_upload_to(upload: UploadFile, dest: Path,
                             *, cap: int = _VIDEO_UPLOAD_CAP) -> Path:
@@ -2811,6 +2816,10 @@ async def _import_clip_common(job_id: str, char_id: str, file: UploadFile, *,
     Returns the fresh VideoVariant. Raises 404/409 with a clear message when the
     job/char/slot can't be resolved."""
     ext = _safe_ext(file.filename or "clip.mp4", allow_video=True)
+    if ext not in _IMPORT_VIDEO_EXTS:
+        raise HTTPException(
+            400, f"Importera en videofil ({', '.join(sorted(_IMPORT_VIDEO_EXTS))}). "
+                 f"'{ext}' är inte en video.")
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -2818,7 +2827,8 @@ async def _import_clip_common(job_id: str, char_id: str, file: UploadFile, *,
     if char_id not in (job.characters or {}):
         raise HTTPException(404, "Character not in job")
     # Stage next to the char's outputs (same filesystem → cheap), then attach
-    # copies it to the canonical imported_<vid> name and we drop the staging.
+    # moves it to the canonical imported_<vid> name; we drop the staging if the
+    # move never happened (e.g. ClipBusyError before the move).
     staging = (settings.output_dir / job_id / char_id
                / f".import_{secrets.token_hex(4)}{ext}")
     await _stream_upload_to(file, staging)
@@ -2826,6 +2836,8 @@ async def _import_clip_common(job_id: str, char_id: str, file: UploadFile, *,
         variant = await runner.attach_imported_clip(
             job_id, char_id, staging,
             variant_id=variant_id, video_id=video_id)
+    except runner.ClipBusyError as e:
+        raise HTTPException(409, str(e))
     finally:
         staging.unlink(missing_ok=True)
     if variant is None:
@@ -5783,23 +5795,6 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
     return _reengineer_view(state, slim=True)
 
 
-def _scene_fully_covered(job: Job, scene_id: str) -> bool:
-    """True when every character that SHOULD have a clip for `scene_id` now has
-    a usable DONE clip on disk. Mirrors _collect_clips / _assembly_gaps so a
-    dirty-clear can never hide a sibling character's stale clip."""
-    from character_swap import runner, runner_reengineer
-    for jc in (job.characters or {}).values():
-        avid = runner_reengineer._approved_variant_for(jc, scene_id)
-        if avid is None:
-            # Slots but no approval = a real gap; no slots = never theirs.
-            if any(im.scene_id == scene_id for im in jc.images):
-                return False
-            continue
-        if runner.pick_clip_for_variant(jc, avid) is None:
-            return False
-    return True
-
-
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/import_clip")
 async def reengineer_import_clip(re_id: str, idx: int,
                                  char_id: str = Form(...),
@@ -5833,12 +5828,16 @@ async def reengineer_import_clip(re_id: str, idx: int,
 
     # Finished finals are now stale → the run must "▶ Bygg ihop igen".
     _mark_finals_stale(state)
-    # Clear the scene's dirty flag ONLY if every character's slot for this
-    # scene now has a usable clip (dirty is per-scene, shared across chars —
-    # clearing blindly could hide a sibling's stale clip). Single-character
-    # runs always clear, which also avoids the re-animate deadlock (the import
-    # guard skips imported clips, so dirty would otherwise never clear itself).
-    if _scene_fully_covered(store().get_job(job_id), scene_id):
+    # Clear the scene's dirty flag ONLY if EVERY character's clip for it is now
+    # an imported take (imported clips never derive from the motion prompt, so
+    # they are never stale). If a sibling still has a generated/stale clip, keep
+    # dirty so the gate makes the user re-animate it before rebuilding — and the
+    # gate/_do_reanimate exempt all-imported scenes so this never dead-locks
+    # (review 2026-06-21). The re-fetch is None-guarded (job may be deleted
+    # mid-upload).
+    fresh_job = store().get_job(job_id)
+    if fresh_job is not None and runner_reengineer._scene_all_imported(
+            fresh_job, scene_id):
         entry.pop("dirty", None)
     _save_reengineer_state(state)
     view = _reengineer_view(state, slim=True)

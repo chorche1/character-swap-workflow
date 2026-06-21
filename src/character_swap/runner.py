@@ -42,6 +42,12 @@ def cancel_job_generation(job_id: str) -> None:
     _CANCELLED_JOBS.add(job_id)
 
 
+class ClipBusyError(Exception):
+    """Raised by attach_imported_clip when the target slot is still rendering —
+    importing over it would let the in-flight generation clobber the import.
+    The API layer maps this to HTTP 409."""
+
+
 def _output_dir(job_id: str, char_id: str) -> Path:
     return settings.output_dir / job_id / char_id
 
@@ -1277,21 +1283,40 @@ async def attach_imported_clip(
     if jc is None:
         return None
 
-    # Resolve the approved image variant this clip animates + whether we are
-    # replacing an existing take in place.
+    # Resolve the slot to replace + the approved image variant it animates.
     src_variant_id = variant_id
     replace_idx: int | None = None
     if video_id is not None:
         replace_idx = next((i for i, v in enumerate(jc.videos)
                             if v.video_id == video_id), None)
-        if replace_idx is not None:
-            src_variant_id = src_variant_id or jc.videos[replace_idx].source_variant_id
+        if replace_idx is None:
+            # Stale/unknown video_id — refuse loudly (caller → 409) instead of
+            # silently retargeting to scene 1's approval (review 2026-06-21).
+            return None
+        src_variant_id = src_variant_id or jc.videos[replace_idx].source_variant_id
+    elif src_variant_id:
+        # Reengineer / find-or-create path: replace the EXISTING clip for this
+        # approved variant IN PLACE — otherwise a second import accumulates a
+        # duplicate and pick_clip_for_variant resolves to the OLDER take while
+        # the UI shows the newer (review 2026-06-21).
+        replace_idx = next((i for i, v in enumerate(jc.videos)
+                            if v.source_variant_id == src_variant_id), None)
     if not src_variant_id:
-        # Single-slot jobs: fall back to the (only) approved variant.
+        # Matched a legacy clip with no recorded variant: fall back to the
+        # (single) approved variant.
         src_variant_id = (jc.approved_variant_ids[0] if jc.approved_variant_ids
                           else jc.approved_variant_id)
     if not src_variant_id:
         return None
+
+    # Never overwrite a take that is still rendering: the in-flight generation
+    # would later write back by video_id and clobber the import (review
+    # 2026-06-21). Refuse loudly so the user waits / picks a finished slot.
+    if replace_idx is not None and jc.videos[replace_idx].status in {
+            VideoStatus.PENDING, VideoStatus.PROCESSING}:
+        raise ClipBusyError(
+            "Klippet renderas fortfarande — vänta tills det är klart innan "
+            "du importerar ett eget.")
 
     # Copy the upload into the char's output dir under a UNIQUE name: never
     # collides with a generated `video_<id>.mp4` (so a later regen is safe),
@@ -1309,7 +1334,10 @@ async def attach_imported_clip(
     out_dir = _output_dir(job_id, char_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     dest = out_dir / f"imported_{new_vid}_{secrets.token_hex(2)}{ext}"
-    await asyncio.to_thread(shutil.copyfile, str(src_path), str(dest))
+    # move (a rename when the staged upload is on the same filesystem as the
+    # output dir, which it is) avoids a second full-file copy of a clip that
+    # can be hundreds of MB (review 2026-06-21).
+    await asyncio.to_thread(shutil.move, str(src_path), str(dest))
     if old_imported_path and old_imported_path != str(dest):
         try:
             Path(old_imported_path).unlink(missing_ok=True)

@@ -1288,6 +1288,27 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
     return clips, missing, waitable
 
 
+def _scene_all_imported(job: Job, scene_id: str) -> bool:
+    """True when EVERY character that should have a clip for `scene_id` has a
+    user-IMPORTED DONE clip. An imported clip never derives from the scene's
+    motion prompt, so such a scene is never "stale" even with `dirty` set
+    (review 2026-06-21) — the assemble gate / re-animate use this to avoid
+    blocking on (or dead-locking) an all-imported edited scene."""
+    any_char = False
+    for jc in (job.characters or {}).values():
+        avid = _approved_variant_for(jc, scene_id)
+        if avid is None:
+            # Slots but no approval = a real gap → not all-imported.
+            if any(im.scene_id == scene_id for im in jc.images):
+                return False
+            continue
+        clip = runner.pick_clip_for_variant(jc, avid)
+        if clip is None or not clip.imported:
+            return False
+        any_char = True
+    return any_char
+
+
 def _assembly_gaps(state: dict, job: Job) -> dict:
     """Pre-flight coverage report for a MANUAL re-assembly ("Bygg ihop igen").
 
@@ -1305,8 +1326,17 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
     Per-(char, scene) rules mirror _collect_clips EXACTLY so the gate and the
     actual build never disagree. All three buckets empty ⇒ a clean rebuild."""
     entries = state.get("scenes") or []
-    dirty = [{"idx": e["idx"], "label": f"scen {e['idx'] + 1}"}
-             for e in entries if e.get("dirty")]
+    dirty = []
+    for e in entries:
+        if not e.get("dirty"):
+            continue
+        # An all-imported scene is never stale (imported clips don't derive
+        # from the motion prompt) — don't block the rebuild on it (and don't
+        # dead-lock it, since re-animate skips imported clips) (review 2026-06-21).
+        sid = e.get("scene_id")
+        if sid and not e.get("is_direct") and _scene_all_imported(job, sid):
+            continue
+        dirty.append({"idx": e["idx"], "label": f"scen {e['idx'] + 1}"})
     hard: list[dict] = []
     pending: list[dict] = []
 
@@ -1333,12 +1363,10 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
                 if any(v.scene_id == e["scene_id"] for v in jc.images):
                     _gap(hard, cid, name, e, "ingen godkänd bild")
                 continue
-            done = next((vv for vv in jc.videos
-                         if vv.status == VideoStatus.DONE
-                         and vv.source_variant_id == vid
-                         and vv.final_video_path
-                         and Path(vv.final_video_path).exists()), None)
-            if done is not None:
+            # Route through pick_clip_for_variant so this presence check stays
+            # IDENTICAL to _collect_clips (the "mirror exactly" invariant —
+            # both now prefer an imported take) (review 2026-06-21).
+            if runner.pick_clip_for_variant(jc, vid) is not None:
                 continue
             rows = [vv for vv in jc.videos if vv.source_variant_id == vid]
             if not rows or any(vv.status in {VideoStatus.PENDING,
@@ -1706,6 +1734,11 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
                 tasks.append(runner.generate_more_videos(
                     job.job_id, cid, 1, source_variant_id=vid))
         if len(tasks) > n_before:
+            acted.append(i)
+        elif not entries[i].get("is_direct") and _scene_all_imported(job, sid):
+            # Nothing to re-animate — every char's clip is an imported take
+            # (never stale). Count the scene as acted so its (stale) dirty flag
+            # clears instead of dead-locking "Bygg ihop igen" (review 2026-06-21).
             acted.append(i)
     # Persist only the idxs that actually spawned a clip task: a scene whose
     # every pair was skipped (e.g. approvals withdrawn by a scene-level image
