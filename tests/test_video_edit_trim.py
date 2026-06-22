@@ -250,6 +250,27 @@ def test_caption_ratio_low_on_hallucination():
     assert caption_transcript_ratio(whisper, script) < 0.55
 
 
+def test_caption_ratio_high_on_long_transcript_with_extra_intro_outro():
+    """Regression (2026-06-22): the compiled TTS speaks an intro HOOK + outro
+    CTA that the scene says-clauses (the script_hint) don't carry, so the
+    Whisper transcript fully CONTAINS the script but is much longer. The old
+    char-level SequenceMatcher with autojunk scored this ~0.02 on any text
+    >200 chars and falsely fell back to evenly-timed words — every multi-scene
+    compile shipped with mis-timed captions. Coverage of the script must stay
+    high so Whisper's real per-word timing is kept."""
+    script = ("Add a teaspoon of turmeric. A few generous slices of fresh "
+              "ginger. The juice of half a fresh lemon. Drink it every morning. "
+              "The curcumin in the turmeric cools the inflammation burning "
+              "inside you. The ginger gets your blood flowing again, and the "
+              "lemon washes out what's been feeding it. Save this and comment.")
+    whisper = ("This is not aging it's chronic inflammation and American Pharma "
+               "have been hiding the cause for years. " + script +
+               " Tea and I'll send you the one ingredient I take with this to "
+               "make it ten times more powerful. Follow me first or I can't "
+               "reach you.")
+    assert caption_transcript_ratio(whisper, script) > 0.9
+
+
 def test_caption_ratio_zero_when_transcript_empty():
     assert caption_transcript_ratio("", "some real script here") == 0.0
 

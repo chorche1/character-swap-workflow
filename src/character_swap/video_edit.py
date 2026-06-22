@@ -1649,23 +1649,40 @@ def words_from_json(raw: str) -> list[Word]:
 
 
 def caption_transcript_ratio(whisper_text: str, script: str) -> float:
-    """Similarity in [0,1] between a Whisper transcript and the KNOWN script
-    (the scene says-clause dialogue). Low = Whisper hallucinated or missed the
-    speech (common on Kling's synthetic voice — it invents a generic 'thanks
-    for watching' outro on unclear audio), so captions should fall back to the
-    script. Compared on normalized word tokens (lowercased, alphanumeric).
+    """Coverage in [0,1] of the KNOWN script (the scene says-clause dialogue)
+    by the Whisper transcript. Low = Whisper hallucinated or missed the speech
+    (common on Kling's synthetic voice — it invents a generic 'thanks for
+    watching' outro on unclear audio), so captions should fall back to the
+    script. High = Whisper captured the real wording → keep its accurate
+    per-word timing.
+
+    Compared on WORD TOKENS (lowercased, alphanumeric) with autojunk disabled,
+    measuring `matched_script_tokens / total_script_tokens`. Two reasons this
+    is NOT a symmetric char-level SequenceMatcher.ratio() (the original, which
+    silently broke captions on essentially every multi-scene compile —
+    2026-06-22):
+      1. CHARACTER-level matching with difflib's `autojunk` heuristic collapses
+         to ~0 on any string >200 chars (frequent characters become 'junk' and
+         stop matching), so a perfect transcript scored 0.02 and falsely tripped
+         the fallback. Token-level + autojunk=False fixes that.
+      2. The TTS routinely speaks MORE than the says-clauses (an intro hook +
+         outro CTA the scene dialogue doesn't carry). Those extra words must NOT
+         count against the match — a one-sided COVERAGE of the script does that,
+         where a symmetric ratio would be dragged down by them.
     ffmpeg-free → unit-testable."""
     import difflib
     import re as _re
 
-    def _norm(s: str) -> str:
-        return " ".join(_re.findall(r"[a-z0-9]+", (s or "").lower()))
-    a, b = _norm(whisper_text), _norm(script)
+    def _toks(s: str) -> list[str]:
+        return _re.findall(r"[a-z0-9]+", (s or "").lower())
+    a, b = _toks(whisper_text), _toks(script)
     if not b:
         return 1.0   # no script to compare against → trust Whisper
     if not a:
         return 0.0   # empty transcript → definitely fall back
-    return difflib.SequenceMatcher(None, a, b).ratio()
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    matched = sum(size for _, _, size in sm.get_matching_blocks())
+    return matched / len(b)
 
 
 def script_fallback_words(script: str, duration: float) -> list[Word]:
