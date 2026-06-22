@@ -1309,6 +1309,81 @@ def _scene_all_imported(job: Job, scene_id: str) -> bool:
     return any_char
 
 
+def _parse_dirty_at(raw: object) -> datetime | None:
+    """Parse a scene's `dirty_at` stamp (`utcnow().isoformat() + "Z"`) back to a
+    naive-UTC datetime, matching VideoVariant.submitted_at. Bad/missing → None."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.rstrip("Z"))
+    except ValueError:
+        return None
+
+
+def _scene_resolved_since_edit(job: Job, entry: dict) -> bool:
+    """True when an edited ('dirty') scene's clips are all back in sync with the
+    edit that set the flag — every expected character has an IMPORTED clip or a
+    generated clip whose generation STARTED after `entry['dirty_at']`.
+
+    This is what lets the per-clip ↻ and single-character redo paths auto-clear
+    the 'ändrad' flag: redo every character's clip and the scene is fresh again,
+    so '▶ Bygg ihop igen' stops refusing — without the costly full "▶ Animera
+    om ändrade" (Hugo 2026-06-22; the stuck-flag footgun, 2nd occurrence).
+
+    Conservative by construction, so a genuinely stale scene NEVER auto-clears
+    (refuse-loudly): no `dirty_at` (older flags) → False; any expected clip
+    missing / still rendering → False; any generated clip whose `submitted_at`
+    is NOT strictly after the edit (a pre-edit or in-flight take) → False.
+    `submitted_at` (not `completed_at`) is the marker: retry_one_video mints a
+    fresh VideoVariant whose submit time is necessarily after the edit+resync,
+    so an in-flight pre-edit clip that merely *finishes* late can't pass. Mirrors
+    _collect_clips' per-(char, scene) inclusion rules exactly so the gate and
+    the build never disagree."""
+    if entry.get("is_direct"):
+        return False
+    edited_at = _parse_dirty_at(entry.get("dirty_at"))
+    if edited_at is None:
+        return False
+    sid = entry.get("scene_id")
+    if not sid:
+        return False
+    any_expected = False
+    for jc in (job.characters or {}).values():
+        vid = _approved_variant_for(jc, sid)
+        if vid is None:
+            # Slots but no approval = a real gap → not resolved.
+            if any(im.scene_id == sid for im in jc.images):
+                return False
+            continue
+        clip = runner.pick_clip_for_variant(jc, vid)
+        if clip is None:
+            return False                       # missing / still rendering
+        any_expected = True
+        if clip.imported:
+            continue                           # imported clips never derive from the prompt
+        if clip.submitted_at is None or clip.submitted_at <= edited_at:
+            return False                       # pre-edit / in-flight (stale) take
+    return any_expected
+
+
+def clear_resolved_dirty(state: dict, job: Job) -> list[int]:
+    """Pop the 'ändrad' (dirty) flag from every scene whose clips are now back
+    in sync with its edit (see _scene_resolved_since_edit), returning the
+    cleared scene idxs (caller persists when non-empty). Called on the
+    Reengineer poll + before the assemble gate so per-clip / single-char redos
+    auto-unblock 'Bygg ihop igen' the same way a full re-animate does, instead
+    of leaving the flag stuck forever (Hugo 2026-06-22)."""
+    cleared: list[int] = []
+    for e in state.get("scenes") or []:
+        if not e.get("dirty"):
+            continue
+        if _scene_resolved_since_edit(job, e):
+            e.pop("dirty", None)
+            e.pop("dirty_at", None)
+            cleared.append(e.get("idx"))
+    return cleared
+
+
 def _assembly_gaps(state: dict, job: Job) -> dict:
     """Pre-flight coverage report for a MANUAL re-assembly ("Bygg ihop igen").
 
@@ -1335,6 +1410,14 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
         # dead-lock it, since re-animate skips imported clips) (review 2026-06-21).
         sid = e.get("scene_id")
         if sid and not e.get("is_direct") and _scene_all_imported(job, sid):
+            continue
+        # Per-clip / single-char redos refresh a scene's clips without going
+        # through "▶ Animera om ändrade", so once every expected clip was
+        # (re)generated after the edit the flag is stale, not the clips — don't
+        # block the build on it (Hugo 2026-06-22; auto-clear footgun). The poll
+        # + assemble endpoint also POP such flags via clear_resolved_dirty; this
+        # keeps the gate authoritative even for a caller that didn't pre-clear.
+        if _scene_resolved_since_edit(job, e):
             continue
         dirty.append({"idx": e["idx"], "label": f"scen {e['idx'] + 1}"})
     hard: list[dict] = []
@@ -1760,6 +1843,7 @@ def _finalize_reanimate(re_id: str, *, clear_dirty: bool,
         for i in state.get("reanimate_idxs") or []:
             if 0 <= i < len(entries):
                 entries[i].pop("dirty", None)
+                entries[i].pop("dirty_at", None)
     _update(re_id,
             scenes=entries,
             finals_stale=True,

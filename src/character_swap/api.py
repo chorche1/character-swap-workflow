@@ -5049,10 +5049,18 @@ async def reengineer_list() -> list[dict]:
 async def reengineer_get(re_id: str, slim: bool = False) -> dict:
     """`?slim=1` omits each variant's prompt text from the embedded job —
     the polling/WS-refresh path uses it (the strip never shows prompts)."""
-    from character_swap import reengineer as reengineer_mod
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
     state = reengineer_mod.load_state(re_id)
     if not state:
         raise HTTPException(404, "re_id not found")
+    # Auto-clear stale "ändrad" flags whose clips were all redone after the edit
+    # (per-clip / single-char redos don't go through "▶ Animera om ändrade"), so
+    # the counter + "Bygg ihop" unblock live on the poll (Hugo 2026-06-22).
+    job_id = state.get("job_id")
+    if job_id:
+        job = store().get_job(job_id)
+        if job is not None and runner_reengineer.clear_resolved_dirty(state, job):
+            _save_reengineer_state(state)
     return _reengineer_view(state, slim=slim)
 
 
@@ -5237,6 +5245,11 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     job = store().get_job(state["job_id"])
     if job is None:
         raise HTTPException(409, "underlying job disappeared")
+    # Drop stale "ändrad" flags whose clips were all redone after the edit
+    # (per-clip / single-char redos) before gating — otherwise a scene whose
+    # clips are already fresh would wrongly refuse the rebuild (Hugo 2026-06-22).
+    if runner_reengineer.clear_resolved_dirty(state, job):
+        _save_reengineer_state(state)
     gaps = runner_reengineer._assembly_gaps(state, job)
     if gaps["dirty"] or gaps["hard"] or gaps["pending"]:
         raise HTTPException(409, detail={
@@ -5344,6 +5357,16 @@ def _mark_finals_stale(state: dict) -> None:
         state["finals_stale"] = True
 
 
+def _mark_scene_dirty(entry: dict) -> None:
+    """Flag a scene edited-but-not-reanimated AND stamp WHEN. The stamp lets the
+    build gate later tell a freshly-redone clip (generated after the edit) from
+    a genuinely stale one, so per-clip / single-char redos auto-clear the flag
+    instead of leaving '▶ Bygg ihop igen' stuck forever (Hugo 2026-06-22). See
+    runner_reengineer._scene_resolved_since_edit / clear_resolved_dirty."""
+    entry["dirty"] = True
+    entry["dirty_at"] = datetime.utcnow().isoformat() + "Z"
+
+
 class ReSceneEditBody(BaseModel):
     motion_prompt: str | None = None
     duration: float | None = None
@@ -5408,12 +5431,12 @@ async def reengineer_edit_scene(re_id: str, idx: int, body: ReSceneEditBody) -> 
                 entry["kling_secs"] = ks
                 changed = True
     if body.dirty:
-        entry["dirty"] = True
+        _mark_scene_dirty(entry)
 
     job = store().get_job(state.get("job_id") or "")
     post_gate = bool(job is not None and (job.movement_prompts or job.movement_prompt))
     if changed and post_gate:
-        entry["dirty"] = True
+        _mark_scene_dirty(entry)
         runner_reengineer._sync_movement_from_state(job, state, [idx])
     _save_reengineer_state(state)
     return _reengineer_view(state, slim=True)
@@ -5571,7 +5594,7 @@ async def reengineer_set_direct(re_id: str, idx: int,
     entry["is_direct"] = True
     entry.pop("shared_clip_path", None)
     entry.pop("direct_error", None)
-    entry["dirty"] = True
+    _mark_scene_dirty(entry)
 
     # Drop this scene's per-character swap variants + approvals; exclude from swap.
     for jc in job.characters.values():
@@ -5610,7 +5633,7 @@ async def reengineer_clear_direct(re_id: str, idx: int,
     sid = entry["scene_id"]
     for k in ("is_direct", "direct_image_path", "shared_clip_path", "direct_error"):
         entry.pop(k, None)
-    entry["dirty"] = True
+    _mark_scene_dirty(entry)
     job.direct_scene_ids = [x for x in (job.direct_scene_ids or []) if x != sid]
     job.updated_at = datetime.utcnow()
     s.update_job(job)
@@ -6139,7 +6162,7 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
 
     # New image ≠ old clip: post-gate the scene must re-animate.
     if job.movement_prompts or job.movement_prompt:
-        entry["dirty"] = True
+        _mark_scene_dirty(entry)
     _mark_finals_stale(state)
     _save_reengineer_state(state)
 
@@ -6200,7 +6223,7 @@ async def reengineer_replace_scene_image(re_id: str, idx: int,
 
     # New image ≠ old clip: post-gate the scene must re-animate.
     if job.movement_prompts or job.movement_prompt:
-        entry["dirty"] = True
+        _mark_scene_dirty(entry)
     s.update_job(job)
     _mark_finals_stale(state)
     _save_reengineer_state(state)
