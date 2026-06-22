@@ -555,3 +555,58 @@ def test_compile_push_partial_success(monkeypatch, tmp_path, capture_push):
     title, body, kw = capture_push[0]
     assert title == "Slutvideor klara (delvis)"
     assert body == "1/2 lyckades"
+
+
+# --- _resolve_caption_words: prompted / unprompted-recover / fallback tiers ----
+
+from character_swap import video_edit  # noqa: E402
+
+_SCRIPT = "rub garlic on your skin tags every morning save this and comment"
+
+
+def _words(text: str) -> list:
+    """Evenly-timed Word list from a text — only `.text` matters here."""
+    toks = text.split()
+    return [video_edit.Word(text=t, start=float(i), end=float(i) + 1.0)
+            for i, t in enumerate(toks)]
+
+
+def _resolve(words, *, transcribe, dur=10.0, monkeypatch):
+    monkeypatch.setattr(video_edit, "transcribe_words", transcribe)
+    monkeypatch.setattr(video_edit, "_probe_duration", lambda *_a, **_k: dur)
+    return asyncio.run(runner_compile._resolve_caption_words(
+        words, Path("/tmp/x.mp4"), script_hint=_SCRIPT, edit_id="ed_x",
+        threshold=0.55))
+
+
+def test_resolve_caption_keeps_prompted_when_it_covers_script(monkeypatch):
+    """Tier 1: prompted transcript covers the script → kept verbatim, and the
+    unprompted re-transcribe is NOT run (lazy)."""
+    def _should_not_run(*a, **k):
+        raise AssertionError("re-transcribe must not run when tier 1 covers")
+    prompted = _words(_SCRIPT)
+    out = _resolve(prompted, transcribe=_should_not_run, monkeypatch=monkeypatch)
+    assert out is prompted
+
+
+def test_resolve_caption_recovers_via_unprompted_retranscribe(monkeypatch):
+    """Tier 2 (the 2026-06-22 bug): the script-biased pass returned only the
+    audio tail (Whisper's prompt-continuation skip) → low coverage, but the
+    UNPROMPTED re-transcribe returns the full transcript → keep its real timing
+    instead of falling back to even-timed words."""
+    prompted = _words("save this and comment")          # only the tail → low cov
+    full = _words(_SCRIPT + " follow me first")          # full speech, real timing
+    out = _resolve(prompted, transcribe=lambda *a, **k: full, monkeypatch=monkeypatch)
+    assert out is full
+    assert len(out) > len(prompted)
+
+
+def test_resolve_caption_falls_back_when_both_diverge(monkeypatch):
+    """Tier 3: genuinely garbled audio — both the prompted and the unprompted
+    transcripts diverge → rebuild evenly-timed words from the known script."""
+    prompted = _words("thanks for watching subscribe now bye")
+    garble = _words("uh hmm what was that noise again")
+    out = _resolve(prompted, transcribe=lambda *a, **k: garble, dur=12.0,
+                   monkeypatch=monkeypatch)
+    assert [w.text for w in out] == _SCRIPT.split()      # script text, not garble
+    assert out[0].start == 0.0 and out[-1].end == pytest.approx(12.0)

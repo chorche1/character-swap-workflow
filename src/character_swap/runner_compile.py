@@ -133,6 +133,63 @@ class EditorResult(NamedTuple):
     voice_applied: bool
 
 
+async def _resolve_caption_words(words: list, current: Path, *, script_hint: str,
+                                 edit_id: str, threshold: float,
+                                 warn=None) -> list:
+    """Choose the caption word source for a clip transcribed WITH `script_hint`
+    as Whisper's `prompt` (backlog #20). Three tiers (Hugo 2026-06-17/06-22):
+
+    1. The script-biased transcript, when it COVERS the known script — keep its
+       accurate per-word timing (the common case on clean TTS audio).
+    2. Else an UNPROMPTED re-transcribe. When the audio closely matches a long
+       prompt, Whisper treats the prompt as already-transcribed context and
+       emits ONLY the trailing audio (e.g. just the outro) — a short,
+       low-coverage transcript that is NOT garbled speech. The unprompted pass
+       reliably returns the full transcript with real timing, so we recover it
+       instead of throwing the timing away.
+    3. Else (genuinely garbled / near-empty transcript) rebuild evenly-timed
+       words from the known script — correct WORDS, approximate timing.
+
+    Coverage is `caption_transcript_ratio` (one-sided, token-level). The
+    unprompted re-transcribe is LAZY — only run when tier 1 fails."""
+    def _cov(ws: list) -> float:
+        return video_edit.caption_transcript_ratio(
+            " ".join(getattr(w, "text", "") for w in ws), script_hint)
+
+    ratio = _cov(words)
+    if ratio >= threshold:
+        return words
+
+    prompted_ratio = ratio
+    try:
+        unprompted = await asyncio.to_thread(
+            video_edit.transcribe_words, current, job_id=edit_id,
+            script_hint=None,
+        )
+    except Exception:
+        unprompted = []
+    if unprompted and _cov(unprompted) >= threshold:
+        logger.info(
+            "%s: script-biased transcript diverged (%.2f < %.2f) but the "
+            "unprompted re-transcribe recovered Whisper timing (%.2f) — keeping "
+            "per-word timing", edit_id, prompted_ratio, threshold,
+            _cov(unprompted))
+        return unprompted
+
+    dur = await asyncio.to_thread(video_edit._probe_duration, current)
+    fallback = video_edit.script_fallback_words(script_hint, dur)
+    if fallback:
+        logger.warning(
+            "%s: Whisper diverged from the script (ratio %.2f < %.2f) — captions "
+            "rebuilt from the known script", edit_id, prompted_ratio, threshold)
+        if warn is not None:
+            await warn(f"captions: Whisper matchade inte repliken "
+                       f"(likhet {prompted_ratio:.0%}) — byggde captions från "
+                       f"den kända repliken (jämn timing)")
+        return fallback
+    return words
+
+
 async def run_editor_pipeline(
     paths: list[Path],
     *,
@@ -304,21 +361,10 @@ async def run_editor_pipeline(
     # its accurate per-word timing. Runs before WPM/gap-trim so everything
     # downstream (incl. the persisted words.json) uses the corrected words.
     if (enable_captions or enable_wpm_normalize) and script_hint:
-        whisper_text = " ".join(getattr(w, "text", "") for w in words)
-        ratio = video_edit.caption_transcript_ratio(whisper_text, script_hint)
-        if ratio < settings.caption_script_fallback_ratio:
-            dur = await asyncio.to_thread(video_edit._probe_duration, current)
-            fallback = video_edit.script_fallback_words(script_hint, dur)
-            if fallback:
-                words = fallback
-                logger.warning(
-                    "%s: Whisper diverged from the script (ratio %.2f < %.2f)"
-                    " — captions rebuilt from the known script",
-                    edit_id, ratio, settings.caption_script_fallback_ratio)
-                if warn is not None:
-                    await warn(f"captions: Whisper matchade inte repliken "
-                               f"(likhet {ratio:.0%}) — byggde captions från "
-                               f"den kända repliken (jämn timing)")
+        words = await _resolve_caption_words(
+            words, current, script_hint=script_hint, edit_id=edit_id,
+            threshold=settings.caption_script_fallback_ratio, warn=warn,
+        )
 
     # Step 4a.5: WORD-GAP TRIM (opt-in, Hugo 2026-06-17). Replaces the
     # level-based interior trim (skipped above) — cuts spoken pauses longer
