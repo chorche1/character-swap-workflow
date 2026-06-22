@@ -557,56 +557,70 @@ def test_compile_push_partial_success(monkeypatch, tmp_path, capture_push):
     assert body == "1/2 lyckades"
 
 
-# --- _resolve_caption_words: prompted / unprompted-recover / fallback tiers ----
+# --- _resolve_caption_words: best-of-both transcript selection ----------------
 
 from character_swap import video_edit  # noqa: E402
 
 _SCRIPT = "rub garlic on your skin tags every morning save this and comment"
 
 
-def _words(text: str) -> list:
-    """Evenly-timed Word list from a text — only `.text` matters here."""
+def _words(text: str, *, last_dur: float | None = None) -> list:
+    """Evenly-timed Word list from a text — `.text`/`.start`/`.end` matter.
+    `last_dur` stretches the FINAL word (to simulate Whisper's giant-gap stall)."""
     toks = text.split()
-    return [video_edit.Word(text=t, start=float(i), end=float(i) + 1.0)
-            for i, t in enumerate(toks)]
+    out = [video_edit.Word(text=t, start=float(i), end=float(i) + 1.0)
+           for i, t in enumerate(toks)]
+    if last_dur is not None and out:
+        out[-1] = video_edit.Word(text=out[-1].text, start=out[-1].start,
+                                  end=out[-1].start + last_dur)
+    return out
 
 
-def _resolve(words, *, transcribe, dur=10.0, monkeypatch):
-    monkeypatch.setattr(video_edit, "transcribe_words", transcribe)
+def _resolve(hint_words, *, plain, dur=10.0, monkeypatch):
+    """`plain` = the words `transcribe_words(script_hint=None)` returns."""
+    monkeypatch.setattr(video_edit, "transcribe_words",
+                        lambda *a, **k: plain)
     monkeypatch.setattr(video_edit, "_probe_duration", lambda *_a, **_k: dur)
     return asyncio.run(runner_compile._resolve_caption_words(
-        words, Path("/tmp/x.mp4"), script_hint=_SCRIPT, edit_id="ed_x",
+        hint_words, Path("/tmp/x.mp4"), script_hint=_SCRIPT, edit_id="ed_x",
         threshold=0.55))
 
 
-def test_resolve_caption_keeps_prompted_when_it_covers_script(monkeypatch):
-    """Tier 1: prompted transcript covers the script → kept verbatim, and the
-    unprompted re-transcribe is NOT run (lazy)."""
-    def _should_not_run(*a, **k):
-        raise AssertionError("re-transcribe must not run when tier 1 covers")
-    prompted = _words(_SCRIPT)
-    out = _resolve(prompted, transcribe=_should_not_run, monkeypatch=monkeypatch)
-    assert out is prompted
+def test_resolve_caption_prefers_plain_when_hint_skips_to_tail(monkeypatch):
+    """The 2026-06-22 bug: the script-biased pass returned only the audio tail
+    (Whisper's prompt-continuation skip) → low coverage; the UNPROMPTED
+    transcript is full → pick it and keep real timing, not even-timed words."""
+    hint = _words("save this and comment")               # tail only → low cov
+    plain = _words(_SCRIPT + " follow me first")          # full speech
+    out = _resolve(hint, plain=plain, monkeypatch=monkeypatch)
+    assert out is plain
 
 
-def test_resolve_caption_recovers_via_unprompted_retranscribe(monkeypatch):
-    """Tier 2 (the 2026-06-22 bug): the script-biased pass returned only the
-    audio tail (Whisper's prompt-continuation skip) → low coverage, but the
-    UNPROMPTED re-transcribe returns the full transcript → keep its real timing
-    instead of falling back to even-timed words."""
-    prompted = _words("save this and comment")          # only the tail → low cov
-    full = _words(_SCRIPT + " follow me first")          # full speech, real timing
-    out = _resolve(prompted, transcribe=lambda *a, **k: full, monkeypatch=monkeypatch)
-    assert out is full
-    assert len(out) > len(prompted)
+def test_resolve_caption_prefers_plain_over_giant_gap(monkeypatch):
+    """re_88112e9ace mode: hint transcript covers OK on tokens but has a single
+    word frozen for 20+ s (Whisper stuck on silence). Plain is clean → pick
+    plain even though both 'cover' the script."""
+    hint = _words(_SCRIPT, last_dur=22.0)                 # giant 22s last word
+    plain = _words(_SCRIPT)                               # clean timing
+    out = _resolve(hint, plain=plain, monkeypatch=monkeypatch)
+    assert out is plain
+    assert runner_compile._maxword(out) < runner_compile._GIANT_GAP_SECS
+
+
+def test_resolve_caption_keeps_hint_when_plain_is_worse(monkeypatch):
+    """No regression: if the unprompted transcript is the garbled one and the
+    script-biased transcript covers the script, keep the hint transcript."""
+    hint = _words(_SCRIPT)                                # full, clean
+    plain = _words("uh hmm what was that noise again")    # garbled → low cov
+    out = _resolve(hint, plain=plain, monkeypatch=monkeypatch)
+    assert out is hint
 
 
 def test_resolve_caption_falls_back_when_both_diverge(monkeypatch):
-    """Tier 3: genuinely garbled audio — both the prompted and the unprompted
-    transcripts diverge → rebuild evenly-timed words from the known script."""
-    prompted = _words("thanks for watching subscribe now bye")
-    garble = _words("uh hmm what was that noise again")
-    out = _resolve(prompted, transcribe=lambda *a, **k: garble, dur=12.0,
-                   monkeypatch=monkeypatch)
+    """Genuinely garbled audio — BOTH transcripts diverge from the script →
+    rebuild evenly-timed words from the known script."""
+    hint = _words("thanks for watching subscribe now bye")
+    plain = _words("uh hmm what was that noise again")
+    out = _resolve(hint, plain=plain, dur=12.0, monkeypatch=monkeypatch)
     assert [w.text for w in out] == _SCRIPT.split()      # script text, not garble
     assert out[0].start == 0.0 and out[-1].end == pytest.approx(12.0)

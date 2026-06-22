@@ -133,59 +133,85 @@ class EditorResult(NamedTuple):
     voice_applied: bool
 
 
+_GIANT_GAP_SECS = 8.0   # a single word longer than this = Whisper stuck on
+                        # silence/room-tone — a degenerate caption (one card
+                        # frozen on screen for seconds). Treated as unhealthy.
+
+
+def _maxword(words: list) -> float:
+    return max((getattr(w, "end", 0) - getattr(w, "start", 0)
+                for w in words), default=0.0)
+
+
+def _caption_score(words: list, cov: float, *, is_plain: bool) -> tuple:
+    """Rank a caption transcript candidate. Higher tuple wins:
+    coverage of the script (rounded, dominant) → no giant gap → prefer the
+    unprompted ('plain') transcript on a tie → more words (more complete)."""
+    return (round(cov, 2), _maxword(words) <= _GIANT_GAP_SECS,
+            is_plain, len(words))
+
+
 async def _resolve_caption_words(words: list, current: Path, *, script_hint: str,
                                  edit_id: str, threshold: float,
                                  warn=None) -> list:
-    """Choose the caption word source for a clip transcribed WITH `script_hint`
-    as Whisper's `prompt` (backlog #20). Three tiers (Hugo 2026-06-17/06-22):
+    """Choose the caption word source (Hugo 2026-06-17 / 06-22). `words` is the
+    Step-4a transcript taken WITH `script_hint` as Whisper's `prompt` (backlog
+    #20, to bias wording). That prompt is double-edged: when the audio closely
+    matches a long prompt, Whisper treats the prompt as already-transcribed
+    context and drops most of the audio — emitting only the trailing tail
+    (e.g. 39 of 96 words) and/or a single word frozen for 20+ s. That is NOT
+    garbled speech, and on clean TTS the UNPROMPTED transcript is reliably
+    complete with accurate timing.
 
-    1. The script-biased transcript, when it COVERS the known script — keep its
-       accurate per-word timing (the common case on clean TTS audio).
-    2. Else an UNPROMPTED re-transcribe. When the audio closely matches a long
-       prompt, Whisper treats the prompt as already-transcribed context and
-       emits ONLY the trailing audio (e.g. just the outro) — a short,
-       low-coverage transcript that is NOT garbled speech. The unprompted pass
-       reliably returns the full transcript with real timing, so we recover it
-       instead of throwing the timing away.
-    3. Else (genuinely garbled / near-empty transcript) rebuild evenly-timed
-       words from the known script — correct WORDS, approximate timing.
-
-    Coverage is `caption_transcript_ratio` (one-sided, token-level). The
-    unprompted re-transcribe is LAZY — only run when tier 1 fails."""
+    So we transcribe BOTH ways and pick the BEST of the two by
+    `_caption_score` (coverage → no giant gap → prefer plain → completeness),
+    which never regresses below either candidate. Only when BOTH genuinely
+    diverge from the script (real Kling garble) do we rebuild evenly-timed
+    words from the known script — correct WORDS, approximate timing."""
     def _cov(ws: list) -> float:
         return video_edit.caption_transcript_ratio(
             " ".join(getattr(w, "text", "") for w in ws), script_hint)
 
-    ratio = _cov(words)
-    if ratio >= threshold:
-        return words
-
-    prompted_ratio = ratio
+    hint_words, hint_cov = words, _cov(words)
     try:
-        unprompted = await asyncio.to_thread(
+        plain_words = await asyncio.to_thread(
             video_edit.transcribe_words, current, job_id=edit_id,
             script_hint=None,
         )
     except Exception:
-        unprompted = []
-    if unprompted and _cov(unprompted) >= threshold:
-        logger.info(
-            "%s: script-biased transcript diverged (%.2f < %.2f) but the "
-            "unprompted re-transcribe recovered Whisper timing (%.2f) — keeping "
-            "per-word timing", edit_id, prompted_ratio, threshold,
-            _cov(unprompted))
-        return unprompted
+        plain_words = []
+    plain_cov = _cov(plain_words)
 
+    candidates = []
+    if hint_words:
+        candidates.append(("hint", hint_words, hint_cov))
+    if plain_words:
+        candidates.append(("plain", plain_words, plain_cov))
+    if candidates:
+        label, best, best_cov = max(
+            candidates,
+            key=lambda c: _caption_score(c[1], c[2], is_plain=c[0] == "plain"))
+        if best_cov >= threshold:
+            if label == "plain" and best is not hint_words:
+                logger.info(
+                    "%s: using unprompted transcript (cov %.2f, %d words) over "
+                    "the script-biased one (cov %.2f, %d words, maxword %.1fs) — "
+                    "script_hint made Whisper skip audio", edit_id, best_cov,
+                    len(best), hint_cov, len(hint_words), _maxword(hint_words))
+            return best
+
+    # Both diverge from the script → genuine garble → even-timed script words.
     dur = await asyncio.to_thread(video_edit._probe_duration, current)
     fallback = video_edit.script_fallback_words(script_hint, dur)
     if fallback:
         logger.warning(
-            "%s: Whisper diverged from the script (ratio %.2f < %.2f) — captions "
-            "rebuilt from the known script", edit_id, prompted_ratio, threshold)
+            "%s: both transcripts diverged from the script (hint %.2f / plain "
+            "%.2f < %.2f) — captions rebuilt from the known script",
+            edit_id, hint_cov, plain_cov, threshold)
         if warn is not None:
             await warn(f"captions: Whisper matchade inte repliken "
-                       f"(likhet {prompted_ratio:.0%}) — byggde captions från "
-                       f"den kända repliken (jämn timing)")
+                       f"(likhet {max(hint_cov, plain_cov):.0%}) — byggde "
+                       f"captions från den kända repliken (jämn timing)")
         return fallback
     return words
 
