@@ -5881,6 +5881,47 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
 
 
+class ReScenePromptVideosBody(BaseModel):
+    prompt: str
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/reprompt_videos")
+async def reengineer_reprompt_scene_videos(
+        re_id: str, idx: int, background_tasks: BackgroundTasks,
+        body: ReScenePromptVideosBody) -> dict:
+    """One-click "regenerate this whole scene's videos with a NEW motion prompt,
+    reuse the images" (Hugo 2026-06-23). Combines the edit-scene PATCH +
+    whole-scene redo into a single action so the user doesn't need to toggle
+    ✎ Redigera: it sets the scene's motion prompt (synced onto the job so the
+    redo uses the new text), marks the scene dirty + finals stale, then
+    re-animates EVERY non-imported clip of the scene for ALL characters via the
+    existing `reanimate` engine (clear_dirty=True → back in sync). Approved
+    swap images are reused; no image is regenerated."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(
+        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
+    entry = _reengineer_entry(state, idx)
+    if entry.get("is_direct"):
+        raise HTTPException(409, "Stöds inte för direkt-scener (ingen swap att animera om)")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(400, "prompt required")
+    entry["motion_prompt"] = prompt
+    _mark_scene_dirty(entry)
+    # Sync the new prompt onto the backing job so `reanimate` picks it up
+    # (mirrors the edit-scene PATCH post-gate path).
+    job = store().get_job(state.get("job_id") or "")
+    if job is not None and (job.movement_prompts or job.movement_prompt):
+        runner_reengineer._sync_movement_from_state(job, state, [idx])
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
+                              re_id, [idx], char_id=None, clear_dirty=True)
+    return _reengineer_view(state, slim=True)
+
+
 class ReClipRegenBody(BaseModel):
     char_id: str
     video_id: str

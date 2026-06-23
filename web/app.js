@@ -6445,6 +6445,13 @@ function studio() {
       sceneId: null, prompt: '', hadOverride: false, submitting: false,
     },
 
+    // Per-SCENE video re-prompt modal (Hugo 2026-06-23): one new motion prompt
+    // re-animates every character's clip in this scene, reusing the approved
+    // images. Used by the Swap/Reengineer flow (reprompt_videos endpoint).
+    sceneRegenModal: {
+      open: false, reId: null, idx: 0, label: '', prompt: '', submitting: false,
+    },
+
     // Read-only "view the EXACT prompt that generated this image" (Hugo
     // 2026-06-13). Fetches the engine-effective per-slot prompt — same source
     // the ✎↻ modal prefills, but display-only.
@@ -6692,6 +6699,42 @@ function studio() {
       if (!jc) return null;
       const src = (jc.images || []).find(im => im.variant_id === vv.source_variant_id);
       return src?.scene_id || null;
+    },
+
+    // Open the per-scene video re-prompt modal for a Reengineer/Swap scene,
+    // prefilled with the scene's current motion prompt. No ✎ edit mode needed.
+    openSceneVideoRepromptModal(reRun, sc) {
+      this.sceneRegenModal = {
+        open: true,
+        reId: reRun.re_id,
+        idx: sc.idx,
+        label: 'Scen ' + ((sc.idx ?? 0) + 1),
+        prompt: sc.motion_prompt || '',
+        submitting: false,
+      };
+    },
+
+    async submitSceneRegen() {
+      const m = this.sceneRegenModal;
+      if (!m.reId || m.submitting) return;
+      const prompt = (m.prompt || '').trim();
+      if (!prompt) { this.notifyError('Skriv en rörelseprompt först.'); return; }
+      m.submitting = true;
+      try {
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/scenes/${m.idx}/reprompt_videos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt }),
+          });
+        if (!r.ok) { this.notifyError('Regenerering misslyckades: ' + await r.text()); return; }
+        this._spliceReengineerView(await r.json());
+        this.sceneRegenModal.open = false;
+        this.notifyInfo('Regenererar scenens videor med den nya prompten — bygg ihop igen när det är klart.');
+        this._startReengineerPolling();
+      } finally {
+        m.submitting = false;
+      }
     },
 
     async submitRegen() {
