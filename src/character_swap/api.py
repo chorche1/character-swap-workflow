@@ -5881,22 +5881,22 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     return {"ok": True, "re_id": re_id, "idx": idx, "char_id": char_id}
 
 
-class ReScenePromptVideosBody(BaseModel):
+class ReRepromptVideosBody(BaseModel):
     prompt: str
 
 
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/reprompt_videos")
 async def reengineer_reprompt_scene_videos(
         re_id: str, idx: int, background_tasks: BackgroundTasks,
-        body: ReScenePromptVideosBody) -> dict:
+        body: ReRepromptVideosBody) -> dict:
     """One-click "regenerate this whole scene's videos with a NEW motion prompt,
     reuse the images" (Hugo 2026-06-23). Combines the edit-scene PATCH +
     whole-scene redo into a single action so the user doesn't need to toggle
     ✎ Redigera: it sets the scene's motion prompt (synced onto the job so the
     redo uses the new text), marks the scene dirty + finals stale, then
-    re-animates EVERY non-imported clip of the scene for ALL characters via the
-    existing `reanimate` engine (clear_dirty=True → back in sync). Approved
-    swap images are reused; no image is regenerated."""
+    re-animates every non-imported, not-already-in-flight clip of the scene for
+    ALL characters via the existing `reanimate` engine (clear_dirty=True → back
+    in sync). Approved swap images are reused; no image is regenerated."""
     from character_swap import runner_reengineer
     state = _editable_reengineer_state(
         re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
@@ -5908,12 +5908,17 @@ async def reengineer_reprompt_scene_videos(
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "prompt required")
+    # Refuse loudly if the backing job is gone — otherwise the sync below would
+    # be silently skipped and the scheduled reanimate would no-op, leaving the
+    # scene stuck dirty/stale with no error (mirrors reengineer_regen_clip).
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
     entry["motion_prompt"] = prompt
     _mark_scene_dirty(entry)
     # Sync the new prompt onto the backing job so `reanimate` picks it up
     # (mirrors the edit-scene PATCH post-gate path).
-    job = store().get_job(state.get("job_id") or "")
-    if job is not None and (job.movement_prompts or job.movement_prompt):
+    if job.movement_prompts or job.movement_prompt:
         runner_reengineer._sync_movement_from_state(job, state, [idx])
     _mark_finals_stale(state)
     _save_reengineer_state(state)

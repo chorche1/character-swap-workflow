@@ -9,8 +9,9 @@ via `reanimate(clear_dirty=True)` — reusing the approved images. No ✎ edit m
 These tests monkeypatch the reengineer state store + the reanimate engine and
 assert: the prompt is written + synced, the scene goes dirty, finals are
 stale, reanimate is scheduled whole-scene with clear_dirty=True, and the
-validation guards (empty prompt → 400, direct scene → 409, already-animating
-→ 409) fire.
+validation guards fire — empty prompt → 400, direct scene → 409,
+already-animating → 409, missing backing job → 409 (no state mutation / no
+scheduled no-op), forbidden run status → 409, out-of-range idx → 404.
 """
 from __future__ import annotations
 
@@ -83,7 +84,7 @@ def test_reprompt_sets_prompt_and_reanimates_whole_scene(wired):
     wired["states"]["re_t"] = _state()
     wired["job"] = _job_with_movement()
     bg = BackgroundTasks()
-    body = api.ReScenePromptVideosBody(prompt="  NEW motion for the scene  ")
+    body = api.ReRepromptVideosBody(prompt="  NEW motion for the scene  ")
     asyncio.run(api.reengineer_reprompt_scene_videos("re_t", 0, bg, body))
 
     st = wired["states"]["re_t"]
@@ -108,7 +109,7 @@ def test_empty_prompt_rejected(wired):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(api.reengineer_reprompt_scene_videos(
             "re_t", 0, BackgroundTasks(),
-            api.ReScenePromptVideosBody(prompt="   ")))
+            api.ReRepromptVideosBody(prompt="   ")))
     assert ei.value.status_code == 400
 
 
@@ -117,7 +118,7 @@ def test_direct_scene_rejected(wired):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(api.reengineer_reprompt_scene_videos(
             "re_t", 0, BackgroundTasks(),
-            api.ReScenePromptVideosBody(prompt="x")))
+            api.ReRepromptVideosBody(prompt="x")))
     assert ei.value.status_code == 409
 
 
@@ -127,5 +128,41 @@ def test_rejected_while_animating(wired, monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(api.reengineer_reprompt_scene_videos(
             "re_t", 0, BackgroundTasks(),
-            api.ReScenePromptVideosBody(prompt="x")))
+            api.ReRepromptVideosBody(prompt="x")))
     assert ei.value.status_code == 409
+
+
+def test_missing_job_refuses_loudly(wired):
+    # Backing swap job gone (store returns None). The endpoint must 409 BEFORE
+    # mutating state or scheduling a no-op reanimate (else the scene silently
+    # sticks dirty/stale with no error). Mirrors reengineer_regen_clip.
+    wired["states"]["re_t"] = _state()
+    wired["job"] = None
+    bg = BackgroundTasks()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_reprompt_scene_videos(
+            "re_t", 0, bg, api.ReRepromptVideosBody(prompt="new")))
+    assert ei.value.status_code == 409
+    # State untouched, nothing scheduled.
+    assert wired["states"]["re_t"]["scenes"][0]["motion_prompt"] == "old prompt"
+    assert not wired["states"]["re_t"]["scenes"][0].get("dirty")
+    assert bg.tasks == []
+
+
+def test_forbidden_status_rejected(wired):
+    # An interactive gate (awaiting_approval) is not in the editable status set.
+    wired["states"]["re_t"] = _state(status="awaiting_approval")
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_reprompt_scene_videos(
+            "re_t", 0, BackgroundTasks(),
+            api.ReRepromptVideosBody(prompt="x")))
+    assert ei.value.status_code == 409
+
+
+def test_out_of_range_idx_404(wired):
+    wired["states"]["re_t"] = _state()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_reprompt_scene_videos(
+            "re_t", 5, BackgroundTasks(),
+            api.ReRepromptVideosBody(prompt="x")))
+    assert ei.value.status_code == 404
