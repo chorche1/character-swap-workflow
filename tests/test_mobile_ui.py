@@ -111,22 +111,37 @@ def test_non_kling_length_select_uses_selected_not_value(_=None):
 
 
 def test_background_refresh_defers_while_typing(_=None):
-    # Hugo's recurring "I have to type the prompt twice for it to stick" bug:
-    # the 5s poll / WS refresh replaced the whole job/run object mid-keystroke,
-    # churning Alpine's x-for scope and re-firing x-model on the focused
-    # textarea (iOS drops the in-flight char). Fix = pause the refresh while a
-    # protected field is focused, then flush on blur.
-    # The protected textareas are tagged.
-    assert _HTML.count("data-keep-focus") >= 2
-    # The guard helper + both churn paths must check it.
+    # Hugo's recurring "I have to enter it twice for it to stick" bug (motion
+    # prompt AND video length): the 5s poll / WS refresh replaced the whole
+    # job/run object mid-interaction, churning Alpine's x-for scope and
+    # re-rendering the focused control — iOS drops the in-flight char on a
+    # <textarea> and reverts the open native picker on a <select> (the duration
+    # menus). Fix = pause the refresh while a protected field is focused OR a
+    # scene save is in flight, then flush on blur.
+    # The two motion textareas + the three duration selects are tagged.
+    assert _HTML.count("data-keep-focus") >= 5
+    # The guard helper + both churn paths must check it; <select> now counts
+    # (the duration menus, which revert on re-render — the "videolängd twice" half).
     assert "_isTypingProtectedField() {" in _JS
     assert "el.closest('[data-keep-focus]')" in _JS
+    assert "tag !== 'SELECT'" in _JS
+    # Each duration control carries data-keep-focus.
+    assert "data-keep-focus" in _HTML.split(
+        "durationByScene[scene.scene_id] = parseInt")[0][-80:]          # Animate Step 4
+    assert "data-keep-focus" in _HTML.split(
+        "x-if=\"reSceneEffModel(r, sc) === 'kling-v3'\"")[1][:300]       # Reengineer Kling-längd
+    assert "data-keep-focus" in _HTML.split(
+        "x-if=\"reSceneEffModel(r, sc) !== 'kling-v3'\"")[1][:300]       # Reengineer non-Kling Längd
+    # A save in flight also defers — the PATCH round-trip race that reverted a
+    # just-changed field before it persisted.
+    assert "_sceneSaveInFlight" in _JS
+    assert "_shouldDeferRefresh()" in _JS
     # Reengineer poll/WS refresh defers and retries.
-    re_refresh = _JS.split("async refreshReengineer(reId) {")[1][:600]
-    assert "_isTypingProtectedField()" in re_refresh
+    re_refresh = _JS.split("async refreshReengineer(reId) {")[1][:700]
+    assert "_shouldDeferRefresh()" in re_refresh
     # Swap WS handler defers the job replacement.
-    handle = _JS.split("async handleEvent(evt) {")[1][:500]
-    assert "_isTypingProtectedField()" in handle
+    handle = _JS.split("async handleEvent(evt) {")[1][:700]
+    assert "_shouldDeferRefresh()" in handle
     assert "this._pendingJobRefresh = true" in handle
     # A blur flush catches the deferred refresh back up.
     assert "_flushDeferredRefresh() {" in _JS

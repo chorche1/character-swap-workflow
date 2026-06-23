@@ -799,7 +799,8 @@
                      evaluates before the option x-for populates and silently
                      reverts the pick (same defect as the Reengineer Veo length
                      menu, Hugo 2026-06-22: 8s picked, 4s rendered). -->
-                <select @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
+                <select data-keep-focus
+                        @change="durationByScene[scene.scene_id] = parseInt($event.target.value)"
                         class="px-2 py-1 rounded-md border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950 focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900">
                   <template x-for="n in sceneVideoDurationSpec(scene).options" :key="'psd'+scene.scene_id+'-'+n">
                     <option :value="n" :selected="n === (durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default)" x-text="n + 's'"></option>
@@ -1702,7 +1703,7 @@
                              original scene length); picking a value persists it.
                              Kling-v3 scenes only. -->
                         <template x-if="reSceneEffModel(r, sc) === 'kling-v3'">
-                          <label class="flex items-center gap-1"
+                          <label data-keep-focus class="flex items-center gap-1"
                                  title="Klipplängden (s) som skickas till Kling, 3–15.">
                             Kling-längd (s)
                             <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
@@ -1715,7 +1716,7 @@
                         </template>
                         <!-- Non-Kling: that model's own duration options. -->
                         <template x-if="reSceneEffModel(r, sc) !== 'kling-v3'">
-                          <label class="flex items-center gap-1" title="Kliplängd (s) för vald modell">
+                          <label data-keep-focus class="flex items-center gap-1" title="Kliplängd (s) för vald modell">
                             Längd (s)
                             <!-- Each <option> self-selects via :selected — same idiom
                                  as the Kling-length menu above. A :value / x-model /
