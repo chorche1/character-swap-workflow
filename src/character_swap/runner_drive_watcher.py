@@ -707,6 +707,19 @@ async def _auto_process_zip(video_paths: list[Path], *,
         except Exception:
             pass
 
+    # 7c. Best-of-both / script fallback (parity with the Editor multi-clip
+    # endpoint + Step-6 compile). When the Drive folder shipped a script.txt
+    # and Whisper dropped most of the stitched Kling audio (only the first
+    # clip's words survived), rebuild captions from the known script so they
+    # span the whole video instead of just the opening seconds. No script →
+    # keep Whisper's transcript unchanged.
+    if script_text:
+        from character_swap import runner_compile
+        words = await runner_compile._resolve_caption_words(
+            words, current, script_hint=script_text, edit_id=edit_id,
+            threshold=settings.caption_script_fallback_ratio,
+        )
+
     # 8. Render capcut-purple-pill captions.
     final_out = edit_dir / "04-final.mp4"
     try:

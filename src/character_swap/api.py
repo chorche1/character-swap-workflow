@@ -4087,7 +4087,25 @@ async def editor_multi_auto_edit(
         style = video_edit.style_from_params(template, overrides_dict)
 
         try:
-            words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
+            # The full script is KNOWN here (required form field, used above for
+            # clip ordering). Transcribe the stitched result WITH it as Whisper's
+            # prompt, then run the SAME best-of-both rescue as the Step-6 compile
+            # and Reengineer assemble (runner_compile._resolve_caption_words):
+            # pick whichever of the prompted/unprompted transcripts best covers
+            # the script, and if BOTH diverge — Whisper dropped most of a
+            # multi-clip Kling reel, the 2026-06-23 bug where only the first
+            # clip's words survived and ~18 s of a 21 s video had no captions —
+            # rebuild evenly-timed caption words from the script so captions span
+            # the WHOLE video, not just the opening seconds.
+            from character_swap import runner_compile
+            words = await asyncio.to_thread(
+                video_edit.transcribe_words, current, job_id=edit_id,
+                script_hint=script,
+            )
+            words = await runner_compile._resolve_caption_words(
+                words, current, script_hint=script, edit_id=edit_id,
+                threshold=settings.caption_script_fallback_ratio,
+            )
             if not words:
                 raise HTTPException(422, "No speech detected after processing")
             (edit_dir / "words.json").write_text(video_edit.words_to_json(words), encoding="utf-8")
