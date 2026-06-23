@@ -89,6 +89,7 @@ def test_from_images_direct_flag_in_state(wired):
         motion_prompts=json.dumps(["wave", "pour"]),
         lengths=json.dumps([5, 6]),
         direct=json.dumps([False, True]),
+        end_frame_files=[], end_frame_idx="[]",
         character_ids=json.dumps(["cA"]),
         image_model="gpt2-id-swap", outfit_mode="scene", outfit_text="",
         auto_mode=False, use_director=False, background_file=None,

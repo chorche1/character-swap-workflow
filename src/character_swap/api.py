@@ -4871,6 +4871,8 @@ async def reengineer_from_images(
     motion_prompts: str = Form(...),         # JSON array of strings (one per file)
     lengths: str = Form(...),                # JSON array of seconds (one per file)
     direct: str = Form("[]"),                # JSON array of bools — "no swap" scenes
+    end_frame_files: list[UploadFile] = File([]),  # optional end pose per scene (sparse)
+    end_frame_idx: str = Form("[]"),         # JSON array of row indices ‖ end_frame_files
     character_ids: str = Form(...),          # JSON array of char ids
     image_model: str = Form("gpt2-id-swap"),
     outfit_mode: str = Form("character"),    # default: character's own clothes (Hugo 2026-06-21)
@@ -4945,10 +4947,59 @@ async def reengineer_from_images(
     if not direct_list:
         direct_list = [False] * len(files)
 
+    # Optional END FRAME (slutpose) per scene, uploaded at creation so the
+    # end-frame swap generates in the SAME swap phase as the start frames
+    # (Hugo 2026-06-23 — no second wait at the gate). The files are sparse
+    # (most rows have none), so they ride as a parallel `end_frame_files`
+    # list + an `end_frame_idx` JSON array of the row indices they belong to.
+    try:
+        end_idx_list = json.loads(end_frame_idx) if end_frame_idx.strip() else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "end_frame_idx must be a JSON array of ints")
+    if not isinstance(end_idx_list, list):
+        raise HTTPException(400, "end_frame_idx must be a JSON array")
+    if len(end_idx_list) != len(end_frame_files):
+        raise HTTPException(400, "end_frame_idx must match the number of end_frame_files")
+    if len(end_frame_files) > len(files):
+        raise HTTPException(400, "more end frames than scenes")
+    seen_ef: set[int] = set()
+    norm_end_idx: list[int] = []
+    for raw in end_idx_list:
+        try:
+            i = int(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "end_frame_idx entries must be ints")
+        if i < 0 or i >= len(files):
+            raise HTTPException(400, f"end_frame_idx {i} out of range")
+        if i in seen_ef:
+            raise HTTPException(400, f"duplicate end_frame_idx {i}")
+        seen_ef.add(i)
+        norm_end_idx.append(i)
+
     re_id = "re_" + secrets.token_hex(5)
     work = reengineer_mod.reengineer_dir(re_id)
     img_dir = work / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save each end-frame image under the run dir and map row idx → path. Direct
+    # ("ingen swap") rows can't have an end frame (no swap), so skip them even if
+    # the client sent one. Reuse the same ext/size helpers as the scene loop.
+    end_frame_paths_by_idx: dict[int, str] = {}
+    if norm_end_idx:
+        ef_dir = work / "end_frames"
+        ef_dir.mkdir(parents=True, exist_ok=True)
+        for upload, row_idx in zip(end_frame_files, norm_end_idx):
+            if bool(direct_list[row_idx]):
+                continue
+            ef_ext = _safe_ext(upload.filename or "")     # image-only; 400 on bad ext
+            ef_data = await _read_capped(upload)
+            if not ef_data:
+                raise HTTPException(400, f"Empty end-frame upload (scene {row_idx + 1})")
+            ef_path = ef_dir / f"img_{row_idx:02d}{ef_ext}"
+            ef_tmp = ef_path.with_suffix(ef_path.suffix + ".tmp")
+            ef_tmp.write_bytes(ef_data)
+            ef_tmp.replace(ef_path)
+            end_frame_paths_by_idx[row_idx] = str(ef_path)
 
     scene_entries: list[dict] = []
     for idx, upload in enumerate(files):
@@ -4986,6 +5037,11 @@ async def reengineer_from_images(
             # every character. Point at the registered library path (stable).
             entry["is_direct"] = True
             entry["direct_image_path"] = str(reg_path)
+        elif idx in end_frame_paths_by_idx:
+            # Optional end pose for this (swapped) scene → carried into
+            # Job.end_frames_by_scene at creation so the swap phase generates
+            # the end-frame swap before the gate. Persisted in state (resume-safe).
+            entry["end_frame_path"] = end_frame_paths_by_idx[idx]
         # Derive the dialogue from the says-clause so the '⚠ replik' hint +
         # caption script-bias work (empty when the prompt has no says-clause).
         entry["speech"] = runner_reengineer._spoken_text(entry)

@@ -544,6 +544,22 @@ async def _create_job_and_swap(re_id: str, state: dict,
     direct_ids = [sid for sid in uniq_ids if direct_map.get(sid)]
     swap_ids = [sid for sid in uniq_ids if not direct_map.get(sid)]
 
+    # Optional per-scene END FRAME (slutpose) staged at upload (Hugo 2026-06-23):
+    # carry it onto Job.end_frames_by_scene so _kick_char swaps every character
+    # into the pose during the swap phase — before the gate, so there's no second
+    # wait. Keyed over uniq_ids (post-dedup) and direct scenes excluded; on a
+    # duplicate START image (colliding scene_id) the first entry's end frame
+    # wins — distinct end frames per duplicate need the post-gate "duplicate
+    # scene" flow instead.
+    end_frames_by_scene: dict[str, str] = {}
+    for sid in uniq_ids:
+        if direct_map.get(sid):
+            continue
+        e = next((x for x in scene_entries
+                  if x["scene_id"] == sid and x.get("end_frame_path")), None)
+        if e and Path(e["end_frame_path"]).exists():
+            end_frames_by_scene[sid] = e["end_frame_path"]
+
     # Outfit choice ("Kläder" in the upload form): scene = wear the original
     # person's clothes (default — job.prompt stays None so the validated
     # default prompt chain applies); character/custom get an explicit prompt.
@@ -615,6 +631,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         prompt=swap_prompt,
         extra_reference_path=background_path,
         background_source=background_source,
+        end_frames_by_scene=end_frames_by_scene,
         video_model=state.get("video_model") or "kling-v3",
         video_audio=True,
         outfit_mode=state.get("outfit_mode") or "scene",

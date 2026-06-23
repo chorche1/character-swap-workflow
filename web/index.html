@@ -1257,6 +1257,28 @@
                     <input type="checkbox" x-model="row.direct" class="rounded" />
                     📌 ingen swap
                   </label>
+                  <!-- 🎯 Optional END FRAME (slutpose) staged at upload (Hugo
+                       2026-06-23): Kling animerar från scenbilden → den här
+                       bilden, och karaktärerna swappas in i den redan i swap-
+                       fasen (ingen andra väntan vid gaten). Döljs för "ingen
+                       swap"-rader. -->
+                  <span x-show="!row.direct" class="flex items-center gap-1.5 text-xs">
+                    <label x-show="!row.endFrameUrl"
+                           class="flex items-center gap-1 text-neutral-500 dark:text-neutral-400 hover:text-indigo-500 cursor-pointer"
+                           title="Valfri slutpose: Kling animerar från scenbilden till den här bilden. Karaktärerna swappas in i den redan i bildgenereringen — ingen extra väntan vid gaten.">
+                      🎯 End frame
+                      <input type="file" accept="image/*" class="hidden"
+                             @change="addSwapEndFrame(idx, $event.target.files[0]); $event.target.value=''" />
+                    </label>
+                    <span x-show="row.endFrameUrl" class="flex items-center gap-1">
+                      <span class="text-neutral-400 dark:text-neutral-500">🎯</span>
+                      <img :src="row.endFrameUrl"
+                           class="w-6 h-10 rounded object-cover border border-indigo-400"
+                           title="Slutpose — Kling animerar hit" />
+                      <button class="text-rose-500 hover:underline"
+                              @click="removeSwapEndFrame(idx)" title="Ta bort slutposen">✕</button>
+                    </span>
+                  </span>
                   <span class="flex-1"></span>
                   <button @click="moveSwapImageRow(idx, -1)" :disabled="idx === 0"
                           class="text-xs px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30" title="Flytta upp">↑</button>

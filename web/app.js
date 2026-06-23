@@ -123,7 +123,7 @@ function studio() {
     // sets its Kling length. POSTs /api/reengineer/from_images and reuses the
     // Reengineer run-card (gate → animate → assemble → edit mode) downstream.
     swapFromImages: {
-      rows: [],                       // [{uid, file, name, previewUrl, motion_prompt, length}]
+      rows: [],                       // [{uid, file, name, previewUrl, motion_prompt, length, direct, endFrameFile, endFrameUrl}]
       charIds: [],
       imageModel: 'gpt2-id-swap',
       autoMode: false,
@@ -1582,6 +1582,7 @@ function studio() {
           file, name: file.name,
           previewUrl: URL.createObjectURL(file),
           motion_prompt: '', length: 5, direct: false,
+          endFrameFile: null, endFrameUrl: '',
         });
       }
     },
@@ -1589,7 +1590,26 @@ function studio() {
     removeSwapImageRow(i) {
       const row = this.swapFromImages.rows[i];
       if (row && row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+      if (row && row.endFrameUrl) URL.revokeObjectURL(row.endFrameUrl);
       this.swapFromImages.rows.splice(i, 1);
+    },
+
+    // Optional end pose (slutpose) for a swap row — staged client-side, sent on
+    // submit so the end-frame swap generates in the same pre-gate swap phase.
+    addSwapEndFrame(i, file) {
+      const row = this.swapFromImages.rows[i];
+      if (!row || !file || !file.type || !file.type.startsWith('image/')) return;
+      if (row.endFrameUrl) URL.revokeObjectURL(row.endFrameUrl);
+      row.endFrameFile = file;
+      row.endFrameUrl = URL.createObjectURL(file);
+    },
+
+    removeSwapEndFrame(i) {
+      const row = this.swapFromImages.rows[i];
+      if (!row) return;
+      if (row.endFrameUrl) URL.revokeObjectURL(row.endFrameUrl);
+      row.endFrameFile = null;
+      row.endFrameUrl = '';
     },
 
     moveSwapImageRow(i, dir) {
@@ -1658,6 +1678,16 @@ function studio() {
         fd.append('motion_prompts', JSON.stringify(g.rows.map(r => r.motion_prompt || '')));
         fd.append('lengths', JSON.stringify(g.rows.map(r => Number(r.length) || 0)));
         fd.append('direct', JSON.stringify(g.rows.map(r => !!r.direct)));
+        // Optional end frames (sparse): the files + a parallel array of their
+        // row indices. Direct rows can't carry one (the UI hides the control).
+        const endIdx = [];
+        g.rows.forEach((row, i) => {
+          if (row.endFrameFile && !row.direct) {
+            fd.append('end_frame_files', row.endFrameFile);
+            endIdx.push(i);
+          }
+        });
+        fd.append('end_frame_idx', JSON.stringify(endIdx));
         fd.append('character_ids', JSON.stringify(g.charIds));
         fd.append('image_model', g.imageModel);
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
@@ -1681,7 +1711,10 @@ function studio() {
         this.notifyInfo('Swap startad — swappar in karaktärerna i dina scener…');
         this._startReengineerPolling();
         // Keep the settings (Hugo iterates); clear the consumed image rows.
-        for (const row of g.rows) if (row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+        for (const row of g.rows) {
+          if (row.previewUrl) URL.revokeObjectURL(row.previewUrl);
+          if (row.endFrameUrl) URL.revokeObjectURL(row.endFrameUrl);
+        }
         g.rows = [];
       } catch (e) {
         this._submitError('Swap', e);

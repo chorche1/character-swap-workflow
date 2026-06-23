@@ -74,6 +74,8 @@ def _call(files, motion, lengths, **kw):
         bg, files=files,
         motion_prompts=json.dumps(motion), lengths=json.dumps(lengths),
         direct=kw.get("direct", "[]"),
+        end_frame_files=kw.get("end_frame_files", []),
+        end_frame_idx=kw.get("end_frame_idx", "[]"),
         character_ids=kw.get("character_ids", json.dumps(["cA"])),
         image_model=kw.get("image_model", "gpt2-id-swap"),
         outfit_mode=kw.get("outfit_mode", "scene"),
@@ -234,3 +236,126 @@ def test_resume_routes_from_images(wired, monkeypatch):
                                   "from_images": True}])
     asyncio.run(runner_reengineer.resume_all())
     assert spawned == ["run_reengineer_from_images"]
+
+
+# --- 🎯 End frame staged at upload (Hugo 2026-06-23) -----------------------
+# The user can attach an end pose per scene IN the upload form, so the end-frame
+# swap generates in the same pre-gate swap phase as the start frames (no second
+# wait at the gate). Files ride as a sparse `end_frame_files` list + parallel
+# `end_frame_idx` row indices; the run carries end_frame_path per scene, and
+# _create_job_and_swap lifts them onto Job.end_frames_by_scene (excluding direct
+# scenes) where _kick_char's existing end-frame generation picks them up.
+
+def test_end_frame_staged_on_scene_entry(wired):
+    from pathlib import Path
+    out, _ = _call(
+        [_upload("a.png"), _upload("b.png")],
+        ["wave", "smile"], [5, 5],
+        end_frame_files=[_upload("end0.png")],
+        end_frame_idx=json.dumps([0]))
+    s0, s1 = wired["states"][out["re_id"]]["scenes"]
+    # scene 0 got the end pose, saved to disk; this read is the persisted state
+    # (save_state round-trip) → confirms resume carries end_frame_path too.
+    assert s0.get("end_frame_path")
+    assert Path(s0["end_frame_path"]).exists()
+    assert "end_frame_path" not in s1            # scene 1 has none
+
+
+def test_end_frame_excluded_for_direct_row(wired):
+    # A direct ("ingen swap") row can't carry an end frame — the saver skips it.
+    out, _ = _call(
+        [_upload("a.png"), _upload("b.png")],
+        ["wave", "logo"], [5, 5],
+        direct=json.dumps([False, True]),
+        end_frame_files=[_upload("end1.png")],
+        end_frame_idx=json.dumps([1]))           # idx 1 is the direct row
+    s0, s1 = wired["states"][out["re_id"]]["scenes"]
+    assert "end_frame_path" not in s0
+    assert "end_frame_path" not in s1            # direct → no end frame
+
+
+def test_end_frame_validation_errors(wired):
+    base = [_upload("a.png"), _upload("b.png")]
+    # idx/files length mismatch (validated BEFORE any file is read)
+    with pytest.raises(HTTPException) as e:
+        _call(base, ["x", "y"], [5, 5],
+              end_frame_files=[_upload("e.png")], end_frame_idx=json.dumps([]))
+    assert e.value.status_code == 400
+    # idx out of range
+    with pytest.raises(HTTPException) as e:
+        _call(base, ["x", "y"], [5, 5],
+              end_frame_files=[_upload("e.png")], end_frame_idx=json.dumps([9]))
+    assert e.value.status_code == 400
+    # duplicate idx
+    with pytest.raises(HTTPException) as e:
+        _call(base, ["x", "y"], [5, 5],
+              end_frame_files=[_upload("e.png"), _upload("f.png")],
+              end_frame_idx=json.dumps([0, 0]))
+    assert e.value.status_code == 400
+
+
+def test_create_job_and_swap_populates_end_frames_by_scene(
+        wired, monkeypatch, tmp_path):
+    # A real character source file on disk (the job builder checks existence).
+    chars_dir = tmp_path / "characters"
+    chars_dir.mkdir()
+    (chars_dir / "cA.png").write_bytes(b"char-bytes")
+    monkeypatch.setattr(type(api.settings), "characters_dir",
+                        property(lambda self: chars_dir), raising=False)
+
+    class _Char:
+        name = "Alice"
+
+        def resolve_source_filename(self, override):
+            return "cA.png"
+
+    class _S2:
+        def get_character(self, cid):
+            return _Char() if cid == "cA" else None
+
+        def add_job(self, job):
+            wired["jobs"][job.job_id] = job
+
+        def get_job(self, jid):
+            return wired["jobs"].get(jid)
+
+        def update_job(self, j):
+            wired["jobs"][j.job_id] = j
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S2())
+
+    # End-frame files must exist (the builder guards on Path.exists()).
+    ef_swap = tmp_path / "ef_swap.png"
+    ef_swap.write_bytes(b"ef")
+    ef_direct = tmp_path / "ef_direct.png"
+    ef_direct.write_bytes(b"efd")
+
+    scene_entries = [
+        {"idx": 0, "scene_id": "sc_swap", "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "p", "end_frame_path": str(ef_swap)},
+        {"idx": 1, "scene_id": "sc_direct", "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "q", "is_direct": True, "direct_image_path": "x",
+         "end_frame_path": str(ef_direct)},
+    ]
+    state = {"re_id": "re_ef", "from_images": True, "status": "swapping",
+             "job_id": "j_ef", "character_ids": ["cA"],
+             "image_model": "gpt2-id-swap", "video_model": "kling-v3",
+             "outfit_mode": "scene", "background_source": "character",
+             "scenes": scene_entries, "n_scenes": 2}
+    wired["states"]["re_ef"] = dict(state)
+
+    from character_swap import runner as runner_mod
+
+    async def _noop_rig(jid):
+        return None
+
+    async def _noop_watch(*a, **k):
+        return None
+    monkeypatch.setattr(runner_mod, "run_image_generation", _noop_rig)
+    monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", _noop_watch)
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_ef", dict(state), scene_entries, "j_ef"))
+
+    job = wired["jobs"]["j_ef"]
+    # Only the SWAP scene's end frame is lifted onto the job — direct excluded.
+    assert job.end_frames_by_scene == {"sc_swap": str(ef_swap)}
