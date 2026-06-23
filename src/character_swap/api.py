@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -159,6 +160,20 @@ async def _stream_upload_to(upload: UploadFile, dest: Path,
     return dest
 
 
+@functools.lru_cache(maxsize=32)
+def _resolved_dir(path_str: str) -> Path:
+    """Cache Path(path_str).resolve() keyed on the string.
+
+    _file_url is called ~120× per job serialization on the hot polled GETs and
+    re-resolved each mount base (settings.*.resolve()) every time — ~4
+    realpath() syscalls per call of pure waste. The base dirs are constant in
+    a running process, so memoizing on the path string collapses that to one
+    syscall per distinct dir. Keying on the string (not maxsize=1) keeps it
+    correct if the data dirs are ever repointed at runtime — notably the test
+    suite monkeypatches settings dirs per-test."""
+    return Path(path_str).resolve()
+
+
 def _file_url(path: Path | str | None) -> str | None:
     """Map a filesystem path to a /files/... URL served by one of the mounts.
 
@@ -172,10 +187,10 @@ def _file_url(path: Path | str | None) -> str | None:
         return None
     p = Path(path).resolve()
     for prefix, base in (
-        ("characters", settings.characters_dir.resolve()),
-        ("input/scenes", settings.scenes_dir.resolve()),
-        ("input/extra_refs", (settings.input_dir / "extra_refs").resolve()),
-        ("output", settings.output_dir.resolve()),
+        ("characters", _resolved_dir(str(settings.characters_dir))),
+        ("input/scenes", _resolved_dir(str(settings.scenes_dir))),
+        ("input/extra_refs", _resolved_dir(str(settings.input_dir / "extra_refs"))),
+        ("output", _resolved_dir(str(settings.output_dir))),
     ):
         try:
             rel = p.relative_to(base)
@@ -183,7 +198,7 @@ def _file_url(path: Path | str | None) -> str | None:
         except ValueError:
             continue
     try:
-        rel = p.relative_to(settings.project_root.resolve())
+        rel = p.relative_to(_resolved_dir(str(settings.project_root)))
         return f"/files/{rel.as_posix()}"
     except ValueError:
         return None
@@ -3111,14 +3126,19 @@ async def get_job_cost(job_id: str) -> dict:
     job = store().get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    return {"usd": call_log.read_costs(job_id=job_id)}
+    # read_costs scans the whole append-only calls.jsonl (grows unbounded);
+    # off-load to a thread so it never blocks the event loop / WS pushes.
+    usd = await asyncio.to_thread(call_log.read_costs, job_id=job_id)
+    return {"usd": usd}
 
 
 @app.get("/api/costs")
 async def get_costs(days: float = 1.0) -> dict:
     if days <= 0 or days > 365:
         raise HTTPException(400, "days must be in (0, 365]")
-    return {"usd": call_log.costs_since(days), "days": days}
+    # Same full-file scan as above — keep it off the event loop.
+    usd = await asyncio.to_thread(call_log.costs_since, days)
+    return {"usd": usd, "days": days}
 
 
 # --- generations (Image / Video tabs) -----------------------------------------------

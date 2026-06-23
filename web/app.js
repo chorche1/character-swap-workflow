@@ -478,6 +478,10 @@ function studio() {
     wsConnected: false,
     _wsBackoff: 1000,
     _sidebarRefreshTimer: null,
+    // Coalesce the per-WS-event job refetch (see _refreshJobSoon): one shared
+    // in-flight GET /api/jobs/{id} instead of one per event during a burst.
+    _jobRefreshInFlight: null,
+    _jobRefreshAgain: false,
 
     async init() {
       this._loadCollapsed();
@@ -1832,6 +1836,52 @@ function studio() {
       }
       for (const run of (this.reengineerHistory || [])) {
         if (this._reengineerIsActive(run)) this.refreshReengineer(run.re_id);
+      }
+    },
+
+    // Coalesce the per-event GET /api/jobs/{id}. A generation burst delivers
+    // many WS events (variant.started/qc_retry/ready/…) in quick succession;
+    // refetching + reassigning this.job once per event re-serializes ~70KB and
+    // re-evaluates the whole job-bound reactive graph each time. Share a single
+    // in-flight fetch; if more events land while it runs, do exactly one
+    // trailing refresh so the final state still converges. Awaiting this leaves
+    // this.job fresh for callers that read it right after (e.g. the
+    // char.pipeline_status terminal check).
+    async _refreshJobSoon() {
+      if (!this.job || !this.job.job_id) return;
+      if (this._jobRefreshInFlight) { this._jobRefreshAgain = true; return this._jobRefreshInFlight; }
+      const jid = this.job.job_id;
+      this._jobRefreshInFlight = (async () => {
+        try {
+          const r = await fetch('/api/jobs/' + jid);
+          // Guard against the user switching jobs mid-fetch.
+          if (r.ok && this.job && this.job.job_id === jid) {
+            this.job = await r.json();
+            // Re-derive pipeline state from every fresh snapshot so a
+            // char.pipeline_status event that got coalesced into an earlier
+            // in-flight fetch (and thus read a pre-terminal job) still clears
+            // the Step-6 spinner once the trailing refresh lands.
+            this._syncPipelineRunning();
+          }
+        } catch (_) {}
+      })();
+      try {
+        await this._jobRefreshInFlight;
+      } finally {
+        this._jobRefreshInFlight = null;
+        if (this._jobRefreshAgain) { this._jobRefreshAgain = false; this._refreshJobSoon(); }
+      }
+    },
+
+    // Idempotent: clear the Step-6 pipeline spinner once every character that
+    // has a pipeline_status has reached a terminal one. Safe to call on any
+    // job snapshot — only ever flips pipelineRunning false (compile start still
+    // sets it true), and no-ops before any pipeline_status exists.
+    _syncPipelineRunning() {
+      if (!this.job) return;
+      const chars = Object.values(this.job.characters || {}).filter(c => c.pipeline_status);
+      if (chars.length && chars.every(c => ['done', 'failed'].includes(c.pipeline_status))) {
+        this.pipelineRunning = false;
       }
     },
 
@@ -7078,10 +7128,7 @@ function studio() {
       }
       if (!this.job || evt.job_id !== this.job.job_id) return;
       this._scheduleSidebarRefresh();
-      try {
-        const r = await fetch('/api/jobs/' + this.job.job_id);
-        if (r.ok) this.job = await r.json();
-      } catch (_) {}
+      await this._refreshJobSoon();
       // Refresh job cost on terminal-ish events (a variant landed / video done / failed
       // / compile done — compile runs Whisper + maybe ElevenLabs which both bill).
       if (['variant.ready', 'variant.failed', 'video.ready', 'video.failed', 'video.submitted',
@@ -7092,16 +7139,15 @@ function studio() {
       // Phase 4 pipeline: refresh job whenever a char's pipeline status
       // changes, plus notify on terminal states.
       if (evt.kind === 'char.pipeline_status') {
-        try {
-          const r = await fetch('/api/jobs/' + this.job.job_id);
-          if (r.ok) this.job = await r.json();
-        } catch (_) {}
+        // this.job was already refreshed above via _refreshJobSoon() for this
+        // same event — no second GET needed; just read the terminal state.
         if (evt.status === 'done' || evt.status === 'failed') {
           const jc = this.job?.characters?.[evt.char_id];
-          const allTerminal = this.job && Object.values(this.job.characters || {})
-            .filter(c => c.pipeline_status)
-            .every(c => ['done', 'failed'].includes(c.pipeline_status));
-          if (allTerminal) this.pipelineRunning = false;
+          // Terminal-state read may be a beat stale if this event's refresh was
+          // coalesced; _refreshJobSoon's trailing pass re-runs this and clears
+          // the spinner. The notification below is event-driven (evt.status),
+          // so it fires correctly regardless of this.job freshness.
+          this._syncPipelineRunning();
           if (jc && this.notifyMilestone) {
             const ok = evt.status === 'done';
             this.notifyMilestone(
