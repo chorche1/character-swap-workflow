@@ -110,42 +110,51 @@ def test_non_kling_length_select_uses_selected_not_value(_=None):
     assert ':value="durationByScene[scene.scene_id] || sceneVideoDurationSpec(scene).default"' not in _HTML
 
 
+def _owner_has_keep_focus(anchor, opener="<select"):
+    # True iff the element opened by `opener` that immediately precedes `anchor`
+    # carries data-keep-focus. Pins the attribute to its control (robust to
+    # attribute reorder / comment edits — unlike a fixed-width char window).
+    i = _HTML.index(anchor)
+    return "data-keep-focus" in _HTML[_HTML.rindex(opener, 0, i):i]
+
+
 def test_background_refresh_defers_while_typing(_=None):
     # Hugo's recurring "I have to enter it twice for it to stick" bug (motion
     # prompt AND video length): the 5s poll / WS refresh replaced the whole
     # job/run object mid-interaction, churning Alpine's x-for scope and
     # re-rendering the focused control — iOS drops the in-flight char on a
-    # <textarea> and reverts the open native picker on a <select> (the duration
-    # menus). Fix = pause the refresh while a protected field is focused OR a
-    # scene save is in flight, then flush on blur.
-    # The two motion textareas + the three duration selects are tagged.
-    assert _HTML.count("data-keep-focus") >= 5
-    # The guard helper + both churn paths must check it; <select> now counts
-    # (the duration menus, which revert on re-render — the "videolängd twice" half).
+    # <textarea> and reverts the open native picker on a <select>. Fix = pause
+    # the refresh while a protected field (textarea/input/SELECT inside
+    # [data-keep-focus]) is focused, then flush on blur.
+    # 2 motion textareas + 3 duration selects + 2 model selects are tagged.
+    assert _HTML.count("data-keep-focus") >= 7
+    # The guard helper + both churn paths must check it; <select> counts too
+    # (the duration/model menus revert on re-render — the "videolängd twice" half).
     assert "_isTypingProtectedField() {" in _JS
     assert "el.closest('[data-keep-focus]')" in _JS
     assert "tag !== 'SELECT'" in _JS
-    # Each duration control carries data-keep-focus.
+    # Each duration + model control carries data-keep-focus, pinned to the control.
+    assert _owner_has_keep_focus("durationByScene[scene.scene_id] = parseInt")       # Animate Step-4 duration
+    assert _owner_has_keep_focus("swapVideoModelsByScene[scene.scene_id] = $event")  # Animate Step-4 model
+    assert _owner_has_keep_focus('title="Videomodell', "<label")                     # Reengineer model
     assert "data-keep-focus" in _HTML.split(
-        "durationByScene[scene.scene_id] = parseInt")[0][-80:]          # Animate Step 4
+        "x-if=\"reSceneEffModel(r, sc) === 'kling-v3'\"")[1][:300]                    # Reengineer Kling-längd
     assert "data-keep-focus" in _HTML.split(
-        "x-if=\"reSceneEffModel(r, sc) === 'kling-v3'\"")[1][:300]       # Reengineer Kling-längd
-    assert "data-keep-focus" in _HTML.split(
-        "x-if=\"reSceneEffModel(r, sc) !== 'kling-v3'\"")[1][:300]       # Reengineer non-Kling Längd
-    # A save in flight also defers — the PATCH round-trip race that reverted a
-    # just-changed field before it persisted.
-    assert "_sceneSaveInFlight" in _JS
-    assert "_shouldDeferRefresh()" in _JS
+        "x-if=\"reSceneEffModel(r, sc) !== 'kling-v3'\"")[1][:300]                    # Reengineer non-Kling Längd
     # Reengineer poll/WS refresh defers and retries.
     re_refresh = _JS.split("async refreshReengineer(reId) {")[1][:700]
-    assert "_shouldDeferRefresh()" in re_refresh
+    assert "_isTypingProtectedField()" in re_refresh
     # Swap WS handler defers the job replacement.
     handle = _JS.split("async handleEvent(evt) {")[1][:700]
-    assert "_shouldDeferRefresh()" in handle
+    assert "_isTypingProtectedField()" in handle
     assert "this._pendingJobRefresh = true" in handle
     # A blur flush catches the deferred refresh back up.
     assert "_flushDeferredRefresh() {" in _JS
     assert "addEventListener('focusout'" in _JS
+    # The redundant save-in-flight defer counter was removed (the draft already
+    # covers the mid-save revert; the counter only added a hung-save freeze risk).
+    assert "_sceneSaveInFlight" not in _JS
+    assert "_shouldDeferRefresh" not in _JS
 
 
 def test_upload_submits_surface_network_errors(_=None):

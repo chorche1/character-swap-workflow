@@ -159,11 +159,6 @@ function studio() {
     // protected field (see _isTypingProtectedField); flushed on blur so Step 4
     // catches up the moment they tap away.
     _pendingJobRefresh: false,
-    // >0 while a reengineerSaveScene PATCH is in flight. A 5s poll that splices
-    // a run fetched BEFORE the PATCH lands would revert the just-changed field
-    // (notably the duration <select>); _shouldDeferRefresh pauses refreshes for
-    // that window and we flush once the save settles.
-    _sceneSaveInFlight: 0,
     // Clip-length menu options (Hugo 2026-06-21): 3–15 s, every whole second.
     // Drives the Kling-length <select>s in the Reengineer gate + Swap "from
     // images" flow (replaced the free-text number inputs).
@@ -1816,17 +1811,10 @@ function studio() {
       return typeof el.closest === 'function' && !!el.closest('[data-keep-focus]');
     },
 
-    // A background refresh must be deferred while the user is focused on a
-    // protected field OR a scene save is mid-flight (the PATCH round-trip — a
-    // poll landing with the pre-save value would revert the just-changed field).
-    _shouldDeferRefresh() {
-      return this._isTypingProtectedField() || this._sceneSaveInFlight > 0;
-    },
-
     // Catch up any refresh that was deferred while the user typed, run shortly
     // after they leave a protected field (focusout listener wired in init()).
     async _flushDeferredRefresh() {
-      if (this._shouldDeferRefresh()) return;   // moved to another field / save still in flight
+      if (this._isTypingProtectedField()) return;   // moved to another protected field
       if (this._pendingJobRefresh && this.job && this.job.job_id) {
         this._pendingJobRefresh = false;
         try {
@@ -1887,10 +1875,10 @@ function studio() {
 
     async refreshReengineer(reId) {
       // Don't churn the run object (and thus the x-for scope) while the user is
-      // interacting with a scene field or a save is mid-flight — re-rendering
-      // eats the keystroke / reverts the duration pick. Defer and retry; the
-      // field's blur (or the next poll tick) lets it through.
-      if (this._shouldDeferRefresh()) {
+      // interacting with a scene field — re-rendering eats the keystroke /
+      // reverts the open duration picker. Defer and retry; the field's blur
+      // (or the next poll tick) lets it through.
+      if (this._isTypingProtectedField()) {
         clearTimeout(this._reRefreshTimers[reId]);
         this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 700);
         return;
@@ -2417,23 +2405,18 @@ function studio() {
         this.reSceneDrafts = rest;
         return;
       }
-      // Pause background refresh across the save round-trip (see
-      // _sceneSaveInFlight): a poll that splices a run fetched before this PATCH
-      // lands would revert the field the user just changed. Flush once it settles.
-      this._sceneSaveInFlight += 1;
-      try {
-        const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`, {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-        if (!r.ok) { this.notifyError('Kunde inte spara scenen: ' + await r.text()); return; }
-        this._spliceReengineerView(await r.json());
-        const { [key]: _, ...rest } = this.reSceneDrafts;
-        this.reSceneDrafts = rest;
-      } finally {
-        this._sceneSaveInFlight = Math.max(0, this._sceneSaveInFlight - 1);
-        this._flushDeferredRefresh();
-      }
+      // No need to gate the background refresh here: the field's value lives in
+      // the draft (reSceneVal = draft-or-state) until AFTER the splice below, so
+      // a poll that lands mid-save can't revert it. The open-picker churn is
+      // handled by data-keep-focus + _isTypingProtectedField while focused.
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte spara scenen: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      const { [key]: _, ...rest } = this.reSceneDrafts;
+      this.reSceneDrafts = rest;
     },
 
     // Commit any typed-but-UNBLURRED scene field edits (Kling-längd, motion
@@ -7116,11 +7099,11 @@ function studio() {
 
     async handleEvent(evt) {
       if (!evt || !evt.kind) return;
-      // While the user interacts with a movement/scene field (or a save is in
-      // flight), replacing this.job would re-render Step 4 and eat the keystroke /
-      // revert the duration pick (the "enter it twice" bug). Defer the refresh;
-      // _flushDeferredRefresh picks it up the moment they blur / the save settles.
-      if (this._shouldDeferRefresh()) { this._pendingJobRefresh = true; return; }
+      // While the user interacts with a movement/scene field, replacing this.job
+      // would re-render Step 4 and eat the keystroke / revert the open duration
+      // picker (the "enter it twice" bug). Defer the refresh; _flushDeferredRefresh
+      // picks it up the moment they blur.
+      if (this._isTypingProtectedField()) { this._pendingJobRefresh = true; return; }
       if (evt.kind === 'snapshot') {
         this.job = evt.job;
         this._fireSwapMilestones(this.job);
