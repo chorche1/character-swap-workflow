@@ -1656,7 +1656,17 @@
                   </template>
                   <!-- motion prompt: editable at the gate and in edit mode -->
                   <template x-if="!(r.status === 'awaiting_approval' || reEdit[r.re_id])">
-                    <div class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2" x-text="sc.motion_prompt"></div>
+                    <div>
+                      <div class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2" x-text="sc.motion_prompt"></div>
+                      <!-- One-click per-scene video re-prompt (Hugo 2026-06-23):
+                           new motion prompt → regenerate ALL of this scene's
+                           clips, reusing the approved images. No ✎ edit mode
+                           needed. Hidden for direct (no-swap) scenes. -->
+                      <button x-show="!sc.is_direct && (r.status === 'awaiting_assembly' || ['done','partial_success','failed'].includes(r.status))"
+                              class="mt-1 text-[11px] text-amber-600 dark:text-amber-400 hover:underline"
+                              title="Skriv en ny rörelseprompt och regenerera alla karaktärers videor i den här scenen — bilderna behålls"
+                              @click="openSceneVideoRepromptModal(r, sc)">↻ Ny prompt → regenerera videor</button>
+                    </div>
                   </template>
                   <template x-if="r.status === 'awaiting_approval' || reEdit[r.re_id]">
                     <div class="mt-1 space-y-1">
@@ -4697,6 +4707,55 @@
                 @click="submitRegen()">
           <span x-show="!regenModal.submitting">↻ Regenerate</span>
           <span x-show="regenModal.submitting">Submitting…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Per-SCENE video re-prompt modal (Hugo 2026-06-23): one new motion prompt
+       re-animates every character's clip in this scene, reusing the approved
+       images. Drives the Swap/Reengineer reprompt_videos endpoint. -->
+  <div x-show="sceneRegenModal.open"
+       @click="sceneRegenModal.open = false"
+       @keydown.window.escape="if (sceneRegenModal.open) sceneRegenModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-xl">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">Regenerera hela scenens videor</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            <span x-text="sceneRegenModal.label"></span>
+            · alla karaktärer · samma bilder behålls
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="sceneRegenModal.open = false">✕</button>
+      </div>
+      <div class="p-5 space-y-4">
+        <label class="block">
+          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+            Rörelseprompt för scenen
+          </span>
+          <textarea x-model="sceneRegenModal.prompt"
+                    rows="5"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg"
+                    placeholder="Beskriv hur karaktärerna rör sig i den här scenen (inkl. dialog: The person says: …)"></textarea>
+          <p class="text-[10px] text-neutral-400 dark:text-neutral-500 mt-1">
+            Den nya prompten ersätter scenens rörelseprompt och regenererar
+            alla karaktärers klipp på plats. Bilderna genereras INTE om.
+            Importerade klipp behålls. Bygg ihop slutfilmerna igen efteråt.
+          </p>
+        </label>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="sceneRegenModal.open = false">Avbryt</button>
+        <button class="px-3 py-1.5 text-sm rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-medium disabled:opacity-40"
+                :disabled="sceneRegenModal.submitting || !(sceneRegenModal.prompt || '').trim()"
+                @click="submitSceneRegen()">
+          <span x-show="!sceneRegenModal.submitting">↻ Regenerera scenen</span>
+          <span x-show="sceneRegenModal.submitting">Skickar…</span>
         </button>
       </div>
     </div>
