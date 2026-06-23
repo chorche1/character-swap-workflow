@@ -4987,18 +4987,12 @@ async def reengineer_from_images(
     end_frame_paths_by_idx: dict[int, str] = {}
     if norm_end_idx:
         ef_dir = work / "end_frames"
-        ef_dir.mkdir(parents=True, exist_ok=True)
         for upload, row_idx in zip(end_frame_files, norm_end_idx):
             if bool(direct_list[row_idx]):
                 continue
             ef_ext = _safe_ext(upload.filename or "")     # image-only; 400 on bad ext
-            ef_data = await _read_capped(upload)
-            if not ef_data:
-                raise HTTPException(400, f"Empty end-frame upload (scene {row_idx + 1})")
             ef_path = ef_dir / f"img_{row_idx:02d}{ef_ext}"
-            ef_tmp = ef_path.with_suffix(ef_path.suffix + ".tmp")
-            ef_tmp.write_bytes(ef_data)
-            ef_tmp.replace(ef_path)
+            await _save_upload(upload, ef_path)           # read-cap + empty-check + atomic write
             end_frame_paths_by_idx[row_idx] = str(ef_path)
 
     scene_entries: list[dict] = []

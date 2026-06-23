@@ -1598,7 +1598,11 @@ function studio() {
     // submit so the end-frame swap generates in the same pre-gate swap phase.
     addSwapEndFrame(i, file) {
       const row = this.swapFromImages.rows[i];
-      if (!row || !file || !file.type || !file.type.startsWith('image/')) return;
+      if (!row || !file) return;                          // cancelled picker → no-op
+      if (!file.type || !file.type.startsWith('image/')) {
+        this.notifyError('End frame måste vara en bildfil');
+        return;
+      }
       if (row.endFrameUrl) URL.revokeObjectURL(row.endFrameUrl);
       row.endFrameFile = file;
       row.endFrameUrl = URL.createObjectURL(file);

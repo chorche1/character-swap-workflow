@@ -170,6 +170,38 @@ def test_kick_char_surfaces_end_frame_error(tmp_path, monkeypatch, _runner_stubs
     assert "s1" not in jc.end_frame_paths          # no bogus path recorded
 
 
+def test_end_frame_reuses_scene_variant_prompt(tmp_path, monkeypatch, _runner_stubs):
+    """Review 2026-06-23 (#1): the end-frame swap must reuse the SAME per-scene
+    prompt the start variant used (e.g. the AI Director's tailored prompt), not
+    the generic job/GENERATION_PROMPT — otherwise the Kling clip interpolates
+    between a tailored start frame and a generic end frame and they diverge."""
+    captured: dict = {}
+
+    def fake_generate_variant(*, dest, prompt, **kw):
+        captured["prompt"] = prompt
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"img")
+        return Path(dest)
+    monkeypatch.setattr(runner.pipeline, "generate_variant", fake_generate_variant)
+
+    pose = tmp_path / "pose.png"
+    pose.write_bytes(b"pose")
+    job, jc = _kick_job(tmp_path, pose)
+    job.prompt = "GENERIC JOB PROMPT"              # must NOT be used when a variant exists
+    jc.images = [GeneratedImage(variant_id="vA1", path=str(tmp_path / "vA1.png"),
+                                prompt="DIRECTOR PROMPT FOR S1", scene_id="s1")]
+
+    out = runner._ensure_end_frame_swap(job, jc, "s1", str(pose), force=True)
+    assert out.exists()
+    assert captured["prompt"] == "DIRECTOR PROMPT FOR S1"
+
+    # Fallback: no variant for the scene → job/default prompt is used.
+    captured.clear()
+    jc.images = []
+    runner._ensure_end_frame_swap(job, jc, "s1", str(pose), force=True)
+    assert captured["prompt"] == "GENERIC JOB PROMPT"
+
+
 # --- duplicate_scene carries the end pose + end frame ---------------------
 
 class _DupStore:

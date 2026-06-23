@@ -117,12 +117,26 @@ def _ensure_end_frame_swap(job: Job, jc: JobCharacter, scene_id, pose_path: str,
         cand = Path(job.extra_reference_path)
         if cand.exists():
             end_extra_ref = cand
+    # Reuse the START frame's prompt for this scene so the Kling interpolation
+    # doesn't drift between a tailored start frame and a generic end frame
+    # (review 2026-06-23): with AI Director on, each start variant carries its
+    # per-scene tailored prompt on GeneratedImage.prompt. Prefer the approved
+    # variant, else the first variant for the scene; fall back to the
+    # job/default prompt when no variant carries one (Director off → the variant
+    # prompt IS that same fallback anyway).
+    approved = set(jc.approved_variant_ids or [])
+    scene_vars = [v for v in (jc.images or [])
+                  if v.scene_id == scene_id and (v.prompt or "").strip()]
+    start_var = (next((v for v in scene_vars if v.variant_id in approved), None)
+                 or (scene_vars[0] if scene_vars else None))
+    eff_prompt = ((start_var.prompt if start_var else None)
+                  or job.prompt or pipeline.GENERATION_PROMPT)
     pipeline.generate_variant(
         model=_swap_image_model(job),
         scene_image=Path(pose_path),
         character_image=Path(jc.source_image_path),
         character_name=jc.name,
-        prompt=job.prompt or pipeline.GENERATION_PROMPT,
+        prompt=eff_prompt,
         dest=dest,
         job_id=job.job_id,
         extra_reference_image=end_extra_ref,
