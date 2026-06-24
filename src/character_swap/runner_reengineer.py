@@ -1326,6 +1326,37 @@ def _scene_all_imported(job: Job, scene_id: str) -> bool:
     return any_char
 
 
+def _scene_redo_targets(job: Job, scene_id: str, *, char_id: str | None = None
+                        ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Per-character clips of `scene_id` to redo, split into (retry, generate):
+    `retry` = (char_id, video_id) of an existing clip to redo IN PLACE;
+    `generate` = (char_id, variant_id) of an approved char with no clip yet.
+    Skips not-yet-approved chars, user-imported clips (authoritative) and
+    in-flight (PENDING/PROCESSING) clips. Shared by `reanimate` (bulk, run-locked)
+    and the lock-free per-scene reprompt endpoint so the two never diverge on
+    what a scene's redo touches."""
+    retry: list[tuple[str, str]] = []
+    generate: list[tuple[str, str]] = []
+    for cid, jc in (job.characters or {}).items():
+        if char_id and cid != char_id:
+            continue
+        vid = _approved_variant_for(jc, scene_id)
+        if vid is None:
+            continue
+        if any(v.source_variant_id == vid and v.imported for v in jc.videos):
+            continue
+        existing = next((v for v in jc.videos
+                         if v.source_variant_id == vid), None)
+        if existing is not None and existing.status in {
+                VideoStatus.PENDING, VideoStatus.PROCESSING}:
+            continue
+        if existing is not None:
+            retry.append((cid, existing.video_id))
+        else:
+            generate.append((cid, vid))
+    return retry, generate
+
+
 def _parse_dirty_at(raw: object) -> datetime | None:
     """Parse a scene's `dirty_at` stamp (`utcnow().isoformat() + "Z"`) back to a
     naive-UTC datetime, matching VideoVariant.submitted_at. Bad/missing → None."""
@@ -1803,39 +1834,23 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
     acted: list[int] = []
     for i in idxs:
         sid = entries[i]["scene_id"]
-        n_before = len(tasks)
         if entries[i].get("is_direct"):
             # Redo of a direct scene re-renders the ONE shared clip (it has no
             # per-character variants). _render_direct_clip overwrites the path.
             tasks.append(_render_direct_clip(re_id, sid))
             acted.append(i)
             continue
-        for cid, jc in job.characters.items():
-            if char_id and cid != char_id:
-                continue
-            vid = _approved_variant_for(jc, sid)
-            if vid is None:
-                continue            # not approved yet — surfaced by the API
-            # A user-imported clip is authoritative — a bulk re-animate must
-            # NEVER overwrite it (Hugo 2026-06-21). Other characters' stale
-            # clips in this scene still re-animate normally.
-            if any(v.source_variant_id == vid and v.imported
-                   for v in jc.videos):
-                continue
-            existing = next((v for v in jc.videos
-                             if v.source_variant_id == vid), None)
-            if existing is not None and existing.status in {
-                    VideoStatus.PENDING, VideoStatus.PROCESSING}:
-                continue            # already in flight
-            if existing is not None:
-                tasks.append(runner.retry_one_video(
-                    job.job_id, cid, existing.video_id))
-            else:
-                tasks.append(runner.generate_more_videos(
-                    job.job_id, cid, 1, source_variant_id=vid))
-        if len(tasks) > n_before:
+        # Shared selection (skips not-approved / imported / in-flight) — same
+        # rules the lock-free per-scene reprompt uses.
+        retry, generate = _scene_redo_targets(job, sid, char_id=char_id)
+        for cid, vidid in retry:
+            tasks.append(runner.retry_one_video(job.job_id, cid, vidid))
+        for cid, varid in generate:
+            tasks.append(runner.generate_more_videos(
+                job.job_id, cid, 1, source_variant_id=varid))
+        if retry or generate:
             acted.append(i)
-        elif not entries[i].get("is_direct") and _scene_all_imported(job, sid):
+        elif _scene_all_imported(job, sid):
             # Nothing to re-animate — every char's clip is an imported take
             # (never stale). Count the scene as acted so its (stale) dirty flag
             # clears instead of dead-locking "Bygg ihop igen" (review 2026-06-21).

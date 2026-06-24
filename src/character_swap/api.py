@@ -5890,40 +5890,54 @@ async def reengineer_reprompt_scene_videos(
         re_id: str, idx: int, background_tasks: BackgroundTasks,
         body: ReRepromptVideosBody) -> dict:
     """One-click "regenerate this whole scene's videos with a NEW motion prompt,
-    reuse the images" (Hugo 2026-06-23). Combines the edit-scene PATCH +
-    whole-scene redo into a single action so the user doesn't need to toggle
-    ✎ Redigera: it sets the scene's motion prompt (synced onto the job so the
-    redo uses the new text), marks the scene dirty + finals stale, then
-    re-animates every non-imported, not-already-in-flight clip of the scene for
-    ALL characters via the existing `reanimate` engine (clear_dirty=True → back
-    in sync). Approved swap images are reused; no image is regenerated."""
-    from character_swap import runner_reengineer
+    reuse the images" (Hugo 2026-06-23). Sets the scene's motion prompt (synced
+    onto the job), marks the scene dirty + finals stale, then redoes every
+    non-imported, not-already-in-flight clip of the scene for ALL characters.
+
+    Lock-free + concurrent (Hugo 2026-06-24): fans the clips out via the SAME
+    per-clip `retry_one_video` path as the `✎↻ prompt` button (carrying the new
+    prompt as a per-clip override) instead of the run-locked `reanimate` engine
+    — so a scene can be regenerated WHILE another scene of the same run is still
+    rendering. The scene's `dirty` flag auto-clears once its clips are redone
+    (clear_resolved_dirty, the same mechanism the per-clip redo relies on).
+    Approved swap images are reused; no image is regenerated."""
+    from character_swap import runner, runner_reengineer
     state = _editable_reengineer_state(
         re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
     entry = _reengineer_entry(state, idx)
     if entry.get("is_direct"):
         raise HTTPException(409, "Stöds inte för direkt-scener (ingen swap att animera om)")
-    if re_id in runner_reengineer._ANIMATING:
-        raise HTTPException(409, "animation already running for this run")
     prompt = (body.prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "prompt required")
     # Refuse loudly if the backing job is gone — otherwise the sync below would
-    # be silently skipped and the scheduled reanimate would no-op, leaving the
-    # scene stuck dirty/stale with no error (mirrors reengineer_regen_clip).
+    # be silently skipped and nothing would regenerate (mirrors regen_clip).
     job = store().get_job(state.get("job_id") or "")
     if job is None:
         raise HTTPException(409, "underlying job disappeared")
+    sid = entry["scene_id"]
+    retry, generate = runner_reengineer._scene_redo_targets(job, sid)
+    if not retry and not generate:
+        raise HTTPException(
+            409, "Inga klipp att regenerera för den här scenen "
+                 "(alla importerade/pågående, eller ingen godkänd bild)")
     entry["motion_prompt"] = prompt
     _mark_scene_dirty(entry)
-    # Sync the new prompt onto the backing job so `reanimate` picks it up
-    # (mirrors the edit-scene PATCH post-gate path).
+    # Sync the new prompt onto the backing job (keeps generate-more / future
+    # operations consistent; the per-clip retries below also carry it as an
+    # explicit override so they use it verbatim).
     if job.movement_prompts or job.movement_prompt:
         runner_reengineer._sync_movement_from_state(job, state, [idx])
     _mark_finals_stale(state)
     _save_reengineer_state(state)
-    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
-                              re_id, [idx], char_id=None, clear_dirty=True)
+    for cid, video_id in retry:
+        background_tasks.add_task(_run_async, runner.retry_one_video,
+                                  job.job_id, cid, video_id, prompt)
+    for cid, variant_id in generate:
+        background_tasks.add_task(_run_async, runner.generate_more_videos,
+                                  job.job_id, cid, 1,
+                                  source_variant_id=variant_id,
+                                  prompt_override=prompt)
     return _reengineer_view(state, slim=True)
 
 
