@@ -2200,6 +2200,15 @@ function studio() {
         this.notifyError('Bygg ihop: ' + msg);
         return;
       }
+      // Edited-but-not-reanimated scenes no longer block (Hugo 2026-06-24) — the
+      // build uses their existing (older) clip. Note it softly so the user knows
+      // their prompt change won't show until they ▶ Animera om ändrade.
+      const data = await r.json().catch(() => ({}));
+      const stale = (data && data.stale_scenes) || [];
+      if (stale.length) {
+        this.notifyInfo('Bygger ihop med ' + stale.length + ' ändrad(e) scen(er) — '
+          + 'befintliga (äldre) klipp används. Kör ▶ Animera om ändrade om du vill ha nya.');
+      }
       run.status = 'assembling';
       this._startReengineerPolling();
     },

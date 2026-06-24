@@ -5324,22 +5324,25 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     # character — refuse overlap instead of double-building the same finals.
     if state.get("status") == "assembling" or re_id in runner_reengineer._ASSEMBLING:
         raise HTTPException(409, "assembly already running for this run")
-    # Hugo 2026-06-17: "Bygg ihop igen" must REFUSE LOUDLY when the run can't
-    # produce complete, up-to-date finals — a scene edited but not re-animated
-    # (stale clip), a failed/missing clip, an un-approved image, or a clip
-    # still rendering — instead of silently shipping a shorter / stale video.
-    # The user fixes the named gap (▶ Animera om ändrade / ta om klippet /
-    # godkänn bild), then rebuilds. Existing finals are left untouched.
+    # "Bygg ihop igen" still REFUSES LOUDLY when the build would be genuinely
+    # BROKEN — a scene with no finished clip (failed/missing), an un-approved
+    # image, or a clip still rendering — naming what to fix and leaving existing
+    # finals untouched. But a scene merely edited-but-not-reanimated (stale
+    # clip) NO LONGER blocks (Hugo 2026-06-24: "ta bort det här kravet — jag vill
+    # alltid kunna bygga ihop"): the build proceeds with the existing (older)
+    # clip and the stale scenes are reported back for transparency. The "ändrad"
+    # badge + ▶ Animera om ändrade stay available so the user can refresh those
+    # clips whenever they choose.
     job = store().get_job(state["job_id"])
     if job is None:
         raise HTTPException(409, "underlying job disappeared")
-    # Drop stale "ändrad" flags whose clips were all redone after the edit
-    # (per-clip / single-char redos) before gating — otherwise a scene whose
-    # clips are already fresh would wrongly refuse the rebuild (Hugo 2026-06-22).
+    # Still drop stale "ändrad" flags whose clips were all redone after the edit
+    # (per-clip / single-char redos) so they don't show up as a false "stale"
+    # note on a build whose clips are already fresh (Hugo 2026-06-22).
     if runner_reengineer.clear_resolved_dirty(state, job):
         _save_reengineer_state(state)
     gaps = runner_reengineer._assembly_gaps(state, job)
-    if gaps["dirty"] or gaps["hard"] or gaps["pending"]:
+    if gaps["hard"] or gaps["pending"]:
         raise HTTPException(409, detail={
             "code": "incomplete_rebuild",
             "message": _assembly_refusal_message(gaps),
@@ -5349,7 +5352,9 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     if _store_assemble_settings(state, body):
         _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
-    return {"ok": True, "re_id": re_id}
+    # stale_scenes = edited-but-not-reanimated scenes the build uses with their
+    # existing (older) clip — surfaced for a soft UI note, never blocks.
+    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"]}
 
 
 def _assembly_refusal_message(gaps: dict) -> str:
@@ -5363,10 +5368,6 @@ def _assembly_refusal_message(gaps: dict) -> str:
                          for n, labels in per.items())
 
     parts: list[str] = []
-    if gaps["dirty"]:
-        labels = ", ".join(g["label"] for g in gaps["dirty"])
-        parts.append(f"{labels} är ändrad(e) men inte omanimerad(e) — klicka "
-                     "▶ Animera om ändrade först.")
     if gaps["hard"]:
         parts.append("Saknar färdigt klipp (ta om scenen/klippet): "
                      + _by_char(gaps["hard"]) + ".")

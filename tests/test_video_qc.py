@@ -185,6 +185,10 @@ def test_video_qc_retry_then_pass(monkeypatch, tmp_path):
     _stub_runner_persistence(monkeypatch, tmp_path)
     monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
     monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
+    # This test exercises the QC retry path, so QC must be ON regardless of the
+    # ambient .env (VIDEO_QC=0 in Hugo's shared env would otherwise force 1 take).
+    monkeypatch.setattr(type(runner.settings), "video_qc_enabled",
+                        property(lambda self: True), raising=False)
 
     submits = []
     monkeypatch.setattr(runner.pipeline, "submit_video",

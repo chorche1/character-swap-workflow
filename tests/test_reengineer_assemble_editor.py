@@ -296,10 +296,11 @@ def test_assemble_endpoint_persists_and_clears_override(monkeypatch):
 
 
 # ---------------------- refuse-loudly rebuild (Hugo 2026-06-17) -------------
-# "Bygg ihop igen" must NEVER silently ship a stale/shorter final: it refuses
-# (409) when a scene is edited-but-not-reanimated, has a failed/missing clip,
-# or is still rendering — naming what to fix — and leaves existing finals
-# untouched. Once the gap is fixed it proceeds normally.
+# "Bygg ihop igen" must NEVER silently ship a BROKEN final: it refuses (409)
+# when a scene has a failed/missing clip, an un-approved image, or a clip still
+# rendering — naming what to fix — and leaves existing finals untouched. As of
+# 2026-06-24 a scene merely edited-but-not-reanimated (stale clip) NO LONGER
+# refuses — the build proceeds with the existing clip (Hugo's directive).
 
 def _incomplete_job(*, status=VideoStatus.FAILED) -> Job:
     v = GeneratedImage(variant_id="va", path="/a.png", prompt="p",
@@ -315,18 +316,17 @@ def _incomplete_job(*, status=VideoStatus.FAILED) -> Job:
                characters={"cA": jc}, origin="reengineer:re_t")
 
 
-def test_assemble_refuses_when_scene_dirty(monkeypatch):
+def test_assemble_proceeds_when_scene_dirty(monkeypatch):
+    # Hugo 2026-06-24: an edited-but-not-reanimated scene (stale clip) NO LONGER
+    # blocks "Bygg ihop" — the build proceeds with the existing (older) clip and
+    # the scene is reported as stale for transparency. Only a missing/failed clip
+    # or one still rendering refuses (see the two tests below).
     box = _wire_api(monkeypatch, status="done")     # complete clips on disk
     box["state"]["scenes"][0]["dirty"] = True        # edited, not re-animated
     bg = BackgroundTasks()
-    with pytest.raises(HTTPException) as e:
-        asyncio.run(api.reengineer_assemble("re_t", bg, None))
-    assert e.value.status_code == 409
-    d = e.value.detail
-    assert d["code"] == "incomplete_rebuild"
-    assert d["dirty"] == [{"idx": 0, "label": "scen 1"}]
-    assert "Animera om ändrade" in d["message"]
-    assert box["saved"] is None and len(bg.tasks) == 0   # nothing built
+    out = asyncio.run(api.reengineer_assemble("re_t", bg, None))
+    assert out["ok"] is True and len(bg.tasks) == 1          # build scheduled
+    assert out["stale_scenes"] == [{"idx": 0, "label": "scen 1"}]
 
 
 def test_assemble_refuses_when_clip_failed(monkeypatch):
