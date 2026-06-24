@@ -6701,6 +6701,16 @@ function studio() {
       return src?.scene_id || null;
     },
 
+    // Poster (still) for a clip = the swap image it animates from (== the
+    // video's first frame). Lets the clip <video> stay preload="none" and still
+    // show a frame instead of black — Safari refuses to decode more than ~20
+    // live <video> elements at once, so a big run renders the rest black
+    // (Hugo 2026-06-24).
+    clipPosterUrl(jc, vv) {
+      const src = (jc?.images || []).find(im => im.variant_id === vv.source_variant_id);
+      return src?.url || '';
+    },
+
     // Open the per-scene video re-prompt modal for a Reengineer/Swap scene,
     // prefilled with the scene's current motion prompt. No ✎ edit mode needed.
     openSceneVideoRepromptModal(reRun, sc) {

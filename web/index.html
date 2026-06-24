@@ -899,7 +899,12 @@
                 <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden flex flex-col">
                   <div class="aspect-[9/16] bg-black relative flex items-center justify-center">
                     <template x-if="vv.url">
-                      <video :src="vv.url" controls class="w-full h-full"></video>
+                      <!-- poster = the swap image (the clip's start frame) +
+                           preload="none" so Safari shows a frame instead of black
+                           and doesn't choke decoding many clips (Hugo 2026-06-24). -->
+                      <video :src="vv.url" controls preload="none"
+                             :poster="clipPosterUrl(jc, vv)"
+                             class="w-full h-full"></video>
                     </template>
                     <template x-if="!vv.url">
                       <div class="text-neutral-400 text-xs flex flex-col items-center gap-2 p-4 text-center">
@@ -1885,8 +1890,13 @@
                           <template x-if="reClipForVariant(jc, v.variant_id)">
                             <div class="mt-1 w-28">
                               <template x-if="reClipForVariant(jc, v.variant_id).status === 'done' && reClipForVariant(jc, v.variant_id).url">
+                                <!-- poster = the swap image (== Kling's start frame) +
+                                     preload="none": Safari refuses to decode more than
+                                     ~16-25 <video> elements at once and renders the rest
+                                     BLACK; a big run has 100+ clips. The poster shows the
+                                     frame and the video only loads on play. Hugo 2026-06-24. -->
                                 <video :src="reClipForVariant(jc, v.variant_id).url"
-                                       controls preload="metadata"
+                                       controls preload="none" :poster="v.url"
                                        class="w-28 rounded border border-neutral-300 dark:border-neutral-700 bg-black"
                                        :title="jc.name + ' — genererat klipp'"></video>
                               </template>
@@ -1930,7 +1940,7 @@
                                   <div class="text-[8px] text-rose-400 leading-tight"
                                        x-text="'⚠ QC ✕' + reClipForVariant(jc, v.variant_id).qc_rejects.length + ' underkända tagningar'"></div>
                                   <template x-for="(rej, ri) in reClipForVariant(jc, v.variant_id).qc_rejects" :key="v.variant_id + '-vqcrej-' + ri">
-                                    <video :src="rej.url" controls preload="metadata"
+                                    <video :src="rej.url" controls preload="none" :poster="v.url"
                                            class="w-20 rounded border border-rose-400/70 opacity-70 bg-black mt-0.5"
                                            :title="'QC underkände tagning ' + (ri+1) + ': ' + (rej.reason || '(ingen orsak angavs)')"></video>
                                   </template>
