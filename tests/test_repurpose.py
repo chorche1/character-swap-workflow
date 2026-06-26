@@ -119,6 +119,36 @@ def test_run_editor_pipeline_mirror_flips_each_clip(monkeypatch, tmp_path):
     assert result.final == edit_dir / "00-concat.mp4"
 
 
+def test_run_editor_pipeline_mirror_fails_loudly_on_hflip_error(monkeypatch, tmp_path):
+    """REFUSE LOUDLY (Hugo's standing rule): if hflip fails on ANY clip, the
+    whole build raises instead of shipping a half-mirrored (some flipped, one
+    not) reel. assemble_clips must never run on a mixed path list."""
+    import pytest
+    p1 = tmp_path / "a.mp4"; p1.write_bytes(b"a")
+    p2 = tmp_path / "b.mp4"; p2.write_bytes(b"b")
+    edit_dir = tmp_path / "edit"; edit_dir.mkdir()
+
+    def flaky_hflip(src, dst, *, job_id=None):
+        if str(src).endswith("b.mp4"):
+            raise RuntimeError("disk full")
+        dst.write_bytes(b"flipped")
+        return dst
+    monkeypatch.setattr(runner_compile.video_edit, "hflip_video", flaky_hflip)
+
+    assembled = {"n": 0}
+    monkeypatch.setattr(runner_compile.video_edit, "assemble_clips",
+                        lambda *a, **k: assembled.__setitem__("n", assembled["n"] + 1))
+
+    with pytest.raises(RuntimeError, match="spegling"):
+        asyncio.run(runner_compile.run_editor_pipeline(
+            [p1, p2], edit_id="ed_z", edit_dir=edit_dir,
+            template="capcut-bluebox", overrides=None, enable_trim=False,
+            enable_captions=False, enable_wpm_normalize=False, target_wpm=190,
+            threshold_db=-24.0, min_silence_secs=0.4, pad_secs=0.1,
+            voice_id=None, enable_transcribe=False, mirror_h=True))
+    assert assembled["n"] == 0          # never concatenated a half-mirrored reel
+
+
 def test_run_editor_pipeline_no_mirror_uses_originals(monkeypatch, tmp_path):
     """The default (mirror_h=False) never calls hflip and passes the original
     clips straight through — the compile path is byte-for-byte unchanged."""

@@ -2253,7 +2253,9 @@ function studio() {
         enable_captions: !!s.enableCaptions,
         enable_wpm_normalize: !!s.enableWpmNormalize,
         target_wpm: Math.min(400, Math.max(80, Number(s.targetWpm) || 190)),
-        playback_speed: Math.min(2, Math.max(0.5, Number(s.playbackSpeed) || 1)),
+        // Number.isFinite (not `|| 1`) so a typed 0 clamps to the 0.5 minimum
+        // instead of silently coercing to 1× — matches threshold/pad below.
+        playback_speed: Math.min(2, Math.max(0.5, Number.isFinite(+s.playbackSpeed) ? +s.playbackSpeed : 1)),
         threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -24)),
         min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.4)),
         pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.1)),

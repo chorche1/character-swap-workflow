@@ -392,18 +392,19 @@ async def run_editor_pipeline(
             try:
                 await asyncio.to_thread(
                     video_edit.hflip_video, p, dst, job_id=edit_id)
-                flipped.append(dst)
             except Exception as flip_err:
-                # Never block the whole repurpose on one clip — fall back to the
-                # un-flipped source for that clip, but LOUDLY (backlog #27 rule).
-                logger.warning("%s: hflip failed for %s (%s: %s) — using "
-                               "un-mirrored clip", edit_id, p,
-                               type(flip_err).__name__, flip_err)
-                if warn is not None:
-                    await warn(f"spegling misslyckades för ett klipp "
-                               f"({type(flip_err).__name__}) — det klippet "
-                               f"behölls ospeglat")
-                flipped.append(p)
+                # REFUSE LOUDLY (Hugo's standing rule): a half-mirrored reel —
+                # some clips flipped, one not — is a broken output, not a
+                # usable one. Fail the whole character so it surfaces as
+                # repurpose_status="failed" with a clear message (the outer
+                # handler catches this), never ship an inconsistent video.
+                # Repurpose is non-destructive (originals untouched) so the
+                # user just clicks retry.
+                raise RuntimeError(
+                    f"spegling (hflip) misslyckades för klipp {i + 1} "
+                    f"({type(flip_err).__name__}: {flip_err}) — "
+                    f"ingen halvspeglad video byggs; försök igen") from flip_err
+            flipped.append(dst)
         paths = flipped
 
     # Steps 0.5 + 1 + 2 in ONE encode (2026-06-12): per-clip audio-onset trim
