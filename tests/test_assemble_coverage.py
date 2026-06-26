@@ -154,7 +154,7 @@ def test_assembly_gaps_categorizes_dirty_hard_pending(tmp_path):
     clean = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
                   _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))])
     g = runner_reengineer._assembly_gaps(_state(), clean)
-    assert g == {"dirty": [], "hard": [], "pending": []}
+    assert g == {"dirty": [], "hard": [], "pending": [], "excluded": []}
 
     # Scene 0 edited but not re-animated → dirty (even though its clip is DONE).
     st = _state(); st["scenes"][0]["dirty"] = True
@@ -169,3 +169,95 @@ def test_assembly_gaps_categorizes_dirty_hard_pending(tmp_path):
     assert [x["label"] for x in g["hard"]] == ["scen 1"]
     assert g["hard"][0]["char_id"] == "cA"
     assert [x["label"] for x in g["pending"]] == ["scen 2"]
+
+
+# ---------------------------------------------------------------------------
+# Never-approved character no longer blocks "Bygg ihop" (Hugo 2026-06-27).
+# Silas had 9 ready images but approved NONE of them and animated NONE — the
+# gate counted all 9 as "ingen godkänd bild" hard gaps and refused the whole
+# build (re_3bedfe62d3). Such a character is not part of the reel: skip it.
+
+def _uninvolved_char(cid="cSilas", name="Silas"):
+    """A character with images for every scene but ZERO approvals + ZERO clips
+    — added to the run, never used."""
+    imgs = [GeneratedImage(variant_id=f"u{i}", path=f"/u{i}.png", prompt="p",
+                           scene_id=f"s{i}", status="ready")
+            for i in (1, 2)]
+    return JobCharacter(char_id=cid, name=name, source_image_path="/s.png",
+                        status=CharStatus.AWAITING_APPROVAL, images=imgs,
+                        approved_variant_ids=[], videos=[])
+
+
+def _job_with(*chars: JobCharacter) -> Job:
+    return Job(job_id="j1", title="t", scene_id="s1", scene_ids=["s1", "s2"],
+               scene_image_path="/p.png", scene_image_paths=["/p.png"] * 2,
+               characters={c.char_id: c for c in chars},
+               origin="reengineer:re_t")
+
+
+def test_uninvolved_char_is_excluded_not_blocked(tmp_path):
+    """A character never approved on ANY swap scene is reported in `excluded`
+    (a soft note) instead of producing hard gaps that block the rebuild."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+    done = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                 _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))])
+    job = _job_with(done.characters["cA"], _uninvolved_char())
+
+    assert runner_reengineer._char_is_uninvolved(_state(), job.characters["cSilas"])
+    assert not runner_reengineer._char_is_uninvolved(_state(), job.characters["cA"])
+
+    g = runner_reengineer._assembly_gaps(_state(), job)
+    assert g["hard"] == [] and g["pending"] == [] and g["dirty"] == []
+    assert g["excluded"] == [{"char_id": "cSilas", "name": "Silas"}]
+
+
+def test_partial_char_still_blocks_loudly(tmp_path):
+    """Refuse-loudly preserved: a character with at least one approval but a
+    withdrawn approval on another scene is a TRUE gap, NOT excluded."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    imgs = [GeneratedImage(variant_id="v1", path="/v1.png", prompt="p",
+                           scene_id="s1", status="ready"),
+            GeneratedImage(variant_id="v2", path="/v2.png", prompt="p",
+                           scene_id="s2", status="ready")]
+    # Approved on s1 only (s2's approval withdrawn by a scene-image regen).
+    partial = JobCharacter(char_id="cP", name="P", source_image_path="/c.png",
+                           status=CharStatus.APPROVED, images=imgs,
+                           approved_variant_ids=["v1"],
+                           videos=[_clip_row("vd1", "v1", VideoStatus.DONE, str(c1))])
+    job = _job_with(partial)
+    assert not runner_reengineer._char_is_uninvolved(_state(), partial)
+    g = runner_reengineer._assembly_gaps(_state(), job)
+    assert g["excluded"] == []
+    assert [(x["char_id"], x["label"], x["reason"]) for x in g["hard"]] == [
+        ("cP", "scen 2", "ingen godkänd bild")]
+
+
+def test_pure_direct_char_never_uninvolved():
+    """A pure-direct run has no per-character variants → zero approvals by
+    construction. The character is NOT uninvolved — its shared direct clips
+    are its build."""
+    direct_state = {"re_id": "re_t", "job_id": "j1", "status": "assembling",
+                    "scenes": [{"idx": 0, "scene_id": "s1", "is_direct": True,
+                                "motion_prompt": "a", "speech": "", "summary": ""}]}
+    jc = JobCharacter(char_id="cD", name="D", source_image_path="/c.png",
+                      status=CharStatus.APPROVED, images=[],
+                      approved_variant_ids=[], videos=[])
+    assert not runner_reengineer._char_is_uninvolved(direct_state, jc)
+
+
+def test_do_assemble_skips_uninvolved_char(monkeypatch, tmp_path):
+    """The build itself skips the never-approved character: only the real
+    character gets a final, the run lands `done` (not partial_success)."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+    done = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                 _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))])
+    job = _job_with(done.characters["cA"], _uninvolved_char())
+    updates, calls = _wire(monkeypatch, tmp_path, job)
+
+    asyncio.run(runner_reengineer._do_assemble("re_t", _state()))
+    assert set(updates["finals"].keys()) == {"cA"}      # Silas absent, not failed
+    assert updates["finals"]["cA"]["status"] == "done"
+    assert updates["status"] == "done"                  # not partial_success
+    assert len(calls) == 1                              # one build, for cA only

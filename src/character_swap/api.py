@@ -5455,13 +5455,18 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
             "message": _assembly_refusal_message(gaps),
             "dirty": gaps["dirty"], "hard": gaps["hard"],
             "pending": gaps["pending"],
+            "excluded": gaps.get("excluded", []),
         })
     if _store_assemble_settings(state, body):
         _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
     # stale_scenes = edited-but-not-reanimated scenes the build uses with their
     # existing (older) clip — surfaced for a soft UI note, never blocks.
-    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"]}
+    # excluded = never-approved characters skipped from the build (also a soft
+    # note) — Hugo 2026-06-27: a character with no approved image / no clips no
+    # longer blocks "Bygg ihop".
+    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"],
+            "excluded": gaps.get("excluded", [])}
 
 
 @app.post("/api/reengineer/{re_id}/repurpose")

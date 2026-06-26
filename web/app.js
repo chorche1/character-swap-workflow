@@ -2215,6 +2215,14 @@ function studio() {
         this.notifyInfo('Bygger ihop med ' + stale.length + ' ändrad(e) scen(er) — '
           + 'befintliga (äldre) klipp används. Kör ▶ Animera om ändrade om du vill ha nya.');
       }
+      // Never-approved characters (no godkänd bild / inga klipp) are skipped
+      // from the build, not blocked (Hugo 2026-06-27). Note who was left out.
+      const excluded = (data && data.excluded) || [];
+      if (excluded.length) {
+        const names = excluded.map(c => c.name).join(', ');
+        this.notifyInfo('Hoppar över ' + excluded.length + ' karaktär(er) utan '
+          + 'godkänd bild/klipp: ' + names + '. De tas inte med i bygget.');
+      }
       run.status = 'assembling';
       this._startReengineerPolling();
     },

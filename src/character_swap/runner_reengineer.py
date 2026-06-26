@@ -1114,6 +1114,29 @@ def _approved_variant_for(jc: JobCharacter, scene_id: str) -> str | None:
     return None
 
 
+def _char_is_uninvolved(state: dict, jc: JobCharacter) -> bool:
+    """True when a character contributes NOTHING to a build and never will
+    without fresh user action — it has NO approved variant for ANY swap
+    (non-direct) scene. Such a character was added to the run but never used
+    (no image approved → no clip animated), so the assemble gate and the build
+    SKIP it entirely instead of refusing the whole rebuild on its empty scenes
+    (Hugo 2026-06-27: "jag vill inte ha med Silas videor som inte ens har några
+    videor" — a never-approved character was blocking "Bygg ihop").
+
+    Deliberately NARROW so refuse-loudly is preserved: a character with at
+    least ONE approval but a missing/withdrawn approval on some scene is a
+    genuine PARTIAL — NOT uninvolved — and still blocks loudly. A pure-direct
+    run (every scene is_direct → no per-character variants exist) has zero
+    approvals by construction, so it is never uninvolved: the shared direct
+    clips ARE that character's build."""
+    swap_scenes = [e for e in (state.get("scenes") or [])
+                   if not e.get("is_direct")]
+    if not swap_scenes:
+        return False
+    return not any(_approved_variant_for(jc, e["scene_id"]) is not None
+                   for e in swap_scenes)
+
+
 def _videos_terminal(job: Job) -> bool:
     vids = [v for jc in job.characters.values() for v in jc.videos]
     return bool(vids) and all(v.status in {VideoStatus.DONE, VideoStatus.FAILED,
@@ -1432,7 +1455,9 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
       pending — a scene whose clip is still rendering → simply not ready yet.
 
     Per-(char, scene) rules mirror _collect_clips EXACTLY so the gate and the
-    actual build never disagree. All three buckets empty ⇒ a clean rebuild."""
+    actual build never disagree. dirty/hard/pending all empty ⇒ a clean rebuild;
+    `excluded` (never-approved characters skipped from the build, see
+    _char_is_uninvolved) is a SOFT note only — it never blocks."""
     entries = state.get("scenes") or []
     dirty = []
     for e in entries:
@@ -1455,6 +1480,7 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
         dirty.append({"idx": e["idx"], "label": f"scen {e['idx'] + 1}"})
     hard: list[dict] = []
     pending: list[dict] = []
+    excluded: list[dict] = []
 
     def _gap(bucket: list[dict], cid: str, name: str, e: dict,
              reason: str) -> None:
@@ -1463,6 +1489,12 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
 
     for cid, jc in job.characters.items():
         name = jc.name or cid
+        # A character never approved on ANY swap scene is not part of the reel —
+        # skip it instead of blocking the build on its 9 empty scenes (Hugo
+        # 2026-06-27). Reported softly so the drop is visible, never silent.
+        if _char_is_uninvolved(state, jc):
+            excluded.append({"char_id": cid, "name": name})
+            continue
         for e in entries:
             if e.get("is_direct"):
                 shared = e.get("shared_clip_path")
@@ -1491,7 +1523,8 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
                 _gap(pending, cid, name, e, "klippet renderas fortfarande")
             else:
                 _gap(hard, cid, name, e, "klippet saknas/misslyckades")
-    return {"dirty": dirty, "hard": hard, "pending": pending}
+    return {"dirty": dirty, "hard": hard, "pending": pending,
+            "excluded": excluded}
 
 
 async def _do_assemble(re_id: str, state: dict) -> None:
@@ -1601,8 +1634,12 @@ async def _do_assemble(re_id: str, state: dict) -> None:
 
     # All characters in parallel, like Step 6 — Whisper calls overlap and the
     # Remotion caption renders are gated process-wide in remotion_render.py.
+    # Skip never-approved characters (no approval on any swap scene): they were
+    # added but never used, so they don't get a failed final and don't drag the
+    # run to partial_success (Hugo 2026-06-27 — mirrors the gate's exclusion).
     await asyncio.gather(*[_one_character(cid, jc)
-                           for cid, jc in job.characters.items()])
+                           for cid, jc in job.characters.items()
+                           if not _char_is_uninvolved(state, jc)])
 
     ok = [f for f in finals.values() if f["status"] == "done"]
     status = ("done" if len(ok) == len(finals) and ok
