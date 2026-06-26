@@ -610,6 +610,13 @@ _LOCALIZE_CACHE_MAX = 1024
 _LOCALIZE_CACHE: dict[tuple[str, str], str] = {}
 
 
+class LocalizationError(Exception):
+    """Raised when a clip's dialogue MUST be translated (an 🇪🇸-flagged character
+    with spoken dialogue) but the translation failed. The runner fails the clip
+    loudly (Hugo 2026-06-27 — "refuse loudly over silent partial") rather than
+    silently shipping an English clip for a character marked Spanish."""
+
+
 def _strip_quotes(text: str) -> str:
     """Drop double-quote chars from a translated phrase before it is spliced back
     BETWEEN the prompt's says-clause quotes — a stray quote would unbalance the
@@ -635,9 +642,11 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     (it already carries the Spanish accent marker), it is returned unchanged so
     the user-approved Spanish text is never re-translated.
 
-    Fail-soft: on translation failure the prompt is left FULLY English (no ES
-    accent wrapped around English words) and a warning is logged — never the
-    contradictory half-Spanish the feature exists to avoid."""
+    Fail LOUD: if the clip HAS dialogue but translation fails, raises
+    LocalizationError so the runner fails the clip (Hugo 2026-06-27) instead of
+    silently shipping English for a Spanish-flagged character. A clip with no
+    dialogue, an already-"es" prompt, or language None/"en" returns unchanged
+    (not a failure — nothing to translate)."""
     lang = (language or "en").strip().lower()
     if lang != "es" or not (prompt or "").strip():
         return prompt
@@ -658,8 +667,9 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     translated = translate_dialogue(phrases, re_id=job_id)
     if translated is None:
         logger.warning("localize_motion_prompt (%s): dialogue translation "
-                       "failed; leaving English", job_id)
-        return prompt          # fail-soft: coherent English, no ES accent
+                       "failed; failing the clip loudly", job_id)
+        raise LocalizationError(
+            "could not translate the dialogue to Spanish")
 
     # Replace each captured dialogue span in REVERSE so earlier spans keep their
     # offsets while later ones are substituted (quotes stripped from each).

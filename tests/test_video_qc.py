@@ -360,6 +360,37 @@ def test_animate_keeps_spanish_through_qc_retry(monkeypatch, tmp_path):
     assert "rejected by quality control" in submits[1]["movement_prompt"]
 
 
+def test_animate_fails_loudly_on_localization_failure(monkeypatch, tmp_path):
+    """If Spanish translation fails for a 🇪🇸-flagged character, the clip FAILS
+    with a clear error (Hugo 2026-06-27) — it never submits an English take."""
+    from character_swap.models import VideoStatus, VideoVariant
+    job, jc, v_img = _job_one_variant(tmp_path)
+    jc.char_id = "cA_loc_fail"; job.characters = {"cA_loc_fail": jc}
+    v_img.status = VariantStatus.READY
+    jc.approved_variant_ids = ["v1"]; jc.approved_variant_id = "v1"
+    Path(v_img.path).write_bytes(b"img")
+    video = VideoVariant(video_id="vd1", grok_job_id="",
+                         status=VideoStatus.PENDING, source_variant_id="v1")
+    jc.videos = [video]
+    store().add_character(CharacterAsset(
+        char_id="cA_loc_fail", name="A", filename="cA.png", language="es"))
+    monkeypatch.setattr(reengineer, "translate_dialogue",
+                        lambda *a, **k: None)            # translation fails
+    _stub_runner_persistence(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
+    submits = []
+    monkeypatch.setattr(runner.pipeline, "submit_video",
+                        lambda **kw: (submits.append(kw), "req")[1])
+
+    asyncio.run(runner._animate_one_video(
+        job, jc, video, 'He waves. The person says: "Hello friends."'))
+
+    assert video.status == VideoStatus.ERROR
+    assert "Spanish localization failed" in (video.error or "")
+    assert submits == []                                 # never submitted English
+
+
 def test_inspect_clip_gating(monkeypatch):
     """inspect_clip: disabled → None; both checks unavailable → None; speech
     mismatch fails with the heard text in the reason."""

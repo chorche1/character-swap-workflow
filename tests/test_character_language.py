@@ -73,14 +73,16 @@ def test_localize_skips_already_spanish_run(monkeypatch):
     assert reengineer.localize_motion_prompt(run_level, "es") == run_level
 
 
-def test_localize_failsoft_keeps_english(monkeypatch):
-    """Translation failure ⇒ coherent ENGLISH (no Spanish accent on English
-    words), never half-translated."""
+def test_localize_raises_when_translation_fails(monkeypatch):
+    """A clip WITH dialogue whose translation fails raises LocalizationError so
+    the runner fails the clip LOUDLY (Hugo 2026-06-27) — never silently ships an
+    English clip for a Spanish-flagged character."""
     _stub_translate(monkeypatch, lambda lines, *, re_id=None: None)
     p = 'He nods. The person says: "Buy it now."'
-    out = reengineer.localize_motion_prompt(p, "es", job_id="j")
-    assert out == p
-    assert "Latin American Spanish accent" not in out
+    with pytest.raises(reengineer.LocalizationError):
+        reengineer.localize_motion_prompt(p, "es", job_id="j")
+    # A no-dialogue clip is NOT a failure (nothing to translate) → no raise.
+    assert reengineer.localize_motion_prompt("She walks in.", "es") == "She walks in."
 
 
 def test_localize_reverse_span_keeps_two_clauses_intact(monkeypatch):

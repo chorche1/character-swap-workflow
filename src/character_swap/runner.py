@@ -1161,9 +1161,21 @@ async def _animate_one_video(
     # video-QC expected dialogue (derived from the submitted prompt) and the
     # QC-retry base both match the Spanish audio.
     if _character_language(jc.char_id) == "es":
-        localized = await asyncio.to_thread(
-            reengineer.localize_motion_prompt, movement_prompt, "es",
-            job_id=job.job_id)
+        try:
+            localized = await asyncio.to_thread(
+                reengineer.localize_motion_prompt, movement_prompt, "es",
+                job_id=job.job_id)
+        except reengineer.LocalizationError as e:
+            # Fail LOUD (Hugo 2026-06-27): a Spanish-flagged character must not
+            # silently ship an English clip when translation fails — fail the
+            # clip with a clear message so the user can retry/reword.
+            video.status = VideoStatus.ERROR
+            video.error = f"Spanish localization failed: {e}"
+            _replace_video(job, jc, video)
+            await _emit(job.job_id, "video.failed", char_id=jc.char_id,
+                        video_id=video.video_id, error=video.error)
+            _maybe_complete_char(job, jc)
+            return
         if localized != movement_prompt:
             # Record the actually-submitted (Spanish) prompt so Step-6 compile
             # derives this clip's captions + Whisper bias from its real spoken
