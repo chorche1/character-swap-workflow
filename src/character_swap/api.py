@@ -384,6 +384,9 @@ def _job_to_dict(job: Job) -> dict:
                 "compile_status": jc.compile_status,
                 "compile_edit_id": jc.compile_edit_id,
                 "compile_error": jc.compile_error,
+                # Non-fatal compile caveat (e.g. "final is missing N scene(s)").
+                # Set by runner_compile; surfaced as the amber ⚠ chip in Step 6.
+                "compile_warning": jc.compile_warning,
                 # Repurpose (mirror-flipped) variant — parallel to compile_*.
                 "repurposed_video_url": (
                     _file_url(jc.repurposed_video_path)

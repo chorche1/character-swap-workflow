@@ -95,6 +95,22 @@ def test_compile_persists_settings_on_job_and_exposes_them(monkeypatch):
     assert out["compile_settings"]["threshold_db"] == -19.0
 
 
+def test_job_to_dict_surfaces_compile_warning():
+    """The non-fatal compile caveat (e.g. "final is missing N scene(s)") must
+    be serialized so the amber ⚠ chip in Step 6 can render it — it was set by
+    runner_compile but dropped by _job_to_dict, so the chip never showed."""
+    job = _eligible_job()
+    job.characters["cA"].compile_warning = "final is missing 1 scene(s): s2"
+
+    out = api._job_to_dict(job)
+    assert out["characters"]["cA"]["compile_warning"] == \
+        "final is missing 1 scene(s): s2"
+
+    # No warning → the field is present and null (chip stays hidden).
+    job.characters["cA"].compile_warning = None
+    assert api._job_to_dict(job)["characters"]["cA"]["compile_warning"] is None
+
+
 def test_compile_resolve_oneoff_does_not_persist_settings(monkeypatch):
     """persist_settings=False (the Resolve one-off, which forces captions OFF)
     must NOT overwrite the job's remembered preset — else the panel silently
