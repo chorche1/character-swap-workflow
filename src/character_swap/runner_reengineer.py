@@ -1638,6 +1638,139 @@ async def _do_assemble(re_id: str, state: dict) -> None:
             completed_at=_now())
 
 
+# --------------------------------------------------------------------------- repurpose
+#
+# "Repurpose" (2026-06-27, Hugo's directive): a HORIZONTALLY-MIRRORED variant of
+# every character's final, built from the SAME clips as the assemble but with
+# its OWN editor settings (new caption template, different trim, …) — for
+# cross-posting the same reel as "new" content. The captions stay upright
+# because run_editor_pipeline(mirror_h=True) flips the source clips BEFORE the
+# caption burn-in. Results live in state["repurposed"] ALONGSIDE finals; the run
+# status / finals / finals_stale are never touched, so the originals are kept.
+
+# In-process duplicate guard, parallel to _ASSEMBLING — repurpose bills Whisper
+# (+ optional ElevenLabs/Remotion) per character and writes the same
+# repurpose_<cid>.mp4 paths.
+_REPURPOSING: set[str] = set()
+
+
+def _repurpose_settings(state: dict) -> dict:
+    """Editor settings for the Repurpose build — like `_assemble_settings` but
+    read from `repurpose_settings` (kept separate so repurposing with different
+    settings never clobbers the assemble preset). Falls back to ASSEMBLE_DEFAULTS."""
+    cfg = dict(ASSEMBLE_DEFAULTS)
+    stored = state.get("repurpose_settings") or {}
+    cfg.update({k: v for k, v in stored.items() if k in ASSEMBLE_DEFAULTS})
+    return cfg
+
+
+async def repurpose(re_id: str) -> None:
+    """Build the mirror-flipped Repurpose variant of every character's final."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    if re_id in _REPURPOSING:
+        _log.info("reengineer %s: repurpose already in flight — skipping", re_id)
+        return
+    _REPURPOSING.add(re_id)
+    try:
+        await _do_repurpose(re_id, state)
+    except Exception as e:
+        _log.exception("reengineer %s repurpose failed", re_id)
+        # Clear the spinner so the UI doesn't hang; the per-char cards already
+        # carry any per-character error.
+        _update(re_id, repurposing=False)
+    finally:
+        _REPURPOSING.discard(re_id)
+
+
+async def _do_repurpose(re_id: str, state: dict) -> None:
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise RuntimeError("underlying job disappeared")
+    run_dir = reengineer.reengineer_dir(re_id)
+    cfg = _repurpose_settings(state)
+    _update(re_id, repurposing=True)
+    repurposed: dict[str, dict] = {}
+
+    async def _one_character(cid: str, jc: JobCharacter) -> None:
+        try:
+            # SAME coverage wait + inclusion rules as _do_assemble so the
+            # mirrored variant covers exactly the scenes the final does.
+            deadline = (asyncio.get_event_loop().time()
+                        + _ASSEMBLE_COVERAGE_WAIT_SECS)
+            jc_now = jc
+            while True:
+                clips, dialogues, missing, waitable = _collect_clips(
+                    state, jc_now)
+                if (not missing or not waitable
+                        or asyncio.get_event_loop().time() > deadline):
+                    break
+                await asyncio.sleep(_ASSEMBLE_COVERAGE_POLL_SECS)
+                fresh_job = store().get_job(state["job_id"])
+                if fresh_job is not None and cid in fresh_job.characters:
+                    jc_now = fresh_job.characters[cid]
+            if not clips:
+                repurposed[cid] = {"status": "failed",
+                                   "error": "no finished clips"}
+                return
+            if missing:
+                err = ("finalen saknar " + str(len(missing)) + " scen(er): "
+                       + ", ".join(missing) + " — ta om scenen och försök igen")
+                repurposed[cid] = {"status": "failed", "error": err,
+                                   "n_clips": len(clips)}
+                return
+
+            edit_id = "ed_" + secrets.token_hex(5)
+            edit_dir = settings.output_dir / "editor" / edit_id
+            edit_dir.mkdir(parents=True, exist_ok=True)
+            voice_id = runner_compile._resolve_compile_voice(
+                cfg["voice_override"], store().get_character(cid),
+                cfg["enable_voice_swap"])
+            warnings: list[str] = []
+
+            async def _warn(message: str) -> None:
+                _log.warning("reengineer %s %s (repurpose): %s",
+                             re_id, cid, message)
+                warnings.append(message)
+
+            script_hint = " ".join(d for d in dialogues if d.strip()) or None
+            result = await runner_compile.run_editor_pipeline(
+                clips,
+                edit_id=edit_id, edit_dir=edit_dir,
+                template=cfg["template"], overrides=cfg["overrides"],
+                enable_trim=cfg["enable_trim"],
+                enable_captions=cfg["enable_captions"],
+                enable_wpm_normalize=cfg["enable_wpm_normalize"],
+                target_wpm=cfg["target_wpm"],
+                threshold_db=cfg["threshold_db"],
+                min_silence_secs=cfg["min_silence_secs"],
+                pad_secs=cfg["pad_secs"],
+                enable_gap_trim=cfg["enable_gap_trim"],
+                gap_max_secs=cfg["gap_max_secs"],
+                voice_id=voice_id,
+                playback_speed=cfg["playback_speed"],
+                mirror_h=True,
+                warn=_warn,
+                script_hint=script_hint,
+                clip_dialogues=dialogues,
+            )
+            final = run_dir / f"repurpose_{cid}.mp4"
+            await asyncio.to_thread(shutil.copyfile, result.final, final)
+            repurposed[cid] = {"status": "done", "final_path": str(final),
+                               "n_clips": len(clips), "edit_id": edit_id}
+            if warnings:
+                repurposed[cid]["warning"] = "; ".join(warnings)
+        except Exception as e:
+            repurposed[cid] = {"status": "failed",
+                               "error": f"{type(e).__name__}: {e}"}
+
+    await asyncio.gather(*[_one_character(cid, jc)
+                           for cid, jc in job.characters.items()])
+    _update(re_id, repurposed=repurposed, repurposing=False,
+            repurposed_at=_now())
+
+
 # --------------------------------------------------------------------------- edit mode
 #
 # Opt-in iteration on a run AFTER the default flow finished (or at the gate):

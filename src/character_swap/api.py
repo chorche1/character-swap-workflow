@@ -384,6 +384,15 @@ def _job_to_dict(job: Job) -> dict:
                 "compile_status": jc.compile_status,
                 "compile_edit_id": jc.compile_edit_id,
                 "compile_error": jc.compile_error,
+                # Repurpose (mirror-flipped) variant — parallel to compile_*.
+                "repurposed_video_url": (
+                    _file_url(jc.repurposed_video_path)
+                    if jc.repurposed_video_path else None
+                ),
+                "repurpose_status": jc.repurpose_status,
+                "repurpose_edit_id": jc.repurpose_edit_id,
+                "repurpose_error": jc.repurpose_error,
+                "repurpose_warning": jc.repurpose_warning,
                 "pipeline_status": jc.pipeline_status,
                 "pipeline_error": jc.pipeline_error,
                 "pipeline_drive_link": jc.pipeline_drive_link,
@@ -3012,6 +3021,67 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
     return _job_to_dict(job)
 
 
+class RepurposeVideosBody(CompileVideosBody):
+    """POST /api/jobs/{job_id}/repurpose_videos — a HORIZONTALLY-MIRRORED
+    variant of each character's compiled final (captions upright), built from
+    the SAME source clips with its own settings, kept ALONGSIDE the compile
+    output. Same field set as CompileVideosBody plus `playback_speed` (the
+    Editor Speed control), persisted to `job.repurpose_settings`."""
+    playback_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+
+
+@app.post("/api/jobs/{job_id}/repurpose_videos")
+async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
+                               background: BackgroundTasks) -> dict:
+    """Kick off the per-character Repurpose build (mirror flip + new settings).
+    Mirrors compile_videos but writes the repurpose_* fields and keeps the
+    original compiled finals untouched. Progress via WS events
+    `char.repurpose_started` / `_done` / `_failed`."""
+    settings.require_keys("openai")
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    eligible = [
+        cid for cid, jc in job.characters.items()
+        if (jc.approved_variant_ids or jc.approved_variant_id)
+        and any(v.status == VideoStatus.DONE and v.final_video_path
+                for v in jc.videos)
+        and (body.char_ids is None or cid in body.char_ids)
+    ]
+    if not eligible:
+        raise HTTPException(
+            409,
+            "No characters with both an approved variant AND a done video — "
+            "finish Step 5 before repurposing.",
+        )
+    if body.persist_settings:
+        job.repurpose_settings = body.model_dump(
+            exclude={"char_ids", "persist_settings"})
+    for cid in eligible:
+        jc = job.characters[cid]
+        jc.repurpose_status = "compiling"
+        jc.repurpose_error = None
+        jc.updated_at = datetime.utcnow()
+        job.characters[cid] = jc
+    s.update_job(job)
+
+    from character_swap import runner_compile
+    background.add_task(
+        _run_async, runner_compile.repurpose_job_videos, job_id,
+        template=body.template, overrides=body.overrides,
+        enable_trim=body.enable_trim, enable_captions=body.enable_captions,
+        enable_wpm_normalize=body.enable_wpm_normalize,
+        target_wpm=body.target_wpm, threshold_db=body.threshold_db,
+        min_silence_secs=body.min_silence_secs, pad_secs=body.pad_secs,
+        enable_gap_trim=body.enable_gap_trim, gap_max_secs=body.gap_max_secs,
+        voice_override=body.voice_override,
+        enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
+        playback_speed=body.playback_speed,
+    )
+    return _job_to_dict(job)
+
+
 @app.post("/api/jobs/{job_id}/unlock_movement")
 async def unlock_movement(job_id: str) -> dict:
     """Clear the movement prompt + reset videos for re-prompting. Refuses if any
@@ -4751,6 +4821,11 @@ def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
     for cid, f in finals.items():
         if f.get("final_path"):
             f["final_url"] = _file_url(Path(f["final_path"]))
+    # Repurpose (mirror-flipped) finals — same shape as `finals`, kept alongside.
+    repurposed = out.get("repurposed") or {}
+    for cid, f in repurposed.items():
+        if f.get("final_path"):
+            f["final_url"] = _file_url(Path(f["final_path"]))
     if state.get("job_id"):
         job = store().get_job(state["job_id"])
         if job is not None:
@@ -5204,6 +5279,26 @@ def _store_assemble_settings(state: dict,
     return True
 
 
+def _store_repurpose_settings(state: dict,
+                              body: ReAssembleSettingsBody | None) -> bool:
+    """Merge the Repurpose modal's explicit (non-None) fields into a SEPARATE
+    `repurpose_settings` key — same shape as assemble, kept apart so repurposing
+    with different settings never clobbers the assemble preset."""
+    if body is None:
+        return False
+    sent = {k: v for k, v in body.model_dump().items() if v is not None}
+    if body.voice_override is not None:
+        sent["voice_override"] = body.voice_override.strip() or None
+    if not sent:
+        return False
+    merged = dict(state.get("repurpose_settings") or {})
+    merged.update(sent)
+    if merged == (state.get("repurpose_settings") or {}):
+        return False
+    state["repurpose_settings"] = merged
+    return True
+
+
 class ResolvePeopleSceneBody(BaseModel):
     idx: int
     swap_person_idx: int = 0
@@ -5354,6 +5449,43 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
     # stale_scenes = edited-but-not-reanimated scenes the build uses with their
     # existing (older) clip — surfaced for a soft UI note, never blocks.
+    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"]}
+
+
+@app.post("/api/reengineer/{re_id}/repurpose")
+async def reengineer_repurpose(re_id: str, background_tasks: BackgroundTasks,
+                               body: ReAssembleSettingsBody | None = None) -> dict:
+    """Build a HORIZONTALLY-MIRRORED variant of every character's final
+    (captions upright) from the SAME clips as the assemble, with the settings in
+    the optional body. Results land in state["repurposed"] ALONGSIDE finals —
+    the originals are untouched. Same coverage gate as 'Bygg ihop igen': refuses
+    a broken build (hard/pending gaps) but allows stale (edited) scenes."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    if re_id in runner_reengineer._REPURPOSING:
+        raise HTTPException(409, "repurpose already running for this run")
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    if runner_reengineer.clear_resolved_dirty(state, job):
+        _save_reengineer_state(state)
+    gaps = runner_reengineer._assembly_gaps(state, job)
+    if gaps["hard"] or gaps["pending"]:
+        raise HTTPException(409, detail={
+            "code": "incomplete_rebuild",
+            "message": _assembly_refusal_message(gaps),
+            "dirty": gaps["dirty"], "hard": gaps["hard"],
+            "pending": gaps["pending"],
+        })
+    _store_repurpose_settings(state, body)
+    # Show the spinner immediately + persist the settings in one write.
+    state["repurposing"] = True
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_reengineer.repurpose, re_id)
     return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"]}
 
 

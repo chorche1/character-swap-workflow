@@ -1101,6 +1101,17 @@
           </span>
           <span x-show="pipelineRunning">Pipeline running…</span>
         </button>
+        <!-- Repurpose (Hugo 2026-06-27): mirror-flip every compiled final (text
+             stays upright) into a NEW set with its own edit settings — for
+             cross-posting the same reel as fresh content. -->
+        <button class="px-4 py-2 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!canCompile()"
+                @click="openRepurposeModal('swap', null)"
+                title="Skapa en spegelvänd kopia av varje karaktärs slutvideo (texten förblir rättvänd) — välj nya edit-inställningar">
+          🔁 Repurpose
+          <span class="text-fuchsia-200 text-xs ml-1"
+                x-text="`(${compilableCharCount()}× · spegelvänd)`"></span>
+        </button>
       </div>
 
       <!-- Per-character compiled-video cards. Live status updates from WS. -->
@@ -1189,6 +1200,57 @@
             </div>
           </div>
         </template>
+      </div>
+
+      <!-- Repurposed (mirror-flipped) finals — directly under the compile grid.
+           One card per character that has been repurposed; mirror is applied
+           server-side, captions stay upright. -->
+      <div x-show="Object.values(compilableCharacters()).some(jc => jc.repurpose_status)" class="mt-4">
+        <div class="text-sm font-medium mb-2 text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (mirrored)</div>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+          <template x-for="(jc, cid) in compilableCharacters()" :key="'rp-'+cid">
+            <div x-show="jc.repurpose_status" class="card border border-fuchsia-200 dark:border-fuchsia-900 rounded-xl overflow-hidden flex flex-col">
+              <div class="aspect-[9/16] bg-black relative flex items-center justify-center">
+                <template x-if="jc.repurposed_video_url && jc.repurpose_status === 'done'">
+                  <video :src="jc.repurposed_video_url + (jc.repurpose_edit_id ? ('?t=' + jc.repurpose_edit_id) : '')" controls class="w-full h-full"></video>
+                </template>
+                <template x-if="jc.repurpose_status === 'compiling'">
+                  <div class="text-neutral-400 text-xs flex flex-col items-center gap-2 p-4 text-center animate-pulse">
+                    <span>🔁 spegelvänder…</span><span x-text="jc.name"></span>
+                  </div>
+                </template>
+                <template x-if="jc.repurpose_status === 'failed'">
+                  <div class="text-red-400 text-xs flex flex-col items-center gap-2 p-4 text-center">
+                    ✕ <span x-text="jc.repurpose_error || 'repurpose failed'"></span>
+                  </div>
+                </template>
+              </div>
+              <div class="p-2 space-y-1.5">
+                <div x-show="jc.repurpose_status === 'done' && jc.repurpose_warning"
+                     class="text-[10px] text-amber-500 bg-amber-500/10 border border-amber-500/30 rounded px-1.5 py-0.5"
+                     x-text="'⚠ ' + jc.repurpose_warning"></div>
+                <div class="flex items-center justify-between gap-2">
+                  <div class="text-xs truncate min-w-0 flex-1">
+                    <span x-text="jc.name"></span>
+                    <span class="text-[10px] text-neutral-400 dark:text-neutral-500 ml-1"
+                          x-text="jc.repurpose_status || ''"></span>
+                  </div>
+                  <div class="flex items-center gap-2 shrink-0">
+                    <a x-show="jc.repurpose_status === 'done' && jc.repurposed_video_url"
+                       :href="jc.repurposed_video_url + (jc.repurpose_edit_id ? ('?t=' + jc.repurpose_edit_id) : '')"
+                       :download="`${jc.name}-repurpose.mp4`"
+                       title="Download mirrored MP4"
+                       class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
+                    <button x-show="jc.repurpose_status === 'done' && jc.repurpose_edit_id"
+                            class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
+                            title="Öppna den spegelvända finalen i Editor-tabben"
+                            @click="openEditInEditor(jc.repurpose_edit_id)">✎ Re-edit</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
     </section>
 
@@ -2315,7 +2377,19 @@
 
           <!-- finals -->
           <div x-show="Object.keys(r.finals || {}).length" class="border-t border-neutral-100 dark:border-neutral-900 pt-3">
-            <div class="text-sm font-medium mb-2">Final videos</div>
+            <div class="flex items-center justify-between mb-2">
+              <div class="text-sm font-medium">Final videos</div>
+              <!-- Repurpose (Hugo 2026-06-27): mirror-flip every final (text stays
+                   upright) into a NEW set with its own edit settings — for
+                   cross-posting the same reel as fresh content. -->
+              <button class="text-xs px-2.5 py-1 rounded-lg border border-fuchsia-300 dark:border-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950 disabled:opacity-40"
+                      :disabled="r.repurposing"
+                      title="Skapa en spegelvänd kopia av alla finalvideor (texten förblir rättvänd) — välj nya edit-inställningar"
+                      @click="openRepurposeModal('reengineer', r)">
+                <span x-show="!r.repurposing">🔁 Repurpose</span>
+                <span x-show="r.repurposing" class="animate-pulse">spegelvänder…</span>
+              </button>
+            </div>
             <div class="flex gap-4 flex-wrap">
               <template x-for="[cid, f] of Object.entries(r.finals || {})" :key="r.re_id+'-f-'+cid">
                 <div class="w-44">
@@ -2340,6 +2414,31 @@
                 </div>
               </template>
             </div>
+
+            <!-- Repurposed (mirror-flipped) variants, directly under the finals -->
+            <div x-show="Object.keys(r.repurposed || {}).length" class="mt-3">
+              <div class="text-xs font-medium mb-2 text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (spegelvänd)</div>
+              <div class="flex gap-4 flex-wrap">
+                <template x-for="[cid, f] of Object.entries(r.repurposed || {})" :key="r.re_id+'-rp-'+cid">
+                  <div class="w-44">
+                    <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
+                    <!-- Cache-buster on repurposed_at — repurpose overwrites the
+                         same repurpose_*.mp4 path on every rebuild. -->
+                    <video x-show="f.final_url" :src="f.final_url + (r.repurposed_at ? ('?t=' + String(r.repurposed_at).replace(/\D/g, '')) : '')" controls class="w-full rounded-lg border border-fuchsia-200 dark:border-fuchsia-900"></video>
+                    <div x-show="f.warning" class="text-[10px] text-amber-500 mt-0.5" x-text="'⚠ ' + f.warning"></div>
+                    <div class="flex items-center gap-3">
+                      <a x-show="f.final_url" :href="f.final_url + (r.repurposed_at ? ('?t=' + String(r.repurposed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || cid) + '-repurpose.mp4'"
+                         class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                      <button x-show="f.final_url && f.edit_id"
+                              class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
+                              title="Öppna den spegelvända finalen i Editor-tabben"
+                              @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+
             <!-- 'animating' removed: the video-phase watcher auto-assembles at
                  the end — a manual click there would overlap the same build -->
             <button class="mt-2 text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
@@ -4515,6 +4614,108 @@
                  x-text="formatBytes(row.bytes)"></div>
           </div>
         </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- Repurpose modal (Hugo 2026-06-27): pick edit settings for the mirror-
+       flipped variant. Shared by the Reengineer finals panel + Swap Step-6.
+       Mirroring is ALWAYS applied server-side; captions stay upright. -->
+  <div x-show="repurposeModal.open"
+       @click="repurposeModal.open = false"
+       @keydown.window.escape="if (repurposeModal.open) repurposeModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-lg max-h-[85vh] flex flex-col">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">🔁 Repurpose — spegelvänd kopia</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            Alla finalvideor speglas horisontellt (texten förblir rättvänd).
+            Originalen behålls; den spegelvända versionen läggs till. Välj
+            edit-inställningar nedan.
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="repurposeModal.open = false">✕</button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+        <div class="grid grid-cols-2 gap-2">
+          <label>Caption-mall
+            <select x-model="repurposeSettings.template"
+                    x-effect="editorTemplates; $nextTick(() => $el.value = repurposeSettings.template)"
+                    class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
+              <template x-for="t in editorTemplates" :key="'rp-'+t.slug">
+                <option :value="t.slug" x-text="t.label || t.slug"></option>
+              </template>
+            </select>
+          </label>
+          <label :class="repurposeSettings.enableCaptions ? '' : 'opacity-40'">Caption-storlek
+            <input type="number" min="24" max="200" step="2"
+                   x-model.number="repurposeSettings.captionSize"
+                   :disabled="!repurposeSettings.enableCaptions"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+          <label :class="repurposeSettings.enableWpmNormalize ? '' : 'opacity-40'">Mål-WPM
+            <input type="number" min="80" max="400" step="5"
+                   x-model.number="repurposeSettings.targetWpm"
+                   :disabled="!repurposeSettings.enableWpmNormalize"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+          <label title="Pitch-bevarande hastighet på hela videon. 1.0 = av.">Hastighet (×)
+            <input type="number" min="0.5" max="2" step="0.05"
+                   x-model.number="repurposeSettings.playbackSpeed"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="flex items-center gap-1"><input type="checkbox" x-model="repurposeSettings.enableTrim" class="accent-fuchsia-500"> Trimma tystnader</label>
+          <label class="flex items-center gap-1"><input type="checkbox" x-model="repurposeSettings.enableCaptions" class="accent-fuchsia-500"> Bränn in captions</label>
+          <label class="flex items-center gap-1"><input type="checkbox" x-model="repurposeSettings.enableWpmNormalize" class="accent-fuchsia-500"> Normalisera tempo</label>
+          <label class="flex items-center gap-1"><input type="checkbox" x-model="repurposeSettings.enableVoiceSwap" class="accent-fuchsia-500"> Röstbyte</label>
+        </div>
+        <div class="grid grid-cols-3 gap-2"
+             x-show="repurposeSettings.enableTrim && !repurposeSettings.enableGapTrim">
+          <label>Tröskel (dB)
+            <input type="number" min="-60" max="0" step="1" x-model.number="repurposeSettings.thresholdDb"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+          <label>Min paus (s)
+            <input type="number" min="0.05" max="5" step="0.05" x-model.number="repurposeSettings.minSilenceSecs"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+          <label>Padding (s)
+            <input type="number" min="0" max="1" step="0.01" x-model.number="repurposeSettings.padSecs"
+                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+        </div>
+        <div class="flex flex-wrap items-center gap-3 pt-1 border-t border-neutral-200 dark:border-neutral-800">
+          <label class="flex items-center gap-1"><input type="checkbox" x-model="repurposeSettings.enableGapTrim" class="accent-fuchsia-500"> Ordglapp-trim (Whisper)</label>
+          <label class="flex items-center gap-1" :class="repurposeSettings.enableGapTrim ? '' : 'opacity-40'">Max paus (s)
+            <input type="number" min="0.05" max="3" step="0.05" x-model.number="repurposeSettings.gapMaxSecs"
+                   :disabled="!repurposeSettings.enableGapTrim"
+                   class="ml-1 w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
+          </label>
+        </div>
+        <label class="block" :class="repurposeSettings.enableVoiceSwap ? '' : 'opacity-40'">Röst-override (alla karaktärer)
+          <select x-model="repurposeSettings.voiceOverride"
+                  :disabled="!repurposeSettings.enableVoiceSwap || !elevenlabsAvailable()"
+                  class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">
+            <option value="">— varje karaktärs preset-röst —</option>
+            <template x-for="v in elevenlabsVoices" :key="'rp-ov-'+v.voice_id">
+              <option :value="v.voice_id" x-text="v.name || v.voice_id"></option>
+            </template>
+          </select>
+        </label>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="text-xs px-3 py-1.5 rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="repurposeModal.open = false">Avbryt</button>
+        <button class="text-xs px-4 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-medium disabled:opacity-40"
+                :disabled="repurposeModal.busy" @click="submitRepurpose()">
+          <span x-show="!repurposeModal.busy">🔁 Repurpose (spegelvänd)</span>
+          <span x-show="repurposeModal.busy">Startar…</span>
+        </button>
       </div>
     </div>
   </div>

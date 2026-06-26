@@ -349,6 +349,7 @@ async def run_editor_pipeline(
     enable_gap_trim: bool = False,
     gap_max_secs: float = 0.35,
     playback_speed: float = 1.0,
+    mirror_h: bool = False,
     warn=None,
     script_hint: str | None = None,
     clip_dialogues: list[str] | None = None,
@@ -369,9 +370,42 @@ async def run_editor_pipeline(
     whole-concat path when absent (Editor multi-clip / drive watcher) or when
     `assemble_clips` took the legacy chain (no per-clip keeps).
 
+    `mirror_h` (the "Repurpose" transform): when True, each source clip is
+    HORIZONTALLY mirrored (a near-lossless video-only re-encode, audio copied)
+    BEFORE anything else, so the whole reel reads flipped while captions still
+    burn in upright on top. The flip happens here — before concat AND before
+    per-clip transcription — so every downstream step (single-encode path or
+    legacy fallback, per-clip caption alignment) operates on the flipped video
+    and mirroring can never silently no-op.
+
     `warn` is an optional async callback(message) for non-fatal step
     failures (currently: caption render) — callers surface it their own way.
     """
+    # Repurpose pre-pass (mirror_h): flip every source clip left↔right once, up
+    # front, then proceed exactly as normal on the flipped copies. One extra
+    # near-lossless video generation per clip — only in repurpose mode; the
+    # original master clips are never touched.
+    if mirror_h:
+        flipped: list[Path] = []
+        for i, p in enumerate(paths):
+            dst = edit_dir / f"mirror-{i:02d}.mp4"
+            try:
+                await asyncio.to_thread(
+                    video_edit.hflip_video, p, dst, job_id=edit_id)
+                flipped.append(dst)
+            except Exception as flip_err:
+                # Never block the whole repurpose on one clip — fall back to the
+                # un-flipped source for that clip, but LOUDLY (backlog #27 rule).
+                logger.warning("%s: hflip failed for %s (%s: %s) — using "
+                               "un-mirrored clip", edit_id, p,
+                               type(flip_err).__name__, flip_err)
+                if warn is not None:
+                    await warn(f"spegling misslyckades för ett klipp "
+                               f"({type(flip_err).__name__}) — det klippet "
+                               f"behölls ospeglat")
+                flipped.append(p)
+        paths = flipped
+
     # Steps 0.5 + 1 + 2 in ONE encode (2026-06-12): per-clip audio-onset trim
     # (ALWAYS — Hugo 2026-06-11: every clip starts exactly when there's
     # enough sound), interior/trailing silence trim (enable_trim), scale to
@@ -655,6 +689,37 @@ async def run_editor_pipeline(
     return EditorResult(final=current, voice_applied=voice_applied)
 
 
+class _CompileSlot(NamedTuple):
+    """Which JobCharacter fields / WS events / output file a per-character build
+    writes to. `_COMPILE_SLOT` is the Step-6 compile; `_REPURPOSE_SLOT` is the
+    mirror-flipped "Repurpose" variant (same source clips, kept ALONGSIDE the
+    compile output). Lets `_compile_one_character` / `compile_job_videos` serve
+    both without duplicating the pipeline."""
+    status_field: str
+    edit_field: str
+    path_field: str
+    error_field: str
+    warning_field: str
+    event_prefix: str        # WS "char.{prefix}_started|_done|_failed|_warning"
+    filename: str            # output basename, with a "{cid}" placeholder
+    mirror_h: bool
+    push_label: str          # phone-push noun ("Slutvideor" / "Spegelvända videor")
+
+
+_COMPILE_SLOT = _CompileSlot(
+    status_field="compile_status", edit_field="compile_edit_id",
+    path_field="compiled_video_path", error_field="compile_error",
+    warning_field="compile_warning", event_prefix="compile",
+    filename="{cid}.mp4", mirror_h=False, push_label="Slutvideor")
+
+_REPURPOSE_SLOT = _CompileSlot(
+    status_field="repurpose_status", edit_field="repurpose_edit_id",
+    path_field="repurposed_video_path", error_field="repurpose_error",
+    warning_field="repurpose_warning", event_prefix="repurpose",
+    filename="{cid}__repurpose.mp4", mirror_h=True,
+    push_label="Spegelvända videor")
+
+
 async def _compile_one_character(
     job_id: str, char_id: str,
     *,
@@ -672,6 +737,8 @@ async def _compile_one_character(
     enable_transcribe: bool = True,
     enable_gap_trim: bool = False,
     gap_max_secs: float = 0.35,
+    playback_speed: float = 1.0,
+    slot: _CompileSlot = _COMPILE_SLOT,
 ) -> None:
     """Compile one character's per-scene videos into a single final MP4.
 
@@ -680,6 +747,11 @@ async def _compile_one_character(
     flags; voice swap auto-applies the character's preset voice (or
     `voice_override` if given) UNLESS `enable_voice_swap` is False, in which
     case the original generated/Kling audio is kept untouched.
+
+    `slot` selects which JobCharacter fields + WS events + output filename this
+    build writes to (compile vs. the mirror-flipped Repurpose variant); when
+    `slot.mirror_h` is True the source clips are horizontally mirrored before
+    everything else (captions stay upright).
     """
     s = store()
     job = s.get_job(job_id)
@@ -707,12 +779,13 @@ async def _compile_one_character(
     compiled_dir = settings.output_dir / job_id / "compiled"
     compiled_dir.mkdir(parents=True, exist_ok=True)
 
-    _persist_jc(job, jc,
-                compile_status="compiling",
-                compile_edit_id=edit_id,
-                compile_error=None,
-                compile_warning=None)
-    await _emit(job_id, "char.compile_started",
+    _persist_jc(job, jc, **{
+        slot.status_field: "compiling",
+        slot.edit_field: edit_id,
+        slot.error_field: None,
+        slot.warning_field: None,
+    })
+    await _emit(job_id, f"char.{slot.event_prefix}_started",
                 char_id=char_id, edit_id=edit_id)
 
     # Step 0: build ordered scene-video list. Bail if empty; warn LOUDLY
@@ -720,17 +793,18 @@ async def _compile_one_character(
     # scenes ships with missing dialogue and status 'done').
     paths, dialogues, missing_scenes = _ordered_scene_videos(job, jc)
     if not paths:
-        _persist_jc(job, jc,
-                    compile_status="failed",
-                    compile_error="no DONE videos found for any scene")
-        await _emit(job_id, "char.compile_failed",
+        _persist_jc(job, jc, **{
+            slot.status_field: "failed",
+            slot.error_field: "no DONE videos found for any scene",
+        })
+        await _emit(job_id, f"char.{slot.event_prefix}_failed",
                     char_id=char_id, error="no DONE videos found")
         return
     scene_warning = None
     if missing_scenes:
         scene_warning = (f"final is missing {len(missing_scenes)} scene(s): "
                          + ", ".join(missing_scenes))
-        await _emit(job_id, "char.compile_warning",
+        await _emit(job_id, f"char.{slot.event_prefix}_warning",
                     char_id=char_id, message=scene_warning)
 
     try:
@@ -738,7 +812,7 @@ async def _compile_one_character(
 
         async def _warn(message: str) -> None:
             pipeline_warnings.append(message)
-            await _emit(job_id, "char.compile_warning",
+            await _emit(job_id, f"char.{slot.event_prefix}_warning",
                         char_id=char_id, message=message)
 
         # Known dialogue per clip (says-clauses, in scene order, aligned with
@@ -756,35 +830,38 @@ async def _compile_one_character(
             pad_secs=pad_secs, voice_id=effective_voice_id,
             enable_transcribe=enable_transcribe,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
+            playback_speed=playback_speed, mirror_h=slot.mirror_h,
             warn=_warn,
             script_hint=script_hint,
             clip_dialogues=dialogues,
         )
 
-        # Copy the final result to the canonical per-character location so
-        # the UI can grab it from `output/<job_id>/compiled/<char_id>.mp4`.
-        compiled_final = compiled_dir / f"{char_id}.mp4"
+        # Copy the final result to the canonical per-character location so the
+        # UI can grab it from `output/<job_id>/compiled/<char_id>[__repurpose].mp4`.
+        compiled_final = compiled_dir / slot.filename.format(cid=char_id)
         shutil.copyfile(result.final, compiled_final)
 
         all_warnings = ([scene_warning] if scene_warning else []) \
             + pipeline_warnings
         combined_warning = "; ".join(all_warnings) or None
-        _persist_jc(job, jc,
-                    compiled_video_path=str(compiled_final),
-                    compile_status="done",
-                    compile_error=None,
-                    compile_warning=combined_warning)
-        await _emit(job_id, "char.compile_done",
+        _persist_jc(job, jc, **{
+            slot.path_field: str(compiled_final),
+            slot.status_field: "done",
+            slot.error_field: None,
+            slot.warning_field: combined_warning,
+        })
+        await _emit(job_id, f"char.{slot.event_prefix}_done",
                     char_id=char_id, edit_id=edit_id,
                     output_path=str(compiled_final),
                     voice_id=effective_voice_id,
                     voice_applied=result.voice_applied,
                     warning=combined_warning)
     except Exception as e:
-        _persist_jc(job, jc,
-                    compile_status="failed",
-                    compile_error=f"{type(e).__name__}: {e}")
-        await _emit(job_id, "char.compile_failed",
+        _persist_jc(job, jc, **{
+            slot.status_field: "failed",
+            slot.error_field: f"{type(e).__name__}: {e}",
+        })
+        await _emit(job_id, f"char.{slot.event_prefix}_failed",
                     char_id=char_id, error=str(e))
 
 
@@ -803,9 +880,11 @@ def _eligible_for_compile(jc: JobCharacter) -> bool:
     )
 
 
-def _compile_push_spec(ok: int, total: int) -> tuple[str, str, int, list[str]] | None:
+def _compile_push_spec(ok: int, total: int, *, label: str = "Slutvideor"
+                       ) -> tuple[str, str, int, list[str]] | None:
     """(title, body, priority, tags) for the batch-settled compile push, or
-    None when there's nothing to report (no compilable characters).
+    None when there's nothing to report (no compilable characters). `label` is
+    the noun for the build kind ("Slutvideor" / "Spegelvända videor").
 
     ``ok``/``total`` are counted over the WHOLE job's compilable characters —
     not just this run's targets — so a per-character retry reports true
@@ -815,12 +894,12 @@ def _compile_push_spec(ok: int, total: int) -> tuple[str, str, int, list[str]] |
     if total <= 0:
         return None
     if ok == total:
-        return ("Slutvideor klara", f"{ok}/{total} karaktarer kompilerade",
+        return (f"{label} klara", f"{ok}/{total} karaktarer kompilerade",
                 3, ["white_check_mark"])
     if ok == 0:
-        return ("Slutvideor misslyckades", f"0/{total} kompilerade",
+        return (f"{label} misslyckades", f"0/{total} kompilerade",
                 5, ["rotating_light"])
-    return ("Slutvideor klara (delvis)", f"{ok}/{total} lyckades",
+    return (f"{label} klara (delvis)", f"{ok}/{total} lyckades",
             4, ["warning"])
 
 
@@ -842,11 +921,16 @@ async def compile_job_videos(
     enable_transcribe: bool = True,
     enable_gap_trim: bool = False,
     gap_max_secs: float = 0.35,
+    playback_speed: float = 1.0,
+    slot: _CompileSlot = _COMPILE_SLOT,
 ) -> None:
     """Fan out compile across every (or selected) approved character. All M
     chars compile in parallel via asyncio.gather. Settings apply uniformly
     — the only per-character thing is the preset voice (and `voice_override`
     takes precedence over it batch-wide if set).
+
+    `slot` (default the Step-6 compile) selects the build kind; pass
+    `_REPURPOSE_SLOT` for the mirror-flipped Repurpose variant.
 
     `enable_transcribe` defaults True so the words.json is always written
     even when captions + WPM normalize are off — the Resolve-export flow
@@ -879,6 +963,7 @@ async def compile_job_videos(
             enable_voice_swap=enable_voice_swap,
             enable_transcribe=enable_transcribe,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
+            playback_speed=playback_speed, slot=slot,
         )
         for cid in targets
     ])
@@ -894,8 +979,17 @@ async def compile_job_videos(
         eligible = [cid for cid, jc in fresh.characters.items()
                     if _eligible_for_compile(jc)]
         ok = sum(1 for cid in eligible
-                 if fresh.characters[cid].compile_status == "done")
-        spec = _compile_push_spec(ok, len(eligible))
+                 if getattr(fresh.characters[cid], slot.status_field) == "done")
+        spec = _compile_push_spec(ok, len(eligible), label=slot.push_label)
         if spec is not None:
             title, body, priority, tags = spec
             push.notify(title, body, priority=priority, tags=tags)
+
+
+async def repurpose_job_videos(job_id: str, **kwargs) -> None:
+    """Step-6 "Repurpose": build a HORIZONTALLY-MIRRORED variant of every
+    eligible character's final (captions upright), from the SAME source clips,
+    kept alongside the compile output. Thin wrapper over `compile_job_videos`
+    with the repurpose slot — accepts the same settings kwargs (incl.
+    `playback_speed`)."""
+    await compile_job_videos(job_id, slot=_REPURPOSE_SLOT, **kwargs)

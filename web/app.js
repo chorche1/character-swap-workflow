@@ -318,6 +318,12 @@ function studio() {
       } catch (_) { return defaults; }
     })(),
     compiling: false,
+    // --- Repurpose (mirror-flip finals + new edit settings) ---
+    // One shared modal for BOTH the Reengineer finals panel and Swap Step-6.
+    // `repurposeSettings` (camelCase, same field set as the ⚙ panels) is seeded
+    // on open from the run/job's editor settings; mirroring is ALWAYS applied.
+    repurposeModal: { open: false, kind: '', id: '', busy: false },
+    repurposeSettings: {},
     pipelineRunning: false,         // true while the 🚀 Run-full-pipeline orchestrator is running
     // --- Visual scrubbing timeline state (kept at top level for Alpine
     // x-show / x-bind brevity in markup; logically belongs to the caption
@@ -2211,6 +2217,96 @@ function studio() {
       }
       run.status = 'assembling';
       this._startReengineerPolling();
+    },
+
+    // ---------------------------------------------------------- repurpose
+    // Open the shared Repurpose modal, seeding its settings from the run's /
+    // job's current editor settings (so the user just tweaks). `kind` is
+    // 'reengineer' (pass the run) or 'swap' (uses the active job).
+    openRepurposeModal(kind, run) {
+      let seed;
+      if (kind === 'reengineer') {
+        seed = { ...this.reAsmFor(run),
+                 ...this._mapStoredToReAsm(run.repurpose_settings) };
+        this.repurposeModal = { open: true, kind: 'reengineer',
+                                id: run.re_id, busy: false };
+      } else {
+        // Swap Step-6 compile settings have no caption-size / speed → seed them.
+        seed = { captionSize: 60, playbackSpeed: 1.0,
+                 ...this.compileFor(this.job),
+                 ...this._mapStoredToReAsm(this.job && this.job.repurpose_settings) };
+        this.repurposeModal = { open: true, kind: 'swap',
+                                id: this.job && this.job.job_id, busy: false };
+      }
+      this.repurposeSettings = seed;
+    },
+
+    // Build the POST body from the modal's settings (mirroring is server-side,
+    // always on). Shape is accepted by BOTH endpoints (ReAssembleSettingsBody /
+    // RepurposeVideosBody both take these fields incl. playback_speed).
+    _repurposeBody() {
+      const s = this.repurposeSettings || {};
+      return {
+        template: s.template,
+        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 60)) },
+        enable_trim: !!s.enableTrim,
+        enable_captions: !!s.enableCaptions,
+        enable_wpm_normalize: !!s.enableWpmNormalize,
+        target_wpm: Math.min(400, Math.max(80, Number(s.targetWpm) || 190)),
+        playback_speed: Math.min(2, Math.max(0.5, Number(s.playbackSpeed) || 1)),
+        threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -24)),
+        min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.4)),
+        pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.1)),
+        enable_gap_trim: !!s.enableGapTrim,
+        gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
+        enable_voice_swap: !!s.enableVoiceSwap,
+        voice_override: s.voiceOverride || '',
+      };
+    },
+
+    async submitRepurpose() {
+      const m = this.repurposeModal;
+      if (!m.id || m.busy) return;
+      m.busy = true;
+      try {
+        const body = this._repurposeBody();
+        const url = m.kind === 'reengineer'
+          ? `/api/reengineer/${m.id}/repurpose`
+          : `/api/jobs/${m.id}/repurpose_videos`;
+        if (m.kind === 'swap') body.persist_settings = true;
+        const r = await fetch(url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) {
+          // 409 'incomplete_rebuild' carries a structured detail — name what to fix.
+          let msg = '';
+          try {
+            const j = await r.json();
+            const d = (j && j.detail) || j;
+            msg = (d && d.message) || (typeof d === 'string' ? d : JSON.stringify(d));
+          } catch (_) { try { msg = await r.text(); } catch (__) { msg = r.status; } }
+          this.notifyError('Repurpose: ' + msg);
+          return;
+        }
+        if (m.kind === 'swap') {
+          this.job = await r.json();   // chars flip to repurpose_status=compiling
+        } else {
+          const data = await r.json().catch(() => ({}));
+          const stale = (data && data.stale_scenes) || [];
+          if (stale.length) {
+            this.notifyInfo('Repurpose med ' + stale.length + ' ändrad(e) scen(er) — '
+              + 'befintliga (äldre) klipp används.');
+          }
+          const run = this.reengineerHistory.find(x => x.re_id === m.id);
+          if (run) run.repurposing = true;
+          this._startReengineerPolling();
+        }
+        this.repurposeModal.open = false;
+        this.notifyInfo('Repurpose startad — spegelvänder finalvideorna…');
+      } finally {
+        this.repurposeModal.busy = false;
+      }
     },
 
     async deleteReengineer(run) {
@@ -7180,7 +7276,8 @@ function studio() {
       // Refresh job cost on terminal-ish events (a variant landed / video done / failed
       // / compile done — compile runs Whisper + maybe ElevenLabs which both bill).
       if (['variant.ready', 'variant.failed', 'video.ready', 'video.failed', 'video.submitted',
-           'char.compile_done', 'char.compile_failed'].includes(evt.kind)) {
+           'char.compile_done', 'char.compile_failed',
+           'char.repurpose_done', 'char.repurpose_failed'].includes(evt.kind)) {
         this.loadJobCost(this.job.job_id);
         this.loadDailyCost();
       }
@@ -7217,6 +7314,16 @@ function studio() {
             `${jc.name} compile done`,
             'Final video ready in Step 6',
             { kind: 'done', tag: `compile-${this.job.job_id}-${evt.char_id}` },
+          );
+        }
+      }
+      if (evt.kind === 'char.repurpose_done') {
+        const jc = this.job?.characters?.[evt.char_id];
+        if (jc && this.notifyMilestone) {
+          this.notifyMilestone(
+            `${jc.name} repurpose klar`,
+            'Spegelvänd final klar i Steg 6',
+            { kind: 'done', tag: `repurpose-${this.job.job_id}-${evt.char_id}` },
           );
         }
       }

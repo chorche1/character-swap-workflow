@@ -2419,6 +2419,36 @@ def replace_audio(video_path: Path, audio_path: Path, output_path: Path) -> Path
     return output_path
 
 
+def hflip_video(input_path: Path, output_path: Path, *,
+                job_id: str | None = None) -> Path:
+    """Mirror a video HORIZONTALLY (left↔right) — the "Repurpose" transform.
+
+    Re-encodes the VIDEO stream with the `hflip` filter (shared `_enc_v()`
+    quality) and COPIES the audio untouched (`-c:a copy`), so the soundtrack
+    stays bit-identical — per-clip Whisper transcription / caption alignment on
+    the flipped clip reads exactly the same words/timing as the original.
+
+    Used as a pre-pass on each source clip BEFORE concat + caption burn-in, so
+    the whole picture mirrors while captions render upright on top of it (a
+    burned-in caption would otherwise come out backwards). Audio-less clips are
+    flipped video-only; the copy-audio map is dropped for them."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with record(phase="editor_hflip", model="ffmpeg-hflip",
+                character="editor", job_id=job_id) as entry:
+        has_audio = _has_audio_stream(input_path)
+        entry["has_audio"] = has_audio
+        args = [_ffmpeg(), "-y", "-i", str(input_path),
+                "-vf", "hflip", *_enc_v()]
+        if has_audio:
+            args += ["-c:a", "copy"]
+        else:
+            args += ["-an"]
+        args += [str(output_path)]
+        _run(args)
+        entry["duration"] = round(_probe_duration(output_path), 2)
+    return output_path
+
+
 def style_from_params(template: str | None,
                       overrides: dict | None = None) -> CaptionStyle:
     """Look up a template, then apply user overrides (font, size, color, etc.)."""

@@ -227,6 +227,15 @@ class JobCharacter(BaseModel):
     # e.g. "final is missing 2 scene(s): s3 (no finished video)" — the
     # compile still succeeds, but never silently.
     compile_warning: str | None = None
+    # Repurpose (2026-06-27): a HORIZONTALLY-MIRRORED variant of the compiled
+    # final (captions stay upright) built from the SAME source clips with its
+    # own editor settings — for cross-posting the same reel as "new" content.
+    # Independent of compile_* so the original final is kept untouched.
+    repurposed_video_path: str | None = None
+    repurpose_edit_id: str | None = None     # the editor edit_id (re-render / debug)
+    repurpose_status: str | None = None      # None | "compiling" | "done" | "failed"
+    repurpose_error: str | None = None
+    repurpose_warning: str | None = None
     # Phase 4 (Full pipeline) per-character status. The "🚀 Run full pipeline"
     # button in Step 6 chains: compile-no-captions → package zip into a temp
     # dir → spawn `python automate.py` (Resolve render → Drive upload) → wait
@@ -377,6 +386,10 @@ class Job(BaseModel):
     # CompileVideosBody shape; surfaced in _job_to_dict for the frontend to
     # rehydrate the panel per job. None = never compiled → use the global default.
     compile_settings: dict | None = None
+    # Per-job Repurpose settings (2026-06-27): the editor settings last used for
+    # the mirror-flipped "Repurpose" variant, kept separate from compile_settings
+    # so repurposing with different settings doesn't clobber the compile preset.
+    repurpose_settings: dict | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
