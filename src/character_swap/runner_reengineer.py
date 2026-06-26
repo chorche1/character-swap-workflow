@@ -953,39 +953,12 @@ def _scene_duration(entry: dict, state: dict) -> int:
     return int(default) if default else _kling_duration(entry)
 
 
-# Per-language accent clause + the keyword that marks "already covered" so the
-# clause is never doubled. Spanish (Hugo 2026-06-20) only changes WHICH accent
-# is enforced — the dialogue itself is written in Spanish upstream (analyst /
-# fallback translation). Mirrored in app.js klingSuffix().
-_ACCENT_CLAUSE: dict[str, tuple[str, str]] = {
-    "en": (" The person speaks fluent American English with a natural "
-           "American accent.", "american"),
-    "es": (" The person speaks fluent, natural Latin American Spanish with a "
-           "neutral Latin American Spanish accent.", "spanish"),
-}
-
-
-def _with_accent(prompt: str, language: str = "en") -> str:
-    """Kling synthesizes voice AND ambience from the prompt — enforce three
-    guarantees centrally, even if a scene's agent-written prompt forgot them:
-    the run's spoken-language accent + clear pronunciation (Hugo 2026-06-11;
-    garbled words like "baking goda" observed) and NO music bed (research
-    2026-06-12: generate_audio invents background music unless told otherwise;
-    there is no API switch, suppression is prompt-level). The pronunciation +
-    no-music directives stay English (they are instructions, not speech). Each
-    clause is skipped when the prompt already covers it. Mirrored in app.js
-    klingSuffix()."""
-    out = prompt
-    clause, key = _ACCENT_CLAUSE.get(language, _ACCENT_CLAUSE["en"])
-    if key not in out.lower():
-        out = out.rstrip() + clause
-    if "pronounc" not in out.lower():
-        out = (out.rstrip() + " Every word is pronounced clearly, correctly "
-               "and distinctly.")
-    if "music" not in out.lower():
-        out = (out.rstrip() + " No background music — natural ambient room "
-               "sound only.")
-    return out
+# The accent clause + with_accent live canonically in `reengineer` (so the
+# lower-level module can share them with the per-character `localize_motion_prompt`
+# without an import cycle). Aliased here for back-compat — every existing caller
+# and test still references `runner_reengineer._with_accent` / `_ACCENT_CLAUSE`.
+_ACCENT_CLAUSE = reengineer.ACCENT_CLAUSE
+_with_accent = reengineer.with_accent
 
 
 # Per-run lock so concurrent direct-clip tasks don't clobber each other's

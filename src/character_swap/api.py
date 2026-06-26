@@ -702,6 +702,9 @@ def _char_to_dict(ch: CharacterAsset) -> dict:
         # the Swap Step 6 compile feature.
         "voice_id": ch.voice_id,
         "voice_provider": ch.voice_provider,
+        # Spoken-language flag: "es" → all of this character's videos translate
+        # their quoted dialogue to Spanish (Hugo 2026-06-26). None = English.
+        "language": ch.language,
         "images": [
             {
                 "image_id": img.image_id,
@@ -859,6 +862,8 @@ class RenameCharacterBody(BaseModel):
     name: str | None = None
     voice_id: str | None = None
     voice_provider: str | None = None
+    # "es" → mark the character Spanish-speaking; "" / "en" clears it (English).
+    language: str | None = None
 
 
 @app.patch("/api/characters/{char_id}")
@@ -893,6 +898,10 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
     elif body.voice_provider is not None:
         # Allow swapping provider without changing voice_id (rare).
         asset.voice_provider = body.voice_provider.strip() or None
+    if body.language is not None:
+        # Only "es" is a real value; anything else (incl. "" / "en") = default
+        # English, stored as None so unflagged characters never change behavior.
+        asset.language = "es" if body.language.strip().lower() == "es" else None
     s.update_character(asset)
     for job in affected_jobs:
         s.update_job(job)

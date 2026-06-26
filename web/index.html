@@ -1312,6 +1312,7 @@
                         @click="toggleSwapChar(ch.char_id)">
                   <img :src="swapCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
                   <span x-text="ch.name"></span>
+                  <span x-show="ch.language === 'es'" class="text-xs" title="Spansktalande — repliken inom citationstecken översätts till spanska i den här karaktärens videor">🇪🇸</span>
                   <span x-show="swapFromImages.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
                 </button>
                 <button x-show="(ch.images || []).length > 1 && swapFromImages.charIds.includes(ch.char_id)"
@@ -1439,6 +1440,7 @@
                         @click="toggleReengineerChar(ch.char_id)">
                   <img :src="reengineerCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
                   <span x-text="ch.name"></span>
+                  <span x-show="ch.language === 'es'" class="text-xs" title="Spanish-speaking — this character's dialogue is auto-translated to Spanish">🇪🇸</span>
                   <span x-show="reengineerGen.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
                 </button>
                 <!-- Reference-image pick: which gallery image (= outfit) this
@@ -4216,6 +4218,16 @@
                   x-text="expandedCharId === ch.char_id ? '▾' : '▸'"></span>
           </div>
           <div x-show="expandedCharId === ch.char_id" class="pl-2 pr-1 py-1 space-y-2">
+            <!-- Spoken-language flag: 🇪🇸 → every video this character makes has
+                 its quoted dialogue auto-translated to neutral LatAm Spanish. -->
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-600 dark:text-neutral-300 cursor-pointer select-none"
+                   @click.stop=""
+                   title="När den är på översätts repliken inom citationstecken automatiskt till spanska i ALLA videor för den här karaktären. Vanliga karaktärer behåller den engelska prompten.">
+              <input type="checkbox" class="accent-rose-500"
+                     :checked="ch.language === 'es'"
+                     @change="setCharacterLanguage(ch.char_id, $event.target.checked)" />
+              <span>🇪🇸 Talar spanska <span class="text-neutral-400 dark:text-neutral-500">(översätt repliker)</span></span>
+            </label>
             <!-- Uploaded reference images for this character -->
             <div>
               <div class="flex items-center justify-between mb-1">

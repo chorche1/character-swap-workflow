@@ -62,6 +62,11 @@ class CharacterAsset(BaseModel):
     # ElevenLabs — `voice_provider` is kept for forward-compat with HeyGen.
     voice_id: str | None = None
     voice_provider: str | None = None  # "elevenlabs" (default when voice_id set)
+    # Spoken language for this character's videos. "es" → every motion/video
+    # prompt's quoted dialogue is auto-translated to neutral Latin American
+    # Spanish + the Spanish accent clause is enforced (Hugo 2026-06-26). None/
+    # "en" = default English (no change). Additive to the per-run 🗣 picker.
+    language: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def resolve_source_filename(self, image_id: str | None = None) -> str:

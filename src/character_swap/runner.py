@@ -12,7 +12,15 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import content_policy, events, pipeline, push, swap_qc, video_qc
+from character_swap import (
+    content_policy,
+    events,
+    pipeline,
+    push,
+    reengineer,
+    swap_qc,
+    video_qc,
+)
 from character_swap.clients import grok
 from character_swap.config import settings
 from character_swap.models import (
@@ -1074,6 +1082,14 @@ async def _resolve_end_image(job: Job, jc: JobCharacter,
     return None
 
 
+def _character_language(char_id: str) -> str | None:
+    """The library character's persistent spoken-language flag ("es" or None).
+    Live lookup (vs a job snapshot) so toggling a character's 🇪🇸 flag takes
+    effect on the next animate without re-creating the job."""
+    ch = store().get_character(char_id)
+    return ch.language if ch else None
+
+
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
     duration_secs: int | None = None, end_image: Path | None = None,
@@ -1138,6 +1154,16 @@ async def _animate_one_video(
     # retries keep the last clip with qc_status="failed" (⚠ in UI).
     max_attempts = 1 + (max(0, settings.video_qc_max_retries)
                         if settings.video_qc_enabled else 0)
+    # Per-character spoken language (Hugo 2026-06-26): a 🇪🇸-flagged character
+    # always speaks Spanish — translate THIS clip's quoted dialogue + enforce
+    # the Spanish accent. No-op for English/unflagged characters and for a
+    # full-"es" run (already localized upstream). Done BEFORE prompt_text so the
+    # video-QC expected dialogue (derived from the submitted prompt) and the
+    # QC-retry base both match the Spanish audio.
+    if _character_language(jc.char_id) == "es":
+        movement_prompt = await asyncio.to_thread(
+            reengineer.localize_motion_prompt, movement_prompt, "es",
+            job_id=job.job_id)
     prompt_text = movement_prompt
     phase = "submit"
     try:
