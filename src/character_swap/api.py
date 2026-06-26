@@ -574,14 +574,29 @@ app.mount("/files/web/static",
           name="files-web-static")
 
 
+# App-shell files (HTML + JS) carry the live app logic and change on every
+# release. Without a Cache-Control header a browser applies HEURISTIC caching
+# and may serve a stale app.js WITHOUT revalidating — so a freshly-reloaded
+# index.html (with a new button) pairs with an old app.js (missing the handler),
+# and the button silently does nothing. "no-cache" forces the browser to
+# revalidate before using its cached copy; the re-fetch is trivial over loopback
+# and guarantees a changed file is always picked up. (Hugo 2026-06-27: this
+# stranded the Repurpose button behind a stale app.js.)
+def _app_shell(rel: str) -> FileResponse:
+    return FileResponse(
+        settings.web_dir / rel,
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
 @app.get("/")
 async def index() -> FileResponse:
-    return FileResponse(settings.web_dir / "index.html")
+    return _app_shell("index.html")
 
 
 @app.get("/app.js")
 async def app_js() -> FileResponse:
-    return FileResponse(settings.web_dir / "app.js")
+    return _app_shell("app.js")
 
 
 @app.get("/favicon.ico")
@@ -598,7 +613,7 @@ async def favicon() -> FileResponse:
 # routes when adding new ones later.
 @app.get("/j/{job_id}")
 async def job_spa(job_id: str) -> FileResponse:
-    return FileResponse(settings.web_dir / "index.html")
+    return _app_shell("index.html")
 
 
 # --- scenes --------------------------------------------------------------------------
