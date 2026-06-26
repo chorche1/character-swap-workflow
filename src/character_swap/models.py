@@ -62,6 +62,11 @@ class CharacterAsset(BaseModel):
     # ElevenLabs — `voice_provider` is kept for forward-compat with HeyGen.
     voice_id: str | None = None
     voice_provider: str | None = None  # "elevenlabs" (default when voice_id set)
+    # Spoken language for this character's videos. "es" → every motion/video
+    # prompt's quoted dialogue is auto-translated to neutral Latin American
+    # Spanish + the Spanish accent clause is enforced (Hugo 2026-06-26). None/
+    # "en" = default English (no change). Additive to the per-run 🗣 picker.
+    language: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def resolve_source_filename(self, image_id: str | None = None) -> str:
@@ -171,6 +176,12 @@ class VideoVariant(BaseModel):
     # regen of the same video pre-fills the modal with the LAST override
     # the user iterated on instead of going back to the original.
     movement_prompt_override: str | None = None
+    # The movement prompt ACTUALLY submitted to the provider after per-character
+    # localization (Hugo 2026-06-26) — i.e. the Spanish-translated text for an
+    # 🇪🇸-flagged character. Set only when localization changed the prompt. Step-6
+    # compile reads the spoken dialogue from here (not the English job prompt) so
+    # captions + the Whisper bias hint match this clip's actual spoken language.
+    localized_movement_prompt: str | None = None
     # Clip-QC outcome (video_qc.py): dialogue transcript match + frame-sampled
     # anatomy check. Same semantics as GeneratedImage.qc_*.
     qc_status: str | None = None

@@ -286,6 +286,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE characters ADD COLUMN voice_id TEXT")
     if "voice_provider" not in char_cols:
         conn.execute("ALTER TABLE characters ADD COLUMN voice_provider TEXT")
+    # Per-character Spanish-speaking flag (Hugo 2026-06-26). "es" → translate
+    # this character's video dialogue to Spanish; null = default English.
+    if "language" not in char_cols:
+        conn.execute("ALTER TABLE characters ADD COLUMN language TEXT")
     # Step 6 (Compile) per-character output. Concatenated + editor-processed
     # final video for each character. Status null = never compiled.
     jc_cols2 = {r["name"] for r in conn.execute("PRAGMA table_info(job_characters)")}
@@ -364,6 +368,7 @@ def _char_from_row(r: sqlite3.Row, images: list[CharacterImage]) -> CharacterAss
         primary_image_id=r["primary_image_id"] if "primary_image_id" in keys else None,
         voice_id=r["voice_id"] if "voice_id" in keys else None,
         voice_provider=r["voice_provider"] if "voice_provider" in keys else None,
+        language=r["language"] if "language" in keys else None,
         created_at=_parse_iso(r["created_at"]),
     )
 
@@ -644,16 +649,17 @@ def upsert_scene(conn: sqlite3.Connection, s: SceneAsset) -> None:
 def upsert_character(conn: sqlite3.Connection, c: CharacterAsset) -> None:
     conn.execute(
         """INSERT INTO characters (char_id, filename, name, primary_image_id,
-                                   voice_id, voice_provider, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+                                   voice_id, voice_provider, language, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(char_id) DO UPDATE SET
              filename = excluded.filename,
              name = excluded.name,
              primary_image_id = excluded.primary_image_id,
              voice_id = excluded.voice_id,
-             voice_provider = excluded.voice_provider""",
+             voice_provider = excluded.voice_provider,
+             language = excluded.language""",
         (c.char_id, c.filename, c.name, c.primary_image_id,
-         c.voice_id, c.voice_provider, _iso(c.created_at)),
+         c.voice_id, c.voice_provider, c.language, _iso(c.created_at)),
     )
     # Replace the image rows atomically.
     conn.execute("DELETE FROM character_images WHERE char_id = ?", (c.char_id,))

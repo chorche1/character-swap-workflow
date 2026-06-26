@@ -101,7 +101,13 @@ def _ordered_scene_videos(
                      cands[0] if cands else None)
         if video is not None:
             paths.append(Path(video.final_video_path))
-            dialogues.append(_scene_dialogue(job, sid))
+            # Prefer the clip's actually-submitted (per-character-localized, e.g.
+            # Spanish) prompt so captions + Whisper bias match its spoken
+            # language; fall back to the English job-level scene prompt.
+            dialogues.append(
+                video_edit.extract_dialogue(video.localized_movement_prompt)
+                if video.localized_movement_prompt
+                else _scene_dialogue(job, sid))
             continue
         # No usable clip — keep the granular reason (backlog #9): a DONE row
         # with its file gone vs. nothing finished at all.

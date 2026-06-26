@@ -5929,6 +5929,22 @@ function studio() {
       await this.loadLibrary();
     },
 
+    // Mark a character Spanish-speaking (🇪🇸 toggle on the library card). When
+    // on, every video this character makes has its quoted dialogue auto-
+    // translated to neutral Latin American Spanish (Hugo 2026-06-26). Sends
+    // language="es" or "" (clear); persisted on the CharacterAsset.
+    async setCharacterLanguage(charId, isEs) {
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: isEs ? 'es' : '' }),
+      });
+      // Always reload — on failure this also re-syncs the checkbox back to the
+      // persisted (unchanged) value so the DOM never lies about the flag state.
+      if (!r.ok) this.notifyError('Language update failed: ' + await r.text());
+      await this.loadLibrary();
+    },
+
     // Editor tab: when user picks a character in the "Character preset"
     // dropdown, auto-fill `editor.voiceId` with that character's preset.
     // Only fires on dropdown CHANGE so manual voice overrides aren't
