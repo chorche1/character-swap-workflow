@@ -302,12 +302,14 @@ def test_animate_localizes_for_flagged_character(monkeypatch, tmp_path):
 
 def test_animate_passes_through_for_unflagged_character(monkeypatch, tmp_path):
     """An unflagged (English) character's prompt reaches the provider untouched —
-    no translation, no accent rewrite. (No CharacterAsset in the store → None.)"""
+    no translation, no accent rewrite. Uses a unique id never registered in the
+    session-scoped store so the 'no flag' state is explicit, not incidental."""
+    assert runner._character_language("cA_unflagged") is None
     monkeypatch.setattr(reengineer, "translate_dialogue",
                         lambda *a, **k: (_ for _ in ()).throw(
                             AssertionError("must not translate for unflagged char")))
     p = 'He waves. The person says: "Hello friends."'
-    submits, _ = _animate_capture(monkeypatch, tmp_path, p)
+    submits, _ = _animate_capture(monkeypatch, tmp_path, p, char_id="cA_unflagged")
     assert len(submits) == 1
     assert submits[0]["movement_prompt"] == p
 

@@ -5841,7 +5841,9 @@ function studio() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ language: isEs ? 'es' : '' }),
       });
-      if (!r.ok) { this.notifyError('Language update failed: ' + await r.text()); return; }
+      // Always reload — on failure this also re-syncs the checkbox back to the
+      // persisted (unchanged) value so the DOM never lies about the flag state.
+      if (!r.ok) this.notifyError('Language update failed: ' + await r.text());
       await this.loadLibrary();
     },
 

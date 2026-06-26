@@ -581,22 +581,40 @@ def with_accent(prompt: str, language: str = "en") -> str:
 
 
 # The analyst (and the English fallback) write the speaking accent INLINE inside
-# the says-clause — "...says to the camera with an American accent: \"…\"" — not
-# as the standalone ACCENT_CLAUSE["en"] sentence. The per-character ES localizer
-# must strip that inline phrase too, or Kling gets a contradictory accent signal
-# wrapping the Spanish words. Anchored on `an?` (NOT "Latin American") so it never
-# touches the Spanish clause's "neutral Latin American Spanish".
+# the says-clause — "...says to the camera with a clear American accent: \"…\"" —
+# not as the standalone ACCENT_CLAUSE["en"] sentence. The per-character ES
+# localizer must strip that inline phrase too, or Kling gets a contradictory
+# accent next to the Spanish words. Allows up to two adjectives ("natural",
+# "clear", "General", ...) before "American"; anchored so it never eats the
+# Spanish clause's "...Latin American Spanish accent" ("American" there is
+# followed by "Spanish", not "English"/"accent").
 _INLINE_EN_ACCENT_RE = re.compile(
-    r"(?i)\s+(?:with|in)\s+an?\s+(?:natural\s+)?American(?:\s+English)?\s+accent")
+    r"(?i)\s+(?:with|in)\s+an?\s+(?:\w+\s+){0,2}?American(?:\s+English)?\s+accent")
+
+# The marker that a prompt is ALREADY a full-"es" run: every run-level shape (the
+# analyst's "in neutral Latin American Spanish" attribution AND the standalone ES
+# accent clause) contains this exact phrase, while natural English dialogue or
+# scene text almost never does. Substring-matching the bare "latin american
+# spanish" was too broad — a dialogue line "...authentic Latin American Spanish
+# cuisine" would falsely skip translation.
+_ES_LOCALIZED_MARKER = "neutral latin american spanish"
 
 # Memoize localized prompts so SERIAL re-renders (per-clip retries / crash
 # resumes / a later job reusing the same scene prompt) skip a redundant GPT-4o
-# call. Keyed by (language, prompt); process-life. NOTE: this does NOT dedupe the
-# CONCURRENT fan-out — the M same-prompt takes animate via asyncio.gather and all
-# miss the cache before any writes it, so they each translate once. That is a
-# bounded, correctness-neutral cost (the translation is deterministic) on a cheap
-# call; reliability is unaffected.
+# call. Keyed by (language, prompt); bounded so a long-lived server can't grow it
+# without limit. NOTE: this does NOT dedupe the CONCURRENT fan-out — the M
+# same-prompt takes animate via asyncio.gather and all miss the cache before any
+# writes it, so they each translate once. That is a bounded, correctness-neutral
+# cost (the translation is deterministic) on a cheap call.
+_LOCALIZE_CACHE_MAX = 1024
 _LOCALIZE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _strip_quotes(text: str) -> str:
+    """Drop double-quote chars from a translated phrase before it is spliced back
+    BETWEEN the prompt's says-clause quotes — a stray quote would unbalance the
+    clause and corrupt a later DIALOGUE_RE re-parse (incl. video_qc)."""
+    return text.replace('"', '').replace('“', '').replace('”', '')
 
 
 def localize_motion_prompt(prompt: str, language: str | None, *,
@@ -605,61 +623,66 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     (Hugo 2026-06-26). Currently only "es" (neutral Latin American Spanish)
     differs from the default.
 
-    For "es": translate the quoted dialogue (each says-clause phrase) to Spanish
-    IN PLACE — the English framing / camera / action stays English — and swap
-    any English accent clause for the Spanish one (`with_accent` adds the ES
-    accent + clear-pronunciation + no-music guarantees). Returns the prompt
-    UNCHANGED for None/"en".
+    For "es" AND only when the clip carries spoken dialogue: translate the quoted
+    dialogue (each says-clause phrase) to Spanish IN PLACE — the English framing /
+    camera / action stays English — swap any English accent clause for the
+    Spanish one, and HARD-guarantee the Spanish accent clause. A purely-visual
+    clip (no says-clause) is returned UNCHANGED — we never inject a speech /
+    accent / no-music directive into a silent shot. Returns the prompt UNCHANGED
+    for None/"en".
 
-    Additive to the per-run 🗣 picker: if the prompt is already Spanish (a full
-    "es" run localized it upstream — its dialogue + accent are written in
-    Spanish), it is returned unchanged so the user-approved Spanish text is
-    never re-translated.
+    Additive to the per-run 🗣 picker: if the prompt is already a full "es" run
+    (it already carries the Spanish accent marker), it is returned unchanged so
+    the user-approved Spanish text is never re-translated.
 
-    Fail-soft: on translation failure the prompt is left FULLY English (the ES
-    accent clause is NOT added, so a Spanish-accent instruction never wraps
-    English words) and a warning is logged — never silently shipped as broken
-    half-Spanish."""
+    Fail-soft: on translation failure the prompt is left FULLY English (no ES
+    accent wrapped around English words) and a warning is logged — never the
+    contradictory half-Spanish the feature exists to avoid."""
     lang = (language or "en").strip().lower()
     if lang != "es" or not (prompt or "").strip():
         return prompt
-    # Already a full-"es" run. Both the run-level shapes — the analyst's inline
-    # "in neutral Latin American Spanish" attribution AND the standalone ES
-    # accent clause — contain "Latin American Spanish", whereas a real "es" run
-    # never re-adds the standalone sentence (with_accent skips it once the inline
-    # text already says "spanish"). Matching that phrase (not the standalone
-    # sentence) is what reliably detects the already-localized prompt without
-    # tripping on a coincidental "Spanish-style" scene description.
-    if "latin american spanish" in prompt.lower():
+    # Already a full-"es" run (run-level picker localized it upstream).
+    if _ES_LOCALIZED_MARKER in prompt.lower():
         return prompt
     cached = _LOCALIZE_CACHE.get((lang, prompt))
     if cached is not None:
         return cached
 
+    # Localize ONLY a clip that actually carries spoken dialogue — a silent /
+    # visual-only clip is left completely untouched.
     matches = list(DIALOGUE_RE.finditer(prompt))
     phrases = [m.group(1).strip() for m in matches]
+    if not any(phrases):
+        return prompt
+
+    translated = translate_dialogue(phrases, re_id=job_id)
+    if translated is None:
+        logger.warning("localize_motion_prompt (%s): dialogue translation "
+                       "failed; leaving English", job_id)
+        return prompt          # fail-soft: coherent English, no ES accent
+
+    # Replace each captured dialogue span in REVERSE so earlier spans keep their
+    # offsets while later ones are substituted (quotes stripped from each).
     es_prompt = prompt
-    if any(phrases):
-        translated = translate_dialogue(phrases, re_id=job_id)
-        if translated is None:
-            logger.warning("localize_motion_prompt (%s): dialogue translation "
-                           "failed; leaving English", job_id)
-            return prompt          # fail-soft: coherent English, no ES accent
-        # Replace each captured dialogue span in REVERSE so earlier spans keep
-        # their offsets while later ones are substituted.
-        for m, es in reversed(list(zip(matches, translated))):
-            es = (es or "").strip()
-            if not es:
-                continue
-            s, e = m.span(1)
-            es_prompt = es_prompt[:s] + es + es_prompt[e:]
-    # Strip EVERY English-accent marker — the standalone sentence AND the
-    # analyst's inline "with an American accent" attribution — then let
-    # with_accent add the single Spanish accent clause (+ pronunciation /
-    # no-music). Otherwise Kling sees a contradictory accent next to Spanish.
+    for m, es in reversed(list(zip(matches, translated))):
+        es = _strip_quotes((es or "").strip())
+        if not es:
+            continue
+        s, e = m.span(1)
+        es_prompt = es_prompt[:s] + es + es_prompt[e:]
+
+    # Strip EVERY English-accent marker (standalone sentence + inline attribution)
+    # then enforce the Spanish accent. with_accent's keyword guard can be falsely
+    # suppressed by an incidental scene word ("Spanish-tiled kitchen"), so make
+    # the ES accent clause a HARD guarantee afterwards.
     es_prompt = es_prompt.replace(ACCENT_CLAUSE["en"][0], "")
     es_prompt = _INLINE_EN_ACCENT_RE.sub("", es_prompt)
     es_prompt = with_accent(es_prompt, "es")
+    if _ES_LOCALIZED_MARKER not in es_prompt.lower():
+        es_prompt = es_prompt.rstrip() + ACCENT_CLAUSE["es"][0]
+
+    if len(_LOCALIZE_CACHE) >= _LOCALIZE_CACHE_MAX:
+        _LOCALIZE_CACHE.clear()
     _LOCALIZE_CACHE[(lang, prompt)] = es_prompt
     return es_prompt
 

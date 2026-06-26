@@ -1161,9 +1161,15 @@ async def _animate_one_video(
     # video-QC expected dialogue (derived from the submitted prompt) and the
     # QC-retry base both match the Spanish audio.
     if _character_language(jc.char_id) == "es":
-        movement_prompt = await asyncio.to_thread(
+        localized = await asyncio.to_thread(
             reengineer.localize_motion_prompt, movement_prompt, "es",
             job_id=job.job_id)
+        if localized != movement_prompt:
+            # Record the actually-submitted (Spanish) prompt so Step-6 compile
+            # derives this clip's captions + Whisper bias from its real spoken
+            # language, not the English job-level prompt.
+            video.localized_movement_prompt = localized
+            movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
     try:

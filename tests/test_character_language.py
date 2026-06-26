@@ -135,18 +135,132 @@ def test_localize_skips_inline_spanish_attribution(monkeypatch):
     assert reengineer.localize_motion_prompt(p, "es") == p
 
 
-def test_localize_no_dialogue_strips_en_clause_and_adds_es(monkeypatch):
-    """Silent scene (no says-clause): translate is never called, but a real EN-run
-    prompt still carries the standalone EN accent clause — it must be REPLACED by
-    the Spanish one (non-vacuous: the input genuinely contains the EN clause)."""
+def test_localize_no_dialogue_leaves_prompt_untouched(monkeypatch):
+    """A purely-visual clip (no says-clause) is left COMPLETELY untouched — no
+    translation, and no Spanish-accent / no-music / pronunciation directive
+    injected into a silent shot that never carried an accent clause."""
     _stub_translate(monkeypatch, _boom)
-    p = reengineer.with_accent("He slices a kiwi into the bowl.", "en")
+    p = "She walks toward the window, slow dolly-in."
+    assert reengineer.localize_motion_prompt(p, "es") == p
+    # Even a silent clip that DID carry the EN accent clause is left alone.
+    p2 = reengineer.with_accent("He slices a kiwi.", "en")
+    assert reengineer.localize_motion_prompt(p2, "es") == p2
+
+
+def test_localize_strips_standalone_en_clause_with_dialogue(monkeypatch):
+    """When the clip HAS dialogue, a pre-existing standalone EN accent clause is
+    replaced by the Spanish one (non-vacuous: the input genuinely contains it)."""
+    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["¡Cómpralo ya!"])
+    p = reengineer.with_accent('He nods. The person says: "Buy now."', "en")
     assert reengineer.ACCENT_CLAUSE["en"][0] in p          # input really has it
     out = reengineer.localize_motion_prompt(p, "es")
-    assert "He slices a kiwi into the bowl." in out
+    assert "¡Cómpralo ya!" in out and "Buy now." not in out
     assert reengineer.ACCENT_CLAUSE["en"][0] not in out    # EN clause stripped
-    assert "American accent" not in out
+    assert "american accent" not in out.lower()
     assert "Latin American Spanish accent" in out
+
+
+def test_localize_guard_does_not_overmatch_dialogue(monkeypatch):
+    """A flagged char whose ENGLISH dialogue/scene text happens to contain
+    'Latin American Spanish' must STILL be translated — the guard keys off the
+    full 'neutral latin american spanish' marker, not the bare phrase."""
+    _stub_translate(monkeypatch,
+                    lambda lines, *, re_id=None: ["Servimos comida auténtica."])
+    p = ('He gestures at the menu. The person says: '
+         '"We serve authentic Latin American Spanish cuisine."')
+    out = reengineer.localize_motion_prompt(p, "es")
+    assert "Servimos comida auténtica." in out             # translated, not skipped
+    assert "We serve authentic" not in out
+    assert "Latin American Spanish accent" in out
+
+
+def test_localize_sanitizes_quotes_in_translation(monkeypatch):
+    """A translation that contains a stray double-quote must not unbalance the
+    says-clause — the localized prompt must still re-parse to a single clean
+    spoken line (video_qc reads the same prompt with the same regex)."""
+    from character_swap.video_edit import extract_dialogue
+    _stub_translate(monkeypatch,
+                    lambda lines, *, re_id=None: ['Él dijo "hola" fuerte'])
+    p = 'He waves. The person says: "He said hi loudly."'
+    out = reengineer.localize_motion_prompt(p, "es")
+    spoken = extract_dialogue(out)
+    assert spoken == "Él dijo hola fuerte"                 # inner quotes stripped
+    assert '"' not in spoken
+
+
+def test_localize_guarantees_accent_despite_spanish_framing(monkeypatch):
+    """If English framing contains the word 'Spanish' (e.g. 'Spanish-tiled'),
+    with_accent's keyword guard would skip the accent clause — the localizer
+    HARD-guarantees it instead."""
+    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["Hola."])
+    p = 'A rustic Spanish-tiled kitchen. The person says: "Hi there."'
+    out = reengineer.localize_motion_prompt(p, "es")
+    assert "Latin American Spanish accent" in out          # accent guaranteed
+
+
+def test_localize_strips_adjectived_inline_accent(monkeypatch):
+    """The inline-accent strip tolerates an adjective ('clear/warm/General')
+    before 'American accent', not only the canonical 'natural' form."""
+    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["Hola."])
+    p = 'He smiles. The person says with a clear American accent: "Hello."'
+    out = reengineer.localize_motion_prompt(p, "es")
+    assert "american accent" not in out.lower()
+    assert "Latin American Spanish accent" in out
+
+
+# --- Step-6 compile reads the clip's localized (Spanish) dialogue -------------
+
+def test_compile_dialogue_uses_localized_prompt(tmp_path):
+    """_ordered_scene_videos must derive each clip's known dialogue from the
+    clip's localized (Spanish) prompt, not the English job prompt — else the
+    flagged character's compiled captions are burned in the wrong language."""
+    from character_swap import runner_compile
+    from character_swap.models import (
+        CharStatus, GeneratedImage, Job, JobCharacter, VariantStatus,
+        VideoStatus, VideoVariant)
+    clip = tmp_path / "clip.mp4"; clip.write_bytes(b"v")
+    img = GeneratedImage(variant_id="v1", path=str(tmp_path / "v1.png"),
+                         prompt="p", scene_id="s1", status=VariantStatus.READY)
+    # Real localizer output keeps the English "says" attribution and translates
+    # only the quoted phrase, so extract_dialogue still anchors on it.
+    vid = VideoVariant(
+        video_id="vd1", grok_job_id="", status=VideoStatus.DONE,
+        source_variant_id="v1", final_video_path=str(clip),
+        localized_movement_prompt=(
+            'Camina. The person says to the camera: "hola amigos". The person '
+            'speaks fluent, natural Latin American Spanish with a neutral '
+            'Latin American Spanish accent.'))
+    jc = JobCharacter(char_id="cc", name="C", source_image_path="c.png",
+                      status=CharStatus.DONE, images=[img], videos=[vid],
+                      approved_variant_ids=["v1"])
+    job = Job(job_id="jcl", title="t", scene_id="s1",
+              scene_image_path=str(tmp_path / "s.png"), scene_ids=["s1"],
+              movement_prompts={"s1": 'Walk. The person says: "hello friends"'})
+    paths, dialogues, missing = runner_compile._ordered_scene_videos(job, jc)
+    assert paths == [clip] and missing == []
+    assert dialogues == ["hola amigos"]          # Spanish, from the localized clip
+
+
+def test_compile_dialogue_falls_back_to_english_when_not_localized(tmp_path):
+    """A clip with no localized prompt (unflagged char) falls back to the English
+    job-level scene dialogue — unchanged behavior."""
+    from character_swap import runner_compile
+    from character_swap.models import (
+        CharStatus, GeneratedImage, Job, JobCharacter, VariantStatus,
+        VideoStatus, VideoVariant)
+    clip = tmp_path / "clip.mp4"; clip.write_bytes(b"v")
+    img = GeneratedImage(variant_id="v1", path=str(tmp_path / "v1.png"),
+                         prompt="p", scene_id="s1", status=VariantStatus.READY)
+    vid = VideoVariant(video_id="vd1", grok_job_id="", status=VideoStatus.DONE,
+                       source_variant_id="v1", final_video_path=str(clip))
+    jc = JobCharacter(char_id="cc2", name="C", source_image_path="c.png",
+                      status=CharStatus.DONE, images=[img], videos=[vid],
+                      approved_variant_ids=["v1"])
+    job = Job(job_id="jcl2", title="t", scene_id="s1",
+              scene_image_path=str(tmp_path / "s.png"), scene_ids=["s1"],
+              movement_prompts={"s1": 'Walk. The person says: "hello friends"'})
+    _, dialogues, _ = runner_compile._ordered_scene_videos(job, jc)
+    assert dialogues == ["hello friends"]
 
 
 # --- SQLite persistence (USE_SQLITE_STATE=1 is the documented default) --------
