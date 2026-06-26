@@ -171,13 +171,15 @@ def test_collect_clips_returns_shared_for_all_chars(wired):
     state = {"scenes": [{"idx": 0, "scene_id": "sc_d", "is_direct": True,
                          "shared_clip_path": str(clip)}]}
     for cid in ("cA", "cB"):
-        clips, missing, waitable = runner_reengineer._collect_clips(state, _jc(cid))
+        clips, _dialogues, missing, waitable = runner_reengineer._collect_clips(
+            state, _jc(cid))
         assert clips == [clip] and not missing
 
 
 def test_collect_clips_direct_waitable_until_ready(wired):
     state = {"scenes": [{"idx": 0, "scene_id": "sc_d", "is_direct": True}]}
-    clips, missing, waitable = runner_reengineer._collect_clips(state, _jc())
+    clips, _dialogues, missing, waitable = runner_reengineer._collect_clips(
+        state, _jc())
     assert not clips and missing and waitable is True
 
 

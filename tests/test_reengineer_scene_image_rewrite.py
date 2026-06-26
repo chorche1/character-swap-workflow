@@ -586,13 +586,14 @@ def test_collect_clips_reports_unapproved_scene_as_missing(tmp_path):
                               status=VideoStatus.DONE,
                               final_video_path=str(clip))]
     state = _state("done")
-    clips, missing, waitable = runner_reengineer._collect_clips(state, jc)
+    clips, _dialogues, missing, waitable = runner_reengineer._collect_clips(
+        state, jc)
     assert len(clips) == 1                            # s2's clip collected
     assert any("scen 1" in m for m in missing)
     assert waitable is False                          # needs manual approve
     # A scene the character has NO slots for stays silently skipped.
     jc.images = [v for v in jc.images if v.scene_id != "s1"]
-    clips, missing, _ = runner_reengineer._collect_clips(state, jc)
+    clips, _dialogues, missing, _ = runner_reengineer._collect_clips(state, jc)
     assert not any("scen 1" in m for m in missing)
 
 

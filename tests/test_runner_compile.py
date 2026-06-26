@@ -64,8 +64,9 @@ def test_ordered_scene_videos_empty_when_no_approved(tmp_path):
         approved_variant_ids=[],
     )
     job = _mkjob(["sc1"], jc)
-    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    paths, dialogues, missing = runner_compile._ordered_scene_videos(job, jc)
     assert paths == []
+    assert dialogues == []
     assert missing == ["sc1 (no approved variant)"]
 
 
@@ -87,8 +88,9 @@ def test_ordered_scene_videos_picks_first_done_per_scene(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    paths, dialogues, missing = runner_compile._ordered_scene_videos(job, jc)
     assert paths == [v1_path, v2_path]
+    assert dialogues == ["", ""]   # no movement prompts → no dialogue
     assert missing == []
 
 
@@ -111,8 +113,9 @@ def test_ordered_scene_videos_skips_scene_without_done_video(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    paths, dialogues, missing = runner_compile._ordered_scene_videos(job, jc)
     assert paths == [v1]
+    assert dialogues == [""]
     assert missing == ["sc2 (no finished video)"]
 
 
@@ -135,8 +138,9 @@ def test_ordered_scene_videos_skips_scene_with_missing_file(tmp_path):
         ],
     )
     job = _mkjob(["sc1", "sc2"], jc)
-    paths, missing = runner_compile._ordered_scene_videos(job, jc)
+    paths, dialogues, missing = runner_compile._ordered_scene_videos(job, jc)
     assert paths == [v1]
+    assert dialogues == [""]
     assert missing == ["sc2 (video file missing on disk)"]
 
 
@@ -151,7 +155,7 @@ def test_ordered_scene_videos_legacy_single_scene_uses_approved_variant_id(tmp_p
         videos=[_mkvideo(v, source_variant_id="var_only")],
     )
     job = _mkjob(["sc1"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == ([v], [])
+    assert runner_compile._ordered_scene_videos(job, jc) == ([v], [""], [])
 
 
 def test_ordered_scene_videos_picks_first_done_when_multiple_videos_per_variant(tmp_path):
@@ -170,7 +174,7 @@ def test_ordered_scene_videos_picks_first_done_when_multiple_videos_per_variant(
         ],
     )
     job = _mkjob(["sc1"], jc)
-    assert runner_compile._ordered_scene_videos(job, jc) == ([v1], [])
+    assert runner_compile._ordered_scene_videos(job, jc) == ([v1], [""], [])
 
 
 def test_compile_persists_missing_scene_warning(monkeypatch, tmp_path):
@@ -213,7 +217,12 @@ def test_compile_persists_missing_scene_warning(monkeypatch, tmp_path):
     async def fake_pipeline(paths, **kw):
         assert paths == [v1]                       # only the existing scene
         # Backlog #20: known dialogue rides along as the Whisper bias hint.
-        assert kw["script_hint"] == "hello there second line"
+        # 2026-06-26: script_hint + clip_dialogues now reflect ONLY scenes that
+        # actually contributed a clip — sc2 has no video, so its "second line"
+        # is NOT in the hint (it isn't spoken in the final). clip_dialogues is
+        # aligned 1:1 with paths for per-clip caption alignment.
+        assert kw["script_hint"] == "hello there"
+        assert kw["clip_dialogues"] == ["hello there"]
         return runner_compile.EditorResult(final=final, voice_applied=False)
     monkeypatch.setattr(runner_compile, "run_editor_pipeline", fake_pipeline)
 

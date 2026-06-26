@@ -2327,7 +2327,10 @@ function studio() {
     // the clip length, so the user can bump the Kling field deliberately.
     klingSpeechSecs(run, sc) {
       const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
-      const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]([^"”]+)["”]/gi)];
+      // Mirror of video_edit.DIALOGUE_RE — the body spans inner quote pairs
+      // (e.g. `comment "skin" …`) so CTAs aren't truncated, while the inner
+      // pair forbids `says` so two separate says-clauses don't merge.
+      const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]/gi)];
       const spoken = (m.map(x => x[1]).join(' ').trim() || String(sc.speech || '').trim());
       const words = spoken ? spoken.split(/\s+/).length : 0;
       return words ? words / 2.2 + 1.0 : 0;

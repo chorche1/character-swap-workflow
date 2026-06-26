@@ -28,7 +28,15 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
 
-_DIALOGUE_RE = re.compile(r'says:\s*[“"]([^”"]+)[”"]')
+from character_swap import video_edit
+
+# Shared canonical dialogue extractor (2026-06-26) — see video_edit.DIALOGUE_RE.
+# This module's private `says:\s*[“"]([^”"]+)[”"]` copy truncated CTAs like
+# `Comment "Skin" …` to just `Comment ` (a review caught it diverging from the
+# fix applied to runner_reengineer + app.js), feeding expected_speech() a
+# corrupted line → false "dialogue mismatch" QC rejections + misleading hints
+# the moment VIDEO_QC is re-enabled. Reuse the ONE source of truth instead.
+_DIALOGUE_RE = video_edit.DIALOGUE_RE
 
 VISUAL_QC_SYSTEM = """\
 You are a strict quality inspector for AI-generated video clips. You receive

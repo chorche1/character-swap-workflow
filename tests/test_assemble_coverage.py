@@ -57,7 +57,7 @@ def test_collect_clips_reports_missing_and_waitable(tmp_path):
     c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
     job = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
                 _clip_row("vd2", "v2", VideoStatus.PROCESSING)])
-    clips, missing, waitable = runner_reengineer._collect_clips(
+    clips, _dialogues, missing, waitable = runner_reengineer._collect_clips(
         _state(), job.characters["cA"])
     assert clips == [c1]
     assert missing == ["scen 2"]
@@ -66,13 +66,13 @@ def test_collect_clips_reports_missing_and_waitable(tmp_path):
     # FAILED-only clip: missing but NOT waitable (no point polling).
     job2 = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
                  _clip_row("vd2", "v2", VideoStatus.FAILED)])
-    _, missing2, waitable2 = runner_reengineer._collect_clips(
+    _, _, missing2, waitable2 = runner_reengineer._collect_clips(
         _state(), job2.characters["cA"])
     assert missing2 == ["scen 2"] and waitable2 is False
 
     # No row at all yet (the observed race): waitable.
     job3 = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1))])
-    _, missing3, waitable3 = runner_reengineer._collect_clips(
+    _, _, missing3, waitable3 = runner_reengineer._collect_clips(
         _state(), job3.characters["cA"])
     assert missing3 == ["scen 2"] and waitable3 is True
 

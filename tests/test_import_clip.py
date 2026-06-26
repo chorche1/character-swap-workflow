@@ -79,7 +79,8 @@ def test_collect_clips_uses_imported(tmp_path):
     imp = tmp_path / "imp.mp4"; imp.write_bytes(b"i")
     job = _job([_clip("vd_gen", "v1", VideoStatus.DONE, str(gen)),
                 _clip("vd_imp", "v1", VideoStatus.DONE, str(imp), imported=True)])
-    clips, missing, _ = runner_reengineer._collect_clips(_state(), job.characters["cA"])
+    clips, _dialogues, missing, _ = runner_reengineer._collect_clips(
+        _state(), job.characters["cA"])
     assert missing == []
     assert clips == [imp]
 
@@ -89,7 +90,7 @@ def test_compile_orders_prefer_imported(tmp_path):
     imp = tmp_path / "imp.mp4"; imp.write_bytes(b"i")
     job = _job([_clip("vd_gen", "v1", VideoStatus.DONE, str(gen)),
                 _clip("vd_imp", "v1", VideoStatus.DONE, str(imp), imported=True)])
-    paths, missing = _ordered_scene_videos(job, job.characters["cA"])
+    paths, _dialogues, missing = _ordered_scene_videos(job, job.characters["cA"])
     assert missing == []
     assert paths == [imp]
 

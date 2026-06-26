@@ -882,8 +882,13 @@ _SPEECH_MARGIN_SECS = 1.0
 # a dialogue EDITED at the gate fell back to the stale analyst speech field
 # and the clip kept the old, shorter duration — chopped lines through the
 # edit path). Mirrored in app.js klingDuration(); a pytest keeps them in sync.
-_DIALOGUE_RE = re.compile(r'says[^"“”]{0,160}?["“]([^"”]+)["”]',
-                          re.IGNORECASE)
+# Shared canonical dialogue extractor (2026-06-26) — see
+# video_edit.DIALOGUE_RE. The old private `["“]([^"”]+)["”]` capture truncated
+# CTAs like `Comment "Skin" …` to just `Comment `; the shared pattern spans
+# inner quote pairs + multi-line dialogue. Re-exported here so existing refs
+# (`_DIALOGUE_RE.findall`) + the sync test (`runner_reengineer._DIALOGUE_RE`)
+# keep working off the SINGLE source of truth.
+_DIALOGUE_RE = video_edit.DIALOGUE_RE
 
 
 def _spoken_text(entry: dict) -> str:
@@ -1255,15 +1260,20 @@ _ASSEMBLE_COVERAGE_WAIT_SECS = 120.0
 _ASSEMBLE_COVERAGE_POLL_SECS = 5.0
 
 
-def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str], bool]:
-    """(clips, missing, waitable) for one character, in state-scene order.
+def _collect_clips(
+        state: dict,
+        jc: JobCharacter) -> tuple[list[Path], list[str], list[str], bool]:
+    """(clips, dialogues, missing, waitable) for one character, in scene order.
 
     A scene is EXPECTED when the character has an approved variant for it.
-    `missing` names expected scenes without a DONE clip on disk; `waitable`
-    is True when at least one missing scene's clip is plausibly still
-    coming (row in flight, or no row yet — rows can lag), so the caller may
-    poll again instead of building an incomplete final."""
+    `dialogues[i]` is the known spoken line for `clips[i]`'s scene (says-clause
+    via `_spoken_text`) — aligned in lockstep with `clips` for per-clip caption
+    alignment. `missing` names expected scenes without a DONE clip on disk;
+    `waitable` is True when at least one missing scene's clip is plausibly
+    still coming (row in flight, or no row yet — rows can lag), so the caller
+    may poll again instead of building an incomplete final."""
     clips: list[Path] = []
+    dialogues: list[str] = []
     missing: list[str] = []
     waitable = False
     for e in state["scenes"]:
@@ -1273,6 +1283,7 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
             shared = e.get("shared_clip_path")
             if shared and Path(shared).exists():
                 clips.append(Path(shared))
+                dialogues.append(_spoken_text(e))
             elif e.get("direct_error"):
                 missing.append(f"scen {e['idx'] + 1} (direktklipp misslyckades)")
             else:
@@ -1294,6 +1305,7 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
         video = runner.pick_clip_for_variant(jc, vid_variant)
         if video is not None:
             clips.append(Path(video.final_video_path))
+            dialogues.append(_spoken_text(e))
             continue
         missing.append(f"scen {e['idx'] + 1}")
         rows = [vv for vv in jc.videos
@@ -1302,7 +1314,7 @@ def _collect_clips(state: dict, jc: JobCharacter) -> tuple[list[Path], list[str]
                                          VideoStatus.PROCESSING}
                            for vv in rows):
             waitable = True
-    return clips, missing, waitable
+    return clips, dialogues, missing, waitable
 
 
 def _scene_all_imported(job: Job, scene_id: str) -> bool:
@@ -1531,7 +1543,8 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                         + _ASSEMBLE_COVERAGE_WAIT_SECS)
             jc_now = jc
             while True:
-                clips, missing, waitable = _collect_clips(state, jc_now)
+                clips, dialogues, missing, waitable = _collect_clips(
+                    state, jc_now)
                 if (not missing or not waitable
                         or asyncio.get_event_loop().time() > deadline):
                     break
@@ -1579,12 +1592,11 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 _log.warning("reengineer %s %s: %s", re_id, cid, message)
                 warnings.append(message)
 
-            # The exact dialogue is KNOWN (gate-approved says-clauses in
-            # scene order) — bias Whisper toward it so captions stop
-            # burning in mis-hearings (backlog #20).
-            script_hint = " ".join(
-                t for t in (_spoken_text(e)
-                            for e in state.get("scenes") or []) if t) or None
+            # The exact dialogue per clip is KNOWN (gate-approved says-clauses,
+            # aligned with `clips`) — drives PER-CLIP caption alignment; the
+            # joined form is the whole-concat Whisper bias hint / fallback
+            # (backlog #20).
+            script_hint = " ".join(d for d in dialogues if d.strip()) or None
 
             result = await runner_compile.run_editor_pipeline(
                 clips,
@@ -1603,6 +1615,7 @@ async def _do_assemble(re_id: str, state: dict) -> None:
                 playback_speed=cfg["playback_speed"],
                 warn=_warn,
                 script_hint=script_hint,
+                clip_dialogues=dialogues,
             )
             final = run_dir / f"final_{cid}.mp4"
             await asyncio.to_thread(shutil.copyfile, result.final, final)

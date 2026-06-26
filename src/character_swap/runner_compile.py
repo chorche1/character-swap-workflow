@@ -46,24 +46,35 @@ async def _emit(job_id: str, kind: str, char_id: str | None = None, **data) -> N
     await events.publish(job_id, payload)
 
 
+def _scene_dialogue(job: Job, sid: str) -> str:
+    """The known spoken line for one scene — the movement prompt's says-clause
+    (via the shared `video_edit.extract_dialogue`). Drives per-clip caption
+    alignment + the Whisper bias hint. Empty when the scene has no dialogue
+    (e.g. a silent action shot)."""
+    return video_edit.extract_dialogue((job.movement_prompts or {}).get(sid) or "")
+
+
 def _ordered_scene_videos(
-        job: Job, jc: JobCharacter) -> tuple[list[Path], list[str]]:
+        job: Job, jc: JobCharacter) -> tuple[list[Path], list[str], list[str]]:
     """Build the ordered list of per-scene video file paths for one character.
 
     Iterates `job.scene_ids` in order. For each scene, finds the approved
     variant for THIS character on THAT scene, then picks the first DONE
     VideoVariant whose `source_variant_id` matches.
 
-    Returns (paths, missing): `missing` names every scene that contributes
-    NO clip, with the reason. Backlog #9 (2026-06-12): these scenes used to
-    be dropped silently — the final shipped with whole lines of dialogue
-    absent and status 'done'."""
+    Returns (paths, dialogues, missing): `dialogues[i]` is the known spoken
+    line for `paths[i]`'s scene (for per-clip caption alignment — aligned in
+    lockstep with `paths`); `missing` names every scene that contributes NO
+    clip, with the reason. Backlog #9 (2026-06-12): these scenes used to be
+    dropped silently — the final shipped with whole lines of dialogue absent
+    and status 'done'."""
     scene_ids = list(job.scene_ids) if job.scene_ids else [job.scene_id]
     approved_set = set(jc.approved_variant_ids or [])
     if jc.approved_variant_id:
         approved_set.add(jc.approved_variant_id)
 
     paths: list[Path] = []
+    dialogues: list[str] = []
     missing: list[str] = []
     for sid in scene_ids:
         # Approved variant for THIS (char, scene). Variants with
@@ -90,6 +101,7 @@ def _ordered_scene_videos(
                      cands[0] if cands else None)
         if video is not None:
             paths.append(Path(video.final_video_path))
+            dialogues.append(_scene_dialogue(job, sid))
             continue
         # No usable clip — keep the granular reason (backlog #9): a DONE row
         # with its file gone vs. nothing finished at all.
@@ -98,7 +110,7 @@ def _ordered_scene_videos(
                        for vv in jc.videos)
         missing.append(f"{sid} (video file missing on disk)" if done_any
                        else f"{sid} (no finished video)")
-    return paths, missing
+    return paths, dialogues, missing
 
 
 def _persist_jc(job: Job, jc: JobCharacter, **fields) -> JobCharacter:
@@ -216,6 +228,108 @@ async def _resolve_caption_words(words: list, current: Path, *, script_hint: str
     return words
 
 
+def _cov(ws: list, dialogue: str) -> float:
+    return video_edit.caption_transcript_ratio(
+        " ".join(getattr(w, "text", "") for w in ws), dialogue)
+
+
+async def _align_one_clip(path: Path, keeps: list | None, dialogue: str,
+                          out_dur: float, *, edit_id: str,
+                          threshold: float) -> tuple[list, bool]:
+    """Caption words for ONE clip, on that clip's own (trimmed) timeline.
+
+    Returns (words, fell_back): `fell_back` is True only when both Whisper
+    reads diverged from the KNOWN line and the words were rebuilt evenly-timed
+    from it (for the caller's aggregate warning).
+
+    The reliable per-clip path (Hugo 2026-06-26). Whisper is far more
+    dependable on a SHORT single clip than on a long stitched reel — the
+    'continuation-skip' that drops most of a concat doesn't happen. We
+    transcribe the raw clip, remap its word times through `keeps` onto the
+    trimmed timeline, and:
+      • no known line → trust Whisper's words (real timing; [] if silent);
+      • a good Whisper read of the line → keep its real per-word timing;
+      • a poor read (garbled Kling voice) → even-time the KNOWN line across
+        this clip's duration — correct WORDS in the RIGHT clip, never the
+        whole script smeared uniformly across the whole video.
+
+    Frugal: 1 Whisper call when the script-biased read already covers the
+    line cleanly, a 2nd (unprompted) only when it doesn't."""
+    def _remap(ws: list) -> list:
+        return (video_edit.remap_words_through_keeps(ws, keeps)
+                if keeps else list(ws))
+
+    async def _tx(hint: str | None) -> list:
+        try:
+            return await asyncio.to_thread(
+                video_edit.transcribe_words, path, job_id=edit_id,
+                script_hint=hint)
+        except Exception:
+            return []
+
+    dialogue = (dialogue or "").strip()
+    if not dialogue:
+        # No known line for this clip (e.g. a silent action shot, or speech
+        # the script doesn't carry) — the unprompted read is the most faithful.
+        return _remap(await _tx(None)), False
+
+    hint = _remap(await _tx(dialogue))
+    hint_cov = _cov(hint, dialogue)
+    if hint and hint_cov >= threshold and _maxword(hint) <= _GIANT_GAP_SECS:
+        return hint, False  # clean read — keep real timing, skip the 2nd call
+
+    plain = _remap(await _tx(None))
+    plain_cov = _cov(plain, dialogue)
+    cands = []
+    if hint:
+        cands.append(("hint", hint, hint_cov))
+    if plain:
+        cands.append(("plain", plain, plain_cov))
+    if cands:
+        _, best, best_cov = max(
+            cands,
+            key=lambda c: _caption_score(c[1], c[2], is_plain=c[0] == "plain"))
+        if best_cov >= threshold:
+            return best, False
+    # Both reads diverge from the known line → even-time it across THIS clip.
+    return video_edit.script_fallback_words(dialogue, out_dur), True
+
+
+async def _resolve_caption_words_per_clip(
+        clip_paths: list[Path], clip_keeps: list, clip_dialogues: list[str],
+        *, edit_id: str, threshold: float, warn=None) -> list:
+    """Per-clip caption alignment across the whole reel (Hugo 2026-06-26).
+
+    Each clip is aligned on its own timeline by `_align_one_clip`, then shifted
+    onto the concatenated timeline by the cumulative duration of the preceding
+    clips' kept ranges (so a per-clip fallback lands in the RIGHT clip's slot).
+    Replaces the old whole-concat transcribe → even-time-the-WHOLE-script
+    fallback, which smeared the script uniformly across the entire video when
+    Whisper couldn't read one character's Kling voice."""
+    all_words: list = []
+    offset = 0.0
+    n_fallback = 0
+    for i, path in enumerate(clip_paths):
+        keeps = clip_keeps[i] if i < len(clip_keeps) else None
+        dialogue = (clip_dialogues[i] if i < len(clip_dialogues) else "") or ""
+        out_dur = (sum(e - s for s, e in keeps) if keeps
+                   else await asyncio.to_thread(video_edit._probe_duration, path))
+        clip_words, fell_back = await _align_one_clip(
+            path, keeps, dialogue, out_dur, edit_id=edit_id, threshold=threshold)
+        if fell_back:
+            n_fallback += 1
+        for w in clip_words:
+            all_words.append(video_edit.Word(
+                text=w.text, start=round(w.start + offset, 3),
+                end=round(w.end + offset, 3)))
+        offset += out_dur
+    if n_fallback and warn is not None:
+        await warn(f"captions: {n_fallback} klipp kunde inte läsas av Whisper "
+                   f"— byggde captions från den kända repliken (jämn timing "
+                   f"inom de klippen)")
+    return all_words
+
+
 async def run_editor_pipeline(
     paths: list[Path],
     *,
@@ -237,6 +351,7 @@ async def run_editor_pipeline(
     playback_speed: float = 1.0,
     warn=None,
     script_hint: str | None = None,
+    clip_dialogues: list[str] | None = None,
 ) -> EditorResult:
     """Concat + Editor finishing, shared by the Step-6 compile and the
     Reengineer assemble: per-clip audio-onset trim → concat → interior
@@ -244,6 +359,15 @@ async def run_editor_pipeline(
     transcribe → WPM normalize → caption burn-in. The result lives inside
     `edit_dir` under the given `edit_id`, so it is re-renderable from the
     Editor tab like any other edit.
+
+    `clip_dialogues` (aligned with `paths`, optional): the known spoken line
+    per clip. When provided with at least one non-empty line, captions use
+    PER-CLIP alignment (`_resolve_caption_words_per_clip`) — each clip
+    transcribed on its own and a garbled clip's line even-timed within ITS
+    OWN slot, instead of the whole-concat transcribe whose fallback smeared
+    the script uniformly across the whole video. Falls back to the
+    whole-concat path when absent (Editor multi-clip / drive watcher) or when
+    `assemble_clips` took the legacy chain (no per-clip keeps).
 
     `warn` is an optional async callback(message) for non-fatal step
     failures (currently: caption render) — callers surface it their own way.
@@ -255,8 +379,14 @@ async def run_editor_pipeline(
     # three. The old three-step chain lost a CRF generation per step; with a
     # ~21 Mbps Kling master the FIRST hop alone measured ~2-3 Mbps.
     concat_out = edit_dir / "00-concat.mp4"
+    # The ORIGINAL per-clip inputs (for per-clip caption transcription) — the
+    # legacy-chain branch below reassigns `paths` to trimmed copies, so capture
+    # them before that. `clip_keeps` stays None unless the single-encode pass
+    # succeeds and returns per-clip kept ranges.
+    clip_paths = list(paths)
+    clip_keeps: list | None = None
     try:
-        await asyncio.to_thread(
+        asm = await asyncio.to_thread(
             video_edit.assemble_clips, paths, concat_out,
             aspect_ratio=settings.video_aspect_ratio,
             # "Ersätt"-läge (Hugo 2026-06-17): when word-gap trim is on, the
@@ -269,6 +399,7 @@ async def run_editor_pipeline(
             pad_secs=pad_secs,
             job_id=edit_id,
         )
+        clip_keeps = (asm or {}).get("clip_keeps")
         current = concat_out
     except Exception as assemble_err:
         # Reliability first: any failure in the combined pass falls back to
@@ -363,34 +494,51 @@ async def run_editor_pipeline(
                 await warn(f"voice swap skipped ({type(voice_err).__name__}: "
                            f"{str(voice_err)[:200]})")
 
-    # Step 4a: transcribe. Needed for: captions, WPM normalize, AND the
-    # Resolve-export flow (SRT generated from words.json). `enable_transcribe`
-    # defaults True so the words are always available for downstream consumers
-    # even when captions + WPM are both off.
+    # Step 4a / 4a.1: caption + WPM word source. Two paths:
+    #
+    # PER-CLIP (Hugo 2026-06-26, the reliable path for Step-6 + Reengineer):
+    # when the caller knows each clip's spoken line (`clip_dialogues`) and the
+    # single-encode assemble returned per-clip kept ranges (`clip_keeps`),
+    # transcribe each clip on its OWN — short clips dodge the long-concat
+    # 'continuation-skip' — and even-time only a garbled clip's own line within
+    # its own slot. This never smears the whole script uniformly across the
+    # whole video (the old fallback's failure that mis-timed every caption).
+    #
+    # WHOLE-CONCAT (Editor multi-clip / drive watcher / legacy assemble chain /
+    # no known per-clip dialogue): transcribe the stitched reel, then
+    # best-of-both + even-timed SCRIPT fallback (Hugo 2026-06-17 / 06-22).
     words: list = []
-    if (enable_transcribe or enable_captions or enable_wpm_normalize
-            or enable_gap_trim):
-        try:
-            words = await asyncio.to_thread(
-                video_edit.transcribe_words, current, job_id=edit_id,
-                script_hint=script_hint,
-            )
-        except Exception:
-            words = []
-
-    # Step 4a.1: HYBRID caption source (Hugo 2026-06-17). Whisper is unreliable
-    # on Kling's synthetic voice — on unclear audio it hallucinates a generic
-    # outro ("thanks for watching") or catches almost nothing. When a known
-    # script is available (script_hint = the scene says-clauses) and Whisper's
-    # transcript diverges badly from it, rebuild the caption words from the
-    # script, evenly timed. A Whisper transcript that matches the script keeps
-    # its accurate per-word timing. Runs before WPM/gap-trim so everything
-    # downstream (incl. the persisted words.json) uses the corrected words.
-    if (enable_captions or enable_wpm_normalize) and script_hint:
-        words = await _resolve_caption_words(
-            words, current, script_hint=script_hint, edit_id=edit_id,
+    use_per_clip = (
+        clip_dialogues is not None
+        and clip_keeps is not None
+        and len(clip_dialogues) == len(clip_paths) == len(clip_keeps)
+        and any((d or "").strip() for d in clip_dialogues)
+        and (enable_captions or enable_wpm_normalize)
+    )
+    if use_per_clip:
+        # Per-clip transcription uses the RAW clip inputs + their kept ranges
+        # (pre-voice-swap timing; ElevenLabs STS preserves duration so swapped
+        # audio stays aligned). Runs before WPM/gap-trim so everything
+        # downstream (incl. the persisted words.json) uses the aligned words.
+        words = await _resolve_caption_words_per_clip(
+            clip_paths, clip_keeps, clip_dialogues, edit_id=edit_id,
             threshold=settings.caption_script_fallback_ratio, warn=warn,
         )
+    else:
+        if (enable_transcribe or enable_captions or enable_wpm_normalize
+                or enable_gap_trim):
+            try:
+                words = await asyncio.to_thread(
+                    video_edit.transcribe_words, current, job_id=edit_id,
+                    script_hint=script_hint,
+                )
+            except Exception:
+                words = []
+        if (enable_captions or enable_wpm_normalize) and script_hint:
+            words = await _resolve_caption_words(
+                words, current, script_hint=script_hint, edit_id=edit_id,
+                threshold=settings.caption_script_fallback_ratio, warn=warn,
+            )
 
     # Step 4a.5: WORD-GAP TRIM (opt-in, Hugo 2026-06-17). Replaces the
     # level-based interior trim (skipped above) — cuts spoken pauses longer
@@ -570,7 +718,7 @@ async def _compile_one_character(
     # Step 0: build ordered scene-video list. Bail if empty; warn LOUDLY
     # when scenes are missing (backlog #9: a final that silently skips
     # scenes ships with missing dialogue and status 'done').
-    paths, missing_scenes = _ordered_scene_videos(job, jc)
+    paths, dialogues, missing_scenes = _ordered_scene_videos(job, jc)
     if not paths:
         _persist_jc(job, jc,
                     compile_status="failed",
@@ -593,16 +741,10 @@ async def _compile_one_character(
             await _emit(job_id, "char.compile_warning",
                         char_id=char_id, message=message)
 
-        # Known dialogue from the movement prompts' says-clauses (in scene
-        # order) biases Whisper toward the real wording (backlog #20).
-        # Lazy import: runner_reengineer imports this module at top level.
-        from character_swap.runner_reengineer import _DIALOGUE_RE
-        spoken_parts: list[str] = []
-        for sid in (job.scene_ids or [job.scene_id]):
-            prompt_text = (job.movement_prompts or {}).get(sid) or ""
-            spoken_parts += _DIALOGUE_RE.findall(prompt_text)
-        script_hint = " ".join(t.strip() for t in spoken_parts
-                               if t.strip()) or None
+        # Known dialogue per clip (says-clauses, in scene order, aligned with
+        # `paths`) drives PER-CLIP caption alignment; the joined form is the
+        # whole-concat Whisper bias hint / fallback (backlog #20).
+        script_hint = " ".join(d for d in dialogues if d.strip()) or None
 
         result = await run_editor_pipeline(
             paths,
@@ -616,6 +758,7 @@ async def _compile_one_character(
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
             warn=_warn,
             script_hint=script_hint,
+            clip_dialogues=dialogues,
         )
 
         # Copy the final result to the canonical per-character location so

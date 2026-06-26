@@ -1721,6 +1721,75 @@ def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> li
     return out
 
 
+# Canonical extractor for a motion prompt's spoken line — the dialogue in
+# `… says …: "…"`. ONE definition shared by runner_reengineer (caption
+# alignment + Whisper bias hint), runner_compile (per-clip dialogue), and
+# video_qc (expected-speech check) so the three never drift (2026-06-26 — a
+# review caught video_qc's private copy still truncating CTAs). Lives in
+# video_edit (a leaf both importers can reach) to avoid the
+# video_qc → runner_reengineer → runner → video_qc import cycle.
+#
+# The body `(?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*` spans:
+#   • plain dialogue text, AND
+#   • a balanced INNER quote pair (e.g. `Comment "Skin" …`) — but the inner
+#     pair's content forbids the word `says`, so two SEPARATE says-clauses in
+#     one prompt (`… says: "a" … person says: "b"`) are NOT swallowed into one
+#     (a plain balanced body merged them; the old `[^"”]+` body truncated the
+#     CTA at the inner quote — both wrong). Stops at the real closing quote;
+#     spans multi-line dialogue. Validated against 192 real prompts + the
+#     two-clause / CTA / multiline shapes: 3 CTAs fixed, 0 regressions.
+# Mirrored in app.js klingSpeechSecs; a sync test asserts the
+# `says[^"“”]{0,160}?` prefix.
+DIALOGUE_RE = re.compile(
+    r'says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]',
+    re.IGNORECASE)
+
+
+def extract_dialogue(text: str) -> str:
+    """Joined spoken line(s) from a motion prompt's says-clause(s), or "" when
+    the prompt carries no dialogue. Single source of truth for every caller."""
+    return " ".join(t.strip() for t in DIALOGUE_RE.findall(text or "")
+                    if t.strip()).strip()
+
+
+def remap_words_through_keeps(
+        words: list[Word],
+        keeps: list[tuple[float, float]]) -> list[Word]:
+    """Map word timestamps from a RAW clip's timeline onto the TRIMMED timeline
+    produced by `assemble_clips` (per-clip caption alignment, 2026-06-26).
+
+    `assemble_clips` cuts each clip down to a list of KEPT ranges (leading
+    audio-onset silence + interior pauses removed) and concatenates those
+    survivors back-to-back. To place words transcribed from the *original*
+    clip onto that trimmed output, each word is shifted by the cumulative
+    length of the kept ranges before it.
+
+    For a word overlapping kept range `k` (the i-th survivor, which starts at
+    output offset `offs[i]`), the output time is
+    `offs[i] + (raw_time - k.start)`, clamped to the range. Words falling
+    entirely inside a removed gap are dropped (their audio is gone). A word
+    spanning a cut is clamped to the kept side. `keeps` must be in ascending
+    order (as `assemble_clips` emits them). ffmpeg-free → unit-testable."""
+    if not keeps:
+        return list(words)
+    offs: list[float] = []
+    acc = 0.0
+    for s, e in keeps:
+        offs.append(acc)
+        acc += max(0.0, e - s)
+    out: list[Word] = []
+    for w in words:
+        for i, (ks, ke) in enumerate(keeps):
+            if w.end <= ks or w.start >= ke:
+                continue  # no overlap with this kept range
+            ns = offs[i] + max(0.0, w.start - ks)
+            ne = offs[i] + (min(w.end, ke) - ks)
+            out.append(Word(text=w.text, start=round(max(0.0, ns), 3),
+                            end=round(max(ns + 0.01, ne), 3)))
+            break  # place each word in the first range it overlaps
+    return out
+
+
 def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
                           max_gap_secs: float = 0.35,
                           pad_secs: float = 0.05) -> list[tuple[float, float]]:
@@ -2199,9 +2268,18 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
 
         out_duration = _probe_duration(output_path)
         entry["duration"] = round(out_duration, 2)
+        # `clip_keeps` (per-clip kept ranges, in input order) lets callers map
+        # words transcribed from each RAW clip onto this trimmed output via
+        # `remap_words_through_keeps` — the basis for per-clip caption
+        # alignment (2026-06-26). `clip_out_durations` = each clip's length on
+        # the trimmed timeline (sum of its kept ranges).
+        clip_keeps = [[(round(s, 3), round(e, 3)) for s, e in k] for k in keeps]
+        clip_out_durations = [round(sum(e - s for s, e in k), 3) for k in keeps]
         return {"n_clips": len(video_paths), "n_segments": n_segments,
                 "duration": round(out_duration, 2),
-                "removed_secs": round(removed_total, 2)}
+                "removed_secs": round(removed_total, 2),
+                "clip_keeps": clip_keeps,
+                "clip_out_durations": clip_out_durations}
 
 
 def apply_timeline(input_path: Path, output_path: Path, *,
