@@ -1744,12 +1744,34 @@ DIALOGUE_RE = re.compile(
     r'says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]',
     re.IGNORECASE)
 
+# Stage directions written INSIDE the dialogue quotes — `"This is store-bought
+# honey (while he points at the jar), and this is raw honey"` — are NOT spoken;
+# they tell the character what to DO. They were leaking into burned captions via
+# the script-fallback path when Whisper couldn't read a Kling clip (2026-06-27,
+# Hugo: "captions included text they didn't say"). Strip any `(...)` / `[...]`
+# parenthetical from the captured line, then heal the spacing/punctuation the
+# removal leaves behind (` ,` → `,`, doubled spaces, a dangling leading comma).
+_STAGE_DIR_RE = re.compile(r"\s*[\(\[][^)\]]*[)\]]")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.;:!?])")
+
+
+def _strip_stage_directions(text: str) -> str:
+    out = _STAGE_DIR_RE.sub(" ", text or "")
+    out = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    return out.strip().lstrip(",;:. ").strip()
+
 
 def extract_dialogue(text: str) -> str:
-    """Joined spoken line(s) from a motion prompt's says-clause(s), or "" when
-    the prompt carries no dialogue. Single source of truth for every caller."""
-    return " ".join(t.strip() for t in DIALOGUE_RE.findall(text or "")
-                    if t.strip()).strip()
+    """Joined SPOKEN line(s) from a motion prompt's says-clause(s), or "" when
+    the prompt carries no dialogue. Single source of truth for every caller.
+
+    Parenthetical stage directions inside the quotes are stripped — they're
+    never spoken, so they must never reach captions / the Whisper bias hint /
+    the expected-speech QC check."""
+    joined = " ".join(t.strip() for t in DIALOGUE_RE.findall(text or "")
+                      if t.strip()).strip()
+    return _strip_stage_directions(joined)
 
 
 def remap_words_through_keeps(

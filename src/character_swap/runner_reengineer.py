@@ -892,11 +892,14 @@ _DIALOGUE_RE = video_edit.DIALOGUE_RE
 
 
 def _spoken_text(entry: dict) -> str:
-    """The scene's dialogue: the motion prompt's says-clause(s) — the text
-    the user sees and edits at the gate — falling back to the analyst's
-    verbatim `speech` field."""
-    texts = _DIALOGUE_RE.findall(entry.get("motion_prompt") or "")
-    return " ".join(texts).strip() or (entry.get("speech") or "").strip()
+    """The scene's SPOKEN dialogue: the motion prompt's says-clause(s) — the
+    text the user sees and edits at the gate — falling back to the analyst's
+    verbatim `speech` field. Routes through `video_edit.extract_dialogue` so
+    parenthetical stage directions inside the quotes are stripped (they're not
+    spoken and must never reach captions — 2026-06-27)."""
+    spoken = video_edit.extract_dialogue(entry.get("motion_prompt") or "")
+    return spoken or video_edit._strip_stage_directions(
+        (entry.get("speech") or "").strip())
 
 
 def _speech_secs(entry: dict) -> float:
