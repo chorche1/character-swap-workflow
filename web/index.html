@@ -2384,8 +2384,15 @@
               <!-- Repurpose (Hugo 2026-06-27): mirror-flip every final (text stays
                    upright) into a NEW set with its own edit settings — for
                    cross-posting the same reel as fresh content. -->
+              <!-- :disabled MUST coerce to a real boolean. `repurposing` is a
+                   client-only field never sent by the server, so on every run
+                   object the KEY IS MISSING (not `false`). Alpine's boolean
+                   :disabled binding inside x-for treats a missing property as
+                   truthy → the button renders permanently disabled and clicks
+                   are dead no-ops. `!!` makes it an explicit false. (Hugo
+                   2026-06-27: this was why "inget händer" on Repurpose.) -->
               <button class="text-xs px-2.5 py-1 rounded-lg border border-fuchsia-300 dark:border-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950 disabled:opacity-40"
-                      :disabled="r.repurposing"
+                      :disabled="!!r.repurposing"
                       title="Skapa en spegelvänd kopia av alla finalvideor (texten förblir rättvänd) — välj nya edit-inställningar"
                       @click="openRepurposeModal('reengineer', r)">
                 <span x-show="!r.repurposing">🔁 Repurpose</span>
