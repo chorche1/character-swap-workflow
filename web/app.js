@@ -1760,6 +1760,14 @@ function studio() {
     },
 
     _reengineerIsActive(r) {
+      // A Repurpose build (mirror-flip + re-render per character) runs AFTER the
+      // run is already `done`, with NO images/videos in flight — so it isn't
+      // caught by status or _reengineerHasInFlight. Without this guard the poll
+      // filter drops the run the instant it's submitted, polling stops, and the
+      // client-set `repurposing` flag is never replaced by the server's cleared
+      // value → the "spegelvänder…" spinner hangs forever even though the
+      // mirrored videos finished. (Hugo 2026-06-27.)
+      if (r.repurposing) return true;
       // awaiting_approval / finished runs count as active while edit-mode
       // work is in flight (per-slot retries, added-scene images, clip redos)
       // — otherwise the poll filter drops the run and nothing repaints.
