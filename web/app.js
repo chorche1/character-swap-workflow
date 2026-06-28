@@ -115,6 +115,7 @@ function studio() {
       background: null,              // optional File: replacement environment
       backgroundUrl: '',             // object URL for the thumbnail
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
+      skipQc: false,                 // 🚫 per-run QC opt-out (image + video)
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -133,6 +134,7 @@ function studio() {
       background: null,
       backgroundUrl: '',
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
+      skipQc: false,                  // 🚫 per-run QC opt-out (image + video)
       sourceOverrides: {},            // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -1555,6 +1557,7 @@ function studio() {
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
+        fd.append('skip_qc', g.skipQc ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
@@ -1707,6 +1710,7 @@ function studio() {
         fd.append('auto_mode', g.autoMode ? 'true' : 'false');
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
+        fd.append('skip_qc', g.skipQc ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('background_source', g.backgroundSource || 'character');

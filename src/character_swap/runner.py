@@ -196,6 +196,19 @@ def _swap_image_model(job: Job) -> str:
     return m
 
 
+def _swap_qc_on(job: Job) -> bool:
+    """Whether image (swap) vision-QC runs for this job: the global SWAP_QC
+    env flag AND the per-job opt-out (Hugo 2026-06-28 "Hoppa över QC"). When
+    False the slot generates ONCE — no judging, no QC retries."""
+    return settings.swap_qc_enabled and not getattr(job, "skip_qc", False)
+
+
+def _video_qc_on(job: Job) -> bool:
+    """Whether video clip-QC runs for this job: the global VIDEO_QC env flag
+    AND the per-job opt-out. When False each clip is submitted ONCE."""
+    return settings.video_qc_enabled and not getattr(job, "skip_qc", False)
+
+
 def _model_provider(slug: str) -> str | None:
     """Provider name for an image-model slug via the registry (lazy import —
     same cycle-avoidance as `_is_gemini_image_model`)."""
@@ -265,7 +278,8 @@ async def _generate_one_variant(
     # holds a lane hostage for 3x its generation time.
     scene_path = _scene_path_for_variant(job, variant)
     char_path = Path(jc.source_image_path)
-    max_attempts = 1 + max(0, settings.swap_qc_max_retries)
+    qc_on = _swap_qc_on(job)
+    max_attempts = 1 + (max(0, settings.swap_qc_max_retries) if qc_on else 0)
     # Per-attempt inputs. After a QC failure the FIRST retry runs in
     # repair mode: the failed image itself becomes the scene input with a
     # fix-only-this instruction, so the result changes as little as
@@ -384,7 +398,7 @@ async def _generate_one_variant(
                             raise RuntimeError(
                                 "fallback(nbp-swap) after content rejection "
                                 f"failed: {type(e2).__name__}: {e2}") from e2
-            verdict = await asyncio.to_thread(
+            verdict = (await asyncio.to_thread(
                 swap_qc.inspect_variant,
                 scene_image=scene_path,
                 character_image=char_path,
@@ -419,7 +433,7 @@ async def _generate_one_variant(
                 # ENFORCE it, not fail it as a SCENE mismatch.
                 camera_gaze=job.from_reengineer,
                 job_id=job.job_id,
-            )
+            ) if qc_on else None)
             if verdict is None:
                 variant.qc_status = "skipped"
                 variant.qc_reason = None
@@ -1152,8 +1166,9 @@ async def _animate_one_video(
     # impossible motion/anatomy. Video is the EXPENSIVE step → 1 retry by
     # default; QC unavailable → single attempt, qc_status="skipped"; exhausted
     # retries keep the last clip with qc_status="failed" (⚠ in UI).
+    video_qc_on = _video_qc_on(job)
     max_attempts = 1 + (max(0, settings.video_qc_max_retries)
-                        if settings.video_qc_enabled else 0)
+                        if video_qc_on else 0)
     # Per-character spoken language (Hugo 2026-06-26): a 🇪🇸-flagged character
     # always speaks Spanish — translate THIS clip's quoted dialogue + enforce
     # the Spanish accent. No-op for English/unflagged characters and for a
@@ -1218,10 +1233,10 @@ async def _animate_one_video(
                 model=video_model,
             )
 
-            verdict = await asyncio.to_thread(
+            verdict = (await asyncio.to_thread(
                 video_qc.inspect_clip, dest,
                 movement_prompt=prompt_text, app_job_id=job.job_id,
-            )
+            ) if video_qc_on else None)
             if verdict is None:
                 video.qc_status = "skipped"
                 video.qc_reason = None

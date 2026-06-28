@@ -377,6 +377,14 @@ class Job(BaseModel):
     # to the legacy enrich/raw path on any failure.
     use_director: bool = False
     director_prompts_json: str | None = None
+    # Per-job QC opt-out (Hugo 2026-06-28). True → skip BOTH the swap (image)
+    # vision-QC and the video clip-QC for every variant/clip in this job, and
+    # their auto-retries: a single generation attempt per slot, no Anthropic
+    # judging, no consistency-warning pass. Default False = QC on (the global
+    # SWAP_QC / VIDEO_QC env flags still apply). A per-run "Hoppa över QC"
+    # checkbox on the Swap + Reengineer forms sets it. See runner._swap_qc_on /
+    # runner._video_qc_on.
+    skip_qc: bool = False
     # Optional third reference image passed to the image model after
     # (scene, character) — useful for "match this background" / "use this
     # outfit" / general visual context. Stored as an absolute path on disk;

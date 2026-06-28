@@ -1122,6 +1122,9 @@ class CreateJobBody(BaseModel):
     # both can be enabled simultaneously (Director wins where it succeeds,
     # enrich is the fallback).
     use_director: bool = False
+    # Per-run QC opt-out (Hugo 2026-06-28): True → skip image (swap) + video
+    # clip QC and their auto-retries for this job. Default False = QC on.
+    skip_qc: bool = False
     # Optional third reference image for the image model: scene + character +
     # this one. Path is relative to `settings.input_dir / 'extra_refs'`, as
     # returned by `POST /api/jobs/extra_ref`. None when the user didn't
@@ -1270,6 +1273,7 @@ async def create_job(body: CreateJobBody, background: BackgroundTasks) -> dict:
         image_model=image_model,
         enrich_prompt=body.enrich_prompt,
         use_director=body.use_director,
+        skip_qc=body.skip_qc,
         extra_reference_path=extra_ref_abs,
         background_source=background_source,
         end_frames_by_scene=end_frames_by_scene,
@@ -2765,6 +2769,7 @@ async def duplicate_job(job_id: str, background: BackgroundTasks) -> dict:
         videos_per_character=src.videos_per_character,
         enrich_prompt=src.enrich_prompt,
         use_director=src.use_director,
+        skip_qc=src.skip_qc,
         # Do NOT copy movement_prompts NOR director_prompts_json — the
         # duplicate is meant to re-run generation (Director re-plans against
         # the new variants), not skip straight to videos or reuse stale
@@ -4906,6 +4911,9 @@ async def reengineer_create(
     # tailored compact swap prompt per scene (props named with position/size,
     # camera distance anchored). Off by default; needs ANTHROPIC_API_KEY.
     use_director: bool = Form(False),
+    # Per-run QC opt-out (Hugo 2026-06-28): True → skip BOTH image (swap) QC and
+    # video clip-QC (and their auto-retries) for this whole run. Default False.
+    skip_qc: bool = Form(False),
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
@@ -5007,6 +5015,7 @@ async def reengineer_create(
         "scene_sensitivity": scene_sensitivity,
         "language": language,
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
+        "skip_qc": bool(skip_qc),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,
@@ -5034,6 +5043,7 @@ async def reengineer_from_images(
     outfit_text: str = Form(""),
     auto_mode: bool = Form(False),
     use_director: bool = Form(False),        # UI presets this ON; API stays opt-in (billed)
+    skip_qc: bool = Form(False),             # per-run QC opt-out (image + video)
     background_file: UploadFile | None = File(None),
     background_source: str = Form("character"),
     character_source_image_ids: str = Form(""),
@@ -5224,6 +5234,7 @@ async def reengineer_from_images(
         "outfit_mode": outfit_mode,
         "outfit_text": outfit_text.strip(),
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
+        "skip_qc": bool(skip_qc),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,

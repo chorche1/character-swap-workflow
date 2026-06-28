@@ -636,6 +636,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         video_audio=True,
         outfit_mode=state.get("outfit_mode") or "scene",
         outfit_text=state.get("outfit_text") or None,
+        skip_qc=bool(state.get("skip_qc")),
         origin=f"reengineer:{re_id}",
     )
     s.add_job(job)
@@ -772,14 +773,17 @@ async def _watch_swap_phase(
     # Cross-scene consistency annotation (backlog #13): every variant passed
     # solo QC, but nothing compared them ACROSS scenes — sleeves/gloves/
     # glasses wobbled between scenes of the same final. One cheap vision
-    # call per character; advisory only (amber chips at the gate).
-    try:
-        warnings = await _consistency_warnings(job)
-        if warnings:
-            _update(re_id, consistency_warnings=warnings)
-    except Exception as e:
-        _log.warning("reengineer %s: consistency annotation failed: %s",
-                     re_id, e)
+    # call per character; advisory only (amber chips at the gate). Skipped
+    # when the run opted out of QC (Hugo 2026-06-28) — it's an Anthropic QC
+    # pass too.
+    if not job.skip_qc:
+        try:
+            warnings = await _consistency_warnings(job)
+            if warnings:
+                _update(re_id, consistency_warnings=warnings)
+        except Exception as e:
+            _log.warning("reengineer %s: consistency annotation failed: %s",
+                         re_id, e)
 
     state = reengineer.load_state(re_id) or {}
     if state.get("auto_mode"):

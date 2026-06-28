@@ -1460,6 +1460,11 @@
             <input type="checkbox" x-model="swapFromImages.useDirector" class="rounded" :disabled="!health.anthropic_key" />
             🎬 AI Director
           </label>
+          <label class="text-sm flex items-center gap-1.5 cursor-pointer"
+                 title="Hoppa över kvalitetskontrollen för den här körningen: ingen bild-QC och ingen video-QC, inga auto-omförsök. Snabbare och billigare, men inga defekter fångas automatiskt.">
+            <input type="checkbox" x-model="swapFromImages.skipQc" class="rounded" />
+            🚫 Hoppa över QC
+          </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!swapFromImages.rows.length || swapFromImages.charIds.length === 0 || swapFromImages.submitting"
                   @click="submitSwapFromImages()"
@@ -1613,6 +1618,11 @@
             <input type="checkbox" x-model="reengineerGen.useDirector" class="rounded"
                    :disabled="!health.anthropic_key" />
             🎬 AI Director
+          </label>
+          <label class="text-sm flex items-center gap-1.5 cursor-pointer"
+                 title="Hoppa över kvalitetskontrollen för den här körningen: ingen bild-QC och ingen video-QC, inga auto-omförsök. Snabbare och billigare, men inga defekter fångas automatiskt.">
+            <input type="checkbox" x-model="reengineerGen.skipQc" class="rounded" />
+            🚫 Hoppa över QC
           </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!reengineerGen.file || reengineerGen.charIds.length === 0 || reengineerGen.submitting"
