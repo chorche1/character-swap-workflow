@@ -854,6 +854,20 @@ def submit_video(
             duration_secs=effective_dur,
             app_job_id=job_id,
         )
+    if model == "seedance-2.0":
+        # Seedance 2.0 routed through fal.ai. Like Kling, it supports an
+        # optional END FRAME (start→end interpolation), so `end_image` is
+        # forwarded. Native audio default mirrors Kling's; a per-call override
+        # (Reengineer sets True) still wins.
+        from character_swap.clients import fal_seedance
+        audio = (generate_audio if generate_audio is not None
+                 else settings.kling_generate_audio)
+        return fal_seedance.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur, end_image=end_image,
+            aspect_ratio=effective_ar,
+            generate_audio=audio, app_job_id=job_id,
+        )
     if model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         return kling.submit_kling(
             image=image, prompt=movement_prompt,
@@ -985,6 +999,9 @@ def wait_for_video(
     elif model == "grok-imagine-1.5":
         from character_swap.clients import fal_grok
         fal_grok.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
+    elif model == "seedance-2.0":
+        from character_swap.clients import fal_seedance
+        fal_seedance.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
     elif model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         kling.wait_for_kling(task_id=job_id, dest=dest)
     elif model in {"runway-gen4", "runway-gen3-alpha"}:

@@ -111,6 +111,13 @@ VIDEO_MODELS: dict[str, dict] = {
     # this endpoint, so a scene overridden to it ignores its end pose (same
     # soft-degrade as veo-3.1-fast). Bills on FAL_API_KEY.
     "grok-imagine-1.5":     {"label": "Grok Imagine 1.5 (fal)",          "provider": "fal",        "price_setting": "grok_video_price_usd",   "duration_options": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
+    # Seedance 2.0 routed through fal.ai (image-to-video). ByteDance's newest;
+    # the ONLY fal video model besides Kling 3.0 with start→end-frame
+    # interpolation (end_frame True → a scene on it honors its 🎯 end pose).
+    # Integer duration 4–15s, native synced audio. Tier (standard/fast) +
+    # resolution via SEEDANCE_FAL_* env (default standard/720p). Priciest model
+    # in the stack ($0.302/s @720p standard). Bills on FAL_API_KEY.
+    "seedance-2.0":         {"label": "Seedance 2.0 (fal)",              "provider": "fal",        "price_setting": "seedance_price_usd",     "duration_options": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5, "end_frame": True},
     # Kling — every confirmed model_name string from Kling's official i2v API
     # (Singapore region, May 2026). Slug == API name to keep the mapping
     # trivial in `kling._resolve_model_name`. Legacy aliases (`kling`,
@@ -126,7 +133,7 @@ VIDEO_MODELS: dict[str, dict] = {
     "kling-v2-1-master":    {"label": "Kling 2.1 Master",                "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-5-turbo":     {"label": "Kling 2.5 Turbo",                 "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
     "kling-v2-6":           {"label": "Kling 2.6",                       "provider": "kling",      "price_setting": "kling_price_usd",        "duration_options": [5, 10], "duration_default": 5},
-    "kling-v3":             {"label": "Kling 3.0",                       "provider": "fal",        "price_setting": "kling_price_usd",        "duration_options": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
+    "kling-v3":             {"label": "Kling 3.0",                       "provider": "fal",        "price_setting": "kling_price_usd",        "duration_options": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5, "end_frame": True},
     # Legacy slug aliases — Hugo's old jobs reference these strings;
     # `kling.LEGACY_ALIASES` maps them to the new model_names. Kept in
     # the registry so the dropdown still shows a sensible label.
@@ -148,6 +155,19 @@ VIDEO_MODELS: dict[str, dict] = {
     "higgsfield-lipsync":   {"label": "Higgsfield Lipsync",              "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [10, 15, 20, 30], "duration_default": 10},
     "higgsfield-speak":     {"label": "Higgsfield Speak",                "provider": "higgsfield", "price_setting": "higgsfield_price_usd",   "duration_options": [10, 15, 20, 30], "duration_default": 10},
 }
+
+# Video models that support a per-scene END FRAME (start→end interpolation).
+# SINGLE SOURCE OF TRUTH — the runner's end-frame gate (runner._resolve_end_image),
+# the /api/generations/models payload flag, and the frontend's end-frame UI all
+# read this (derived from each row's `end_frame` flag). A model NOT in this set
+# silently ignores any 🎯 end pose (Grok/Veo soft-degrade).
+END_FRAME_VIDEO_MODELS: frozenset[str] = frozenset(
+    slug for slug, info in VIDEO_MODELS.items() if info.get("end_frame"))
+
+
+def supports_end_frame(model: str) -> bool:
+    """True if `model` interpolates start→end via a per-scene end frame."""
+    return model in END_FRAME_VIDEO_MODELS
 
 
 def video_duration_spec(model: str) -> dict:

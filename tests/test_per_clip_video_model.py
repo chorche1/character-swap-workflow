@@ -198,6 +198,10 @@ def test_clamp_scene_secs_is_model_aware() -> None:
     assert api._clamp_scene_secs("grok-imagine-1.5", 20.0) == 15.0
     assert api._clamp_scene_secs("grok-imagine-1.5", 2.0) == 3.0
     assert api._clamp_scene_secs("grok-imagine-1.5", 6.0) == 6.0
+    # Seedance 2.0 (fal): integer opts [4..15] (min 4, not 3).
+    assert api._clamp_scene_secs("seedance-2.0", 20.0) == 15.0
+    assert api._clamp_scene_secs("seedance-2.0", 2.0) == 4.0
+    assert api._clamp_scene_secs("seedance-2.0", 6.0) == 6.0
 
 
 def test_scene_duration_honors_long_nonkling_override() -> None:

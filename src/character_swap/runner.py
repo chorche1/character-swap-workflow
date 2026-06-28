@@ -18,6 +18,7 @@ from character_swap import (
     pipeline,
     push,
     reengineer,
+    runner_media,
     swap_qc,
     video_qc,
 )
@@ -1071,14 +1072,16 @@ def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
 
 async def _resolve_end_image(job: Job, jc: JobCharacter,
                              scene_id: str | None) -> Path | None:
-    """Optional per-scene END FRAME (Kling 3.0 only): prefer the frame
+    """Optional per-scene END FRAME (end-frame-capable models only — Kling 3.0
+    and Seedance 2.0; see runner_media.END_FRAME_VIDEO_MODELS): prefer the frame
     already generated (the character swapped into the scene's end pose);
     fall back to swapping now if it's missing. Errors are surfaced on
     `end_frame_errors` + an event, never swallowed. Shared by the initial
     batch, "+ N more" AND per-clip retries — the latter two previously
     DROPPED the end frame on regenerated clips (review 2026-06-13), which
     also broke Reengineer's reanimate path."""
-    if scene_id is None or _eff_video_model_for_scene(job, scene_id) != "kling-v3":
+    if scene_id is None or not runner_media.supports_end_frame(
+            _eff_video_model_for_scene(job, scene_id)):
         return None
     pre = (jc.end_frame_paths or {}).get(scene_id)
     if pre and Path(pre).exists():

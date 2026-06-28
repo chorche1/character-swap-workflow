@@ -2082,6 +2082,7 @@ _VIDEO_MODEL_KEYS: dict[str, str] = {
     "kling-v3": "fal",   # Kling 3.0 routes through fal.ai, not the official Kling API
     "veo-3.1-fast": "fal",  # Veo 3.1 Fast also routes through fal.ai
     "grok-imagine-1.5": "fal",  # Grok Imagine 1.5 also routes through fal.ai
+    "seedance-2.0": "fal",      # Seedance 2.0 also routes through fal.ai
 }
 
 
@@ -2557,8 +2558,9 @@ async def set_scene_end_frame(job_id: str, scene_id: str,
                               background: BackgroundTasks,
                               file: UploadFile = File(...)) -> dict:
     """Attach an optional END POSE to a scene. Each character is swapped into
-    the pose so that scene's Kling 3.0 clip interpolates from the approved image
-    (start) to the swapped end frame (end). Only Kling 3.0 honors it — other
+    the pose so that scene's clip interpolates from the approved image (start)
+    to the swapped end frame (end). Only end-frame-capable models honor it
+    (Kling 3.0 / Seedance 2.0 — see runner_media.END_FRAME_VIDEO_MODELS); other
     models ignore the end frame. Locked once movement is submitted.
 
     If Step-3 variants already exist, kicks a background regeneration so the
@@ -3305,6 +3307,10 @@ def _models_payload() -> dict:
             row["duration_options"] = list(info["duration_options"])
             row["duration_default"] = info.get("duration_default",
                                                info["duration_options"][0])
+        # Per-scene end-frame (start→end interpolation) capability — lets the
+        # frontend show/hide the 🎯 end-frame UI without hardcoding model slugs.
+        if info.get("end_frame"):
+            row["end_frame"] = True
         return row
     return {
         "image":  [_entry(s, i) for s, i in runner_media.IMAGE_MODELS.items()],

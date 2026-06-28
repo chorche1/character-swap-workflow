@@ -344,17 +344,18 @@ class Job(BaseModel):
     # scene has an entry, THAT scene's clip uses the override provider instead.
     # Resolution order in the runner: per-scene → `video_model` → "grok-imagine".
     # Mirrors `durations_by_scene` / `movement_prompts`; old jobs load empty.
-    # NOTE: only `kling-v3` honors per-scene END FRAMES — a scene overridden to
-    # a non-Kling model ignores its end pose (the Step-4 UI warns; Reengineer
-    # hides the control for that scene).
+    # NOTE: only end-frame-capable models (kling-v3, seedance-2.0 — see
+    # runner_media.END_FRAME_VIDEO_MODELS) honor per-scene END FRAMES; a scene
+    # overridden to a model without it (Grok/Veo) ignores its end pose (the
+    # Step-4 UI warns; Reengineer hides the control for that scene).
     video_models_by_scene: dict[str, str] = Field(default_factory=dict)
     # Optional per-scene END-POSE reference (scene_id → uploaded image path).
     # Set on a scene in Step 1. During Step 3 the runner SWAPS each character
     # into the pose (so the end frame features the same person) and hands the
-    # result to Kling 3.0 as the end frame — first/last-frame interpolation.
-    # Keyed by scene_id, so a duplicated scene can carry a DIFFERENT end pose
-    # (same start, different end → different clip). Only kling-v3 honors it;
-    # other models ignore it.
+    # result to an end-frame-capable model (Kling 3.0 / Seedance 2.0) as the
+    # end frame — first/last-frame interpolation. Keyed by scene_id, so a
+    # duplicated scene can carry a DIFFERENT end pose (same start, different
+    # end → different clip). Models without end-frame support ignore it.
     end_frames_by_scene: dict[str, str] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom

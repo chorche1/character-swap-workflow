@@ -182,6 +182,16 @@ class Settings(BaseSettings):
     # is Grok-1.5-only but fal doesn't publish its per-second price). Grok
     # 1.5 accepts every resolution at every duration (no per-clip downgrade).
     grok_fal_resolution: str = Field(default="720p", validation_alias="GROK_FAL_RESOLUTION")
+    # fal Seedance 2.0 (image-to-video) tier: "standard" (default, up to 4k,
+    # $0.302/s @720p) or "fast" (cheaper $0.242/s, caps at 720p — identical
+    # schema/capabilities otherwise per fal). Submit + poll must use the same
+    # tier (fal request_ids are endpoint-scoped).
+    seedance_fal_tier: str = Field(default="standard", validation_alias="SEEDANCE_FAL_TIER")
+    # fal Seedance 2.0 render resolution: "480p" / "720p" / "1080p" / "4k".
+    # Default 720p (Hugo 2026-06-29). The FAST tier auto-downgrades 1080p/4k
+    # to 720p. Seedance is the priciest video model in the stack — 1080p is
+    # $0.682/s (~4x Kling 3.0 Pro audio-on).
+    seedance_fal_resolution: str = Field(default="720p", validation_alias="SEEDANCE_FAL_RESOLUTION")
     # Local ffmpeg encode quality for EVERY intermediate/final re-encode in
     # video_edit.py (trims, concat, time-stretch, ASS caption burn). A clip
     # passes through 2-4 of these generations, so per-generation loss

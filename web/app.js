@@ -2429,6 +2429,15 @@ function studio() {
       return { options: [5], default: 5 };
     },
 
+    // True if a Reengineer scene's effective model supports a per-scene END
+    // FRAME (Kling 3.0 / Seedance 2.0). Data-driven from the registry
+    // `end_frame` flag — gates the 🎯 end-frame controls for that scene.
+    reSceneSupportsEndFrame(run, sc) {
+      const slug = this.reSceneEffModel(run, sc);
+      const m = (this.models.video || []).find(x => x.slug === slug);
+      return !!(m && m.end_frame);
+    },
+
     // Whole-second clip length, model-aware. Kling keeps the exact auto/
     // override behavior; other models use their own options (mirror of
     // _scene_duration). Used for the cost preview + the non-Kling length select.
@@ -7142,6 +7151,14 @@ function studio() {
       const slug = this.sceneVideoModel(scene);
       return (this.models.video || []).find(m => m.slug === slug)
         || { slug, label: slug, available: true };
+    },
+
+    // True if the scene's effective model supports a per-scene END FRAME
+    // (start→end interpolation: Kling 3.0 / Seedance 2.0). Data-driven from
+    // the registry `end_frame` flag — no hardcoded slug. Gates the
+    // "ignores end pose" warning so it only fires for models that DROP it.
+    sceneSupportsEndFrame(scene) {
+      return !!this.sceneVideoModelEntry(scene).end_frame;
     },
 
     // Duration spec gated to the SCENE's effective model — so a scene

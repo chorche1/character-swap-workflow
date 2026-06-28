@@ -792,9 +792,9 @@
                             x-text="m.label + (m.available ? '' : '  (locked)')"></option>
                   </template>
                 </select>
-                <span x-show="(swapVideoModelsByScene[scene.scene_id] || '') && sceneVideoModel(scene) !== 'kling-v3' && hasEndPose(scene.scene_id)"
+                <span x-show="(swapVideoModelsByScene[scene.scene_id] || '') && !sceneSupportsEndFrame(scene) && hasEndPose(scene.scene_id)"
                       class="text-amber-500 cursor-help"
-                      title="Bara Kling 3.0 tolkar slutposen — denna scen ignorerar den.">⚠ ignorerar slutpose</span>
+                      title="Bara modeller med slutpose-stöd (Kling 3.0 / Seedance 2.0) tolkar slutposen — denna scen ignorerar den.">⚠ ignorerar slutpose</span>
                 <label class="text-neutral-500 dark:text-neutral-400 ml-1">Duration:</label>
                 <!-- Per-option :selected, NOT a select-level :value — the latter
                      evaluates before the option x-for populates and silently
@@ -1771,9 +1771,10 @@
                       <div class="flex items-center gap-3 text-[10px] text-neutral-500 flex-wrap">
                         <!-- Per-scene video-model override (opt-in, Hugo
                              2026-06-18). "" = run default (Kling 3.0). A
-                             non-Kling scene loses end-frame interpolation +
-                             auto-length (soft degrade) — its End-frame control
-                             and Kling-specific hints below hide. -->
+                             model WITHOUT end-frame support (Grok/Veo) loses
+                             end-frame interpolation (soft degrade) — its
+                             End-frame control + Kling-specific hints below
+                             hide. Seedance 2.0 keeps the End-frame control. -->
                         <label data-keep-focus class="flex items-center gap-1" title="Videomodell för just detta klipp (annars körens standard)">
                           Modell
                           <select class="px-1 py-0.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"
@@ -2086,10 +2087,10 @@
                   </div>
                   <!-- 🎯 END FRAME per scene (Hugo 2026-06-13): upload an end
                        pose AFTER the scenes exist → every character is
-                       swapped into it → the scene's Kling 3.0 clip
-                       interpolates start → end. NOT a new scene. Only
-                       kling-v3 honors it. -->
-                  <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && reSceneEffModel(r, sc) === 'kling-v3'"
+                       swapped into it → the scene's clip interpolates
+                       start → end. NOT a new scene. Only end-frame-capable
+                       models honor it (Kling 3.0 / Seedance 2.0). -->
+                  <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && reSceneSupportsEndFrame(r, sc)"
                        class="flex gap-2 mt-1 flex-wrap items-center text-[10px]">
                     <template x-if="!reSceneEndFrameUrl(r, sc)">
                       <label class="text-indigo-500 hover:underline cursor-pointer"
