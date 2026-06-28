@@ -194,6 +194,10 @@ def test_clamp_scene_secs_is_model_aware() -> None:
     # Off-grid value snaps to the model's NEAREST option, not Kling's ceiling.
     assert api._clamp_scene_secs("veo", 20.0) == 8.0             # veo opts [4,6,8]
     assert api._clamp_scene_secs("veo-3.1-fast", 6.0) == 6.0
+    # Grok Imagine 1.5 (fal): integer opts [3..15], like Kling's range.
+    assert api._clamp_scene_secs("grok-imagine-1.5", 20.0) == 15.0
+    assert api._clamp_scene_secs("grok-imagine-1.5", 2.0) == 3.0
+    assert api._clamp_scene_secs("grok-imagine-1.5", 6.0) == 6.0
 
 
 def test_scene_duration_honors_long_nonkling_override() -> None:

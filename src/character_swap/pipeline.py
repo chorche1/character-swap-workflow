@@ -844,6 +844,16 @@ def submit_video(
             generate_audio=generate_audio if generate_audio is not None else True,
             app_job_id=job_id,
         )
+    if model == "grok-imagine-1.5":
+        # Grok Imagine 1.5 routed through fal.ai. Native audio is ALWAYS on
+        # (no toggle), aspect is inferred from the input frame, and there is no
+        # end-frame input (a scene on this model ignores any end pose).
+        from character_swap.clients import fal_grok
+        return fal_grok.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur,
+            app_job_id=job_id,
+        )
     if model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         return kling.submit_kling(
             image=image, prompt=movement_prompt,
@@ -972,6 +982,9 @@ def wait_for_video(
     elif model == "veo-3.1-fast":
         from character_swap.clients import fal_veo
         fal_veo.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
+    elif model == "grok-imagine-1.5":
+        from character_swap.clients import fal_grok
+        fal_grok.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
     elif model in kling.KLING_MODELS or model in kling.LEGACY_ALIASES:
         kling.wait_for_kling(task_id=job_id, dest=dest)
     elif model in {"runway-gen4", "runway-gen3-alpha"}:

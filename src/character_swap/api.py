@@ -2081,6 +2081,7 @@ _VIDEO_MODEL_KEYS: dict[str, str] = {
     "kling-1.6": "kling",
     "kling-v3": "fal",   # Kling 3.0 routes through fal.ai, not the official Kling API
     "veo-3.1-fast": "fal",  # Veo 3.1 Fast also routes through fal.ai
+    "grok-imagine-1.5": "fal",  # Grok Imagine 1.5 also routes through fal.ai
 }
 
 

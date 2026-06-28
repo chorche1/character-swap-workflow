@@ -105,6 +105,12 @@ VIDEO_MODELS: dict[str, dict] = {
     # veo_fal_resolution (default 1080p). No end-frame on this endpoint, so a
     # scene overridden to it ignores its end pose (soft-degrade). Bills on FAL.
     "veo-3.1-fast":         {"label": "Veo 3.1 Fast (fal)",              "provider": "fal",        "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
+    # Grok Imagine 1.5 routed through fal.ai (image-to-video) — xAI's newest
+    # Grok video model. Integer duration 3–15s, native synced audio ALWAYS on,
+    # renders at settings.grok_fal_resolution (default 720p). No end-frame on
+    # this endpoint, so a scene overridden to it ignores its end pose (same
+    # soft-degrade as veo-3.1-fast). Bills on FAL_API_KEY.
+    "grok-imagine-1.5":     {"label": "Grok Imagine 1.5 (fal)",          "provider": "fal",        "price_setting": "grok_video_price_usd",   "duration_options": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
     # Kling — every confirmed model_name string from Kling's official i2v API
     # (Singapore region, May 2026). Slug == API name to keep the mapping
     # trivial in `kling._resolve_model_name`. Legacy aliases (`kling`,

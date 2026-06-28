@@ -176,6 +176,12 @@ class Settings(BaseSettings):
     # pro so clips from different models in one reel share sharpness); 720p is
     # fal's own default (cheaper/faster). fal-routed Veo bills on FAL_API_KEY.
     veo_fal_resolution: str = Field(default="1080p", validation_alias="VEO_FAL_RESOLUTION")
+    # fal Grok Imagine 1.5 (image-to-video) render resolution: "480p" /
+    # "720p" / "1080p". Default 720p (Hugo 2026-06-29 — verified fal pricing
+    # tier at $0.14/s with native audio included; 480p is ~half cost, 1080p
+    # is Grok-1.5-only but fal doesn't publish its per-second price). Grok
+    # 1.5 accepts every resolution at every duration (no per-clip downgrade).
+    grok_fal_resolution: str = Field(default="720p", validation_alias="GROK_FAL_RESOLUTION")
     # Local ffmpeg encode quality for EVERY intermediate/final re-encode in
     # video_edit.py (trims, concat, time-stretch, ASS caption burn). A clip
     # passes through 2-4 of these generations, so per-generation loss
