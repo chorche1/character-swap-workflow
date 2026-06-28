@@ -891,6 +891,10 @@ class RenameCharacterBody(BaseModel):
     voice_provider: str | None = None
     # "es" → mark the character Spanish-speaking; "" / "en" clears it (English).
     language: str | None = None
+    # Set which uploaded reference image is the character's primary/preset image
+    # (the star in the library, the default swap source). Must be an image_id
+    # already on this character.
+    primary_image_id: str | None = None
 
 
 @app.patch("/api/characters/{char_id}")
@@ -929,6 +933,17 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
         # Only "es" is a real value; anything else (incl. "" / "en") = default
         # English, stored as None so unflagged characters never change behavior.
         asset.language = "es" if body.language.strip().lower() == "es" else None
+    if body.primary_image_id is not None:
+        # Repoint the preset/primary image. The id must be one of this
+        # character's own uploaded images. `filename` is kept in lockstep so
+        # the legacy `url`/`filename` fields (the library thumbnail + default
+        # swap source) follow the new primary.
+        new_primary = next(
+            (i for i in asset.images if i.image_id == body.primary_image_id), None)
+        if new_primary is None:
+            raise HTTPException(404, "Image not found on this character")
+        asset.primary_image_id = new_primary.image_id
+        asset.filename = new_primary.filename
     s.update_character(asset)
     for job in affected_jobs:
         s.update_job(job)

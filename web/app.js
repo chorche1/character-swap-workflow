@@ -5945,6 +5945,21 @@ function studio() {
       await this.loadLibrary();
     },
 
+    // Set which uploaded reference image is the character's primary/preset
+    // image — the ★ in the library and the default swap source for new jobs.
+    // Called by the ☆ button that appears on every non-primary reference image.
+    async setPrimaryImage(charId, imageId) {
+      const ch = (this.library || []).find(c => c.char_id === charId);
+      if (ch && ch.primary_image_id === imageId) return;  // already primary
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ primary_image_id: imageId }),
+      });
+      if (!r.ok) { this.notifyError('Could not set primary image: ' + await r.text()); return; }
+      await this.loadLibrary();
+    },
+
     // Mark a character Spanish-speaking (🇪🇸 toggle on the library card). When
     // on, every video this character makes has its quoted dialogue auto-
     // translated to neutral Latin American Spanish (Hugo 2026-06-26). Sends

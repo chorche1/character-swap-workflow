@@ -4351,9 +4351,16 @@
                          :class="ch.primary_image_id === img.image_id
                                    ? 'border-amber-400 ring-1 ring-amber-300'
                                    : 'border-neutral-200 dark:border-neutral-800'" />
+                    <!-- Primary marker (always shown) vs. set-primary control
+                         (hover, on every non-primary image). Clicking the ☆ makes
+                         that image the character's preset/default swap source. -->
                     <div x-show="ch.primary_image_id === img.image_id"
                          class="absolute top-0.5 left-0.5 bg-amber-500 text-white text-[9px] px-1 py-0.5 rounded leading-none"
-                         title="Primary image">★</div>
+                         title="Primary reference image — the preset swap source for this character">★</div>
+                    <button x-show="ch.primary_image_id !== img.image_id"
+                            class="absolute top-0.5 left-0.5 bg-neutral-900/70 hover:bg-amber-500 text-white text-[10px] w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 leading-none transition-colors"
+                            title="Set as primary reference image"
+                            @click.stop="setPrimaryImage(ch.char_id, img.image_id)">☆</button>
                     <button class="absolute top-0.5 right-0.5 bg-neutral-900/70 text-white text-[10px] w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 leading-none"
                             title="Remove this image"
                             @click.stop="deleteCharacterImage(ch.char_id, img.image_id)">✕</button>
