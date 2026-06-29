@@ -505,7 +505,14 @@ function studio() {
       this.selectedCharacters = this.library.map(c => c.char_id);
       await this.loadProjects();
       await this.loadJobsList();
-      await this.loadDailyCost();
+      // FIRE-AND-FORGET, never await: the daily-cost badge is peripheral, and
+      // its /api/costs endpoint can hang for 30s+ when the default thread pool
+      // is saturated by an in-flight reengineer run's video polling (the
+      // costs_since file scan itself is <20ms — the wait is executor queueing).
+      // Awaiting it here stalled the WHOLE init() before loadReengineerHistory()
+      // below, so swap/reengineer runs + generations never rendered while a big
+      // job was animating. It self-refreshes every 60s + after each job anyway.
+      this.loadDailyCost();
       this.loadDisk();
       await this.loadGenModels();
       // Eagerly load ElevenLabs voices + editor templates once at boot so
@@ -5232,11 +5239,20 @@ function studio() {
     },
 
     async loadDailyCost() {
+      // Bound the request: /api/costs can hang when the server's thread pool is
+      // busy with an animating run's video polls. Without this, the 60s refresh
+      // interval would leave a dead connection open on every tick.
       try {
-        const r = await fetch('/api/costs?days=1');
-        if (r.ok) {
-          const data = await r.json();
-          this.dailyCost = data.usd;
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 10000);
+        try {
+          const r = await fetch('/api/costs?days=1', { signal: ctrl.signal });
+          if (r.ok) {
+            const data = await r.json();
+            this.dailyCost = data.usd;
+          }
+        } finally {
+          clearTimeout(t);
         }
       } catch (_) {}
     },
