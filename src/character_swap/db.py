@@ -278,6 +278,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE generations ADD COLUMN use_director INTEGER NOT NULL DEFAULT 0")
     if "director_prompt" not in gen_cols:
         conn.execute("ALTER TABLE generations ADD COLUMN director_prompt TEXT")
+    # kind=editor JSON bag (saved multi-clip reels + repurpose pointer, 2026-06-29).
+    # One column holds the whole sub-document so future Editor fields are free.
+    if "editor_meta" not in gen_cols:
+        conn.execute("ALTER TABLE generations ADD COLUMN editor_meta TEXT")
     # Per-character preset ElevenLabs voice. Auto-applied when generating a
     # video for the character via the Editor tab's optional "Character"
     # dropdown OR the Swap-flow Step 6 compile feature.
@@ -918,8 +922,9 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
                                     use_director, director_prompt,
                                     status, output_path,
                                     provider_job_id, cost_usd, error,
+                                    editor_meta,
                                     created_at, completed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(gen_id) DO UPDATE SET
              kind = excluded.kind,
              model = excluded.model,
@@ -938,6 +943,7 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
              provider_job_id = excluded.provider_job_id,
              cost_usd = excluded.cost_usd,
              error = excluded.error,
+             editor_meta = excluded.editor_meta,
              completed_at = excluded.completed_at""",
         (
             g.gen_id, str(g.kind), g.model, g.prompt, g.aspect_ratio,
@@ -946,6 +952,7 @@ def upsert_generation(conn: sqlite3.Connection, g: MediaGeneration) -> None:
             1 if g.use_director else 0, g.director_prompt,
             str(g.status), g.output_path, g.provider_job_id,
             g.cost_usd, g.error,
+            _reel_json.dumps(g.editor_meta) if g.editor_meta is not None else None,
             _iso(g.created_at), _iso(g.completed_at),
         ),
     )
@@ -982,6 +989,10 @@ def _gen_from_row(r: sqlite3.Row, ref_paths: list[str]) -> MediaGeneration:
         provider_job_id=r["provider_job_id"],
         cost_usd=r["cost_usd"],
         error=r["error"],
+        editor_meta=(
+            _reel_json.loads(r["editor_meta"])
+            if "editor_meta" in keys and r["editor_meta"] else None
+        ),
         created_at=_parse_iso(r["created_at"]),
         completed_at=_parse_iso(r["completed_at"]) if r["completed_at"] else None,
     )

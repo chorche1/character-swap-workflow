@@ -1000,3 +1000,98 @@ async def repurpose_job_videos(job_id: str, **kwargs) -> None:
     with the repurpose slot — accepts the same settings kwargs (incl.
     `playback_speed`)."""
     await compile_job_videos(job_id, slot=_REPURPOSE_SLOT, **kwargs)
+
+
+async def repurpose_editor_job(
+    gen_id: str,
+    *,
+    template: str = "capcut-bluebox",
+    overrides: dict | None = None,
+    enable_trim: bool = True,
+    enable_captions: bool = True,
+    enable_wpm_normalize: bool = False,
+    target_wpm: float = 190.0,
+    threshold_db: float = -24.0,
+    min_silence_secs: float = 0.4,
+    pad_secs: float = 0.1,
+    enable_gap_trim: bool = False,
+    gap_max_secs: float = 0.35,
+    playback_speed: float = 1.0,
+    enable_voice_swap: bool = False,
+    voice_override: str | None = None,
+    settings_snapshot: dict | None = None,
+) -> None:
+    """Editor-tab 🔁 Repurpose: build a HORIZONTALLY-MIRRORED copy of a SAVED
+    multi-clip reel (captions upright) from its ORIGINAL source clips — the
+    same `run_editor_pipeline(mirror_h=True)` seam Swap/Reengineer use. The
+    mirrored result + its status ride on the saved generation's
+    `editor_meta.repurpose` (mirroring the Swap character card's repurpose
+    fields), so the Editor card shows the copy inline.
+
+    Fails LOUDLY (status=failed, named reason) if a source clip went missing or
+    the pipeline errors — never ships a half-built reel. Non-destructive: the
+    original saved reel + its files are untouched, so the user just retries.
+    """
+    s = store()
+    gen = s.get_generation(gen_id)
+    if gen is None:
+        return
+    meta = dict(gen.editor_meta or {})
+    clip_paths = [Path(p) for p in (meta.get("clip_paths") or [])]
+
+    def _set_repurpose(**fields) -> None:
+        g = s.get_generation(gen_id)
+        if g is None:
+            return
+        m = dict(g.editor_meta or {})
+        rep = dict(m.get("repurpose") or {})
+        rep.update(fields)
+        m["repurpose"] = rep
+        g.editor_meta = m
+        s.update_generation(g)
+
+    # Validate sources up front — refuse loudly rather than build a broken reel.
+    missing = [p for p in clip_paths if not p.exists()]
+    if not clip_paths or missing:
+        reason = ("inga sparade källklipp att repurposa" if not clip_paths
+                  else (f"saknar {len(missing)} källklipp på disk: "
+                        + ", ".join(p.name for p in missing)))
+        _set_repurpose(status="failed", error=reason, video_path=None)
+        push.notify("Repurpose misslyckades", reason,
+                    priority=5, tags=["rotating_light"])
+        return
+
+    new_edit_id = "ed_" + secrets.token_hex(5)
+    edit_dir = settings.output_dir / "editor" / new_edit_id
+    edit_dir.mkdir(parents=True, exist_ok=True)
+    _set_repurpose(status="compiling", edit_id=new_edit_id, video_path=None,
+                   error=None, settings=settings_snapshot or {})
+
+    # Editor reels have no per-character preset voice — a voice swap only
+    # happens when the user picked an explicit override AND ticked the box.
+    eff_voice = (voice_override or None) if enable_voice_swap else None
+    try:
+        result = await run_editor_pipeline(
+            clip_paths,
+            edit_id=new_edit_id, edit_dir=edit_dir,
+            template=template, overrides=overrides,
+            enable_trim=enable_trim, enable_captions=enable_captions,
+            enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
+            threshold_db=threshold_db, min_silence_secs=min_silence_secs,
+            pad_secs=pad_secs, voice_id=eff_voice,
+            enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
+            playback_speed=playback_speed, mirror_h=True,
+            script_hint=(gen.prompt or None),
+        )
+    except Exception as e:  # noqa: BLE001 — surface ANY failure on the record
+        reason = f"{type(e).__name__}: {e}"
+        logger.warning("repurpose_editor_job %s failed: %s", gen_id, reason)
+        _set_repurpose(status="failed", error=reason[:300], video_path=None)
+        push.notify("Repurpose misslyckades", reason[:200],
+                    priority=5, tags=["rotating_light"])
+        return
+
+    _set_repurpose(status="done", edit_id=new_edit_id,
+                   video_path=str(result.final), error=None)
+    push.notify("Repurpose klar", "Spegelvänd reel byggd",
+                priority=3, tags=["white_check_mark"])

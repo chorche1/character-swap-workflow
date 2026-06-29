@@ -4254,6 +4254,66 @@
         </div>
       </section>
 
+      <!-- Saved multi-clip reels (persistent across reload/restart, 2026-06-29).
+           Each can be 🔁 Repurposed into a mirror-flipped copy, exactly like
+           Swap/Reengineer finals. Backed by /api/generations?kind=editor. -->
+      <div x-show="editorJobs.length > 0" class="mb-6">
+        <h3 class="text-sm font-semibold mb-2 text-neutral-500 dark:text-neutral-400">
+          💾 Sparade reels <span class="text-[10px] text-neutral-400" x-text="`(${editorJobs.length})`"></span>
+          <span class="ml-2 text-[10px] font-normal text-neutral-400">— sparas automatiskt · tryck 🔁 för en spegelvänd kopia</span>
+        </h3>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+          <template x-for="g in editorJobs" :key="'ej-'+g.gen_id">
+            <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden bg-white dark:bg-neutral-900">
+              <video :src="g.output_url" controls preload="metadata" class="w-full bg-black"></video>
+              <div class="p-2 text-xs space-y-1.5">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-neutral-700 dark:text-neutral-300 truncate" :title="g.prompt" x-text="(g.prompt || g.gen_id).slice(0, 60)"></span>
+                  <button class="text-neutral-400 hover:text-rose-500 shrink-0" title="Ta bort" @click="deleteEditorJob(g)">✕</button>
+                </div>
+                <div class="flex items-center justify-between text-[10px] text-neutral-500 dark:text-neutral-400">
+                  <span x-text="(g.editor && g.editor.n_clips ? g.editor.n_clips + ' klipp · ' : '') + (g.editor && g.editor.settings && g.editor.settings.template || '')"></span>
+                  <a :href="g.output_url" :download="friendlyName(g)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ ladda ner</a>
+                </div>
+
+                <!-- Repurpose action + result (mirrors Swap's character card) -->
+                <div class="pt-1 border-t border-neutral-100 dark:border-neutral-800">
+                  <template x-if="!(g.editor && g.editor.repurpose_status)">
+                    <button class="w-full px-2 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-[11px] font-medium"
+                            @click="openRepurposeModal('editor', g)">🔁 Repurpose (spegelvänd)</button>
+                  </template>
+                  <template x-if="g.editor && g.editor.repurpose_status === 'compiling'">
+                    <div class="flex items-center gap-2 text-[11px] text-fuchsia-500">
+                      <span class="inline-block w-3 h-3 border-2 border-fuchsia-500 border-t-transparent rounded-full animate-spin"></span>
+                      Speglar reel:en…
+                    </div>
+                  </template>
+                  <template x-if="g.editor && g.editor.repurpose_status === 'done'">
+                    <div class="space-y-1">
+                      <div class="flex items-center justify-between text-[10px] text-fuchsia-500">
+                        <span>🔁 Spegelvänd kopia</span>
+                        <div class="flex items-center gap-2">
+                          <a :href="g.editor.repurpose_url" :download="friendlyName(g, 'mp4').replace(/\.mp4$/, '-mirror.mp4')" class="hover:underline">↓</a>
+                          <button class="hover:text-fuchsia-700" title="Repurposa igen" @click="openRepurposeModal('editor', g)">↻</button>
+                        </div>
+                      </div>
+                      <video :src="g.editor.repurpose_url" controls preload="metadata" class="w-full bg-black rounded"></video>
+                    </div>
+                  </template>
+                  <template x-if="g.editor && g.editor.repurpose_status === 'failed'">
+                    <div class="space-y-1">
+                      <div class="text-[10px] text-rose-500" x-text="'Repurpose misslyckades: ' + (g.editor.repurpose_error || '')"></div>
+                      <button class="w-full px-2 py-1 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white text-[11px] font-medium"
+                              @click="openRepurposeModal('editor', g)">↻ Försök igen</button>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div x-show="editorHistory.length > 0">
         <h3 class="text-sm font-semibold mb-2 text-neutral-500 dark:text-neutral-400">Earlier renders</h3>
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -4667,11 +4727,10 @@
       <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
         <div>
           <div class="text-sm font-semibold">🔁 Repurpose — spegelvänd kopia</div>
-          <div class="text-xs text-neutral-500 dark:text-neutral-400">
-            Alla finalvideor speglas horisontellt (texten förblir rättvänd).
-            Originalen behålls; den spegelvända versionen läggs till. Välj
-            edit-inställningar nedan.
-          </div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400"
+               x-text="repurposeModal.kind === 'editor'
+                 ? 'Reel:en speglas horisontellt (texten förblir rättvänd). Originalet behålls; den spegelvända kopian läggs till. Välj edit-inställningar nedan.'
+                 : 'Alla finalvideor speglas horisontellt (texten förblir rättvänd). Originalen behålls; den spegelvända versionen läggs till. Välj edit-inställningar nedan.'"></div>
         </div>
         <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
                 @click="repurposeModal.open = false">✕</button>
@@ -4734,7 +4793,7 @@
                    class="ml-1 w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
           </label>
         </div>
-        <label class="block" :class="repurposeSettings.enableVoiceSwap ? '' : 'opacity-40'">Röst-override (alla karaktärer)
+        <label class="block" :class="repurposeSettings.enableVoiceSwap ? '' : 'opacity-40'"><span x-text="repurposeModal.kind === 'editor' ? 'Röstbyte (ElevenLabs)' : 'Röst-override (alla karaktärer)'"></span>
           <select x-model="repurposeSettings.voiceOverride"
                   :disabled="!repurposeSettings.enableVoiceSwap || !elevenlabsAvailable()"
                   class="mt-1 w-full px-2 py-1 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded">

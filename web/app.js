@@ -143,6 +143,7 @@ function studio() {
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
+    _editorRepurposePollTimer: null,  // polls saved-reel repurpose status
     // variant_id → Date.now() set on per-slot retry. A retry overwrites the
     // SAME file path, so the thumbnail <img> needs a cache-busting query to
     // show the regenerated image instead of the browser-cached old one.
@@ -346,6 +347,9 @@ function studio() {
     _dragPreviewH: 1,
     editorTemplates: [],
     editorHistory: [],
+    // Persistent saved multi-clip reels (kind=editor). Loaded from the API at
+    // boot so they survive reload/restart — each can be 🔁 Repurposed.
+    editorJobs: [],
     // --- CapCut-style timeline editor (operates on the LATEST rendered video) ---
     timeline: {
       open: false,                 // is the timeline panel visible?
@@ -509,6 +513,7 @@ function studio() {
       if (this.elevenlabsAvailable()) this.loadElevenlabsVoices();
       this.loadEditorTemplates();
       await this.loadGenerations();
+      this._resumeEditorRepurposePolling();
       await this.loadSwapDefaults();
       this.loadReengineerHistory();
       // Restore last-used picks per-tab so the model/voice/aspect we used
@@ -1070,16 +1075,26 @@ function studio() {
 
     async loadGenerations() {
       try {
-        const [iR, vR, aR, auR] = await Promise.all([
+        const [iR, vR, aR, auR, eR] = await Promise.all([
           fetch('/api/generations?kind=image'),
           fetch('/api/generations?kind=video'),
           fetch('/api/generations?kind=avatar'),
           fetch('/api/generations?kind=audio'),
+          fetch('/api/generations?kind=editor'),
         ]);
         if (iR.ok) this.imageHistory = await iR.json();
         if (vR.ok) this.videoHistory = await vR.json();
         if (aR.ok) this.avatarHistory = await aR.json();
         if (auR.ok) this.audioHistory = await auR.json();
+        if (eR.ok) this.editorJobs = await eR.json();
+      } catch (_) {}
+    },
+
+    // Refresh just the saved-reels list (after a render / repurpose / delete).
+    async loadEditorJobs() {
+      try {
+        const r = await fetch('/api/generations?kind=editor');
+        if (r.ok) this.editorJobs = await r.json();
       } catch (_) {}
     },
 
@@ -1281,6 +1296,22 @@ function studio() {
             created_at: r.completed_at || r.created_at,
           });
         }
+      }
+      // Saved multi-clip Editor reels (+ their mirrored repurpose copy).
+      for (const g of this.editorJobs) {
+        if (g.output_url) out.push({
+          kind: 'editor', id: g.gen_id, tab: 'editor',
+          thumb: g.output_url,
+          label: (g.prompt || g.gen_id || '').toString().slice(0, 40),
+          created_at: g.completed_at || g.created_at,
+        });
+        const rp = g.editor && g.editor.repurpose_url;
+        if (rp) out.push({
+          kind: 'editor', id: g.gen_id, tab: 'editor',
+          thumb: rp,
+          label: '🔁 ' + (g.prompt || g.gen_id || '').toString().slice(0, 37),
+          created_at: g.completed_at || g.created_at,
+        });
       }
       out.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
       return out.slice(0, 50);
@@ -2245,6 +2276,33 @@ function studio() {
     // 'reengineer' (pass the run) or 'swap' (uses the active job).
     openRepurposeModal(kind, run) {
       let seed;
+      if (kind === 'editor') {
+        // Saved multi-clip reel: seed from the reel's own settings (and the
+        // last repurpose settings if it's been repurposed before).
+        const es = (run.editor && run.editor.settings) || {};
+        const rs = (run.editor && run.editor.repurpose_settings) || {};
+        seed = {
+          template: es.template || 'capcut-bluebox',
+          captionSize: (es.overrides && es.overrides.size) || 60,
+          enableTrim: es.enable_trim !== false,
+          enableCaptions: es.enable_captions !== false,
+          enableWpmNormalize: !!es.enable_wpm_normalize,
+          targetWpm: es.target_wpm || 190,
+          enableGapTrim: !!es.enable_gap_trim,
+          gapMaxSecs: es.gap_max_secs || 0.35,
+          playbackSpeed: es.playback_speed || 1.0,
+          thresholdDb: es.threshold_db ?? -24,
+          minSilenceSecs: es.min_silence_secs || 0.4,
+          padSecs: es.pad_secs ?? 0.1,
+          enableVoiceSwap: !!(es.voice_id),
+          voiceOverride: es.voice_id || '',
+          ...this._mapStoredToReAsm(rs),
+        };
+        this.repurposeModal = { open: true, kind: 'editor',
+                                id: run.gen_id, busy: false };
+        this.repurposeSettings = seed;
+        return;
+      }
       if (kind === 'reengineer') {
         seed = { ...this.reAsmFor(run),
                  ...this._mapStoredToReAsm(run.repurpose_settings) };
@@ -2294,6 +2352,8 @@ function studio() {
         const body = this._repurposeBody();
         const url = m.kind === 'reengineer'
           ? `/api/reengineer/${m.id}/repurpose`
+          : m.kind === 'editor'
+          ? `/api/editor/${m.id}/repurpose`
           : `/api/jobs/${m.id}/repurpose_videos`;
         if (m.kind === 'swap') body.persist_settings = true;
         const r = await fetch(url, {
@@ -2313,6 +2373,12 @@ function studio() {
         }
         if (m.kind === 'swap') {
           this.job = await r.json();   // chars flip to repurpose_status=compiling
+        } else if (m.kind === 'editor') {
+          const data = await r.json().catch(() => ({}));
+          // Merge the updated record (repurpose_status=compiling) + poll it.
+          const idx = this.editorJobs.findIndex(g => g.gen_id === m.id);
+          if (idx !== -1 && data && data.gen_id) this.editorJobs[idx] = data;
+          this._startEditorRepurposePolling(m.id);
         } else {
           const data = await r.json().catch(() => ({}));
           const stale = (data && data.stale_scenes) || [];
@@ -2325,10 +2391,60 @@ function studio() {
           this._startReengineerPolling();
         }
         this.repurposeModal.open = false;
-        this.notifyInfo('Repurpose startad — spegelvänder finalvideorna…');
+        this.notifyInfo('Repurpose startad — spegelvänder reel:en…');
       } finally {
         this.repurposeModal.busy = false;
       }
+    },
+
+    // Poll saved-reel repurpose status until every in-flight one settles. The
+    // worker is async (background task); there's no per-edit WebSocket, so we
+    // refetch the generation record. One shared timer covers all reels.
+    _startEditorRepurposePolling(genId) {
+      if (this._editorRepurposePollTimer) return;
+      this._editorRepurposePollTimer = setInterval(async () => {
+        const active = this.editorJobs.filter(
+          g => g.editor && g.editor.repurpose_status === 'compiling');
+        if (!active.length) {
+          clearInterval(this._editorRepurposePollTimer);
+          this._editorRepurposePollTimer = null;
+          return;
+        }
+        for (const g of active) {
+          try {
+            const r = await fetch('/api/generations/' + g.gen_id);
+            if (!r.ok) continue;
+            const updated = await r.json();
+            const idx = this.editorJobs.findIndex(x => x.gen_id === g.gen_id);
+            if (idx !== -1) this.editorJobs[idx] = updated;
+            const st = updated.editor && updated.editor.repurpose_status;
+            if (st === 'done' || st === 'failed') {
+              this.notifyMilestone(
+                st === 'done' ? 'Repurpose klar' : 'Repurpose misslyckades',
+                st === 'done'
+                  ? (updated.prompt || updated.gen_id || '').toString().slice(0, 80)
+                  : (updated.editor.repurpose_error || '').slice(0, 120),
+                { kind: st === 'done' ? 'done' : 'error',
+                  tag: `editor-repurpose-${g.gen_id}` });
+            }
+          } catch (_) {}
+        }
+      }, 4000);
+    },
+
+    // Resume polling on boot if a saved reel was mid-repurpose at last reload.
+    _resumeEditorRepurposePolling() {
+      if (this.editorJobs.some(
+            g => g.editor && g.editor.repurpose_status === 'compiling')) {
+        this._startEditorRepurposePolling();
+      }
+    },
+
+    async deleteEditorJob(gen) {
+      if (!confirm('Ta bort denna sparade reel (inkl. filer)?')) return;
+      const r = await fetch('/api/generations/' + gen.gen_id, { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Kunde inte ta bort: ' + await r.text()); return; }
+      this.editorJobs = this.editorJobs.filter(g => g.gen_id !== gen.gen_id);
     },
 
     async deleteReengineer(run) {
@@ -4193,6 +4309,9 @@ function studio() {
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }
+        // The backend persisted this reel (kind=editor) — refresh the saved
+        // list so it shows up immediately and can be repurposed.
+        this.loadEditorJobs();
       } finally {
         this.multiAutoEditing = false;
       }

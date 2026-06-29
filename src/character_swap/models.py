@@ -419,6 +419,13 @@ class GenKind(StrEnum):
     VIDEO = "video"
     AVATAR = "avatar"
     AUDIO = "audio"
+    # A saved multi-clip Editor reel (2026-06-29). Persisted so the user can
+    # come back after a reload/restart and find it — and press 🔁 Repurpose to
+    # get a mirror-flipped copy, exactly like Swap/Reengineer finals. All the
+    # Editor-specific data (ordered source clips, the settings used, and the
+    # repurpose pointer) rides in `MediaGeneration.editor_meta`; everything
+    # else maps cleanly (prompt = script, output_path = final mp4).
+    EDITOR = "editor"
 
 
 class GenStatus(StrEnum):
@@ -456,6 +463,17 @@ class MediaGeneration(BaseModel):
     provider_job_id: str | None = None            # external async id (Grok / Veo / Kling / HeyGen)
     cost_usd: float | None = None
     error: str | None = None
+    # kind=editor ONLY (2026-06-29): a free-form JSON bag holding everything a
+    # saved multi-clip Editor reel needs to be re-opened AND repurposed —
+    #   {edit_id, n_clips, clip_paths: [ordered ORIGINAL uploads],
+    #    settings: {template, voice_id, enable_*, target_wpm, playback_speed,
+    #               threshold_db, min_silence_secs, pad_secs, gap_max_secs,
+    #               overrides},
+    #    repurpose: None | {status, edit_id, video_path, error, settings}}
+    # Persisted as one JSON column in SQLite (the generations table uses
+    # enumerated columns, not the jobs' model_json blob) so future Editor
+    # fields slot in here for free.
+    editor_meta: dict | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     completed_at: datetime | None = None
 

@@ -5,6 +5,7 @@ import contextlib
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -47,6 +48,8 @@ from character_swap.models import (
     VideoVariant,
 )
 from character_swap.state import store
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".webm", ".flac"}
@@ -3264,7 +3267,7 @@ async def get_costs(days: float = 1.0) -> dict:
 # --- generations (Image / Video tabs) -----------------------------------------------
 
 def _gen_to_dict(gen: MediaGeneration) -> dict:
-    return {
+    out = {
         "gen_id": gen.gen_id,
         "kind": gen.kind.value,
         "model": gen.model,
@@ -3287,6 +3290,23 @@ def _gen_to_dict(gen: MediaGeneration) -> dict:
         "created_at": gen.created_at.isoformat() + "Z",
         "completed_at": (gen.completed_at.isoformat() + "Z") if gen.completed_at else None,
     }
+    # kind=editor: surface the saved-reel + repurpose sub-document so the
+    # Editor tab can render the card, seed the 🔁 modal, and show the mirrored
+    # result inline (mirrors the Swap character card's repurpose fields).
+    if gen.kind is GenKind.EDITOR:
+        meta = gen.editor_meta or {}
+        rep = meta.get("repurpose") or {}
+        out["editor"] = {
+            "edit_id": meta.get("edit_id") or gen.gen_id,
+            "n_clips": meta.get("n_clips"),
+            "settings": meta.get("settings") or {},
+            "repurpose_status": rep.get("status"),
+            "repurpose_url": (_file_url(Path(rep["video_path"]))
+                              if rep.get("video_path") else None),
+            "repurpose_error": rep.get("error"),
+            "repurpose_settings": rep.get("settings") or {},
+        }
+    return out
 
 
 def _models_payload() -> dict:
@@ -3552,6 +3572,21 @@ async def delete_generation(gen_id: str) -> dict:
         raise HTTPException(404, "Generation not found")
     if gen.status in {GenStatus.PENDING, GenStatus.RUNNING}:
         raise HTTPException(409, "Generation is in flight; wait for it to finish")
+    # Editor reels: an in-flight repurpose must finish first (its files are
+    # being written), and the files live under output/editor/<edit_id>/ — both
+    # the original edit and the mirrored repurpose edit — not output/generations/.
+    if gen.kind is GenKind.EDITOR:
+        meta = gen.editor_meta or {}
+        rep = meta.get("repurpose") or {}
+        if rep.get("status") == "compiling":
+            raise HTTPException(409, "Repurpose is in flight; wait for it to finish")
+        s.delete_generation(gen_id)
+        for eid in (meta.get("edit_id"), rep.get("edit_id")):
+            if eid:
+                d = settings.output_dir / "editor" / eid
+                if d.exists():
+                    shutil.rmtree(d, ignore_errors=True)
+        return {"ok": True}
     s.delete_generation(gen_id)
     gen_dir = settings.output_dir / "generations" / gen_id
     if gen_dir.exists():
@@ -4009,6 +4044,12 @@ async def editor_multi_auto_edit(
     if not clip_paths:
         raise HTTPException(400, "No valid clips uploaded")
 
+    # Keep the ORIGINAL uploaded clips (pre-trim, pre-stretch) so a later
+    # 🔁 Repurpose can re-run the whole pipeline mirror-flipped from the same
+    # raw sources. `clip_paths` gets reassigned to trimmed/stretched copies
+    # below, so snapshot it now; we reorder these by the match placements too.
+    original_clip_paths = list(clip_paths)
+
     # 1.5. ALWAYS cut every clip to audio onset at ENTRY — before
     # transcription, so word timestamps, fuzzy matching, and WPM scaling all
     # operate on the trimmed timeline (no shifting needed downstream).
@@ -4244,6 +4285,57 @@ async def editor_multi_auto_edit(
         except RuntimeError as e:
             raise HTTPException(500, f"Caption rendering failed: {e}")
 
+    # Persist the finished reel as a saved Editor generation (kind=editor) so it
+    # survives reload/restart and can be 🔁 Repurposed later — exactly like a
+    # Swap/Reengineer final (Hugo 2026-06-29). The ORIGINAL clips, in matched
+    # order, ride along so a repurpose re-runs the pipeline mirror-flipped from
+    # the raw sources. Best-effort: the user already has their video — a
+    # persistence hiccup must never turn a successful render into a 500.
+    try:
+        overrides_parsed: dict | None = None
+        if overrides:
+            try:
+                overrides_parsed = json.loads(overrides)
+            except json.JSONDecodeError:
+                overrides_parsed = None
+        ordered_original_clips = [original_clip_paths[p["idx"]] for p in placements]
+        editor_settings = {
+            "template": template,
+            "voice_id": voice_id or "",
+            "enable_trim": enable_trim,
+            "enable_captions": enable_captions,
+            "enable_wpm_normalize": enable_wpm_normalize,
+            "target_wpm": target_wpm,
+            "enable_gap_trim": enable_gap_trim,
+            "gap_max_secs": gap_max_secs,
+            "playback_speed": speed,
+            "threshold_db": threshold_db,
+            "min_silence_secs": min_silence_secs,
+            "pad_secs": pad_secs,
+            "overrides": overrides_parsed,
+        }
+        gen = MediaGeneration(
+            gen_id=edit_id,                       # the ed_… id == the gen_id
+            kind=GenKind.EDITOR,
+            model="editor-multiclip",
+            prompt=script,
+            reference_paths=[str(p) for p in ordered_original_clips],
+            status=GenStatus.DONE,
+            output_path=str(current),
+            completed_at=datetime.utcnow(),
+            editor_meta={
+                "edit_id": edit_id,
+                "n_clips": len(ordered_original_clips),
+                "clip_paths": [str(p) for p in ordered_original_clips],
+                "settings": editor_settings,
+                "repurpose": None,
+            },
+        )
+        store().add_generation(gen)
+    except Exception as persist_err:  # noqa: BLE001 — never block the render
+        logger.warning("multi_auto_edit %s: failed to persist editor record: %s: %s",
+                       edit_id, type(persist_err).__name__, persist_err)
+
     push.notify("Editor: multi-clip klar",
                 f"{len(ordered_paths)} klipp · {template}",
                 priority=3, tags=["white_check_mark"])
@@ -4261,6 +4353,71 @@ async def editor_multi_auto_edit(
         "captions": cap_info,
         "rerender_available": bool(enable_captions),
     }
+
+
+class EditorRepurposeBody(BaseModel):
+    """POST /api/editor/{edit_id}/repurpose — settings for the mirror-flipped
+    copy of a saved multi-clip reel. Same field set the shared Repurpose modal
+    sends for Swap/Reengineer (`voice_override` maps to the reel's voice swap)."""
+    template: str = "capcut-bluebox"
+    overrides: dict | None = None
+    enable_trim: bool = True
+    enable_captions: bool = True
+    enable_wpm_normalize: bool = False
+    target_wpm: float = Field(default=190.0, ge=80, le=400)
+    threshold_db: float = Field(default=-24.0, ge=-60, le=0)
+    min_silence_secs: float = Field(default=0.4, ge=0.05, le=5)
+    pad_secs: float = Field(default=0.1, ge=0, le=1)
+    enable_gap_trim: bool = False
+    gap_max_secs: float = Field(default=0.35, ge=0.05, le=3)
+    playback_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    enable_voice_swap: bool = False
+    voice_override: str = ""
+
+
+@app.post("/api/editor/{edit_id}/repurpose")
+async def editor_repurpose(edit_id: str, body: EditorRepurposeBody,
+                           background: BackgroundTasks) -> dict:
+    """🔁 Repurpose a SAVED multi-clip Editor reel: a horizontally-mirrored copy
+    (captions upright) rebuilt from the same ORIGINAL source clips with new edit
+    settings — the Editor-tab analogue of the Swap/Reengineer repurpose. The
+    mirrored result lands on the saved reel's `editor_meta.repurpose`; poll
+    `GET /api/generations/{edit_id}` for `editor.repurpose_status`."""
+    settings.require_keys("openai")
+    s = store()
+    gen = s.get_generation(edit_id)
+    if gen is None or gen.kind is not GenKind.EDITOR:
+        raise HTTPException(404, "Saved editor reel not found")
+    meta = gen.editor_meta or {}
+    if (meta.get("repurpose") or {}).get("status") == "compiling":
+        raise HTTPException(409, "Repurpose already running for this reel")
+    if not meta.get("clip_paths"):
+        raise HTTPException(409, "This reel has no saved source clips to repurpose")
+    if body.enable_voice_swap and body.voice_override \
+            and not settings.has_provider("elevenlabs"):
+        raise HTTPException(503, "ELEVENLABS_API_KEY not set — cannot swap voice")
+
+    # Flip to compiling immediately so the UI spinner shows before the runner
+    # actually starts (mirrors the Swap repurpose endpoint).
+    m = dict(meta)
+    m["repurpose"] = {"status": "compiling", "edit_id": None, "video_path": None,
+                      "error": None, "settings": body.model_dump()}
+    gen.editor_meta = m
+    s.update_generation(gen)
+
+    from character_swap import runner_compile
+    background.add_task(
+        _run_async, runner_compile.repurpose_editor_job, edit_id,
+        template=body.template, overrides=body.overrides,
+        enable_trim=body.enable_trim, enable_captions=body.enable_captions,
+        enable_wpm_normalize=body.enable_wpm_normalize, target_wpm=body.target_wpm,
+        threshold_db=body.threshold_db, min_silence_secs=body.min_silence_secs,
+        pad_secs=body.pad_secs, enable_gap_trim=body.enable_gap_trim,
+        gap_max_secs=body.gap_max_secs, playback_speed=body.playback_speed,
+        enable_voice_swap=body.enable_voice_swap, voice_override=body.voice_override,
+        settings_snapshot=body.model_dump(),
+    )
+    return _gen_to_dict(gen)
 
 
 @app.post("/api/editor/rerender")
