@@ -86,12 +86,16 @@ def test_registry_seedance_routes_to_fal():
 
 
 def test_end_frame_capability_set():
-    # Single source of truth: only Kling 3.0 + Seedance 2.0 interpolate end frames.
-    assert runner_media.END_FRAME_VIDEO_MODELS == frozenset({"kling-v3", "seedance-2.0"})
+    # Single source of truth: Kling 3.0 + Seedance 2.0 + Veo 3.1 Fast interpolate
+    # end frames (Veo 3.1 Fast via its first-last-frame endpoint).
+    assert runner_media.END_FRAME_VIDEO_MODELS == frozenset(
+        {"kling-v3", "seedance-2.0", "veo-3.1-fast"})
     assert runner_media.supports_end_frame("seedance-2.0") is True
     assert runner_media.supports_end_frame("kling-v3") is True
+    assert runner_media.supports_end_frame("veo-3.1-fast") is True
     assert runner_media.supports_end_frame("grok-imagine-1.5") is False
-    assert runner_media.supports_end_frame("veo-3.1-fast") is False
+    # Plain Veo 3 (Gemini path) has no end-frame endpoint — stays soft-degrade.
+    assert runner_media.supports_end_frame("veo") is False
 
 
 def test_models_payload_surfaces_end_frame_flag():
@@ -99,9 +103,10 @@ def test_models_payload_surfaces_end_frame_flag():
     by_slug = {m["slug"]: m for m in p["video"]}
     assert by_slug["seedance-2.0"].get("end_frame") is True
     assert by_slug["kling-v3"].get("end_frame") is True
+    assert by_slug["veo-3.1-fast"].get("end_frame") is True
     # Models without end-frame support must NOT carry a truthy flag.
     assert not by_slug["grok-imagine-1.5"].get("end_frame")
-    assert not by_slug["veo-3.1-fast"].get("end_frame")
+    assert not by_slug["veo"].get("end_frame")
 
 
 # --- routing (incl. end frame) --------------------------------------------

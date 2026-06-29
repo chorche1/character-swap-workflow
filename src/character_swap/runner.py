@@ -1072,9 +1072,9 @@ def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
 
 async def _resolve_end_image(job: Job, jc: JobCharacter,
                              scene_id: str | None) -> Path | None:
-    """Optional per-scene END FRAME (end-frame-capable models only — Kling 3.0
-    and Seedance 2.0; see runner_media.END_FRAME_VIDEO_MODELS): prefer the frame
-    already generated (the character swapped into the scene's end pose);
+    """Optional per-scene END FRAME (end-frame-capable models only — Kling 3.0,
+    Seedance 2.0 and Veo 3.1 Fast; see runner_media.END_FRAME_VIDEO_MODELS):
+    prefer the frame already generated (the character swapped into the end pose);
     fall back to swapping now if it's missing. Errors are surfaced on
     `end_frame_errors` + an event, never swallowed. Shared by the initial
     batch, "+ N more" AND per-clip retries — the latter two previously

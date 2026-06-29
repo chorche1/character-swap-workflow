@@ -74,6 +74,9 @@ def test_registry_veo_31_fast_routes_to_fal():
     assert entry["duration_options"] == [4, 6, 8]
     assert entry["duration_default"] == 8
     assert "Veo 3.1 Fast" in entry["label"]
+    # Veo 3.1 Fast honors a per-scene end pose via the first-last-frame endpoint.
+    assert entry.get("end_frame") is True
+    assert runner_media.supports_end_frame("veo-3.1-fast") is True
 
 
 # --- routing --------------------------------------------------------------
@@ -96,6 +99,25 @@ def test_submit_video_routes_veo_31_fast_to_fal(monkeypatch):
     assert captured["aspect_ratio"] == "9:16"
     assert captured["prompt"] == "he waves"
     assert captured["generate_audio"] is True   # default ON for Veo
+    assert captured["end_image"] is None         # no end frame on this call
+
+
+def test_submit_video_forwards_end_image_to_fal_veo(monkeypatch):
+    """A veo-3.1-fast scene with a 🎯 end pose must hand the end frame to the
+    fal Veo client (which routes it to the first-last-frame endpoint)."""
+    captured = {}
+    monkeypatch.setattr(fal_veo, "submit_image_to_video",
+                        lambda **kw: (captured.update(kw), "fal_req_veo")[1])
+    monkeypatch.setattr(google_genai, "submit_veo",
+                        lambda **kw: pytest.fail("routed to Gemini Veo, not fal"))
+
+    rid = pipeline.submit_video(
+        image=Path("/frame.png"), movement_prompt="he turns",
+        character_name="X", model="veo-3.1-fast", duration_secs=8,
+        aspect_ratio="9:16", end_image=Path("/end.png"),
+    )
+    assert rid == "fal_req_veo"
+    assert captured["end_image"] == Path("/end.png")   # end frame forwarded
 
 
 def test_wait_for_video_routes_veo_31_fast_to_fal(monkeypatch, tmp_path):
@@ -150,6 +172,55 @@ def test_submit_builds_fal_arguments(monkeypatch):
     assert args["resolution"] == "1080p"
     assert args["aspect_ratio"] == "9:16"
     assert args["generate_audio"] is True
+    # No end frame → no first/last frame fields (those belong to the FLF endpoint).
+    assert "first_frame_url" not in args
+    assert "last_frame_url" not in args
+
+
+def test_submit_builds_fal_arguments_with_end_frame(monkeypatch):
+    """When an end frame is set, submit must route to the SEPARATE
+    first-last-frame endpoint with first_frame_url + last_frame_url (and NO
+    image_url), uploading both frames."""
+    captured = {}
+    uploads = []
+
+    class _Handler:
+        request_id = "ridFLF"
+
+    class _FakeFal:
+        Completed = object
+        @staticmethod
+        def upload_file(p):
+            uploads.append(p)
+            # Distinct URLs so we can assert which frame went where.
+            return ("https://fal.media/end.png" if "end" in str(p)
+                    else "https://fal.media/start.png")
+        @staticmethod
+        def submit(endpoint, arguments):
+            captured["endpoint"] = endpoint
+            captured["arguments"] = arguments
+            return _Handler()
+
+    monkeypatch.setattr(fal_veo, "_client", lambda: _FakeFal)
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "1080p")
+
+    rid = fal_veo.submit_image_to_video(
+        image=Path("/start.png"), prompt="he turns to face the camera",
+        duration_secs=8, aspect_ratio="9:16", generate_audio=True,
+        end_image=Path("/end.png"),
+    )
+    assert rid == "ridFLF"
+    assert captured["endpoint"] == "fal-ai/veo3.1/fast/first-last-frame-to-video"
+    args = captured["arguments"]
+    assert args["first_frame_url"] == "https://fal.media/start.png"
+    assert args["last_frame_url"] == "https://fal.media/end.png"
+    assert "image_url" not in args            # FLF endpoint has no image_url
+    assert args["duration"] == "8s"
+    assert args["resolution"] == "1080p"
+    assert args["aspect_ratio"] == "9:16"
+    assert args["generate_audio"] is True
+    assert len(uploads) == 2                  # both start + end uploaded
 
 
 def test_submit_downgrades_resolution_for_short_clip(monkeypatch):

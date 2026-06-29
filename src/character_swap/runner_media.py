@@ -100,11 +100,13 @@ VIDEO_MODELS: dict[str, dict] = {
     "grok-imagine":         {"label": "Grok Imagine",                    "provider": "xai",        "price_setting": "grok_video_price_usd",   "duration_options": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5},
     "veo":                  {"label": "Veo 3",                           "provider": "gemini",     "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
     "veo-3-fast":           {"label": "Veo 3 Fast",                     "provider": "gemini",     "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
-    # Veo 3.1 Fast routed through fal.ai (image-to-video) — fal's endpoint
-    # accepts 4/6/8s (sent as "4s"/"6s"/"8s") and renders at settings.
-    # veo_fal_resolution (default 1080p). No end-frame on this endpoint, so a
-    # scene overridden to it ignores its end pose (soft-degrade). Bills on FAL.
-    "veo-3.1-fast":         {"label": "Veo 3.1 Fast (fal)",              "provider": "fal",        "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8},
+    # Veo 3.1 Fast routed through fal.ai — fal's i2v endpoint accepts 4/6/8s
+    # (sent as "4s"/"6s"/"8s") and renders at settings.veo_fal_resolution
+    # (default 1080p). Supports a per-scene END FRAME (end_frame True → honors a
+    # 🎯 end pose): when one is set the client routes to fal's separate
+    # `first-last-frame-to-video` endpoint (start→end interpolation), else the
+    # plain image-to-video endpoint. Bills on FAL.
+    "veo-3.1-fast":         {"label": "Veo 3.1 Fast (fal)",              "provider": "fal",        "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8, "end_frame": True},
     # Grok Imagine 1.5 routed through fal.ai (image-to-video) — xAI's newest
     # Grok video model. Integer duration 3–15s, native synced audio ALWAYS on,
     # renders at settings.grok_fal_resolution (default 720p). No end-frame on
@@ -160,7 +162,8 @@ VIDEO_MODELS: dict[str, dict] = {
 # SINGLE SOURCE OF TRUTH — the runner's end-frame gate (runner._resolve_end_image),
 # the /api/generations/models payload flag, and the frontend's end-frame UI all
 # read this (derived from each row's `end_frame` flag). A model NOT in this set
-# silently ignores any 🎯 end pose (Grok/Veo soft-degrade).
+# silently ignores any 🎯 end pose (e.g. Grok / Veo 3 soft-degrade — but Veo 3.1
+# Fast IS in the set via its first-last-frame endpoint).
 END_FRAME_VIDEO_MODELS: frozenset[str] = frozenset(
     slug for slug, info in VIDEO_MODELS.items() if info.get("end_frame"))
 

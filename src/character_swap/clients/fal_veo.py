@@ -10,7 +10,7 @@ second fal-hosted video model needs no new credentials, and fal exposes Veo
 3.1 Fast (which the Gemini path doesn't carry — it only has Veo 3 / Veo 3
 Fast).
 
-API: https://fal.ai/models/fal-ai/veo3.1/fast/image-to-video
+API (no end frame): https://fal.ai/models/fal-ai/veo3.1/fast/image-to-video
   image_url       (required)  URL or data URI — we upload the local frame first
   prompt          (required)  motion prompt
   duration        (enum str)  "4s" | "6s" | "8s"  (default "8s")
@@ -20,9 +20,19 @@ API: https://fal.ai/models/fal-ai/veo3.1/fast/image-to-video
   negative_prompt (string)    optional
 Response: {video: {url, ...}, ...}  — identical shape to fal Kling v3.
 
-NOTE: this endpoint has NO end-frame input (fal exposes start→end only via a
-separate `first-last-frame-to-video` endpoint), so a scene overridden to this
-model ignores any end pose — matching the per-scene soft-degrade in the runner.
+END FRAME (start→end interpolation): the plain image-to-video endpoint has NO
+end-frame field, so when a scene carries a 🎯 end pose we route to fal's
+SEPARATE endpoint instead:
+  https://fal.ai/models/fal-ai/veo3.1/fast/first-last-frame-to-video
+  first_frame_url (required)  the start frame (uploaded)
+  last_frame_url  (required)  the end frame  (uploaded)
+  prompt / duration / aspect_ratio / resolution / generate_audio / negative_prompt
+                              — same enums/defaults as the i2v endpoint.
+So `veo-3.1-fast` joins kling-v3 / seedance-2.0 in END_FRAME_VIDEO_MODELS: a
+scene on it HONORS its end pose (runner._resolve_end_image gates on that set).
+Both endpoints poll identically — fal keys the queue status URL by the
+`veo3.1` alias, not the `fast/<...>` sub-path — so `wait_for_video` needs no
+endpoint awareness even on resume.
 """
 from __future__ import annotations
 
@@ -45,6 +55,10 @@ from character_swap.clients.fal_kling import (
 from character_swap.config import settings
 
 _ENDPOINT = "fal-ai/veo3.1/fast/image-to-video"
+# Separate endpoint used ONLY when a scene carries an end pose — takes
+# first_frame_url + last_frame_url instead of image_url (the i2v endpoint above
+# has no end-frame field). Polling is alias-keyed, so both share wait_for_video.
+_ENDPOINT_FLF = "fal-ai/veo3.1/fast/first-last-frame-to-video"
 
 # fal Veo 3.1 Fast duration enum (whole seconds, sent as "<n>s").
 _ALLOWED_DURATIONS = (4, 6, 8)
@@ -110,15 +124,24 @@ def submit_image_to_video(
     duration_secs: int | None = 8,
     aspect_ratio: str | None = None,
     generate_audio: bool = True,
+    end_image: Path | None = None,
     app_job_id: str | None = None,
 ) -> str:
     """Upload the start frame, submit a Veo 3.1 Fast i2v job, return the fal
-    `request_id` for polling in `wait_for_video`."""
+    `request_id` for polling in `wait_for_video`.
+
+    `end_image` (optional) routes the submit to fal's SEPARATE Veo 3.1 Fast
+    `first-last-frame-to-video` endpoint (the plain image-to-video endpoint has
+    no end-frame field): the start frame is sent as `first_frame_url` and the
+    end frame as `last_frame_url`, so the clip interpolates start → end. Both
+    endpoints poll identically (fal keys queue status by the `veo3.1` alias,
+    not the sub-path), so `wait_for_video` is endpoint-agnostic."""
     _check_account_block()
     fal = _client()
     dur = clamp_duration(duration_secs)
+    endpoint = _ENDPOINT_FLF if end_image is not None else _ENDPOINT
     with call_log.record(
-        phase="veo_fal_submit", model=_ENDPOINT, character="veo-3.1-fast",
+        phase="veo_fal_submit", model=endpoint, character="veo-3.1-fast",
         job_id=app_job_id, duration_secs=dur,
     ) as payload:
         try:
@@ -132,25 +155,37 @@ def submit_image_to_video(
         payload["upload_url"] = start_url
 
         arguments = {
-            "image_url": start_url,
             "prompt": (prompt or "")[:2500],
             "duration": f"{dur}s",          # fal expects the enum as "<n>s"
             "aspect_ratio": _aspect_ratio(aspect_ratio),
             "resolution": _resolution(dur),
             "generate_audio": generate_audio,
         }
+        if end_image is not None:
+            # first-last-frame endpoint: start = first_frame_url,
+            # end = last_frame_url (there is NO image_url field here).
+            try:
+                end_url = fal.upload_file(str(end_image))
+            except Exception as e:
+                raise RuntimeError(
+                    f"fal.upload_file (end frame) failed: {e}") from e
+            arguments["first_frame_url"] = start_url
+            arguments["last_frame_url"] = end_url
+            payload["end_upload_url"] = end_url
+        else:
+            arguments["image_url"] = start_url
         # Reuse the shared talking-head negative set (empty → field omitted).
         neg = (settings.kling_negative_prompt or "").strip()
         if neg:
             arguments["negative_prompt"] = neg[:2500]
         try:
-            handler = fal.submit(_ENDPOINT, arguments=arguments)
+            handler = fal.submit(endpoint, arguments=arguments)
         except Exception as e:
             if _is_account_error(e):
                 _trip_account_block(e)
                 raise FalAccountError(
                     f"fal account cannot accept work: {e}") from e
-            raise RuntimeError(f"fal {_ENDPOINT} submit failed: {e}") from e
+            raise RuntimeError(f"fal {endpoint} submit failed: {e}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id
         return request_id
@@ -165,7 +200,13 @@ def wait_for_video(
     poll_secs: int | None = None,
 ) -> Path:
     """Poll the fal queue until the job completes, then download the MP4 to
-    `dest`. Raises RuntimeError on timeout / missing output."""
+    `dest`. Raises RuntimeError on timeout / missing output.
+
+    Uses `_ENDPOINT` for status/result EVEN for end-frame (first-last-frame)
+    jobs: fal builds the queue status URL from the `veo3.1` alias and drops the
+    `fast/<...>` sub-path, so the same request_id resolves whichever sub-endpoint
+    submitted it. Don't "fix" this to branch on the endpoint — there is nothing
+    to branch on (wait_for_video only gets a request_id), and it isn't needed."""
     fal = _client()
     import fal_client  # type: ignore
     timeout = timeout_secs or settings.video_timeout_secs

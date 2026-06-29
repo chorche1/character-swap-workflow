@@ -2546,8 +2546,8 @@ function studio() {
     },
 
     // True if a Reengineer scene's effective model supports a per-scene END
-    // FRAME (Kling 3.0 / Seedance 2.0). Data-driven from the registry
-    // `end_frame` flag — gates the 🎯 end-frame controls for that scene.
+    // FRAME (Kling 3.0 / Seedance 2.0 / Veo 3.1 Fast). Data-driven from the
+    // registry `end_frame` flag — gates the 🎯 end-frame controls for that scene.
     reSceneSupportsEndFrame(run, sc) {
       const slug = this.reSceneEffModel(run, sc);
       const m = (this.models.video || []).find(x => x.slug === slug);
@@ -7273,9 +7273,9 @@ function studio() {
     },
 
     // True if the scene's effective model supports a per-scene END FRAME
-    // (start→end interpolation: Kling 3.0 / Seedance 2.0). Data-driven from
-    // the registry `end_frame` flag — no hardcoded slug. Gates the
-    // "ignores end pose" warning so it only fires for models that DROP it.
+    // (start→end interpolation: Kling 3.0 / Seedance 2.0 / Veo 3.1 Fast).
+    // Data-driven from the registry `end_frame` flag — no hardcoded slug. Gates
+    // the "ignores end pose" warning so it only fires for models that DROP it.
     sceneSupportsEndFrame(scene) {
       return !!this.sceneVideoModelEntry(scene).end_frame;
     },

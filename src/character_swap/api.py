@@ -2563,8 +2563,9 @@ async def set_scene_end_frame(job_id: str, scene_id: str,
     """Attach an optional END POSE to a scene. Each character is swapped into
     the pose so that scene's clip interpolates from the approved image (start)
     to the swapped end frame (end). Only end-frame-capable models honor it
-    (Kling 3.0 / Seedance 2.0 — see runner_media.END_FRAME_VIDEO_MODELS); other
-    models ignore the end frame. Locked once movement is submitted.
+    (Kling 3.0 / Seedance 2.0 / Veo 3.1 Fast — see
+    runner_media.END_FRAME_VIDEO_MODELS); other models ignore the end frame.
+    Locked once movement is submitted.
 
     If Step-3 variants already exist, kicks a background regeneration so the
     preview end frame matches the new pose (errors surfaced on

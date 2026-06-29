@@ -834,14 +834,18 @@ def submit_video(
         )
     if model == "veo-3.1-fast":
         # Veo 3.1 Fast routed through fal.ai (the Gemini path only carries Veo
-        # 3 / Veo 3 Fast). Native audio defaults ON (Veo's own default); a
-        # per-call override (Reengineer sets True) still wins.
+        # 3 / Veo 3 Fast). Like Kling/Seedance it supports an optional END FRAME
+        # (start→end interpolation) — when `end_image` is set the client routes
+        # to fal's first-last-frame endpoint, otherwise the plain i2v endpoint.
+        # Native audio defaults ON (Veo's own default); a per-call override
+        # (Reengineer sets True) still wins.
         from character_swap.clients import fal_veo
         return fal_veo.submit_image_to_video(
             image=image, prompt=movement_prompt,
             duration_secs=effective_dur,
             aspect_ratio=effective_ar,
             generate_audio=generate_audio if generate_audio is not None else True,
+            end_image=end_image,
             app_job_id=job_id,
         )
     if model == "grok-imagine-1.5":
