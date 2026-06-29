@@ -2413,7 +2413,7 @@
             <div class="flex gap-4 flex-wrap">
               <template x-for="[cid, f] of Object.entries(r.finals || {})" :key="r.re_id+'-f-'+cid">
                 <div class="w-44">
-                  <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
+                  <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
                   <!-- Cache-buster on completed_at (Hugo 2026-06-17): "▶ Bygg
                        ihop igen" overwrites the SAME final_*.mp4 path, so
                        without ?t= the browser shows the cached old final and the
@@ -2421,7 +2421,7 @@
                        happen. completed_at changes on every assemble. -->
                   <video x-show="f.final_url" :src="f.final_url + (r.completed_at ? ('?t=' + String(r.completed_at).replace(/\D/g, '')) : '')" controls class="w-full rounded-lg border border-neutral-200 dark:border-neutral-800"></video>
                   <div class="flex items-center gap-3">
-                    <a x-show="f.final_url" :href="f.final_url + (r.completed_at ? ('?t=' + String(r.completed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || cid) + '-reengineered.mp4'"
+                    <a x-show="f.final_url" :href="f.final_url + (r.completed_at ? ('?t=' + String(r.completed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + '-reengineered.mp4'"
                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
                     <!-- Re-edit in the Editor tab (Hugo 2026-06-13): the final
                          is an Editor edit — captions/words/trim/speed can be
@@ -2441,13 +2441,13 @@
               <div class="flex gap-4 flex-wrap">
                 <template x-for="[cid, f] of Object.entries(r.repurposed || {})" :key="r.re_id+'-rp-'+cid">
                   <div class="w-44">
-                    <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
+                    <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
                     <!-- Cache-buster on repurposed_at — repurpose overwrites the
                          same repurpose_*.mp4 path on every rebuild. -->
                     <video x-show="f.final_url" :src="f.final_url + (r.repurposed_at ? ('?t=' + String(r.repurposed_at).replace(/\D/g, '')) : '')" controls class="w-full rounded-lg border border-fuchsia-200 dark:border-fuchsia-900"></video>
                     <div x-show="f.warning" class="text-[10px] text-amber-500 mt-0.5" x-text="'⚠ ' + f.warning"></div>
                     <div class="flex items-center gap-3">
-                      <a x-show="f.final_url" :href="f.final_url + (r.repurposed_at ? ('?t=' + String(r.repurposed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || cid) + '-repurpose.mp4'"
+                      <a x-show="f.final_url" :href="f.final_url + (r.repurposed_at ? ('?t=' + String(r.repurposed_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + '-repurpose.mp4'"
                          class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
                       <button x-show="f.final_url && f.edit_id"
                               class="text-xs text-violet-600 dark:text-violet-400 hover:underline"

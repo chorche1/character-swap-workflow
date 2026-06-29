@@ -5418,10 +5418,26 @@ async def reengineer_from_images(
 async def reengineer_list() -> list[dict]:
     from character_swap import reengineer as reengineer_mod
     # List view stays light: no embedded job dicts (the detail view has them).
+    # But DO resolve each final's playable URL + a light character-name map, so a
+    # run BEYOND the newest-8 — which the tab does NOT hydrate via the detail
+    # endpoint — still renders its final-video players + names instead of bare
+    # "ch_…" IDs with no player. (Hugo 2026-06-29.) load_state() returns a fresh
+    # from-disk dict each call, so mutating the nested finals here is safe.
     out = []
     for state in reengineer_mod.list_states():
         row = dict(state)
         row.pop("scenes", None)
+        for bucket in ("finals", "repurposed"):
+            for f in (row.get(bucket) or {}).values():
+                if isinstance(f, dict) and f.get("final_path"):
+                    f["final_url"] = _file_url(Path(f["final_path"]))
+        # cid -> snapshot name, so the finals cards show names without embedding
+        # the heavy full job dict (matches the hydrated detail view's names).
+        names: dict[str, str] = {}
+        job = store().get_job(row["job_id"]) if row.get("job_id") else None
+        if job is not None:
+            names = {cid: jc.name for cid, jc in job.characters.items()}
+        row["char_names"] = names
         out.append(row)
     return out
 
