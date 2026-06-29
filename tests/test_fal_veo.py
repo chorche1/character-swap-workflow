@@ -253,3 +253,43 @@ def test_submit_downgrades_resolution_for_short_clip(monkeypatch):
     args = captured["arguments"]
     assert args["duration"] == "4s"
     assert args["resolution"] == "720p"      # downgraded from 1080p for sub-8s
+
+
+def test_submit_downgrades_resolution_for_short_clip_on_end_frame(monkeypatch):
+    """The sub-8s 1080p→720p downgrade must ALSO apply on the END-FRAME (FLF)
+    path — the resolution arg is shared across both endpoints. Without this
+    lock, a refactor that moved `_resolution(dur)` into only the i2v branch
+    would send raw 1080p to the first-last-frame endpoint and reintroduce the
+    `re_d2c6425f15` "1080p only at duration=8s" failure for every short
+    end-frame clip (the common Reengineer case is scene-length-dictated)."""
+    captured = {}
+
+    class _Handler:
+        request_id = "ridFLF6"
+
+    class _FakeFal:
+        Completed = object
+        @staticmethod
+        def upload_file(p):
+            return ("https://fal.media/end.png" if "end" in str(p)
+                    else "https://fal.media/start.png")
+        @staticmethod
+        def submit(endpoint, arguments):
+            captured["endpoint"] = endpoint
+            captured["arguments"] = arguments
+            return _Handler()
+
+    monkeypatch.setattr(fal_veo, "_client", lambda: _FakeFal)
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    monkeypatch.setattr(fal_veo.settings, "veo_fal_resolution", "1080p")
+
+    fal_veo.submit_image_to_video(
+        image=Path("/start.png"), prompt="x", duration_secs=6,  # sub-8s
+        aspect_ratio="9:16", generate_audio=True, end_image=Path("/end.png"),
+    )
+    args = captured["arguments"]
+    assert captured["endpoint"] == "fal-ai/veo3.1/fast/first-last-frame-to-video"
+    assert args["duration"] == "6s"
+    assert args["resolution"] == "720p"      # downgraded on the FLF path too
+    assert args["first_frame_url"] == "https://fal.media/start.png"
+    assert args["last_frame_url"] == "https://fal.media/end.png"
