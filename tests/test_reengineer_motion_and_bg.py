@@ -158,8 +158,8 @@ def test_analyze_frame_budget_scales_down_for_many_scenes(monkeypatch, tmp_path)
 
 def test_qc_receives_replacement_background(monkeypatch, tmp_path):
     """REGRESSION: with background_replaced + background_image, the judge
-    gets the BACKGROUND block and the system text that fails kept-original
-    backgrounds. Without the image, content is unchanged."""
+    gets the BACKGROUND block (informational since QC is catastrophe-only).
+    Without the image, content is unchanged."""
     from character_swap.clients import anthropic_client
     from character_swap.config import settings
     monkeypatch.setattr(type(settings), "swap_qc_enabled",
@@ -184,7 +184,10 @@ def test_qc_receives_replacement_background(monkeypatch, tmp_path):
     texts = [b.get("text", "") for b in seen["messages"][0]["content"]]
     assert any("BACKGROUND (the requested replacement" in t for t in texts)
     assert f"IMG:{tmp_path / 'bg.png'}" in texts
-    assert "WRONG BACKGROUND" in seen["system"]
+    # QC loosened to catastrophe-only (Hugo 2026-06-30): the judge still
+    # RECEIVES the BACKGROUND block, but background mismatch is no longer a
+    # failure class — assert a still-present catastrophe rule instead.
+    assert "WRONG PERSON" in seen["system"]
 
     seen.clear()
     swap_qc.inspect_variant(

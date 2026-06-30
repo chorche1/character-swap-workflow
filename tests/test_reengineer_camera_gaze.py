@@ -144,8 +144,16 @@ def test_inspect_variant_omits_flag_for_plain_swap(monkeypatch, tmp_path):
     assert "camera_gaze" not in _qc_flags_text(captured)
 
 
-def test_qc_system_documents_camera_gaze_flag():
-    assert "camera_gaze=true" in swap_qc.QC_SYSTEM
+def test_qc_system_treats_gaze_as_informational():
+    # Hugo 2026-06-30: image QC was loosened to catastrophe-only. Gaze is no
+    # longer judged at all — the inspect_variant call still PASSES the
+    # camera_gaze flag (locked by test_inspect_variant_passes_camera_gaze_flag),
+    # but the system prompt must declare context flags informational and must
+    # NOT fail an image for gaze.
+    low = swap_qc.QC_SYSTEM.lower()
+    assert "informational only" in low
+    assert "gaze" in low
+    assert "WRONG GAZE" not in swap_qc.QC_SYSTEM
 
 
 def test_runner_qc_call_passes_from_reengineer():

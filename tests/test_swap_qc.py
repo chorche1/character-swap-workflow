@@ -207,15 +207,37 @@ def test_inspect_variant_parses_verdict(monkeypatch, tmp_path):
     assert verdict.corrective_hint == "use Image 2's face"
 
 
-def test_qc_prompt_covers_prop_and_action_fidelity():
-    """Regression guard (Hugo 2026-06-11): wrong-prop images (person holding
-    a completely different thing than in the scene) passed QC because the
-    judge was never ASKED about props. The system prompt must instruct an
-    explicit same-objects/same-action check."""
+def test_qc_prompt_covers_catastrophe_classes():
+    """Hugo 2026-06-30: image QC was loosened to CATASTROPHE-ONLY (the judge
+    was rejecting ~60% of swaps on framing/zoom false-positives). The judge
+    must still cover the four unusable-image classes — wrong person, missing/
+    extra people, broken image, severe anatomy — each named so the retry
+    machinery can route on the reason."""
     text = swap_qc.QC_SYSTEM
-    assert "WRONG PROPS" in text
-    assert "SAME object" in text
-    assert "action" in text.lower()
+    for cls in ("WRONG PERSON", "MISSING/EXTRA PEOPLE",
+                "BROKEN IMAGE", "SEVERE ARTIFACTS"):
+        assert cls in text, cls
+    # WRONG PERSON is still flagged the single most important check.
+    assert "most important" in " ".join(text.lower().split())
+
+
+def test_qc_prompt_loosened_to_catastrophe_only():
+    """Hugo 2026-06-30: the judge must EXPLICITLY accept the dimensions it
+    used to fail on — framing/zoom, props, gaze, outfit, background — so a
+    future edit can't silently re-tighten it. The old head-ruler/zoom test
+    is gone."""
+    text = swap_qc.QC_SYSTEM
+    low = text.lower()
+    # The dimensions that drove the false-positives are now declared OK.
+    for dim in ("framing", "props", "gaze", "outfit", "background", "headroom"):
+        assert dim in low, dim
+    # The judge is told NOT to fail for them, and to default to PASS.
+    assert "do not fail" in low
+    assert "lenient" in low
+    # The numeric head-ruler / zoom rule must be retired, not just softened.
+    assert "head-ruler" not in low or "no head-ruler" in low
+    assert "WRONG FRAMING" not in text
+    assert "WRONG OUTFIT" not in text
 
 
 def _wire_inspect(monkeypatch, call_behavior):
@@ -332,29 +354,6 @@ def test_repairable_class_still_uses_repair_mode(monkeypatch, tmp_path):
     assert "EXCEPT where the fix" in prompts[1]
 
 
-def test_qc_prompt_covers_gaze_and_prop_precision():
-    """Backlog #14+#15 (audit 2026-06-12): originals look down at the task
-    but variants stare at camera (passed QC); 3 kiwi halves became a staged
-    6-slice flower; a foreground desk vanished. All three classes need
-    explicit criteria."""
-    text = " ".join(swap_qc.QC_SYSTEM.split())
-    assert "WRONG GAZE / GESTURE" in text
-    assert "staring into the camera is a FAIL" in text
-    assert "prop COUNT" in text
-    assert "foreground furniture" in text
-
-
-def test_qc_prompt_covers_outfit_and_user_intent():
-    """Backlog #16+#17 (audit 2026-06-12): no outfit criterion existed (the
-    glove-bleed class passed), and the judge never saw the user's own prompt
-    so swap-with-modifications jobs were false-failed and 'repaired' back."""
-    text = " ".join(swap_qc.QC_SYSTEM.split())
-    assert "WRONG OUTFIT" in text
-    assert "custom_outfit=" in text
-    assert "USER INTENT" in text
-    assert "NEVER fail a deviation the user intent clearly requests" in text
-
-
 def test_qc_passes_outfit_and_intent_to_judge(monkeypatch, tmp_path):
     calls, _ = _wire_inspect(monkeypatch, lambda n: object())
     verdict = swap_qc.inspect_variant(
@@ -401,51 +400,16 @@ def test_qc_default_judge_is_sonnet():
     assert "sonnet" in settings.swap_qc_model
 
 
-def test_qc_prompt_covers_framing_and_zoom():
-    """Regression guard (Hugo 2026-06-11): gpt2-id-swap outputs noticeably
-    more zoomed-out than the source scene passed QC — the judge was never
-    asked about framing. The system prompt must instruct an explicit
-    camera-distance/crop/subject-scale comparison."""
+def test_qc_no_longer_fails_framing_or_background(monkeypatch, tmp_path):
+    """Hugo 2026-06-30: framing/zoom and background drift were the dominant
+    false-positives. The judge's system text must declare them acceptable and
+    must NOT carry the retired strict-rule names, so the loosening can't
+    silently regress."""
     text = swap_qc.QC_SYSTEM
-    assert "WRONG FRAMING" in text
-    assert "zoomed out" in text
-    assert "subject scale" in text
-
-
-def test_qc_checks_background_symbols():
-    """Backlog #3 (audit 2026-06-12): the US flag rendered without its blue
-    star canton in 3/6 post-fix scenes and every variant passed QC — the
-    judge never inspected background symbols. With a BACKGROUND image the
-    judge must fail defaced/incomplete distinctive symbols."""
-    text = " ".join(swap_qc.QC_SYSTEM.split())
-    assert "WRONG BACKGROUND SYMBOL" in text
-    assert "blue star canton" in text
-
-
-def test_qc_zoom_anchor_survives_replaced_background():
-    """Backlog #2 (audit 2026-06-12): clearly wider variants passed QC when
-    background_replaced=true — with a new environment the judge had nothing
-    to compare the room against and went lenient on zoom. The rule must
-    explicitly re-anchor the comparison on the SUBJECT's frame occupancy,
-    exactly like the headroom rule already does."""
-    low = swap_qc.QC_SYSTEM.lower()
-    z = low.index("wrong framing")
-    block = low[z:low.index("wrong headroom")]
-    assert "background_replaced=true" in block
-    assert "subject" in block
-    assert "fraction of the frame" in block
-
-
-def test_qc_prompt_covers_headroom_drift():
-    """Regression guard (Hugo 2026-06-12): with a replaced background the
-    swap pushed the subject down and added the new background's sky/scenery
-    above the head (dead space at top) — and it PASSED QC because the judge
-    went lenient on edges when background_replaced=true. The judge must flag
-    added headroom even when the background is replaced."""
-    text = swap_qc.QC_SYSTEM
-    assert "WRONG HEADROOM" in text
-    assert "above the" in text.lower()
-    # The headroom rule must explicitly survive a replaced background.
+    for retired in ("WRONG FRAMING", "WRONG ZOOM", "HEAD-RULER",
+                    "WRONG HEADROOM", "WRONG GAZE", "WRONG OUTFIT",
+                    "WRONG PROPS", "WRONG BACKGROUND", "OBVIOUS CUTOUT"):
+        assert retired not in text, retired
     low = text.lower()
-    h = low.index("wrong headroom")
-    assert "background_replaced=true" in low[h:h + 700]
+    assert "framing" in low and "zoom" in low      # named as acceptable
+    assert "background or environment differing" in low

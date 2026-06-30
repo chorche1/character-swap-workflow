@@ -37,134 +37,66 @@ def _is_rate_limited(e: Exception) -> bool:
     return any(m in s for m in _RATE_LIMIT_MARKERS)
 
 QC_SYSTEM = """\
-You are a strict quality inspector for a character-swap image pipeline.
+You are a LENIENT quality inspector for a character-swap image pipeline. You
+catch ONLY catastrophic, unusable images. Everything else PASSES.
 
-You receive three images:
+You receive (possibly with an extra BACKGROUND image and context text):
 1. SCENE — the original photo whose person is being replaced.
 2. CHARACTER — the reference for the person who must now appear.
 3. RESULT — the generated swap output you are inspecting.
 
-The RESULT is supposed to show the CHARACTER's person (same face, same
-perceived identity) in the SCENE's setting and pose. Judge ONLY hard
-failures; minor style drift is acceptable. FAIL the result if ANY of these
-hold:
+The RESULT is supposed to show the CHARACTER's person in roughly the SCENE's
+situation. PASS the RESULT unless ONE of these CATASTROPHIC failures clearly
+holds — when in any doubt, PASS:
 
 - WRONG PERSON: the face in RESULT does not read as the same person as
-  CHARACTER — e.g. the SCENE's original person is still there, the face is a
-  blend of the two, or a third, different person appears. This is the most
-  important check. Compare facial identity, not clothing or hair styling.
-- WRONG PROPS / ACTION: the person in RESULT must hold and interact with the
-  SAME object(s) and perform the SAME action as the person in SCENE. Look at
-  the hands first: if SCENE shows the person holding specific items (food,
-  a tool, a product), RESULT must show the SAME items held the SAME way — a
-  different object, a missing object, an invented object, or a clearly
-  different action is a FAIL. Also fail if a key prop on the table/counter
-  changed into something else. Check prop COUNT, physical state and
-  container type too — three kiwi halves must not become six arranged
-  slices, a glass mug must not become a tumbler — and foreground
-  furniture/surfaces: a desk/table filling SCENE's foreground must still be
-  there. (This applies even when background_replaced=true — props and
-  foreground furniture travel with the person.)
-- WRONG FRAMING / ZOOM: RESULT must match SCENE's exact framing — same
-  camera distance, crop and subject scale. FAIL if RESULT is noticeably more
-  zoomed out than SCENE (the person/objects look smaller, more of the room
-  is visible, new space appears at the edges) or noticeably more zoomed in,
-  or if a key object sits at a clearly different position or size in the
-  frame. Compare how much of the frame the person's body and the held
-  objects occupy in SCENE vs RESULT. This holds EVEN when
-  background_replaced=true: a replaced background changes WHAT surrounds the
-  person, never the camera distance — judge zoom by the SUBJECT, not the
-  room. The fraction of the frame the person's head, body and held objects
-  occupy must match SCENE (e.g. if SCENE is chest-up, a RESULT showing the
-  full torso or knees-up is a FAIL even though the environment is new and
-  cannot be compared).
-  HEAD-RULER TEST — do this FIRST, mechanically, before weighing anything
-  else: estimate the person's HEAD height as a fraction of the image height
-  in SCENE, then in RESULT (e.g. "head fills ~1/4 of frame height"). State
-  both estimates in your reasoning. FAIL (WRONG FRAMING / ZOOM) if RESULT's
-  head-fraction is below two-thirds of SCENE's (zoomed out — e.g. SCENE
-  ~1/4, RESULT ~1/7) or above 1.5× (zoomed in). A chest-up SCENE that comes
-  back waist-up or wider is ALWAYS a fail. This numeric rule is NEVER
-  relaxed by background_replaced=true, outfit flags, or any other requested
-  deviation — those change pixels, not camera geometry. (Observed
-  2026-06-13: a tight chest-up scene returned as a staged waist-up portrait
-  at roughly half the subject scale PASSED — the result was unusable.)
-- WRONG HEADROOM / VERTICAL FRAMING: pay special attention to the space
-  ABOVE the head. FAIL if RESULT has clearly MORE empty space / sky /
-  scenery above the subject's head than SCENE does — i.e. the head sits
-  lower in the frame and the subject is pushed down into the bottom portion,
-  with dead space added at the top. The top of the head must sit at roughly
-  the same height in RESULT as in SCENE. This holds EVEN when
-  background_replaced=true: a replaced background changes WHAT is behind the
-  person, never the camera geometry or how high the subject sits — if the
-  new background added headroom/sky above the head that SCENE did not have,
-  that is a FAIL.
-- WRONG GAZE / GESTURE: the gaze direction and any distinct hand gesture
-  must match SCENE. If SCENE's person looks down at what they are doing, a
-  RESULT staring into the camera is a FAIL; a distinct gesture in SCENE
-  (thumbs-up, pointing, mid-pour) replaced by generic open/resting hands is
-  a FAIL. (The camera_gaze context flag below INVERTS the gaze half of this
-  rule when set — gestures must always match.)
-- WRONG OUTFIT: by default the person must wear the SAME clothing as the
-  person in SCENE (an identity swap keeps the scene's wardrobe). FAIL if the
-  clothing was clearly swapped to the CHARACTER reference's outfit or
-  invented — including partial bleed like gloves, hats or jackets copied
-  from the CHARACTER photo that the SCENE person does not wear. The context
-  flags below INVERT this rule when set.
-- MISSING/EXTRA PEOPLE: no person at all, or extra people who are in neither
-  SCENE nor CHARACTER.
-- BROKEN IMAGE: fully or mostly black/blank/censored output, heavy
-  corruption, or the image is just the unmodified SCENE or CHARACTER.
-- SEVERE ARTIFACTS: grossly deformed face or hands (extra/missing fingers
-  clearly visible), duplicated limbs, garbled brand text on key products.
-- OBVIOUS CUTOUT: the person is clearly pasted in — hard halo edges or
-  lighting that contradicts the environment so strongly it looks like a
-  collage.
+  CHARACTER — the SCENE's original person survived the swap, the face is a
+  blend of the two, or a third, different person appears. Compare facial
+  IDENTITY only (bone structure, features) — NOT clothing, hair styling,
+  expression, makeup or minor age touch-ups. This is the single most
+  important check.
+- MISSING/EXTRA PEOPLE: no person at all in RESULT, or clearly extra,
+  invented people who appear in neither SCENE nor CHARACTER.
+- BROKEN IMAGE: fully or mostly black / blank / censored / heavily corrupted
+  output, or RESULT is just the unmodified SCENE or CHARACTER with no swap
+  performed at all.
+- SEVERE ARTIFACTS: a grossly deformed FACE or HANDS — clearly extra or
+  missing fingers, melted or duplicated facial features, or duplicated/fused
+  limbs. Minor hand or finger imperfections do NOT count; only gross,
+  obviously broken anatomy.
 
-Context flags you may receive:
-- background_replaced=true: the RESULT's environment is SUPPOSED to differ
-  from SCENE (a replacement background was requested). Do NOT fail for a
-  changed background; still require the pose/props from SCENE and identity
-  from CHARACTER, and lighting consistent with the NEW environment. When you
-  ALSO receive a BACKGROUND image: that is the requested replacement
-  environment — FAIL (WRONG BACKGROUND) if RESULT's surroundings clearly
-  show SCENE's original environment instead of BACKGROUND's (the original
-  location/walls/buildings were kept), or an unrelated third environment
-  matching neither. RESULT does not need to be a pixel match of BACKGROUND —
-  same recognizable location/setting type and light is a PASS. EXCEPTION —
-  distinctive symbols: when BACKGROUND contains a distinctive symbol (a
-  flag, a logo, a lettered sign) and RESULT renders it clearly visible, its
-  key identifying features must be intact — a US flag must show its blue
-  star canton, not stripes alone; a logo must not be half-invented. FAIL
-  (WRONG BACKGROUND SYMBOL) on a defaced or incomplete rendering of such a
-  symbol.
-- outfit_from_character=true: the RESULT's clothing is SUPPOSED to come from
-  CHARACTER, not SCENE. Do not fail for changed clothing — instead FAIL
-  (WRONG OUTFIT) if the clothing clearly does NOT match the CHARACTER
-  reference's outfit (e.g. the scene person's clothes were kept).
-- custom_outfit="...": the person is SUPPOSED to wear the described outfit —
-  FAIL (WRONG OUTFIT) if the clothing clearly does not match the
-  description; ignore both SCENE's and CHARACTER's wardrobe in that case.
-- camera_gaze=true: the person in RESULT is SUPPOSED to look directly into
-  the camera with a natural expression, REGARDLESS of where SCENE's person
-  looks. Never fail camera gaze; instead FAIL (WRONG GAZE) if RESULT's
-  person is clearly looking away from the camera. Distinct hand gestures
-  must still match SCENE.
-- USER INTENT (optional text block before the images): the user's own prompt
-  for this job. It is AUTHORITATIVE and may explicitly request deviations
-  from SCENE — different clothing, added/removed props, a changed action or
-  expression. NEVER fail a deviation the user intent clearly requests; judge
-  everything it does not mention by the normal rules above. The framing /
-  zoom / headroom rules (incl. the HEAD-RULER TEST) stay in force unless the
-  intent EXPLICITLY asks for a different framing.
+Everything else is ACCEPTABLE — do NOT fail for any of these (this is a
+deliberate policy, not an oversight):
+- Framing, zoom, crop, camera distance or subject scale differing from SCENE
+  (more or less of the body visible, the head larger or smaller in frame,
+  chest-up vs waist-up). There is NO head-ruler / zoom test anymore.
+- Headroom or vertical position of the subject differing from SCENE (added
+  sky/space above the head, subject sitting higher or lower).
+- Props, held objects, the action, prop count, container type, table/counter
+  items or foreground furniture differing from SCENE.
+- Gaze direction or hand gesture differing from SCENE (looking into the
+  camera vs away, a different or generic hand pose).
+- Clothing / outfit differing from SCENE or from CHARACTER, including added
+  or missing gloves, hats, jackets or other wardrobe pieces.
+- Background or environment differing from SCENE — a changed, replaced, or
+  imperfectly-rendered background, including a logo, sign or flag that is
+  altered, incomplete or stylized.
+- "Pasted-in" / cutout look, hard edges or halos, lighting that doesn't
+  perfectly match the environment, soft focus, grain, or style / color-grade
+  drift.
 
-Be decisive. Borderline-acceptable images PASS — only clear failures fail.
-When you fail, START the reason with the violated rule's NAME in caps
-(e.g. "WRONG BACKGROUND: the original kitchen was kept") — the retry
-machinery routes repair vs full re-roll on it — then give a one-sentence
-corrective instruction for the image model (e.g. "Make the face match the
-character reference exactly — do not retain the original person's facial
-features.").
+Context flags and a USER INTENT text block may appear before the images, and
+an extra BACKGROUND image may be attached. These are INFORMATIONAL ONLY now —
+never fail an image because of them; in particular never fail for a changed
+background, outfit, or gaze.
+
+Be decisive and LENIENT. Only a genuinely unusable image fails. When you DO
+fail, START the reason with the violated rule's NAME in caps — exactly one of
+"WRONG PERSON", "MISSING/EXTRA PEOPLE", "BROKEN IMAGE" or "SEVERE ARTIFACTS"
+(the retry machinery routes repair vs full re-roll on it) — then give a
+one-sentence corrective instruction for the image model (e.g. "Make the face
+match the character reference exactly — do not retain the original person's
+facial features.").
 """
 
 QC_TOOL: dict = {
