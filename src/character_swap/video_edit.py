@@ -1744,6 +1744,25 @@ DIALOGUE_RE = re.compile(
     r'says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]',
     re.IGNORECASE)
 
+# LABELED spoken lines from STRUCTURED / cinematic prompts that carry no `says`
+# verb — the AI Director's `AUDIO — … Dialogue: "…"` block, or screenplay-style
+# `Spoken line: "…"` / `Voice-over: "…"`. Anchored to the label + colon so a
+# quoted PROP elsewhere in the prompt (`bottle labeled "Heinz White Vinegar"`,
+# `Voice: male, American accent`) is NEVER mistaken for speech. Only consulted
+# when DIALOGUE_RE finds no says-clause, so a prompt carrying BOTH an explicit
+# says-clause and an AUDIO block never double-counts the line.
+#
+# Hugo 2026-06-30: a use_director Reengineer run wrote every scene's line as
+# `AUDIO — … Dialogue: "…"` (no `says`), so extract_dialogue returned "" for
+# ALL scenes. That silently disengaged BOTH per-clip caption alignment AND the
+# even-timed script fallback (both gate on a known line) — one character whose
+# Veo/Kling voice Whisper couldn't read shipped captions on only the first clip
+# (re_87e851d21f / Chang). Recognising the labeled form re-arms the whole net.
+# Mirrored in app.js klingSpeechSecs; the JS-mirror sync test pins both.
+_LABELED_DIALOGUE_RE = re.compile(
+    r'\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]',
+    re.IGNORECASE)
+
 # Stage directions written INSIDE the dialogue quotes — `"This is store-bought
 # honey (while he points at the jar), and this is raw honey"` — are NOT spoken;
 # they tell the character what to DO. They were leaking into burned captions via
@@ -1763,15 +1782,20 @@ def _strip_stage_directions(text: str) -> str:
 
 
 def extract_dialogue(text: str) -> str:
-    """Joined SPOKEN line(s) from a motion prompt's says-clause(s), or "" when
-    the prompt carries no dialogue. Single source of truth for every caller.
+    """Joined SPOKEN line(s) from a motion prompt, or "" when the prompt carries
+    no dialogue. Single source of truth for every caller (captions, the Whisper
+    bias hint, per-clip alignment, the expected-speech QC check).
 
-    Parenthetical stage directions inside the quotes are stripped — they're
-    never spoken, so they must never reach captions / the Whisper bias hint /
-    the expected-speech QC check."""
-    joined = " ".join(t.strip() for t in DIALOGUE_RE.findall(text or "")
-                      if t.strip()).strip()
-    return _strip_stage_directions(joined)
+    Prefers the analyst's canonical says-clause(s) (`… says …: "…"`); when none
+    is present, falls back to a LABELED line from a structured Director prompt
+    (`AUDIO — … Dialogue: "…"`, `Voice-over: "…"`). Parenthetical stage
+    directions inside the quotes are stripped — they're never spoken, so they
+    must never reach captions / the bias hint / the QC check."""
+    parts = [t.strip() for t in DIALOGUE_RE.findall(text or "") if t.strip()]
+    if not parts:
+        parts = [t.strip() for t in _LABELED_DIALOGUE_RE.findall(text or "")
+                 if t.strip()]
+    return _strip_stage_directions(" ".join(parts).strip())
 
 
 def remap_words_through_keeps(

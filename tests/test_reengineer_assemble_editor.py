@@ -646,6 +646,13 @@ def test_kling_duration_js_mirror_in_sync():
     assert f"/ {wps} + {margin}" in hint, "speech pace constants drifted"
     assert 'says[^"“”]{0,160}?' in hint, "JS dialogue regex drifted"
     assert 'says[^"“”]{0,160}?' in runner_reengineer._DIALOGUE_RE.pattern
+    # The labeled-dialogue fallback (`Dialogue: "…"` from structured Director
+    # prompts) is mirrored too — both must carry it or a Director run's clip
+    # length under-estimates the same way captions used to drop (Hugo 06-30).
+    from character_swap import video_edit as _ve
+    label_frag = r'(?:dialogue|spoken\s+line|voice-?over)\s*:\s*'
+    assert label_frag in hint, "JS labeled-dialogue regex drifted"
+    assert label_frag in _ve._LABELED_DIALOGUE_RE.pattern
 
 
 def test_speech_secs_parses_descriptor_attribution():

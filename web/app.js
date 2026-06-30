@@ -2581,7 +2581,15 @@ function studio() {
       // (e.g. `comment "skin" …`) so CTAs aren't truncated, while the inner
       // pair forbids `says` so two separate says-clauses don't merge.
       const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]/gi)];
-      const spoken = (m.map(x => x[1]).join(' ').trim() || String(sc.speech || '').trim());
+      let saysSpoken = m.map(x => x[1]).join(' ').trim();
+      if (!saysSpoken) {
+        // Mirror of video_edit._LABELED_DIALOGUE_RE — structured Director
+        // prompts carry the line as `Dialogue: "…"` / `Voice-over: "…"` with no
+        // `says` verb (anchored to the label so quoted props aren't speech).
+        const lm = [...prompt.matchAll(/\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]/gi)];
+        saysSpoken = lm.map(x => x[1]).join(' ').trim();
+      }
+      const spoken = (saysSpoken || String(sc.speech || '').trim());
       const words = spoken ? spoken.split(/\s+/).length : 0;
       return words ? words / 2.2 + 1.0 : 0;
     },
