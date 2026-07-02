@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -62,8 +62,24 @@ def _retryable_status(response: httpx.Response) -> bool:
     return response.status_code == 429 or 500 <= response.status_code < 600
 
 
+def _should_retry(exc: BaseException) -> bool:
+    """Transport-level failures always retry. 429/5xx responses are raised
+    as httpx.HTTPStatusError via the `if _retryable_status(r):
+    r.raise_for_status()` pattern below — but HTTPStatusError is NOT a
+    TransportError subclass, so the old retry_if_exception_type(_RETRY_EXCS)
+    never matched it and every rate-limit / transient-5xx failed the call on
+    the first hit despite the 5 configured attempts. Other 4xx (permanent
+    client errors, e.g. a 404 on an image download URL) must NOT retry."""
+    if isinstance(exc, _RETRY_EXCS):
+        return True
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and _retryable_status(exc.response)
+    )
+
+
 @retry(
-    retry=retry_if_exception_type(_RETRY_EXCS),
+    retry=retry_if_exception(_should_retry),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,
@@ -119,7 +135,7 @@ def submit(*, image: Path, prompt: str, character: str,
 
 
 @retry(
-    retry=retry_if_exception_type(_RETRY_EXCS),
+    retry=retry_if_exception(_should_retry),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,
@@ -152,7 +168,7 @@ def generate_image(*, prompt: str, **kwargs) -> bytes:
 
 
 @retry(
-    retry=retry_if_exception_type(_RETRY_EXCS),
+    retry=retry_if_exception(_should_retry),
     stop=stop_after_attempt(5),
     wait=wait_exponential(multiplier=2, min=2, max=60),
     reraise=True,

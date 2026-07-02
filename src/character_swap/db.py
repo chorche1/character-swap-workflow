@@ -320,7 +320,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # pydantic dump (children excluded — they have their own rows); readers
     # prefer it and fall back to the legacy columns for old rows. New model
     # fields survive automatically — never enumerate columns again.
-    for table in ("jobs", "job_characters", "variants", "videos"):
+    # `projects` joined 2026-07-01: its enumerated columns silently dropped
+    # ProjectAsset.default_prompt, so saved project default prompts vanished
+    # on every server restart.
+    for table in ("jobs", "job_characters", "variants", "videos", "projects"):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if "model_json" not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN model_json TEXT")
@@ -377,6 +380,15 @@ def _char_image_from_row(r: sqlite3.Row) -> CharacterImage:
 
 
 def _project_from_row(r: sqlite3.Row, character_ids: list[str]) -> ProjectAsset:
+    # Prefer the full-fidelity dump (carries default_prompt and every future
+    # field); the legacy columns only serve rows written pre-migration.
+    if "model_json" in r.keys() and r["model_json"]:
+        try:
+            pa = ProjectAsset.model_validate_json(r["model_json"])
+            pa.character_ids = character_ids
+            return pa
+        except (ValueError, TypeError):
+            pass
     return ProjectAsset(
         project_id=r["project_id"],
         name=r["name"],
@@ -668,6 +680,15 @@ def upsert_project(conn: sqlite3.Connection, p: ProjectAsset) -> None:
              name = excluded.name,
              updated_at = excluded.updated_at""",
         (p.project_id, p.name, _iso(p.created_at), _iso(p.updated_at)),
+    )
+    # Full-fidelity dump (character_ids live in project_characters rows) —
+    # the reader prefers this over the legacy columns, so EVERY ProjectAsset
+    # field round-trips. Without it, default_prompt was silently dropped on
+    # restart (the same column-enumeration bug class the job tables were
+    # migrated to model_json for, 2026-06-10).
+    conn.execute(
+        "UPDATE projects SET model_json = ? WHERE project_id = ?",
+        (p.model_dump_json(exclude={"character_ids"}), p.project_id),
     )
     # Replace the project_characters mapping atomically.
     conn.execute("DELETE FROM project_characters WHERE project_id = ?", (p.project_id,))

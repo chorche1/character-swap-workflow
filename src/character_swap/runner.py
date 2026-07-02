@@ -507,8 +507,15 @@ async def _generate_one_variant(
 
     variant.status = VariantStatus.READY
     await asyncio.to_thread(_replace_variant, job, jc, variant)
-    # First successful variant flips char to AWAITING_APPROVAL so user can act early.
-    if jc.status != CharStatus.AWAITING_APPROVAL:
+    # First successful variant flips char to AWAITING_APPROVAL so user can act
+    # early. NEVER demote an already-APPROVED character: early approval is a
+    # supported flow (the user can approve while sibling variants are still
+    # rendering — each takes minutes), and this persist used to clobber that
+    # APPROVED status back to AWAITING_APPROVAL. The approvals list survived,
+    # so the UI kept showing green ✓ rings while set_movement /
+    # run_video_synthesis (which filter on status == APPROVED) silently
+    # dropped the character from Step 4 with no error anywhere.
+    if jc.status not in (CharStatus.AWAITING_APPROVAL, CharStatus.APPROVED):
         await asyncio.to_thread(_persist, job, jc,
                                 status=CharStatus.AWAITING_APPROVAL)
     await _emit(job.job_id, "variant.ready",

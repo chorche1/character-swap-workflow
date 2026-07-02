@@ -112,7 +112,14 @@ class JsonStateStore:
         self.save()
 
     def remove_character(self, char_id: str) -> CharacterAsset | None:
-        return self._state.characters.pop(char_id, None)
+        # Must persist like every other JSON deleter (remove_job /
+        # delete_project / delete_generation) — without the save(), a deleted
+        # character resurrected on restart pointing at an already-unlinked
+        # image file (the caller unlinks the file from disk immediately).
+        out = self._state.characters.pop(char_id, None)
+        if out is not None:
+            self.save()
+        return out
 
     def list_characters(self) -> list[CharacterAsset]:
         return list(self._state.characters.values())

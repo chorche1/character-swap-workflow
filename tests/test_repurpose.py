@@ -341,3 +341,116 @@ def test_repurpose_slot_invariants():
     assert _REPURPOSE_SLOT.status_field == "repurpose_status"
     assert _REPURPOSE_SLOT.filename.format(cid="c1") == "c1__repurpose.mp4"
     assert _COMPILE_SLOT.event_prefix != _REPURPOSE_SLOT.event_prefix
+
+
+# --- 5. _do_repurpose skips uninvolved chars + fails loudly (audit 2026-07-01) ---------
+
+
+def _wire_repurpose(monkeypatch, tmp_path, job):
+    """Same wiring as test 4, but capturing every _update CALL separately (the
+    stale-error clear rides on the first one, the results on the last)."""
+    run_dir = tmp_path / "run"; run_dir.mkdir(exist_ok=True)
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def get_character(self, cid):
+            return None
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.runner_compile, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.reengineer, "reengineer_dir",
+                        lambda rid: run_dir)
+    monkeypatch.setattr(type(runner_reengineer.settings), "output_dir",
+                        property(lambda self: tmp_path / "out"), raising=False)
+
+    calls: list[dict] = []
+
+    async def fake_pipeline(paths, **kw):
+        calls.append({"paths": [str(p) for p in paths]})
+        out = kw["edit_dir"] / "final.mp4"; out.write_bytes(b"mp4")
+        return EditorResult(final=out, voice_applied=False)
+    monkeypatch.setattr(runner_reengineer.runner_compile,
+                        "run_editor_pipeline", fake_pipeline)
+
+    updates: list[dict] = []
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda re_id, **kw: updates.append(kw))
+    return updates, calls
+
+
+def _uninvolved_re_char(cid="cSilas", name="Silas"):
+    """Images on every scene but ZERO approvals + ZERO clips — added to the
+    run, never used (re_3bedfe62d3's Silas)."""
+    imgs = [GeneratedImage(variant_id=f"u{i}", path=f"/u{i}.png", prompt="p",
+                           scene_id=f"s{i}", status="ready") for i in (1, 2)]
+    return JobCharacter(char_id=cid, name=name, source_image_path="/s.png",
+                        status=CharStatus.AWAITING_APPROVAL, images=imgs,
+                        approved_variant_ids=[], videos=[])
+
+
+def test_do_repurpose_skips_uninvolved_char(monkeypatch, tmp_path):
+    """A never-approved character is SKIPPED like _do_assemble does (mirrors
+    the gate's soft `excluded` bucket, Hugo 2026-06-27) — no spurious
+    {status: failed, error: 'no finished clips'} card on a run whose assemble
+    is clean."""
+    job, clips = _re_job(tmp_path)
+    silas = _uninvolved_re_char()
+    job.characters[silas.char_id] = silas
+    updates, calls = _wire_repurpose(monkeypatch, tmp_path, job)
+
+    asyncio.run(runner_reengineer._do_repurpose("re_t", _re_state()))
+
+    merged: dict = {}
+    for kw in updates:
+        merged.update(kw)
+    assert set(merged["repurposed"].keys()) == {"cA"}   # Silas absent, not failed
+    assert merged["repurposed"]["cA"]["status"] == "done"
+    assert len(calls) == 1                              # one build, for cA only
+
+
+def test_repurpose_early_failure_writes_run_error(monkeypatch):
+    """FAIL LOUDLY: a failure BEFORE the per-character phase (here: the
+    underlying job was deleted) must land on the run state's `error` — the
+    old handler only cleared the spinner, so the UI showed nothing and
+    repeated clicks silently repeated the no-op."""
+    state = {"re_id": "re_t", "job_id": "j_gone", "status": "done",
+             "scenes": []}
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
+                        lambda rid: dict(state))
+    monkeypatch.setattr(runner_reengineer, "store",
+                        lambda: SimpleNamespace(get_job=lambda jid: None))
+    updates: list[dict] = []
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda re_id, **kw: updates.append(kw))
+
+    asyncio.run(runner_reengineer.repurpose("re_t"))
+
+    assert updates, "the failure never reached the run state"
+    last = updates[-1]
+    assert last["repurposing"] is False                 # spinner cleared
+    assert "underlying job disappeared" in last["error"]
+    assert last["error"].startswith("repurpose")        # scoped for retry-clear
+    assert "re_t" not in runner_reengineer._REPURPOSING  # guard released
+
+
+def test_do_repurpose_clears_stale_repurpose_error(monkeypatch, tmp_path):
+    """A retry after a failed/restart-orphaned repurpose must drop the old
+    'repurpose …' banner (repurpose never transitions `status`, so _update's
+    clear-on-recovery rule never fires) — but a NON-repurpose run-level
+    error is never touched."""
+    job, _clips = _re_job(tmp_path)
+    updates, _calls = _wire_repurpose(monkeypatch, tmp_path, job)
+
+    st = _re_state()
+    st["error"] = "repurpose avbröts av serveromstart — kör 🔁 Repurpose igen"
+    asyncio.run(runner_reengineer._do_repurpose("re_t", st))
+    assert updates[0]["repurposing"] is True
+    assert updates[0]["error"] is None                  # stale banner dropped
+
+    updates.clear()
+    st2 = _re_state()
+    st2["error"] = "video phase timed out"              # not repurpose-scoped
+    asyncio.run(runner_reengineer._do_repurpose("re_t", st2))
+    assert updates[0]["repurposing"] is True
+    assert "error" not in updates[0]                    # left alone

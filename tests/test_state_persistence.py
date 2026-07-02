@@ -509,3 +509,122 @@ def test_json_remove_job_persists(tmp_path):
 
     s2 = JsonStateStore(path=tmp_path / "state.json")
     assert s2.get_job("j1") is None
+
+
+def test_json_remove_character_persists(json_state_path):
+    """2026-07-01 audit: JsonStateStore.remove_character popped from memory
+    but never called save() — a deleted character resurrected on restart
+    pointing at an already-unlinked image file. NOTE: no other mutation may
+    run between the removal and the restart (the old JSON test masked the
+    bug via update_project's incidental full-state save)."""
+    s1 = JsonStateStore(path=json_state_path)
+    s1.add_character(CharacterAsset(char_id="c1", name="A", filename="a.png"))
+    s1.add_character(CharacterAsset(char_id="c2", name="B", filename="b.png"))
+    removed = s1.remove_character("c1")
+    assert removed is not None and removed.char_id == "c1"
+    # Removing an already-gone character is a harmless no-op.
+    assert s1.remove_character("c1") is None
+
+    # Restart-equivalent: the deletion must have reached disk on its own.
+    s2 = JsonStateStore(path=json_state_path)
+    assert s2.get_character("c1") is None
+    assert s2.get_character("c2") is not None  # untouched
+
+
+# --- ProjectAsset.default_prompt (2026-07-01: dropped by column enumeration) -----------
+#
+# The projects table was never migrated to model_json like the job tables, so
+# ProjectAsset.default_prompt ('★ save as project default' in Step 2) silently
+# vanished on every server restart — jobs then inherited the GLOBAL prompt with
+# no error anywhere. projects now carries model_json too.
+
+
+def test_sqlite_project_default_prompt_round_trip(sqlite_db_path):
+    s1 = _fresh_sqlite(sqlite_db_path)
+    s1.add_project(ProjectAsset(
+        project_id="p1", name="Reels",
+        default_prompt="MY CUSTOM SWAP PROMPT",
+    ))
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert s2.get_project("p1").default_prompt == "MY CUSTOM SWAP PROMPT"
+
+
+def test_sqlite_project_default_prompt_set_via_update(sqlite_db_path):
+    """The PATCH /api/projects flow: set default_prompt on an EXISTING
+    project via update_project, then restart."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    s1.add_project(ProjectAsset(project_id="p1", name="Reels",
+                                character_ids=["c9"]))
+    proj = s1.get_project("p1")
+    proj.default_prompt = "project prompt v2"
+    s1.update_project(proj)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_project("p1")
+    assert loaded.default_prompt == "project prompt v2"
+    assert loaded.character_ids == ["c9"]  # still from project_characters rows
+
+    # Clearing back to None (revert to global default) persists too.
+    proj = s1.get_project("p1")
+    proj.default_prompt = None
+    s1.update_project(proj)
+    s3 = _fresh_sqlite(sqlite_db_path)
+    assert s3.get_project("p1").default_prompt is None
+
+
+def test_sqlite_full_fidelity_project_round_trip(sqlite_db_path):
+    """Every ProjectAsset field — including ones added NEXT MONTH — must
+    survive a restart (same model_json guarantee as the job tables)."""
+    project = _populated(ProjectAsset)
+    s1 = _fresh_sqlite(sqlite_db_path)
+    s1.add_project(project)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    loaded = s2.get_project(project.project_id)
+    assert loaded is not None
+    assert loaded.model_dump() == project.model_dump(), (
+        "SQLite round-trip dropped or mutated a ProjectAsset field — check "
+        "db.py upsert_project/_project_from_row model_json paths")
+
+
+def test_sqlite_project_migration_from_pre_model_json_schema(sqlite_db_path):
+    """Existing DBs: the projects table predates model_json. ensure_schema
+    must ALTER it in (PRAGMA-guarded, idempotent), legacy rows must still
+    load (default_prompt None — nothing was ever stored), and the first
+    update_project must persist default_prompt from then on."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(sqlite_db_path))
+    conn.executescript(
+        """CREATE TABLE projects (
+               project_id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               created_at TEXT NOT NULL,
+               updated_at TEXT NOT NULL
+           );
+           INSERT INTO projects VALUES
+               ('p_old', 'Legacy', '2026-06-01T00:00:00', '2026-06-01T00:00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    s1 = _fresh_sqlite(sqlite_db_path)
+    legacy = s1.get_project("p_old")
+    assert legacy is not None and legacy.name == "Legacy"
+    assert legacy.default_prompt is None
+
+    legacy.default_prompt = "post-migration prompt"
+    s1.update_project(legacy)
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert s2.get_project("p_old").default_prompt == "post-migration prompt"
+
+
+def test_json_project_default_prompt_round_trip(json_state_path):
+    """JSON-backend parity (full model dumps — should always have worked)."""
+    s1 = JsonStateStore(path=json_state_path)
+    s1.add_project(ProjectAsset(project_id="p1", name="P",
+                                default_prompt="json prompt"))
+    s2 = JsonStateStore(path=json_state_path)
+    assert s2.get_project("p1").default_prompt == "json prompt"

@@ -139,6 +139,16 @@ function studio() {
     // the next 5s poll tick.
     _reengineerSockets: {},
     _reRefreshTimers: {},
+    // Dirty-marks DEFERRED during an in-flight video phase (2026-07-01):
+    // approve/✕↻ are allowed while a run is animating/reanimating/assembling
+    // (the job-level endpoints are relaxed for from_reengineer), but the
+    // scenes-PATCH that records `dirty` 409s in those statuses
+    // (_EDITABLE_RUN_STATES) — so an image regenerated mid-phase silently
+    // shipped its OLD clip in the final with no '● ändrad' badge. Queue the
+    // scene idx here (idx is stable: scene add/delete/reorder also 409 while
+    // in-flight) and flush the PATCH the moment refreshReengineer sees the
+    // run in a markable status again. re_id → [scene idx, ...].
+    _reDirtyPending: {},
     // A WS job-refresh that was DEFERRED because the user was typing in a
     // protected field (see _isTypingProtectedField); flushed on blur so Step 4
     // catches up the moment they tap away.
@@ -1277,7 +1287,12 @@ function studio() {
         // the 5s poll skips them. Before this, any approval gate older than the 8
         // newest showed an EMPTY gate — the swap images existed on disk and the
         // detail endpoint returned them, but the light history row never got them.
-        const gate = x => ['awaiting_approval', 'awaiting_assembly'].includes(x.status);
+        // awaiting_person_choice added 2026-07-01 (same bug class, missed then):
+        // the multi-person chooser is an x-if on sc.multi_person inside the
+        // scenes x-for — an unhydrated run showed the violet status with ZERO
+        // radio choices and '▶ Fortsätt' sent {scenes: []} → 400 forever.
+        const gate = x => ['awaiting_approval', 'awaiting_assembly',
+                           'awaiting_person_choice'].includes(x.status);
         const toHydrate = new Set(list.slice(0, 8).map(x => x.re_id));
         for (const x of list) if (gate(x)) toHydrate.add(x.re_id);
         for (const id of toHydrate) this.refreshReengineer(id);
@@ -1432,6 +1447,21 @@ function studio() {
         const prev = i >= 0 ? this.reengineerHistory[i] : null;
         if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
         else this.reengineerHistory.unshift(fresh);
+        // Flush dirty-marks deferred while the run was animating/reanimating/
+        // assembling (see _reMarkSceneDirtyIdx) — the backend PATCH accepts
+        // them again now. Polling is guaranteed live through those phases
+        // (_reengineerIsActive includes them), so this transition is never
+        // missed. Clear the queue FIRST so a re-entrant refresh can't
+        // double-PATCH the same scenes.
+        const pendingDirty = this._reDirtyPending[reId];
+        if (pendingDirty && pendingDirty.length
+            && this._reDirtyMarkableStatuses.includes(fresh.status)) {
+          const { [reId]: _gone, ...rest } = this._reDirtyPending;
+          this._reDirtyPending = rest;
+          for (const idx of pendingDirty) {
+            await this._reMarkSceneDirtyIdx(fresh, idx);
+          }
+        }
         // Keep the WS while edit-mode work is in flight on a finished run.
         if (['done', 'partial_success', 'failed'].includes(fresh.status)
             && !this._reengineerHasInFlight(fresh)) {
@@ -1503,10 +1533,32 @@ function studio() {
       return s?.end_frame_url || null;
     },
 
+    // Run statuses where the backend scenes-PATCH accepts a dirty mark
+    // (the post-clip subset of _EDITABLE_RUN_STATES — at the approval gate
+    // no clips exist yet, so nothing can be stale and nothing is marked).
+    _reDirtyMarkableStatuses: ['done', 'partial_success', 'failed',
+                               'awaiting_assembly'],
+    // In-flight video phases: clips exist (or are rendering) but the backend
+    // 409s scene edits — DEFER the mark instead of dropping it (2026-07-01).
+    _reDirtyDeferStatuses: ['animating', 'reanimating', 'assembling'],
+
     // Mark ONE scene entry dirty by idx (clip no longer matches its images).
     async _reMarkSceneDirtyIdx(run, idx) {
-      if (!['done', 'partial_success', 'failed',
-            'awaiting_assembly'].includes(run.status)) return;
+      // Image regens / approval swaps ARE possible mid-video-phase (the
+      // approve/retry endpoints are relaxed for from_reengineer jobs), but
+      // the scenes-PATCH refuses those statuses — queue the mark and let
+      // refreshReengineer flush it once the run leaves the phase. Before
+      // this, a ✕↻ during 'animating' shipped the old clip in the final
+      // with no '● ändrad' badge (silent image/clip mismatch).
+      if (this._reDirtyDeferStatuses.includes(run.status)) {
+        const q = this._reDirtyPending[run.re_id] || [];
+        if (!q.includes(idx)) {
+          this._reDirtyPending = { ...this._reDirtyPending,
+                                   [run.re_id]: [...q, idx] };
+        }
+        return;
+      }
+      if (!this._reDirtyMarkableStatuses.includes(run.status)) return;
       try {
         const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${idx}`, {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
@@ -2300,20 +2352,14 @@ function studio() {
     async _reMarkVariantSceneDirty(run, charId, variantId) {
       // awaiting_assembly included (review 2026-06-13): approving a
       // regenerated image at the clip-review gate must re-flag the scene,
-      // or the old clip silently ships with the new image.
-      if (!['done', 'partial_success', 'failed',
-            'awaiting_assembly'].includes(run.status)) return;
+      // or the old clip silently ships with the new image. Status gating
+      // (incl. deferral during animating/reanimating/assembling, 2026-07-01)
+      // lives in _reMarkSceneDirtyIdx — one shared PATCH site.
       const v = (run.job?.characters?.[charId]?.images || [])
         .find(x => x.variant_id === variantId);
       const idx = (run.scenes || []).findIndex(sc => sc.scene_id === v?.scene_id);
       if (idx < 0) return;
-      try {
-        const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${idx}`, {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dirty: true }),
-        });
-        if (r.ok) this._spliceReengineerView(await r.json());
-      } catch (_) {}
+      await this._reMarkSceneDirtyIdx(run, idx);
     },
 
     reengineerAddSceneFile(run, file) {

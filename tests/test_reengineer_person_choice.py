@@ -254,3 +254,21 @@ def test_frontend_wiring_present():
     assert "submitReengineerPersonChoices" in app_js
     assert "awaiting_person_choice" in index
     assert "sc.people" in index
+
+
+def test_person_choice_gate_is_always_hydrated():
+    """Audit 2026-07-01: GET /api/reengineer returns LIGHT rows (no scenes/
+    job); loadReengineerHistory hydrates full details for the 8 newest runs
+    PLUS every run parked at an interactive gate. `awaiting_person_choice`
+    was missing from that gate allowlist (the exact bug class fixed
+    2026-06-19 for awaiting_approval/awaiting_assembly), so a person-choice
+    run older than the 8 newest rendered the violet status with ZERO radio
+    choices and '▶ Fortsätt' sent {scenes: []} → 400 forever."""
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    app_js = (root / "web" / "app.js").read_text(encoding="utf-8")
+    assert "const gate = x =>" in app_js
+    gate_src = app_js.split("const gate = x =>", 1)[1][:250]
+    assert "'awaiting_person_choice'" in gate_src
+    assert "'awaiting_approval'" in gate_src
+    assert "'awaiting_assembly'" in gate_src

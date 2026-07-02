@@ -361,6 +361,11 @@ def _job_to_dict(job: Job) -> dict:
         # Per-job Step-6 compile settings so the ⚙ panel rehydrates per job
         # (None until the job's first compile → frontend uses the global default).
         "compile_settings": job.compile_settings or None,
+        # Last-used 🔁 Repurpose settings (persisted by repurpose_videos with
+        # persist_settings=true) — openRepurposeModal('swap') seeds from
+        # `job.repurpose_settings`, so omitting this silently discarded the
+        # round-trip and the modal fell back to compile defaults.
+        "repurpose_settings": job.repurpose_settings or None,
         "compacted": job.compacted,
         "created_at": job.created_at.isoformat() + "Z",
         "updated_at": job.updated_at.isoformat() + "Z",
@@ -5005,6 +5010,29 @@ async def reengineer_create(
     return _reengineer_view(initial_state)
 
 
+def _register_scene_duplicate(src_scene_id: str, data: bytes,
+                              original_name: str) -> tuple[str, Path]:
+    """Register a NEW scene id for a byte-identical repeat upload IN THE SAME
+    run. Content-addressing (`_register_frame_as_scene`) collapses identical
+    bytes to ONE scene_id, but everything downstream — the job's scene dedupe,
+    the per-scene prompt/duration dicts, `_render_direct_clip`'s first-match
+    entry resolve and `_persist_direct`'s first-match write — is keyed by
+    scene_id ALONE, so the second row would silently lose its own prompt and
+    (for "ingen swap" rows) wait forever on a clip that never lands. Mint a
+    `__dup` id (the duplicate-scene machinery's scheme, so it never collides
+    with a content hash) backed by its OWN file on disk — job scene paths are
+    derived as `scenes_dir/<scene_id>.png` at job creation."""
+    new_sid = f"{src_scene_id}__dup{secrets.token_hex(3)}"
+    dest = settings.scenes_dir / f"{new_sid}.png"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    store().add_scene(SceneAsset(scene_id=new_sid, filename=dest.name,
+                                 original_name=original_name))
+    return new_sid, dest
+
+
 @app.post("/api/reengineer/from_images")
 async def reengineer_from_images(
     background_tasks: BackgroundTasks,
@@ -5138,6 +5166,7 @@ async def reengineer_from_images(
             end_frame_paths_by_idx[row_idx] = str(ef_path)
 
     scene_entries: list[dict] = []
+    seen_scene_ids: set[str] = set()
     for idx, upload in enumerate(files):
         ext = _safe_ext(upload.filename or "")          # image-only; 400 on bad ext
         data = await _read_capped(upload)
@@ -5148,6 +5177,15 @@ async def reengineer_from_images(
         tmp.write_bytes(data)
         tmp.replace(img_path)
         scene_id, reg_path = runner_reengineer._register_frame_as_scene(img_path)
+        if scene_id in seen_scene_ids:
+            # Byte-identical repeat row (the natural way to have the same shot
+            # speak two different lines) — give it its OWN scene entry, or the
+            # rows collapse to one scene_id and the second row's prompt/clip is
+            # silently lost (direct rows then 409 "Klipp renderas fortfarande"
+            # forever at assembly). Applies to swap AND direct rows.
+            scene_id, reg_path = _register_scene_duplicate(
+                scene_id, data, upload.filename or f"Scene {idx + 1} (dubblett)")
+        seen_scene_ids.add(scene_id)
 
         raw_len = length_list[idx]
         length = float(raw_len) if raw_len else 5.0
@@ -5624,6 +5662,23 @@ def _save_reengineer_state(state: dict) -> None:
     reengineer_mod.save_state(state)
 
 
+def _reload_reengineer_state_after_await(re_id: str) -> dict:
+    """Fresh re-load of a run's state after a LONG await (upload stream,
+    ffprobe, frame extraction). The mutating endpoints load state up front for
+    validation and then await multi-second work — saving that pre-await
+    snapshot at the end would silently revert any state write that landed in
+    the window (a Whisper dialogue prefill from generate_added_scene, a
+    PATCH /scenes/{idx} prompt edit, the poll's dirty-clear). Same
+    reload-before-save pattern as reengineer_char_drive_push and
+    runner_reengineer._persist_direct. Refuses loudly when the run vanished
+    mid-request — saving the stale snapshot would resurrect a deleted run."""
+    from character_swap import reengineer as reengineer_mod
+    fresh = reengineer_mod.load_state(re_id)
+    if not fresh:
+        raise HTTPException(409, "run state disappeared during the request")
+    return fresh
+
+
 def _mark_finals_stale(state: dict) -> None:
     if state.get("finals"):
         state["finals_stale"] = True
@@ -5792,6 +5847,11 @@ async def reengineer_add_scene(
     if whisper_source and not direct:
         entry["transcribing"] = True
 
+    # The upload stream / ffprobe / frame-extraction awaits above take seconds
+    # — re-load before mutating so the save below doesn't clobber concurrent
+    # state writes (e.g. a PRIOR add's Whisper dialogue prefill landing in the
+    # window) with the pre-await snapshot.
+    state = _reload_reengineer_state_after_await(re_id)
     entries = state.get("scenes") or []
     pos = position if 0 <= position <= len(entries) else len(entries)
     entries.insert(pos, entry)
@@ -5823,6 +5883,21 @@ async def reengineer_add_scene(
     return _reengineer_view(state, slim=True)
 
 
+def _refuse_shared_direct_scene(state: dict, idx: int, sid: str) -> None:
+    """409 when another state.scenes entry (list index ≠ `idx`) shares `sid`.
+    Marking a scene "direkt bild" drops EVERY variant whose v.scene_id == sid
+    and adds sid to job.direct_scene_ids — both keyed by the NON-unique
+    scene_id, so a same-id sibling would be corrupted, never re-swapped, and
+    silently omitted from the final. Refuse loudly rather than corrupt the
+    sibling (the same doctrine as _repoint_scene's collision guard)."""
+    if any(i != idx and e.get("scene_id") == sid
+           for i, e in enumerate(state.get("scenes") or [])):
+        raise HTTPException(409,
+            "Den här scenen delar bild med en annan scen (identisk bildruta) — "
+            "direkt-läget skulle ta bort syskonscenens bilder. Byt bild på "
+            "scenen eller ta bort dubbletten först.")
+
+
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/direct_image")
 async def reengineer_set_direct(re_id: str, idx: int,
                                 file: UploadFile | None = File(None)) -> dict:
@@ -5847,16 +5922,30 @@ async def reengineer_set_direct(re_id: str, idx: int,
         data = await _read_capped(file)
         if not data:
             raise HTTPException(400, "Empty upload")
+        # The stream await above can span seconds — re-load so the final save
+        # doesn't clobber concurrent state writes with the pre-await snapshot.
+        state = _reload_reengineer_state_after_await(re_id)
+        entry = _reengineer_entry(state, idx)
         run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
         run_dir.mkdir(parents=True, exist_ok=True)
         up = run_dir / f"direct_{secrets.token_hex(4)}{ext}"
         up.write_bytes(data)
         new_sid, reg_path = runner_reengineer._register_frame_as_scene(up)
         old_sid = entry["scene_id"]
+        # Sibling guard BEFORE any mutation: the upload can content-hash to a
+        # scene_id another entry already uses (byte-identical image).
+        _refuse_shared_direct_scene(state, idx, new_sid)
         if new_sid != old_sid:
             _repoint_scene(job, state, idx, old_sid, new_sid, str(reg_path))
         entry["direct_image_path"] = str(reg_path)
     else:
+        # scene_id is NOT unique within state.scenes (identical detected
+        # frames content-hash to one id) and the variant-drop below is keyed
+        # by scene_id ALONE — without this guard a sibling entry sharing the
+        # id was silently gutted (its approved images deleted, the id flipped
+        # into direct_scene_ids) and then dropped from the final as "never
+        # theirs". Refuse loudly instead, mirroring _repoint_scene's guard.
+        _refuse_shared_direct_scene(state, idx, entry["scene_id"])
         sc = s.get_scene(entry["scene_id"])
         if sc is None:
             raise HTTPException(400, "ingen bild att använda — ladda upp en")
@@ -6191,6 +6280,11 @@ async def reengineer_import_clip(re_id: str, idx: int,
     variant = await _import_clip_common(
         job_id, char_id, file, variant_id=approved)
 
+    # The upload stream + ffprobe above can take minutes (clips up to 1 GiB) —
+    # re-load before mutating so the save below doesn't clobber concurrent
+    # state writes (a prompt edit, a dirty-clear) with the pre-await snapshot.
+    state = _reload_reengineer_state_after_await(re_id)
+    entry = _reengineer_entry(state, idx)
     # Finished finals are now stale → the run must "▶ Bygg ihop igen".
     _mark_finals_stale(state)
     # Clear the scene's dirty flag ONLY if EVERY character's clip for it is now
@@ -6199,10 +6293,11 @@ async def reengineer_import_clip(re_id: str, idx: int,
     # dirty so the gate makes the user re-animate it before rebuilding — and the
     # gate/_do_reanimate exempt all-imported scenes so this never dead-locks
     # (review 2026-06-21). The re-fetch is None-guarded (job may be deleted
-    # mid-upload).
+    # mid-upload); the entry-still-same-scene check guards a concurrent
+    # repoint/reorder that moved a different scene onto this list index.
     fresh_job = store().get_job(job_id)
-    if fresh_job is not None and runner_reengineer._scene_all_imported(
-            fresh_job, scene_id):
+    if (fresh_job is not None and entry.get("scene_id") == scene_id
+            and runner_reengineer._scene_all_imported(fresh_job, scene_id)):
         entry.pop("dirty", None)
     _save_reengineer_state(state)
     view = _reengineer_view(state, slim=True)
@@ -6527,12 +6622,16 @@ async def reengineer_replace_scene_image(re_id: str, idx: int,
     job = s.get_job(state.get("job_id") or "")
     if job is None:
         raise HTTPException(409, "underlying job missing")
-    old_sid = entry["scene_id"]
 
     ext = _safe_ext(file.filename or "upload.png")          # image-only
     data = await _read_capped(file)
     if not data:
         raise HTTPException(400, "Empty upload")
+    # The stream await above can span seconds — re-load so the final save
+    # doesn't clobber concurrent state writes with the pre-await snapshot.
+    state = _reload_reengineer_state_after_await(re_id)
+    entry = _reengineer_entry(state, idx)
+    old_sid = entry["scene_id"]
     run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
     run_dir.mkdir(parents=True, exist_ok=True)
     upload = run_dir / f"replace_{secrets.token_hex(4)}{ext}"

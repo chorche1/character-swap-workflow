@@ -20,9 +20,11 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,27 @@ def _render_gate() -> threading.BoundedSemaphore:
 # settings.project_root anchor (set in config.py).
 def _remotion_dir() -> Path:
     return settings.project_root / "remotion"
+
+
+def _kill_render_tree(proc: subprocess.Popen) -> None:
+    """SIGKILL the render's entire process group. The render is spawned with
+    start_new_session=True so its pgid == its pid and the group holds every
+    descendant (npx → node remotion CLI → headless Chrome + its per-tab
+    renderer processes). Killing only the direct child — what
+    subprocess.run(timeout=...) did — SIGKILLed npx while the wedged Chrome
+    tree survived, reparented, and kept burning CPU forever (one leaked tree
+    per timeout)."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # Group already gone (or unkillable) — fall back to the direct child.
+        proc.kill()
+    try:
+        # Reap the child + drain/close its pipes; bounded so a kernel-stuck
+        # zombie can't re-wedge the gate slot the timeout just freed.
+        proc.communicate(timeout=10)
+    except Exception:
+        pass
 
 
 def _cache_dir() -> Path:
@@ -265,13 +288,22 @@ def _render_locked(
 
         # Write props JSON to a temp file alongside the output; Remotion CLI
         # reads it with `--props=<path>`.
-        props_path = output_video.parent / f".remotion-props-{cache_key}.json"
+        # Both temp names carry a per-render token: the gate admits 2 renders
+        # at once and the in-gate cache re-check only catches a FINISHED
+        # sibling, so two concurrent renders with the SAME cache key used to
+        # write into ONE shared .partial file — the interleaved garbage was
+        # then promoted into the cache permanently, and the first finisher's
+        # cleanup unlinked the shared props file out from under the sibling.
+        render_token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        props_path = output_video.parent / (
+            f".remotion-props-{cache_key}-{render_token}.json")
         props_path.write_text(json.dumps(real_props), encoding="utf-8")
         # Backlog #8 (2026-06-12): render to a .partial temp file and
         # promote atomically on success. Rendering straight to cache_path
         # meant a failed/killed render left a truncated MP4 at the cache
         # key — served as a successful render on every future hit.
-        partial_path = cache_path.with_name(cache_path.name + ".partial.mp4")
+        partial_path = cache_path.with_name(
+            f"{cache_path.name}.partial-{render_token}.mp4")
         try:
             cmd = [
                 "npx", "--prefix", str(remotion_dir),
@@ -297,21 +329,28 @@ def _render_locked(
                 "--log=info",
             ]
             entry["concurrency"] = max(1, settings.remotion_concurrency)
+            # Whole-subprocess backstop (backlog #11): a hung headless
+            # Chrome used to hold one of the gate slots forever. The render
+            # runs in its OWN process group (start_new_session) so on
+            # timeout we can kill the WHOLE tree — subprocess.run's own
+            # timeout only SIGKILLed the direct child (npx), leaving the
+            # wedged node/Chrome descendants alive (see _kill_render_tree).
+            proc = subprocess.Popen(
+                cmd, cwd=str(remotion_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                start_new_session=True,
+            )
+            timeout_secs = max(60, settings.remotion_render_timeout_secs)
             try:
-                # Whole-subprocess backstop (backlog #11): a hung headless
-                # Chrome used to hold one of the gate slots forever.
-                # subprocess.run KILLS the child on timeout before raising.
-                proc = subprocess.run(
-                    cmd, cwd=str(remotion_dir),
-                    capture_output=True, text=True,
-                    timeout=max(60, settings.remotion_render_timeout_secs),
-                )
+                stdout, stderr = proc.communicate(timeout=timeout_secs)
             except subprocess.TimeoutExpired as e:
+                _kill_render_tree(proc)
                 raise RuntimeError(
-                    f"remotion render timed out after {e.timeout:.0f}s — "
-                    "Chrome killed, gate slot released") from e
+                    f"remotion render timed out after {timeout_secs:.0f}s — "
+                    "render process tree (npx/node/Chrome) killed, gate slot "
+                    "released") from e
             if proc.returncode != 0:
-                detail = (proc.stderr or proc.stdout or "").strip()[-2000:]
+                detail = (stderr or stdout or "").strip()[-2000:]
                 raise RuntimeError(
                     f"remotion render failed (exit {proc.returncode}): {detail}"
                 )

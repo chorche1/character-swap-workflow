@@ -7,15 +7,23 @@ per render at 11-concurrent vs 71s solo, plus per-frame delayRender 30s
 timeouts (`Timeout (30000ms) exceeded rendering the component at frame
 427`) and one Chrome launch crash. The fix gates renders process-wide in
 remotion_render.py and raises per-render --concurrency / --timeout.
+
+2026-07-01 additions: the render subprocess now runs in its OWN process
+group so the timeout kills the whole npx → node → Chrome tree (not just
+npx), and each render writes to a UNIQUE .partial temp file so two
+concurrent renders with the same cache key can't interleave writes into
+one file and promote garbage into the cache.
 """
 from __future__ import annotations
 
 import contextlib
+import os
+import signal
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +39,50 @@ def _no_record(**_kw):
 
 def _cache_mp4_arg(cmd: list[str]) -> Path:
     return Path(next(a for a in cmd if a.endswith(".mp4")))
+
+
+def _props_arg(cmd: list[str]) -> str:
+    return next(a for a in cmd if a.startswith("--props="))
+
+
+def _install_popen(monkeypatch, render, spawn_kwargs: list | None = None):
+    """Patch subprocess.Popen inside remotion_render with a fake process.
+
+    `render(cmd, timeout)` runs inside communicate() and returns
+    (returncode, stdout, stderr); it may write output files or raise
+    subprocess.TimeoutExpired to simulate a hung Chrome.
+    """
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            self.cmd = cmd
+            self.pid = 999_999  # never a real pid — killpg is stubbed in tests
+            self.returncode = None
+            self._timed_out = False
+            if spawn_kwargs is not None:
+                spawn_kwargs.append(kwargs)
+
+        def communicate(self, timeout=None):
+            if self._timed_out:
+                # post-kill reap inside _kill_render_tree
+                return "", ""
+            try:
+                rc, out, err = render(self.cmd, timeout)
+            except subprocess.TimeoutExpired:
+                self._timed_out = True
+                raise
+            self.returncode = rc
+            return out, err
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(remotion_render.subprocess, "Popen", FakeProc)
+    return FakeProc
+
+
+def _ok_render(cmd, _timeout, payload: bytes = b"fake"):
+    _cache_mp4_arg(cmd).write_bytes(payload)
+    return 0, "", ""
 
 
 @pytest.fixture()
@@ -65,12 +117,11 @@ def test_render_cmd_uses_settings_concurrency_and_timeout(render_env, monkeypatc
     monkeypatch.setattr(settings, "remotion_timeout_ms", 120_000)
     captured: list[list[str]] = []
 
-    def fake_run(cmd, **_kw):
+    def fake_render(cmd, timeout):
         captured.append(cmd)
-        _cache_mp4_arg(cmd).write_bytes(b"fake")
-        return SimpleNamespace(returncode=0, stderr="", stdout="")
+        return _ok_render(cmd, timeout)
 
-    monkeypatch.setattr(remotion_render.subprocess, "run", fake_run)
+    _install_popen(monkeypatch, fake_render)
     inp = _make_input(render_env, "in.mp4")
     out = render_env / "out.mp4"
     summary = remotion_render.render_remotion(
@@ -84,16 +135,31 @@ def test_render_cmd_uses_settings_concurrency_and_timeout(render_env, monkeypatc
     assert "--concurrency=1" not in cmd
 
 
+def test_render_spawns_in_own_process_group(render_env, monkeypatch):
+    """The subprocess must be its own session/process-group leader so a
+    timeout can kill the whole npx → node → Chrome tree via killpg."""
+    spawn_kwargs: list[dict] = []
+    _install_popen(monkeypatch, _ok_render, spawn_kwargs=spawn_kwargs)
+    inp = _make_input(render_env, "in.mp4")
+    remotion_render.render_remotion(
+        inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
+        props={"accent": "#8B5CF6"}, words=WORDS)
+    (kwargs,) = spawn_kwargs
+    assert kwargs.get("start_new_session") is True, (
+        "render subprocess must run in its own process group — without it a "
+        "timeout kills only npx and leaks the node/Chrome descendants")
+
+
 def test_failed_render_never_poisons_the_cache(render_env, monkeypatch):
     """Backlog #8 (2026-06-12): the render used to write straight to the
     cache key — a failed/killed Chrome left a truncated MP4 there, served
     as a successful render on every future hit. Now it renders to a
     .partial temp and promotes atomically only on success."""
-    def dying_run(cmd, **_kw):
+    def dying_render(cmd, _timeout):
         _cache_mp4_arg(cmd).write_bytes(b"truncated-by-crash")
-        return SimpleNamespace(returncode=1, stderr="chrome crashed", stdout="")
+        return 1, "", "chrome crashed"
 
-    monkeypatch.setattr(remotion_render.subprocess, "run", dying_run)
+    _install_popen(monkeypatch, dying_render)
     inp = _make_input(render_env, "in.mp4")
     with pytest.raises(RuntimeError, match="remotion render failed"):
         remotion_render.render_remotion(
@@ -104,11 +170,7 @@ def test_failed_render_never_poisons_the_cache(render_env, monkeypatch):
 
     # The same render retried after the transient failure succeeds cleanly
     # (cache miss, not a poisoned hit).
-    def good_run(cmd, **_kw):
-        _cache_mp4_arg(cmd).write_bytes(b"fake")
-        return SimpleNamespace(returncode=0, stderr="", stdout="")
-
-    monkeypatch.setattr(remotion_render.subprocess, "run", good_run)
+    _install_popen(monkeypatch, _ok_render)
     summary = remotion_render.render_remotion(
         inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
         props={"accent": "#8B5CF6"}, words=WORDS)
@@ -116,19 +178,24 @@ def test_failed_render_never_poisons_the_cache(render_env, monkeypatch):
     assert (render_env / "out.mp4").read_bytes() == b"fake"
 
 
-def test_render_subprocess_timeout_kills_and_releases_gate(render_env, monkeypatch):
+def test_render_subprocess_timeout_kills_tree_and_releases_gate(render_env, monkeypatch):
     """Backlog #11 (2026-06-12): no subprocess timeout meant a hung headless
     Chrome held 1 of the 2 gate slots forever. The run is now bounded by
-    settings.remotion_render_timeout_secs; on expiry the child is killed,
-    the cache stays clean and the gate slot is released."""
+    settings.remotion_render_timeout_secs; on expiry the ENTIRE process
+    group is SIGKILLed (2026-07-01 — subprocess.run's own timeout only
+    killed npx, leaking the wedged node/Chrome tree), the cache stays clean
+    and the gate slot is released."""
     monkeypatch.setattr(settings, "remotion_render_timeout_secs", 60)
     seen_timeouts: list[float] = []
+    kills: list[tuple[int, int]] = []
+    monkeypatch.setattr(remotion_render.os, "killpg",
+                        lambda pgid, sig: kills.append((pgid, sig)))
 
-    def hung_run(cmd, **kw):
-        seen_timeouts.append(kw.get("timeout"))
-        raise remotion_render.subprocess.TimeoutExpired(cmd, kw.get("timeout"))
+    def hung_render(cmd, timeout):
+        seen_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(cmd, timeout)
 
-    monkeypatch.setattr(remotion_render.subprocess, "run", hung_run)
+    proc_cls = _install_popen(monkeypatch, hung_render)
     inp = _make_input(render_env, "in.mp4")
     with pytest.raises(RuntimeError, match="timed out"):
         remotion_render.render_remotion(
@@ -136,17 +203,47 @@ def test_render_subprocess_timeout_kills_and_releases_gate(render_env, monkeypat
             props={"accent": "#8B5CF6"}, words=WORDS)
     assert seen_timeouts == [60]
     assert list(remotion_render._cache_dir().iterdir()) == []
+    # The WHOLE process group was killed, not just the direct child.
+    assert kills == [(999_999, signal.SIGKILL)], (
+        "timeout must os.killpg the render's process group")
+    assert proc_cls is not None
 
     # Gate slot was released: the next render goes straight through.
-    def good_run(cmd, **_kw):
-        _cache_mp4_arg(cmd).write_bytes(b"fake")
-        return SimpleNamespace(returncode=0, stderr="", stdout="")
-
-    monkeypatch.setattr(remotion_render.subprocess, "run", good_run)
+    _install_popen(monkeypatch, _ok_render)
     summary = remotion_render.render_remotion(
         inp, render_env / "out.mp4", composition_id="CapCutPurplePill",
         props={"accent": "#8B5CF6"}, words=WORDS)
     assert summary["cached"] is False
+
+
+def test_kill_render_tree_kills_grandchildren():
+    """Real-OS check: _kill_render_tree must reach DESCENDANTS of the direct
+    child (the npx → node → Chrome chain), not just the child itself. A
+    plain proc.kill() would orphan the grandchild `sleep` here."""
+    proc = subprocess.Popen(
+        ["/bin/sh", "-c", "sleep 30 & echo $!; wait"],
+        stdout=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        grandchild_pid = int(proc.stdout.readline().strip())
+        remotion_render._kill_render_tree(proc)
+        # Direct child reaped.
+        assert proc.returncode is not None
+        # Grandchild dead too — killpg reached the whole group.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail("grandchild survived the process-tree kill")
+    finally:
+        # Belt and braces — never leave a stray sleep behind on failure.
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def test_gate_caps_simultaneous_render_subprocesses(render_env, monkeypatch):
@@ -155,7 +252,7 @@ def test_gate_caps_simultaneous_render_subprocesses(render_env, monkeypatch):
     lock = threading.Lock()
     state = {"active": 0, "max_active": 0}
 
-    def fake_run(cmd, **_kw):
+    def slow_render(cmd, _timeout):
         with lock:
             state["active"] += 1
             state["max_active"] = max(state["max_active"], state["active"])
@@ -163,9 +260,9 @@ def test_gate_caps_simultaneous_render_subprocesses(render_env, monkeypatch):
         _cache_mp4_arg(cmd).write_bytes(b"fake")
         with lock:
             state["active"] -= 1
-        return SimpleNamespace(returncode=0, stderr="", stdout="")
+        return 0, "", ""
 
-    monkeypatch.setattr(remotion_render.subprocess, "run", fake_run)
+    _install_popen(monkeypatch, slow_render)
 
     def one(i: int) -> dict:
         inp = _make_input(render_env, f"in-{i}.mp4")
@@ -181,6 +278,66 @@ def test_gate_caps_simultaneous_render_subprocesses(render_env, monkeypatch):
     assert all((render_env / f"out-{i}.mp4").is_file() for i in range(8))
     assert state["max_active"] == 2, (
         f"expected exactly 2 concurrent renders, saw {state['max_active']}")
+
+
+def test_concurrent_identical_key_renders_use_distinct_partial_files(render_env, monkeypatch):
+    """2026-07-01: two renders with the SAME cache key admitted by the gate
+    simultaneously (the in-gate re-check only catches a FINISHED sibling)
+    used to write into ONE shared .partial file — interleaved garbage was
+    promoted into the cache permanently, and the first finisher unlinked
+    the shared props file out from under the sibling. Each render must get
+    its own temp files; each promoted output must be one COMPLETE render."""
+    monkeypatch.setattr(settings, "remotion_max_concurrent_renders", 2)
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    payloads = [b"A" * 4096, b"B" * 4096]
+    seen: list[dict] = []
+
+    def overlapping_render(cmd, _timeout):
+        with lock:
+            payload = payloads[len(seen)]
+            seen.append({
+                "partial": _cache_mp4_arg(cmd),
+                "props": _props_arg(cmd),
+                "payload": payload,
+            })
+        # Both renders are mid-flight at the same time — deterministic
+        # reproduction of the double-submit race.
+        barrier.wait(timeout=10)
+        _cache_mp4_arg(cmd).write_bytes(payload)
+        return 0, "", ""
+
+    _install_popen(monkeypatch, overlapping_render)
+    inp = _make_input(render_env, "in.mp4")
+
+    def one(i: int) -> dict:
+        return remotion_render.render_remotion(
+            inp, render_env / f"out-{i}.mp4",
+            composition_id="CapCutPurplePill",
+            props={"accent": "#8B5CF6"}, words=WORDS)
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        results = list(ex.map(one, range(2)))
+
+    assert len(seen) == 2
+    # THE fix: no shared temp files between the two in-flight renders.
+    assert seen[0]["partial"] != seen[1]["partial"], (
+        "concurrent same-key renders must not share a .partial file")
+    assert seen[0]["props"] != seen[1]["props"], (
+        "concurrent same-key renders must not share a props file")
+    assert all(r["cached"] is False for r in results)
+
+    # The cache holds exactly ONE complete render (either one), no leftovers.
+    cache_files = list(remotion_render._cache_dir().iterdir())
+    assert len(cache_files) == 1
+    assert cache_files[0].suffix == ".mp4"
+    assert cache_files[0].read_bytes() in (payloads[0], payloads[1])
+    # Both outputs are COMPLETE payloads — never interleaved garbage.
+    for i in range(2):
+        assert (render_env / f"out-{i}.mp4").read_bytes() in (
+            payloads[0], payloads[1])
+    # No orphaned props files either.
+    assert not list(render_env.glob(".remotion-props-*"))
 
 
 def test_cache_rechecked_after_waiting_for_gate(render_env, monkeypatch):
@@ -209,10 +366,10 @@ def test_cache_rechecked_after_waiting_for_gate(render_env, monkeypatch):
     monkeypatch.setattr(
         remotion_render, "_render_gate", sibling_fills_cache_while_queued)
 
-    def must_not_run(*_a, **_kw):  # pragma: no cover - failure path
-        raise AssertionError("subprocess ran despite warm cache")
+    def must_not_spawn(*_a, **_kw):  # pragma: no cover - failure path
+        raise AssertionError("subprocess spawned despite warm cache")
 
-    monkeypatch.setattr(remotion_render.subprocess, "run", must_not_run)
+    monkeypatch.setattr(remotion_render.subprocess, "Popen", must_not_spawn)
     out = render_env / "out.mp4"
     summary = remotion_render.render_remotion(
         inp, out, composition_id="CapCutPurplePill", props=props, words=WORDS)

@@ -1712,9 +1712,17 @@ async def repurpose(re_id: str) -> None:
         await _do_repurpose(re_id, state)
     except Exception as e:
         _log.exception("reengineer %s repurpose failed", re_id)
-        # Clear the spinner so the UI doesn't hang; the per-char cards already
-        # carry any per-character error.
-        _update(re_id, repurposing=False)
+        # FAIL LOUDLY (2026-07-01): per-char cards only exist for failures
+        # INSIDE the per-character gather. A failure OUTSIDE it (underlying
+        # job deleted, state-write error, the final repurposed=… write) used
+        # to only clear the spinner — the UI showed nothing and repeated
+        # clicks silently repeated the no-op ("inget händer" class). Surface
+        # it in the run-level error box (same field the startup-recovery
+        # pass uses for restart-orphaned repurposes); status/finals stay
+        # untouched — repurpose never owns the run status.
+        _update(re_id, repurposing=False,
+                error=f"repurpose misslyckades: {type(e).__name__}: {e}"
+                      " — kör 🔁 Repurpose igen")
     finally:
         _REPURPOSING.discard(re_id)
 
@@ -1725,7 +1733,14 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
         raise RuntimeError("underlying job disappeared")
     run_dir = reengineer.reengineer_dir(re_id)
     cfg = _repurpose_settings(state)
-    _update(re_id, repurposing=True)
+    # A repurpose never transitions `status`, so _update's clear-error-on-
+    # recovery rule never fires for it — drop a stale banner from an earlier
+    # failed/restart-orphaned repurpose here instead ("repurpose …" prefix
+    # covers both). A non-repurpose run-level error is never touched.
+    prev_err = state.get("error")
+    stale = {"error": None} if (isinstance(prev_err, str)
+                                and prev_err.startswith("repurpose")) else {}
+    _update(re_id, repurposing=True, **stale)
     repurposed: dict[str, dict] = {}
 
     async def _one_character(cid: str, jc: JobCharacter) -> None:
@@ -1800,8 +1815,14 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
             repurposed[cid] = {"status": "failed",
                                "error": f"{type(e).__name__}: {e}"}
 
+    # Skip never-approved characters exactly like _do_assemble (Hugo
+    # 2026-06-27 — mirrors the gate's soft `excluded` bucket): the endpoint's
+    # gap check just declared them excluded, so running them here produced a
+    # spurious {status: failed, error: "no finished clips"} card on runs whose
+    # assemble is clean (re_3bedfe62d3: Silas).
     await asyncio.gather(*[_one_character(cid, jc)
-                           for cid, jc in job.characters.items()])
+                           for cid, jc in job.characters.items()
+                           if not _char_is_uninvolved(state, jc)])
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
 
