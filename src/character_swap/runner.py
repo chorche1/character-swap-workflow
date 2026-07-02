@@ -623,6 +623,15 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     jc.images = []
     jc.videos = []
     jc.approved_variant_id = None
+    # jc.images was just wiped, so EVERY previously-approved id is dangling
+    # (fresh variants get new random ids) — clear the multi-approve list too.
+    # Stale ids survived here before (audit 2026-07-01): re-approving after a
+    # regenerate produced a stale+fresh mix, and _animate_character spawned a
+    # phantom ERROR clip ("approved variant missing on disk") per stale id.
+    # Scene-scoped regens (regen_scene_variants / retry_single_variant) do NOT
+    # route through _kick_char, so live approvals in other scenes are safe —
+    # and _generate_one_variant's APPROVED-restore for those paths is intact.
+    jc.approved_variant_ids = []
     jc.error = None
     jc.status = CharStatus.QUEUED
     jc.updated_at = datetime.utcnow()

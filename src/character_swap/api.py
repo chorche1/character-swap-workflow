@@ -1031,8 +1031,20 @@ async def delete_character(char_id: str) -> dict:
         if char_id in project.character_ids:
             project.character_ids = [c for c in project.character_ids if c != char_id]
             s.update_project(project)
-    with contextlib.suppress(OSError):
-        (settings.characters_dir / asset.filename).unlink(missing_ok=True)
+    # Image files are content-addressed (im_<sha256>) and deliberately SHARED
+    # across characters — upload dedupe reuses the existing file, including
+    # when the same photo is appended to a DIFFERENT character. Mirror
+    # delete_character_image's guard: only unlink when no remaining character
+    # references the same filename (asset was already removed from state
+    # above, so the scan covers exactly the survivors).
+    still_referenced = any(
+        c.filename == asset.filename
+        or any(i.filename == asset.filename for i in c.images)
+        for c in s.state.characters.values()
+    )
+    if not still_referenced:
+        with contextlib.suppress(OSError):
+            (settings.characters_dir / asset.filename).unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -2037,10 +2049,19 @@ async def delete_variant(job_id: str, char_id: str, variant_id: str) -> dict:
     if target is None:
         raise HTTPException(404, "Variant not found on this character")
 
-    with contextlib.suppress(OSError):
-        p = Path(target.path)
-        if p.exists():
-            p.unlink()
+    # A duplicated scene's clones point at the SAME file on disk
+    # (_apply_scene_duplicate: path=v.path) — unlinking here would destroy a
+    # sibling clone's (possibly APPROVED) image. Refcount across EVERY
+    # variant in the job (all characters) before touching the file.
+    still_referenced = any(
+        v.path == target.path and v.variant_id != target.variant_id
+        for c in job.characters.values() for v in c.images
+    )
+    if not still_referenced:
+        with contextlib.suppress(OSError):
+            p = Path(target.path)
+            if p.exists():
+                p.unlink()
 
     jc.images = [v for v in jc.images if v.variant_id != variant_id]
     # Drop the deleted variant from BOTH the legacy field and the multi-pick
@@ -2609,6 +2630,16 @@ def _apply_scene_delete(job: Job, scene_id: str) -> None:
             if jc.approved_variant_id in removed_ids:
                 jc.approved_variant_id = (jc.approved_variant_ids[0]
                                           if jc.approved_variant_ids else None)
+            # A character whose ONLY approvals lived in the deleted scene must
+            # drop back to AWAITING_APPROVAL (mirrors the approve toggle's
+            # empty-list demotion and delete_variant) — leaving it APPROVED
+            # with zero approvals lets set_movement's status gate pass while
+            # run_video_synthesis silently skips the char: the job locks at
+            # Step 4 with nothing to animate.
+            if (jc.status == CharStatus.APPROVED
+                    and not jc.approved_variant_ids
+                    and not jc.approved_variant_id):
+                jc.status = CharStatus.AWAITING_APPROVAL
             jc.updated_at = datetime.utcnow()
 
     del scene_ids[idx]
@@ -2743,16 +2774,28 @@ async def compact_job(job_id: str) -> dict:
         raise HTTPException(409, "Job has in-flight work; wait for it to finish first")
 
     bytes_freed = 0
-    for jc in job.characters.values():
-        # Keep EVERY approved variant — multi-scene jobs may have several.
+    # Keep EVERY approved variant — multi-scene jobs may have several.
+    keep_by_char: dict[str, set[str]] = {}
+    # Duplicated-scene clones point at the SAME file on disk
+    # (_apply_scene_duplicate: path=v.path), so a path is only safe to unlink
+    # when NO surviving variant — in ANY character — still references it.
+    kept_paths: set[str] = set()
+    for cid, jc in job.characters.items():
         keep_variants = set(jc.approved_variant_ids or [])
         if jc.approved_variant_id:
             keep_variants.add(jc.approved_variant_id)
+        keep_by_char[cid] = keep_variants
+        kept_paths.update(v.path for v in jc.images
+                          if v.variant_id in keep_variants)
+    for cid, jc in job.characters.items():
+        keep_variants = keep_by_char[cid]
         remaining_images: list[GeneratedImage] = []
         for v in jc.images:
             if v.variant_id in keep_variants:
                 remaining_images.append(v)
                 continue
+            if v.path in kept_paths:
+                continue          # a kept clone still needs this file
             with contextlib.suppress(OSError):
                 p = Path(v.path)
                 if p.exists():
@@ -3471,7 +3514,11 @@ async def get_swap_defaults(project_id: str | None = None,
 async def elevenlabs_voices() -> list[dict]:
     from character_swap.clients import elevenlabs as _eleven
     try:
-        return _eleven.list_voices()
+        # list_voices is a SYNC httpx call wrapped in tenacity retries
+        # (3 attempts × exponential backoff × 30s timeout ≈ 90s+ worst case)
+        # — running it inline would freeze the whole event loop (same class
+        # as the /api/costs freeze, 2026-06-23). Always offload.
+        return await asyncio.to_thread(_eleven.list_voices)
     except ProviderNotConfigured as e:
         raise HTTPException(503, str(e))
     except NotImplementedError as e:
@@ -4373,7 +4420,9 @@ async def editor_rerender(
     if words_json:
         try:
             words = video_edit.words_from_json(words_json)
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            # KeyError: valid-JSON dicts MISSING a key ({start,end} without
+            # "text") used to escape as a 500 instead of this 400.
             raise HTTPException(400, "words_json must be a JSON list of {text, start, end}")
         if words:
             # Persist atomically. Keep a `.original.json` backup the first
@@ -4628,6 +4677,61 @@ def _find_editor_videos(edit_dir: Path) -> tuple[Path | None, Path | None]:
     return final, pre
 
 
+async def _export_zip_response(*, final_video: Path,
+                               pre_caption_video: Path | None,
+                               words: list[dict] | None,
+                               project_name: str) -> FileResponse:
+    """Build a Resolve export zip and stream it back as a file download.
+
+    The zip deflates the FULL final + pre-caption MP4s (CRF-16 masters, easily
+    100+ MB each) — seconds to tens of seconds of pure CPU — so it must NEVER
+    run on the event loop (same freeze class as /api/costs, 2026-06-23). The
+    archive is built in a worker thread into a temp file under
+    output/cache/exports/ and served via FileResponse (streams from disk, no
+    second in-memory copy); the temp file is deleted after the response is
+    sent, and stale leftovers from interrupted downloads are pruned on each
+    call."""
+    import time
+
+    from starlette.background import BackgroundTask
+
+    from character_swap import exporter
+
+    export_dir = settings.output_dir / "cache" / "exports"
+
+    def _build() -> Path:
+        export_dir.mkdir(parents=True, exist_ok=True)
+        # Prune stale zips (crashed/interrupted downloads never reach the
+        # post-response delete below).
+        cutoff = time.time() - 3600
+        for old in export_dir.glob("*.zip"):
+            with contextlib.suppress(OSError):
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
+        data = exporter.build_export_zip(
+            final_video=final_video,
+            pre_caption_video=pre_caption_video,
+            words=words,
+            project_name=project_name,
+        )
+        dest = export_dir / f"{project_name}-{secrets.token_hex(4)}.zip"
+        dest.write_bytes(data)
+        return dest
+
+    zip_path = await asyncio.to_thread(_build)
+
+    def _cleanup() -> None:
+        with contextlib.suppress(OSError):
+            zip_path.unlink(missing_ok=True)
+
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename=f"{project_name}-resolve.zip",
+        background=BackgroundTask(_cleanup),
+    )
+
+
 @app.get("/api/jobs/{job_id}/characters/{char_id}/export_resolve")
 async def job_char_export_resolve(job_id: str, char_id: str):
     """Download one compiled per-character video as a Resolve project zip.
@@ -4638,9 +4742,6 @@ async def job_char_export_resolve(job_id: str, char_id: str):
     underlying edit_dir (jc.compile_edit_id) so we can still emit SRT
     even when the compile was run with captions disabled.
     """
-    from fastapi.responses import Response
-    from character_swap import exporter
-
     s = store()
     job = s.get_job(job_id)
     if job is None:
@@ -4672,19 +4773,11 @@ async def job_char_export_resolve(job_id: str, char_id: str):
 
     char_slug = _safe_filename_stem(jc.name) or char_id
     project_name = f"{job_id}-{char_slug}"
-    zip_bytes = exporter.build_export_zip(
+    return await _export_zip_response(
         final_video=final_video,
         pre_caption_video=pre_caption,
         words=words,
         project_name=project_name,
-    )
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{project_name}-resolve.zip"',
-            "Content-Length": str(len(zip_bytes)),
-        },
     )
 
 
@@ -4784,9 +4877,6 @@ async def editor_export_resolve(edit_id: str):
     (from words.json) + raw words.json + starter Python script driving
     Resolve's scripting API + README. See `exporter.build_export_zip`.
     """
-    from fastapi.responses import Response
-    from character_swap import exporter
-
     edit_dir = settings.output_dir / "editor" / edit_id
     if not edit_dir.is_dir():
         raise HTTPException(404, f"Edit {edit_id!r} not found")
@@ -4803,19 +4893,11 @@ async def editor_export_resolve(edit_id: str):
         except (json.JSONDecodeError, OSError):
             words = None
 
-    zip_bytes = exporter.build_export_zip(
+    return await _export_zip_response(
         final_video=final_video,
         pre_caption_video=pre_caption,
         words=words,
         project_name=edit_id,
-    )
-    return Response(
-        content=zip_bytes,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f'attachment; filename="{edit_id}-resolve.zip"',
-            "Content-Length": str(len(zip_bytes)),
-        },
     )
 
 
