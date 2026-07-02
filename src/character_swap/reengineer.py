@@ -156,15 +156,26 @@ def detect_scenes(
 
     # Merge too-short fragments into their predecessor (or successor for the first).
     merged: list[tuple[float, float]] = []
+    carry_start: float | None = None   # too-short opener start, folded forward
     for s in scenes:
-        if merged and (s[1] - s[0]) < min_secs:
-            merged[-1] = (merged[-1][0], s[1])
-        elif not merged and (s[1] - s[0]) < min_secs and len(scenes) > 1:
-            # fold a too-short opener into what follows by skipping the cut
-            continue_start = s[0]
-            merged.append((continue_start, s[1]))  # provisional; next merge extends
+        span = (carry_start if carry_start is not None else s[0], s[1])
+        if merged and (span[1] - span[0]) < min_secs:
+            merged[-1] = (merged[-1][0], span[1])
+        elif not merged and (span[1] - span[0]) < min_secs and len(scenes) > 1:
+            # Fold a too-short opener into what FOLLOWS: carry its start
+            # forward so the next scene absorbs it. (Appending it as a
+            # "provisional" scene left the fragment as its own scene
+            # whenever the second scene was normal-length — the extend
+            # branch above only fires for a too-short successor.)
+            carry_start = span[0]
+            continue
         else:
-            merged.append(s)
+            merged.append(span)
+        carry_start = None
+    if carry_start is not None:
+        # Every scene was a too-short fragment folding forward — emit the
+        # accumulated span as ONE scene rather than dropping the video.
+        merged.append((carry_start, scenes[-1][1]))
 
     # Subdivide long scenes evenly into <= max_secs chunks.
     sized: list[tuple[float, float]] = []
@@ -406,7 +417,22 @@ def analyze_scenes(
                            speech=s.get("speech", ""), summary=s.get("summary", ""))
                  for s in data["scenes"]]
         by_idx = {p.idx: p for p in plans}
-        return [by_idx[i] for i in range(len(frames)) if i in by_idx] or None
+        # The only consumer (runner_reengineer._analyze) pairs the plans
+        # POSITIONALLY against spans/frames — a partial plan would shift
+        # every scene after a gap onto the NEXT scene's prompt/dialogue,
+        # drop the last scene entirely, and cache the corruption in
+        # plan.json forever. Refuse anything but exact 1:1 coverage; the
+        # caller falls back to fallback_plans (one plan per span, always).
+        missing = [i for i in range(len(frames)) if i not in by_idx]
+        extra = sorted(i for i in by_idx if not 0 <= i < len(frames))
+        if missing or extra:
+            logger.warning(
+                "reengineer analyst (%s): plan does not cover the %d scenes "
+                "1:1 (missing idx %s, unknown idx %s) — discarding it, "
+                "falling back to transcript-derived prompts",
+                re_id, len(frames), missing, extra)
+            return None
+        return [by_idx[i] for i in range(len(frames))] or None
     except Exception as e:
         # Callers fall back to generic prompts — but the operator must be
         # able to see WHY the analyst died (backlog #23).

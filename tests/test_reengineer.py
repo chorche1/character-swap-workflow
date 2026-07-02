@@ -16,15 +16,19 @@ from character_swap.runner_reengineer import _clamp_kling
 from character_swap.video_edit import Word
 
 
-def _make_video(dest: Path, segments: list[str], secs_each: float = 3.0) -> Path:
+def _make_video(dest: Path, segments: list[str],
+                secs_each: float | list[float] = 3.0) -> Path:
     """Synthesize a tiny video with one solid-color segment per entry —
-    hard cuts between segments trip ffmpeg's scene detector."""
+    hard cuts between segments trip ffmpeg's scene detector. `secs_each`
+    accepts a per-segment list for uneven cuts (e.g. a short opener)."""
+    durs = (secs_each if isinstance(secs_each, list)
+            else [secs_each] * len(segments))
     parts = []
-    for i, color in enumerate(segments):
+    for i, (color, secs) in enumerate(zip(segments, durs)):
         p = dest.parent / f"seg{i}.mp4"
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-y", "-f", "lavfi",
-             "-i", f"color=c={color}:s=160x284:d={secs_each}:r=12",
+             "-i", f"color=c={color}:s=160x284:d={secs}:r=12",
              "-pix_fmt", "yuv420p", str(p)],
             check=True, capture_output=True)
         parts.append(p)
@@ -55,6 +59,52 @@ def test_detect_scenes_subdivides_long_single_shot(tmp_path):
     assert len(spans) >= 2
     for a, b in spans:
         assert (b - a) <= reengineer.MAX_SCENE_SECS + 0.01
+
+
+def test_detect_scenes_folds_short_opener_into_next_scene(tmp_path):
+    """A sub-min_secs opening fragment (logo flash / transition) must fold
+    INTO the following scene — not survive as its own billed scene (audit
+    2026-07-01: the documented fold-forward was a no-op, so a 0.4s opener
+    got its own swap image + a >=3s Kling clip per character)."""
+    video = _make_video(tmp_path / "v.mp4", ["red", "blue", "green"],
+                        secs_each=[0.5, 3.0, 3.0])
+    spans = reengineer.detect_scenes(video)
+    assert len(spans) == 2
+    # The opener is absorbed by the first REAL scene, not emitted alone.
+    assert spans[0][0] == 0.0
+    assert spans[0][1] == pytest.approx(3.5, abs=0.5)
+    assert spans[-1][1] == pytest.approx(6.5, abs=0.5)
+    for a, b in spans:
+        assert (b - a) >= reengineer.MIN_SCENE_SECS
+
+
+def test_detect_scenes_folds_consecutive_short_openers(monkeypatch):
+    """Back-to-back opener fragments accumulate into the first real scene;
+    interior fragments keep merging into their PREDECESSOR."""
+    monkeypatch.setattr(reengineer, "_probe_duration", lambda v: 10.0)
+    monkeypatch.setattr(reengineer, "_ffmpeg_scene_changes",
+                        lambda v, t: [0.3, 0.6, 5.0, 5.4])
+    spans = reengineer.detect_scenes(Path("v.mp4"))
+    # (0,0.3)+(0.3,0.6) fold forward into (0.6,5.0); the interior fragment
+    # (5.0,5.4) folds backward as before.
+    assert spans == [(0.0, 5.4), (5.4, 10.0)]
+
+
+def test_detect_scenes_all_short_fragments_become_one_scene(monkeypatch):
+    """Nothing but fragments → one scene covering the whole video (the
+    pre-fix behavior for this case, preserved)."""
+    monkeypatch.setattr(reengineer, "_probe_duration", lambda v: 0.7)
+    monkeypatch.setattr(reengineer, "_ffmpeg_scene_changes",
+                        lambda v, t: [0.3])
+    assert reengineer.detect_scenes(Path("v.mp4")) == [(0.0, 0.7)]
+
+
+def test_detect_scenes_single_short_video_stays_one_scene(monkeypatch):
+    """A single scene shorter than min_secs has nothing to fold into —
+    it stays as-is (len(scenes) > 1 guard, preserved)."""
+    monkeypatch.setattr(reengineer, "_probe_duration", lambda v: 0.5)
+    monkeypatch.setattr(reengineer, "_ffmpeg_scene_changes", lambda v, t: [])
+    assert reengineer.detect_scenes(Path("v.mp4")) == [(0.0, 0.5)]
 
 
 def test_extract_frame(tmp_path):
@@ -258,6 +308,69 @@ def test_resolve_source_filename():
     assert ch.resolve_source_filename(None) == "primary.png"
     assert ch.resolve_source_filename("im_b") == "outfit2.png"   # outfit pick
     assert ch.resolve_source_filename("im_gone") == "primary.png"  # stale id
+
+
+# --- analyst plan must cover every scene idx 1:1 (audit 2026-07-01) ----------
+# runner_reengineer._analyze zips plans POSITIONALLY against spans/frames, so
+# a plan missing one idx would shift every later scene onto the NEXT scene's
+# prompt/dialogue and silently drop the last scene (then cache the corruption
+# in plan.json). analyze_scenes must refuse partial coverage → None → the
+# caller falls back to fallback_plans, which always emits one plan per span.
+
+
+def _analyst_scene(i: int) -> dict:
+    return {"idx": i, "motion_prompt": f"plan {i}", "speech": f"line {i}",
+            "summary": f"s{i}"}
+
+
+def _run_analyze(monkeypatch, tmp_path, scenes_payload):
+    """Call the REAL analyze_scenes with the Claude call stubbed (same
+    pattern as test_reengineer_analyst_timeout)."""
+    from character_swap.clients import anthropic_client
+    monkeypatch.setattr(anthropic_client, "messages_with_tools",
+                        lambda **kw: object())
+    monkeypatch.setattr(anthropic_client, "extract_tool_call",
+                        lambda resp, name: {"scenes": scenes_payload})
+    monkeypatch.setattr(anthropic_client, "_file_to_image_block",
+                        lambda p: {"type": "image_stub", "path": str(p)})
+    frames = []
+    for i in range(3):
+        f = tmp_path / f"scene-{i:02d}.png"
+        f.write_bytes(b"x")
+        frames.append(f)
+    return reengineer.analyze_scenes(
+        frames=frames, spans=[(0.0, 3.0), (3.0, 6.0), (6.0, 9.0)],
+        words=[], re_id="re_gap")
+
+
+def test_analyze_scenes_rejects_gapped_plan(monkeypatch, tmp_path, caplog):
+    """Missing idx 1 → None (caller falls back), with a loud warning that
+    names the missing idx — never a compacted shorter list."""
+    import logging
+    with caplog.at_level(logging.WARNING, logger="character_swap.reengineer"):
+        plans = _run_analyze(monkeypatch, tmp_path,
+                             [_analyst_scene(0), _analyst_scene(2)])
+    assert plans is None
+    assert any("missing idx [1]" in r.getMessage() for r in caplog.records)
+
+
+def test_analyze_scenes_rejects_out_of_range_idx(monkeypatch, tmp_path):
+    """An idx outside range(len(frames)) means the analyst misread the scene
+    structure — refuse the whole plan rather than guess."""
+    plans = _run_analyze(monkeypatch, tmp_path,
+                         [_analyst_scene(i) for i in (0, 1, 2, 3)])
+    assert plans is None
+
+
+def test_analyze_scenes_returns_full_plan_when_complete(monkeypatch, tmp_path):
+    """Exact 1:1 coverage passes — and comes back ORDERED by idx even when
+    the analyst emits scenes out of order."""
+    plans = _run_analyze(monkeypatch, tmp_path,
+                         [_analyst_scene(2), _analyst_scene(0),
+                          _analyst_scene(1)])
+    assert plans is not None and len(plans) == 3
+    assert [p.idx for p in plans] == [0, 1, 2]
+    assert [p.motion_prompt for p in plans] == ["plan 0", "plan 1", "plan 2"]
 
 
 # --- analyst failure is never silent (backlog #23, 2026-06-12) ---------------

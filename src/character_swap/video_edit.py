@@ -1298,6 +1298,23 @@ def _group_words(words: list[Word], per_card: int) -> list[tuple[float, float, l
     return cards
 
 
+def _ass_escape(text: str) -> str:
+    """Escape libass metacharacters in caption TEXT (never applied to the
+    override tags we generate ourselves).
+
+    `{` opens an override block: libass parses everything up to the next `}`
+    as style tags and renders NONE of it — one stray brace in a word (a
+    Whisper artifact, or a free-text edit from the visual caption editor)
+    silently swallows caption text. `\\{` / `\\}` are libass's literal-brace
+    escapes. A backslash pairs with the NEXT character to form `\\N`/`\\n`/
+    `\\h` (line break / hard space) — a zero-width space after each backslash
+    breaks the pair while rendering invisibly. A raw newline would terminate
+    the one-line Dialogue event itself, so it becomes a plain space."""
+    out = (text or "").replace("\\", "\\\u200b")
+    out = out.replace("{", "\\{").replace("}", "\\}")
+    return out.replace("\r", " ").replace("\n", " ")
+
+
 def _ass_events(words: list[Word], style: CaptionStyle) -> str:
     """Emit one ASS Dialogue line per card. If `highlight_color` is set, also
     emit per-word overrides so the spoken word pops in the highlight color.
@@ -1306,6 +1323,9 @@ def _ass_events(words: list[Word], style: CaptionStyle) -> str:
     the caption lands at a custom point on the 1080×1920 canvas (overrides the
     Style's MarginV + alignment-based placement)."""
     def _case(w: str) -> str:
+        # The ONE point where user/Whisper word text enters the ASS line —
+        # escape libass metacharacters here so both branches below are safe.
+        w = _ass_escape(w)
         return w.upper() if style.all_caps else w
 
     # Free-position override — used when user has dragged the text off-center.
