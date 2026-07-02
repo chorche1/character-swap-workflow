@@ -111,6 +111,34 @@ def test_job_to_dict_surfaces_compile_warning():
     assert api._job_to_dict(job)["characters"]["cA"]["compile_warning"] is None
 
 
+def test_repurpose_persists_settings_and_job_to_dict_exposes_them(monkeypatch):
+    """The 🔁 Repurpose modal for Swap jobs seeds from `job.repurpose_settings`
+    (openRepurposeModal('swap') in app.js) and repurpose_videos persists the
+    settings server-side — but _job_to_dict never serialized the field, so the
+    round-trip silently fell back to compile defaults (audit 2026-07-01,
+    api.py _job_to_dict). Lock both halves: persisted AND surfaced."""
+    store = _FakeStore(_eligible_job())
+    monkeypatch.setattr(api, "store", lambda: store)
+    monkeypatch.setattr(type(api.settings), "require_keys",
+                        lambda self, *a, **k: None, raising=False)
+
+    body = api.RepurposeVideosBody(playback_speed=1.5, overrides={"size": 80},
+                                   char_ids=["cA"])
+    out = asyncio.run(api.repurpose_job_videos("jc1", body, BackgroundTasks()))
+
+    saved = store.get_job("jc1").repurpose_settings
+    assert saved is not None
+    assert saved["playback_speed"] == 1.5
+    assert saved["overrides"] == {"size": 80}
+    assert "char_ids" not in saved          # per-click filter, not a setting
+    assert "persist_settings" not in saved  # control flag, not a setting
+    # Surfaced in the job payload so the modal can rehydrate (the fixed half).
+    assert out["repurpose_settings"]["playback_speed"] == 1.5
+    assert out["repurpose_settings"]["overrides"] == {"size": 80}
+    # No settings persisted yet → the field is present and null.
+    assert api._job_to_dict(_eligible_job())["repurpose_settings"] is None
+
+
 def test_compile_resolve_oneoff_does_not_persist_settings(monkeypatch):
     """persist_settings=False (the Resolve one-off, which forces captions OFF)
     must NOT overwrite the job's remembered preset — else the panel silently

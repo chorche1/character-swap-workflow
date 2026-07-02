@@ -101,6 +101,76 @@ def test_from_images_direct_flag_in_state(wired):
     assert scenes[1]["direct_image_path"].endswith(".png")
 
 
+def _from_images(box, *, files, motion, direct):
+    bg = BackgroundTasks()
+    return asyncio.run(api.reengineer_from_images(
+        bg, files=files,
+        motion_prompts=json.dumps(motion),
+        lengths=json.dumps([5] * len(files)),
+        direct=json.dumps(direct),
+        end_frame_files=[], end_frame_idx="[]",
+        character_ids=json.dumps(["cA"]),
+        image_model="gpt2-id-swap", outfit_mode="scene", outfit_text="",
+        auto_mode=False, use_director=False, background_file=None,
+        background_source="character",
+        character_source_image_ids=""))
+
+
+def test_from_images_duplicate_direct_rows_get_distinct_scenes(wired):
+    """Audit 2026-07-01: two byte-identical 'ingen swap' uploads content-hash
+    to ONE scene_id — the second row could never get its own clip (both tasks
+    billed row 1's prompt, _persist_direct only ever fills the first entry)
+    and assembly 409'd 'Klipp renderas fortfarande' forever. Repeat rows must
+    become REAL distinct scenes via the duplicate-scene id scheme."""
+    box, tmp = wired
+    out = _from_images(box, files=[_upload("a.png", b"same-bytes"),
+                                   _upload("b.png", b"same-bytes")],
+                       motion=["line one", "line two"],
+                       direct=[True, True])
+    scenes = box["states"][out["re_id"]]["scenes"]
+    sids = [e["scene_id"] for e in scenes]
+    assert len(set(sids)) == 2                          # no collapse
+    assert sids[1].startswith(sids[0] + "__dup")        # duplicate-scene scheme
+    # Each row keeps ITS OWN prompt (previously the dict-by-scene_id merge
+    # silently dropped one of them).
+    assert scenes[0]["motion_prompt"] == "line one"
+    assert scenes[1]["motion_prompt"] == "line two"
+    # Both rows are real scenes: registered in the library, each backed by its
+    # own <scene_id>.png so job scene paths + the strip thumbnails resolve.
+    for e in scenes:
+        assert e["is_direct"] is True
+        assert box["scenes"][e["scene_id"]] is not None
+        assert (tmp / "scenes" / f"{e['scene_id']}.png").exists()
+    assert scenes[0]["direct_image_path"] != scenes[1]["direct_image_path"]
+
+
+def test_from_images_swap_plus_direct_duplicate_do_not_collide(wired):
+    """Mixed case: the same image once as a SWAP row and once as 'ingen swap'.
+    With a shared scene_id, _create_job_and_swap's last-entry-wins direct_map
+    silently flipped the swap row into a variant-less direct scene that
+    _collect_clips then dropped from the final. Distinct ids fix both."""
+    box, _ = wired
+    out = _from_images(box, files=[_upload("a.png", b"same-bytes"),
+                                   _upload("b.png", b"same-bytes")],
+                       motion=["talk", "hold still"],
+                       direct=[False, True])
+    scenes = box["states"][out["re_id"]]["scenes"]
+    assert scenes[0]["scene_id"] != scenes[1]["scene_id"]
+    assert "is_direct" not in scenes[0]                 # swap row untouched
+    assert scenes[1]["is_direct"] is True
+
+
+def test_from_images_distinct_images_unaffected(wired):
+    """Different bytes → plain content-addressed ids, no __dup suffix."""
+    box, _ = wired
+    out = _from_images(box, files=[_upload("a.png", b"one"),
+                                   _upload("b.png", b"two")],
+                       motion=["p1", "p2"], direct=[False, False])
+    sids = [e["scene_id"] for e in box["states"][out["re_id"]]["scenes"]]
+    assert len(set(sids)) == 2
+    assert not any("__dup" in s for s in sids)
+
+
 # --------------------------------------------------------------------------- job build
 
 def _seed_state(box, *, scenes):
@@ -233,6 +303,30 @@ def test_set_direct_reuses_scene_image(wired):
     for jc in job.characters.values():
         assert not jc.images and not jc.approved_variant_ids
     assert box["states"]["re_t"]["finals_stale"] is True
+
+
+def test_set_direct_refuses_when_scene_id_shared_with_sibling(wired):
+    """Audit 2026-07-01: the no-upload path dropped EVERY variant whose
+    v.scene_id == sid — a SIBLING entry sharing the (non-unique) scene_id was
+    silently gutted, flipped into direct_scene_ids, and then omitted from the
+    final as 'never theirs'. It must refuse loudly (like _repoint_scene's
+    collision guard) and leave the job untouched."""
+    box, tmp = wired
+    _seed_job_with_scene(box, tmp)
+    # Video-flow shape: two entries share sc_x (identical detected frames).
+    box["states"]["re_t"]["scenes"].append(
+        {"idx": 1, "scene_id": "sc_x", "motion_prompt": "second line",
+         "duration": 5.0})
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.reengineer_set_direct("re_t", 0, file=None))
+    assert e.value.status_code == 409
+    # Nothing was mutated: variants + approvals survive, no direct flip.
+    job = box["jobs"]["j_t"]
+    for jc in job.characters.values():
+        assert jc.images and jc.approved_variant_ids
+    assert "sc_x" not in (job.direct_scene_ids or [])
+    for entry in box["states"]["re_t"]["scenes"]:
+        assert "is_direct" not in entry
 
 
 def test_set_direct_blocked_while_animating(wired, monkeypatch):
