@@ -52,15 +52,15 @@ def _two_scene_job(**overrides) -> tuple[Job, JobCharacter]:
 # --- 1. Runner resolution (covers submit + salvage + resume read-sites) -------
 
 def test_eff_video_model_resolves_per_scene() -> None:
-    job, jc = _two_scene_job(video_models_by_scene={"scB": "veo"})
+    job, jc = _two_scene_job(video_models_by_scene={"scB": "veo-3.1-fast"})
     vid_a = VideoVariant(video_id="vid_a", grok_job_id="g1", source_variant_id="v_a")
     vid_b = VideoVariant(video_id="vid_b", grok_job_id="g2", source_variant_id="v_b")
 
     # Scene B has an override; scene A falls back to the job default.
-    assert runner._eff_video_model(job, jc, vid_b) == "veo"
+    assert runner._eff_video_model(job, jc, vid_b) == "veo-3.1-fast"
     assert runner._eff_video_model(job, jc, vid_a) == "grok-imagine"
     # The same resolution drives end-frame gating, salvage re-poll and resume.
-    assert runner._eff_video_model_for_scene(job, "scB") == "veo"
+    assert runner._eff_video_model_for_scene(job, "scB") == "veo-3.1-fast"
     assert runner._eff_video_model_for_scene(job, "scA") == "grok-imagine"
     assert runner._eff_video_model_for_scene(job, None) == "grok-imagine"
 
@@ -84,7 +84,7 @@ def test_resolve_end_image_gated_per_scene(tmp_path: Path) -> None:
 
     job, jc = _two_scene_job(
         video_model="kling-v3",                       # run default = Kling 3.0
-        video_models_by_scene={"scB": "veo"},         # scene B overridden
+        video_models_by_scene={"scB": "veo-3.1-fast"},         # scene B overridden
         end_frames_by_scene={"scA": str(end_pose), "scB": str(end_pose)},
     )
     # Scene A (effective kling-v3) with a pre-generated swapped end frame → used.
@@ -119,19 +119,19 @@ class _FakeStore:
 def test_movement_rejects_locked_per_scene_model(monkeypatch: pytest.MonkeyPatch) -> None:
     job, _ = _two_scene_job()
     monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
-    # Job default (xai) available; the per-scene veo override (gemini) is not.
+    # Job default (xai) available; the per-scene kling-v1 override (kling) is not.
     monkeypatch.setattr(type(api.settings), "has_provider",
-                        lambda self, provider: provider != "gemini")
+                        lambda self, provider: provider != "kling")
 
     body = api.MovementBody(
         movement_prompts={"scA": "a", "scB": "b"},
         video_model="grok-imagine",
-        video_models_by_scene={"scB": "veo"},
+        video_models_by_scene={"scB": "kling-v1"},
     )
     with pytest.raises(HTTPException) as ei:
         _run(api.set_movement("j_test", body, BackgroundTasks()))
     assert ei.value.status_code == 422
-    assert "Veo" in ei.value.detail  # names the locked model
+    assert "Kling" in ei.value.detail  # names the locked model
 
 
 def test_movement_stores_per_scene_models(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,11 +142,11 @@ def test_movement_stores_per_scene_models(monkeypatch: pytest.MonkeyPatch) -> No
     body = api.MovementBody(
         movement_prompts={"scA": "a", "scB": "b"},
         video_model="grok-imagine",
-        video_models_by_scene={"scB": "veo", "scA": ""},  # "" = same as job
+        video_models_by_scene={"scB": "veo-3.1-fast", "scA": ""},  # "" = same as job
     )
     _run(api.set_movement("j_test", body, BackgroundTasks()))
     # Blank entry dropped; only the real override persists.
-    assert job.video_models_by_scene == {"scB": "veo"}
+    assert job.video_models_by_scene == {"scB": "veo-3.1-fast"}
     assert job.video_model == "grok-imagine"
 
 
@@ -167,7 +167,7 @@ def test_reengineer_sync_carries_model_and_model_aware_duration(
             {"scene_id": "scA", "idx": 0, "motion_prompt": "He waves", "duration": 10.0},
             # Veo override, same 10s → must use veo's default (8), NOT _kling_duration
             {"scene_id": "scB", "idx": 1, "motion_prompt": "He nods",
-             "duration": 10.0, "video_model": "veo"},
+             "duration": 10.0, "video_model": "veo-3.1-fast"},
         ],
     }
     job = Job(job_id="j_re", scene_id="scA", scene_image_path="/tmp/s.png",
@@ -175,7 +175,7 @@ def test_reengineer_sync_carries_model_and_model_aware_duration(
 
     runner_reengineer._sync_movement_from_state(job, state)
 
-    assert job.video_models_by_scene == {"scA": "kling-v3", "scB": "veo"}
+    assert job.video_models_by_scene == {"scA": "kling-v3", "scB": "veo-3.1-fast"}
     assert job.durations_by_scene["scA"] == 12          # Kling auto-length intact
     assert job.durations_by_scene["scB"] == 8           # veo default, model-aware
     # Sanity: the Kling auto-length helper would have given 12 for scB too —
@@ -192,7 +192,7 @@ def test_clamp_scene_secs_is_model_aware() -> None:
     # A model whose options exceed 15s keeps the longer pick (no silent clamp).
     assert api._clamp_scene_secs("sora-2", 20.0) == 20.0          # 20 is a valid option
     # Off-grid value snaps to the model's NEAREST option, not Kling's ceiling.
-    assert api._clamp_scene_secs("veo", 20.0) == 8.0             # veo opts [4,6,8]
+    assert api._clamp_scene_secs("veo-3.1-fast", 20.0) == 8.0             # veo-3.1-fast opts [4,6,8]
     assert api._clamp_scene_secs("veo-3.1-fast", 6.0) == 6.0
     # Grok Imagine 1.5 (fal): integer opts [3..15], like Kling's range.
     assert api._clamp_scene_secs("grok-imagine-1.5", 20.0) == 15.0
@@ -231,25 +231,25 @@ def _job_with_failed_clip(models_by_scene, *, video_model) -> Job:
 
 
 def test_retry_failed_preflights_the_override_provider(monkeypatch) -> None:
-    # Job default = grok (xai) but the failed clip's scene is overridden to veo
-    # (gemini): the pre-flight must check GEMINI (the provider it'll resubmit
-    # under), not xai — otherwise the worker silently 401s.
-    job = _job_with_failed_clip({"scB": "veo"}, video_model="grok-imagine")
+    # Job default = grok (xai) but the failed clip's scene is overridden to
+    # kling (kling): the pre-flight must check KLING (the provider it'll
+    # resubmit under), not xai — otherwise the worker silently 401s.
+    job = _job_with_failed_clip({"scB": "kling"}, video_model="grok-imagine")
     monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
     seen = []
     monkeypatch.setattr(type(api.settings), "require_keys",
                         lambda self, *names: seen.extend(names))
     from fastapi import BackgroundTasks
     _run(api.retry_failed_videos("j1", BackgroundTasks()))
-    assert "gemini" in seen          # veo override's key pre-flighted
+    assert "kling" in seen           # kling override's key pre-flighted
     assert "xai" not in seen         # NOT keyed on the job default
 
 
 def test_retry_failed_no_false_reject_for_available_override(monkeypatch) -> None:
-    # Inverse: job default = veo (gemini) but the failed clip is overridden to
-    # grok (xai). Pre-flight must check xai only — NOT gemini (which would
-    # wrongly 422 a retry that never submits to veo).
-    job = _job_with_failed_clip({"scB": "grok-imagine"}, video_model="veo")
+    # Inverse: job default = veo-3.1-fast (fal) but the failed clip is
+    # overridden to grok (xai). Pre-flight must check xai only — NOT fal
+    # (which would wrongly 422 a retry that never submits to veo-3.1-fast).
+    job = _job_with_failed_clip({"scB": "grok-imagine"}, video_model="veo-3.1-fast")
     monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
     seen = []
     monkeypatch.setattr(type(api.settings), "require_keys",
@@ -257,4 +257,4 @@ def test_retry_failed_no_false_reject_for_available_override(monkeypatch) -> Non
     from fastapi import BackgroundTasks
     _run(api.retry_failed_videos("j1", BackgroundTasks()))
     assert "xai" in seen
-    assert "gemini" not in seen
+    assert "fal" not in seen

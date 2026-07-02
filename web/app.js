@@ -31,8 +31,6 @@ function studio() {
     // transitions like "char moved to awaiting_approval" so we only fire
     // ONE milestone notification per gate, not on every WS refresh.
     _lastSwapJobSnapshot: {},
-    // Same idea for freeform gens: stash previous status keyed by gen_id.
-    _lastGenStatus: {},
     videosPerChar: 1,
     // While a generate_more_videos request is in flight for char X this
     // holds X — used to disable the "+ N more" buttons + show a spinner
@@ -64,16 +62,12 @@ function studio() {
     disk: null,              // {output_bytes, by_job}
     showDiskModal: false,
     activeTab: 'swap',
-    models: { image: [], video: [], avatar: [], audio: [] },
-    imageGen: { model: 'gpt-image', prompt: '', refs: [], aspect: '9:16', generating: false },
-    videoGen: { model: 'grok-imagine', prompt: '', ref: null, aspect: '9:16', duration: 10, generating: false },
+    models: { image: [], video: [], audio: [] },
     // Prompt enrichment toggles — per-form so Hugo can A/B per pipeline.
     // Defaults match where enrichment helps most (video especially).
     // Persisted in init() via $watch.
     enrich: {
       swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.swap')  !== '0') : true,
-      image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.image') !== '0') : true,
-      video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('enrich.video') !== '0') : true,
     },
     // 🎬 AI Director toggles — opt-in Claude Opus agent that writes tailored
     // per-(character, scene, variant) prompts. Slower (~15-25s) and pricier
@@ -81,20 +75,7 @@ function studio() {
     // reference visible features. Default OFF; persisted via $watch.
     director: {
       swap:  (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.swap')  === '1') : false,
-      image: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.image') === '1') : false,
-      video: (typeof localStorage !== 'undefined') ? (localStorage.getItem('director.video') === '1') : false,
     },
-    avatarGen: { model: 'heygen-avatar-5', script: '', avatarId: '', voiceId: '', voiceProvider: 'heygen', aspect: '9:16', generating: false },
-    audioGen: { model: 'elevenlabs-vc', voiceId: '', sourceAudio: null, script: '', generating: false },
-    // B-roll: audio → transcript → planned visual prompts → clips → final mp4
-    brollGen: {
-      videoModel: 'grok-imagine',
-      aspectRatio: '9:16',           // 9:16 | 1:1 | 16:9
-      source: null,                  // {file, url, name, isVideo}
-      submitting: false,
-    },
-    brollHistory: [],                 // [{broll_id, status, clips, ...}]
-    _brollPollTimer: null,
     // Reengineer: reference video → scenes → swap → Kling clips (native
     // audio) → reassembled final per character.
     reengineerGen: {
@@ -337,7 +318,6 @@ function studio() {
     isScrubbing: false,
     // --- Studio-specific state, top-level so HTML can bind directly ---
     propTab: 'template',
-    promptDropActive: false,         // highlights prompt area on file drag-over
     duration: 0,
     trimStartSecs: 0,
     trimEndSecs: 0,
@@ -371,11 +351,6 @@ function studio() {
     multiScript: '',
     multiAutoEditing: false,
     multiResult: null,             // last response from /multi_auto_edit
-    // Higgsfield Drive inbox — clips auto-pulled from a user-configured
-    // Drive folder via the background watcher. Shape:
-    // {drive: {ready, folder_name, folder_id, poll_secs}, items: [...]}
-    higgsfieldInbox: null,
-    higgsfieldPolling: false,
     swapPrompt: '',
     swapModel: 'gpt2-id-swap',   // Hugo 2026-06-16: identity-first is the Swap default
     // Where the OUTPUT background comes from (Hugo 2026-06-21): "character"
@@ -416,44 +391,10 @@ function studio() {
     charLibLoadingId: null,
     charLibDragOver: false,
     libPanelDragOver: false,
-    imageHistory: [],
-    videoHistory: [],
-    avatarHistory: [],
-    audioHistory: [],
     // Persistent sidebar "Recent media" expand/collapse state.
     recentMediaOpen: true,
-
-    // Per-tab history filters: free-text prompt search + optional model
-    // filter. Frontend-only — operates on the already-loaded history
-    // arrays via computed getters (filteredImageHistory etc.).
-    historyFilters: {
-      image: { q: '', model: '' },
-      video: { q: '', model: '' },
-      audio: { q: '', model: '' },
-      avatar: { q: '', model: '' },
-      broll: { q: '', status: '' },
-    },
-    heygenAvatars: [],
-    heygenVoices: [],
-    heygenCatalogueError: '',
     elevenlabsVoices: [],
     elevenlabsCatalogueError: '',
-    // --- Chat tab ---------------------------------------------------------
-    chatSessions: [],        // list of {chat_id, title, n_messages, ...}
-    activeChat: null,        // full chat object incl messages + media
-    chatInput: '',
-    chatPending: false,
-    chatPendingLabel: '',
-    _chatInited: false,
-    photoAvatarModal: {
-      open: false,
-      variantUrl: '',
-      variantName: '',     // for the toast/title
-      voiceId: '',
-      script: '',
-      submitting: false,
-    },
-    _genPollTimer: null,
     generating: false,
     // Legacy single-prompt; kept as a buffer for the single-scene case to
     // simplify x-model binding. New flow uses `movementPrompts` (dict).
@@ -493,9 +434,9 @@ function studio() {
     async init() {
       this._loadCollapsed();
       // Validate the stored tab against the tabs that still exist — users
-      // who last sat on a removed tab (image/video/avatar/audio/broll)
+      // who last sat on a removed tab (chat/image/video/avatar/audio/broll)
       // would otherwise land on a blank page.
-      const _validTabs = ['chat', 'swap', 'animate', 'reengineer', 'editor'];
+      const _validTabs = ['swap', 'animate', 'reengineer', 'editor'];
       const _storedTab = localStorage.getItem('active_tab');
       this.activeTab = _validTabs.includes(_storedTab) ? _storedTab : 'swap';
       this.showCharLib = localStorage.getItem('char_lib_open') === '1';
@@ -523,24 +464,6 @@ function studio() {
       this._resumeEditorRepurposePolling();
       await this.loadSwapDefaults();
       this.loadReengineerHistory();
-      // Restore last-used picks per-tab so the model/voice/aspect we used
-      // before is still selected next session. Falls back to existing
-      // defaults if no saved value exists.
-      this._restorePerTabPrefs();
-      // Then wire watches that save the picks back as the user changes them.
-      this.$watch('imageGen.model', v => v && localStorage.setItem('imageGen.model', v));
-      this.$watch('imageGen.aspect', v => v && localStorage.setItem('imageGen.aspect', v));
-      this.$watch('videoGen.model', v => v && localStorage.setItem('videoGen.model', v));
-      this.$watch('videoGen.aspect', v => v && localStorage.setItem('videoGen.aspect', v));
-      this.$watch('videoGen.duration', v => v && localStorage.setItem('videoGen.duration', String(v)));
-      this.$watch('audioGen.model', v => v && localStorage.setItem('audioGen.model', v));
-      this.$watch('audioGen.voiceId', v => v && localStorage.setItem('audioGen.voiceId', v));
-      this.$watch('avatarGen.model', v => v && localStorage.setItem('avatarGen.model', v));
-      this.$watch('avatarGen.voiceId', v => v && localStorage.setItem('avatarGen.voiceId', v));
-      this.$watch('avatarGen.voiceProvider', v => v && localStorage.setItem('avatarGen.voiceProvider', v));
-      this.$watch('avatarGen.avatarId', v => v && localStorage.setItem('avatarGen.avatarId', v));
-      this.$watch('brollGen.videoModel', v => v && localStorage.setItem('brollGen.videoModel', v));
-      this.$watch('brollGen.aspectRatio', v => v && localStorage.setItem('brollGen.aspectRatio', v));
       // Reengineer swap-engine pick is a sticky preset (Hugo 2026-06-11:
       // gpt2-id-swap is his GPT engine of choice — make it survive reloads).
       this.$watch('reengineerGen.imageModel',
@@ -556,8 +479,8 @@ function studio() {
                   v => v && localStorage.setItem('swapFromImages.imageModel', v));
       // Refresh daily cost every minute while the tab is open.
       this._dailyCostTimer = setInterval(() => this.loadDailyCost(), 60000);
-      // 1-second tick so the elapsed-time labels in the status toast +
-      // B-roll progress card update without an extra backend round-trip.
+      // 1-second tick so the elapsed-time labels in the status toast
+      // update without an extra backend round-trip.
       this._tickTimer = setInterval(() => { this._tickNow = Date.now(); }, 1000);
       // Reload swap defaults whenever the active project changes — picks up
       // the project's `default_prompt` (or falls back to global).
@@ -577,11 +500,11 @@ function studio() {
       this.$watch('notif.os',    v => localStorage.setItem('notif.os',    v ? '1' : '0'));
       this.$watch('notif.sound', v => localStorage.setItem('notif.sound', v ? '1' : '0'));
       // Persist enrichment toggles per-pipeline.
-      ['swap', 'image', 'video'].forEach(k => {
+      ['swap'].forEach(k => {
         this.$watch(`enrich.${k}`, v => localStorage.setItem(`enrich.${k}`, v ? '1' : '0'));
       });
       // Persist 🎬 AI Director toggles per-pipeline.
-      ['swap', 'image', 'video'].forEach(k => {
+      ['swap'].forEach(k => {
         this.$watch(`director.${k}`, v => localStorage.setItem(`director.${k}`, v ? '1' : '0'));
       });
       // Drive the Remotion preview: react to template / overrides / source-video
@@ -603,8 +526,6 @@ function studio() {
         if (this._editedWordsTimer) clearTimeout(this._editedWordsTimer);
         this._editedWordsTimer = setTimeout(() => this._refreshRemotionPreview(), 180);
       });
-      // Poll in-flight generations every 4s
-      this._genPollTimer = setInterval(() => this.pollActiveGens(), 4000);
       // URL routing: if we landed on /j/<id>, open that job.
       this._openFromUrl();
       window.addEventListener('popstate', () => this._openFromUrl());
@@ -637,173 +558,6 @@ function studio() {
       this.notifyInfo('Finalen är öppnad i Editorn — re-rendera captions, '
         + 'redigera ord (✎), trimma (Trim & split) eller ändra hastighet.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
-
-    // --- Chat tab -----------------------------------------------------------
-    // Claude agent loop: user types → /api/chats/<id>/turn → Claude runs
-    // tool_use loop until end_turn → we get back the full updated chat.
-    // Inline media for each assistant turn is matched by walking forward
-    // from the message's tool_use blocks → the tool_result that followed →
-    // the chat.media entry it produced.
-
-    async initChat() {
-      if (this._chatInited) return;
-      this._chatInited = true;
-      await this.loadChatSessions();
-      // Auto-select the most recent chat if any exist; otherwise show
-      // the empty-state placeholder.
-      if (this.chatSessions.length > 0 && !this.activeChat) {
-        await this.selectChat(this.chatSessions[0].chat_id);
-      }
-    },
-
-    async loadChatSessions() {
-      try {
-        const r = await fetch('/api/chats');
-        if (!r.ok) return;
-        this.chatSessions = await r.json();
-      } catch { /* offline / not configured */ }
-    },
-
-    async newChat() {
-      try {
-        const r = await fetch('/api/chats', { method: 'POST' });
-        if (!r.ok) {
-          this.notifyError('Could not start chat: ' + await r.text());
-          return;
-        }
-        const data = await r.json();
-        this.chatSessions = [data, ...this.chatSessions];
-        this.activeChat = data;
-        this.chatInput = '';
-      } catch (e) {
-        this.notifyError('Chat init error: ' + e);
-      }
-    },
-
-    async selectChat(chatId) {
-      try {
-        const r = await fetch(`/api/chats/${chatId}`);
-        if (!r.ok) return;
-        this.activeChat = await r.json();
-        this.$nextTick(() => this._scrollChatToBottom());
-      } catch { /* swallow */ }
-    },
-
-    async deleteChat(chatId) {
-      if (!confirm('Delete this chat?')) return;
-      try {
-        await fetch(`/api/chats/${chatId}`, { method: 'DELETE' });
-        this.chatSessions = this.chatSessions.filter(c => c.chat_id !== chatId);
-        if (this.activeChat?.chat_id === chatId) {
-          this.activeChat = null;
-        }
-      } catch (e) {
-        this.notifyError('Delete failed: ' + e);
-      }
-    },
-
-    async saveChatTitle() {
-      if (!this.activeChat) return;
-      try {
-        await fetch(`/api/chats/${this.activeChat.chat_id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: this.activeChat.title }),
-        });
-        // Mirror new title into the session list.
-        const row = this.chatSessions.find(c => c.chat_id === this.activeChat.chat_id);
-        if (row) row.title = this.activeChat.title;
-      } catch { /* swallow */ }
-    },
-
-    async sendChat() {
-      if (!this.activeChat || !this.chatInput.trim() || this.chatPending) return;
-      const msg = this.chatInput.trim();
-      this.chatInput = '';
-      // Optimistically render the user message so it shows up instantly.
-      this.activeChat.messages = [...(this.activeChat.messages || []),
-                                   { role: 'user', content: msg }];
-      this.activeChat.n_messages = (this.activeChat.n_messages || 0) + 1;
-      this.chatPending = true;
-      this.chatPendingLabel = 'Claude is thinking…';
-      this.$nextTick(() => this._scrollChatToBottom());
-
-      try {
-        const r = await fetch(`/api/chats/${this.activeChat.chat_id}/turn`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: msg }),
-        });
-        if (!r.ok) {
-          this.notifyError('Chat turn failed: ' + await r.text());
-          return;
-        }
-        this.activeChat = await r.json();
-        // Update sidebar row (title may have changed; updated_at moved it to top).
-        const idx = this.chatSessions.findIndex(c => c.chat_id === this.activeChat.chat_id);
-        if (idx >= 0) {
-          this.chatSessions[idx] = { ...this.chatSessions[idx],
-                                     title: this.activeChat.title,
-                                     n_messages: this.activeChat.n_messages,
-                                     n_media: this.activeChat.n_media,
-                                     updated_at: this.activeChat.updated_at };
-          // Move to top.
-          const [row] = this.chatSessions.splice(idx, 1);
-          this.chatSessions.unshift(row);
-        }
-        this.notifyMilestone('Chat turn done',
-          `${this.activeChat.n_messages} messages · ${this.activeChat.n_media} media`,
-          { kind: 'done', tag: `chat-${this.activeChat.chat_id}` });
-      } catch (e) {
-        this.notifyError('Chat error: ' + e);
-      } finally {
-        this.chatPending = false;
-        this.chatPendingLabel = '';
-        this.$nextTick(() => this._scrollChatToBottom());
-      }
-    },
-
-    // Walk forward from the assistant message at index `mi` to find the
-    // matching tool_result blocks (which arrive as the NEXT message with
-    // role=user, content=array). Each tool_result.tool_use_id maps back to
-    // a tool_use block in `msg` — and the result's parsed content tells us
-    // which chat.media URL to render.
-    inlineMediaForMessage(mi) {
-      const msg = this.activeChat?.messages?.[mi];
-      if (!msg || msg.role !== 'assistant' || !Array.isArray(msg.content)) return [];
-      const toolUses = msg.content.filter(b => b.type === 'tool_use');
-      if (toolUses.length === 0) return [];
-      const next = this.activeChat.messages[mi + 1];
-      if (!next || next.role !== 'user' || !Array.isArray(next.content)) return [];
-      const results = next.content.filter(b => b.type === 'tool_result');
-
-      const out = [];
-      for (const tr of results) {
-        let parsed = null;
-        try { parsed = JSON.parse(tr.content || '{}'); } catch { continue; }
-        if (!parsed || !parsed.url || parsed.status !== 'done') continue;
-        // Best-guess kind from the tool name. Falls back to "edit" or "image".
-        const use = toolUses.find(u => u.id === tr.tool_use_id);
-        const toolName = use?.name || '';
-        let kind = 'image';
-        if (toolName.includes('video')) kind = 'video';
-        else if (toolName.includes('audio')) kind = 'audio';
-        else if (toolName.includes('avatar')) kind = 'avatar';
-        else if (toolName.includes('caption')) kind = 'edit';
-        else if (toolName.includes('broll')) kind = 'video';
-        out.push({
-          kind, url: parsed.url,
-          generation_id: parsed.generation_id || parsed.edit_id || parsed.job_id,
-          model: parsed.model || parsed.template || '',
-        });
-      }
-      return out;
-    },
-
-    _scrollChatToBottom() {
-      const el = this.$refs?.chatLog;
-      if (el) el.scrollTop = el.scrollHeight;
     },
 
     // --- generations: models + history --------------------------------------
@@ -1002,11 +756,7 @@ function studio() {
       try {
         const r = await fetch('/api/generations/models');
         if (r.ok) this.models = await r.json();
-        // Make sure the default selection actually maps to an available model.
         const firstImage = (this.models.image || []).find(m => m.available);
-        if (firstImage && !this.models.image.find(m => m.slug === this.imageGen.model)?.available) {
-          this.imageGen.model = firstImage.slug;
-        }
         // Re-assert the Reengineer engine pick AFTER models load. The <select>
         // renders before its options exist, so the browser auto-selects the
         // first option in the DOM without telling Alpine; setting state to
@@ -1035,10 +785,6 @@ function studio() {
           : (firstImage ? firstImage.slug : this.swapFromImages.imageModel);
         this.swapFromImages.imageModel = '';
         this.$nextTick(() => { this.swapFromImages.imageModel = swTarget; });
-        const firstVideo = (this.models.video || []).find(m => m.available);
-        if (firstVideo && !this.models.video.find(m => m.slug === this.videoGen.model)?.available) {
-          this.videoGen.model = firstVideo.slug;
-        }
         // Initialize the Step-4 swap-flow duration picker to the selected
         // model's default. If a job is already loaded with a stored
         // duration_secs, syncDurationToModel() keeps it (still-valid).
@@ -1072,27 +818,9 @@ function studio() {
       return groups;
     },
 
-    currentImageModel() {
-      return (this.models.image || []).find(m => m.slug === this.imageGen.model);
-    },
-
-    currentVideoModel() {
-      return (this.models.video || []).find(m => m.slug === this.videoGen.model);
-    },
-
     async loadGenerations() {
       try {
-        const [iR, vR, aR, auR, eR] = await Promise.all([
-          fetch('/api/generations?kind=image'),
-          fetch('/api/generations?kind=video'),
-          fetch('/api/generations?kind=avatar'),
-          fetch('/api/generations?kind=audio'),
-          fetch('/api/generations?kind=editor'),
-        ]);
-        if (iR.ok) this.imageHistory = await iR.json();
-        if (vR.ok) this.videoHistory = await vR.json();
-        if (aR.ok) this.avatarHistory = await aR.json();
-        if (auR.ok) this.audioHistory = await auR.json();
+        const eR = await fetch('/api/generations?kind=editor');
         if (eR.ok) this.editorJobs = await eR.json();
       } catch (_) {}
     },
@@ -1123,57 +851,6 @@ function studio() {
       return `${slug || g.gen_id}-${date}.${ext}`;
     },
 
-    _historyForKind(kind) {
-      return kind === 'image' ? this.imageHistory
-           : kind === 'video' ? this.videoHistory
-           : kind === 'avatar' ? this.avatarHistory
-           : this.audioHistory;
-    },
-
-    _filterHistory(kind, arr) {
-      const f = this.historyFilters[kind];
-      if (!f) return arr;
-      const q = (f.q || '').trim().toLowerCase();
-      const model = f.model || '';
-      if (!q && !model) return arr;
-      return arr.filter(g => {
-        if (model && g.model !== model) return false;
-        if (q) {
-          const hay = ((g.prompt || '') + ' ' + (g.model || '')).toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        return true;
-      });
-    },
-
-    // Convenience getters used by the templates.
-    get filteredImageHistory() { return this._filterHistory('image', this.imageHistory); },
-    get filteredVideoHistory() { return this._filterHistory('video', this.videoHistory); },
-    get filteredAudioHistory() { return this._filterHistory('audio', this.audioHistory); },
-    get filteredAvatarHistory() { return this._filterHistory('avatar', this.avatarHistory); },
-    get filteredBrollHistory() {
-      const f = this.historyFilters.broll;
-      const q = (f.q || '').trim().toLowerCase();
-      const st = f.status || '';
-      if (!q && !st) return this.brollHistory;
-      return this.brollHistory.filter(b => {
-        if (st && b.status !== st) return false;
-        if (q) {
-          const hay = ((b.transcript || '') + ' ' + (b.broll_id || '')).toLowerCase();
-          if (!hay.includes(q)) return false;
-        }
-        return true;
-      });
-    },
-
-    // Models that have actually been used in this history kind, for the
-    // dropdown filter so we don't show locked/unused models.
-    _modelsInHistory(arr) {
-      const seen = new Set();
-      for (const g of arr) if (g.model) seen.add(g.model);
-      return [...seen].sort();
-    },
-
     // Internal tick so any elapsed-time UI re-renders without polling
     // the backend on every second. Bumped once per second by a
     // setInterval kicked off in init.
@@ -1189,33 +866,6 @@ function studio() {
       const m = Math.floor(sec / 60);
       const s = sec % 60;
       return `${m}m ${s}s`;
-    },
-
-    // B-roll: aggregate progress for the current run — n_done, n_failed,
-    // n_total, percent_done, and an ETA estimate based on per-clip
-    // average runtime so far.
-    brollProgress(b) {
-      const clips = b.clips || [];
-      const n = clips.length;
-      if (!n) return null;
-      const done = clips.filter(c => c.status === 'done').length;
-      const failed = clips.filter(c => c.status === 'failed').length;
-      const inFlight = clips.filter(c => ['image_running','image_done','video_running'].includes(c.status)).length;
-      const percent = Math.round((done / n) * 100);
-      // ETA: assume remaining clips take same wall-time as completed ones.
-      let eta = '';
-      if (b.created_at && done > 0 && done < n) {
-        const elapsedMs = this._tickNow - Date.parse(b.created_at);
-        const perClipMs = elapsedMs / done;
-        const remainingClips = n - done - failed;
-        const etaMs = perClipMs * remainingClips;
-        if (etaMs > 0 && etaMs < 1000 * 60 * 60) {
-          const etaMin = Math.floor(etaMs / 60000);
-          const etaSec = Math.round((etaMs % 60000) / 1000);
-          eta = etaMin > 0 ? `~${etaMin}m ${etaSec}s` : `~${etaSec}s`;
-        }
-      }
-      return { n, done, failed, inFlight, percent, eta };
     },
 
     // Swap/Reengineer: aggregate image-phase progress across every variant
@@ -1287,7 +937,7 @@ function studio() {
 
     // Cross-kind list of recent finished media for the sidebar thumbnail
     // strip. Each entry has {kind, id, tab, thumb, label, created_at}.
-    // Includes Image, Video, Audio, Avatar, and B-roll final outputs.
+    // Includes Reengineer finals and saved Editor reels.
     // Sorted newest-first, capped to 50 for performance.
     get recentMedia() {
       // Only kinds whose tabs still exist are aggregated (the Image/Video/
@@ -1328,62 +978,11 @@ function studio() {
       if (job.tab) this.switchTab(job.tab);
       // Tiny delay so the tab renders before we scroll
       this.$nextTick(() => {
-        // Try to scroll to the specific card. Each card uses gen_id or broll_id
-        // as part of its key.
-        const sel = `[x-key="${job.id}"], [x-key="br-${job.id}"]`;
+        // Try to scroll to the specific card (id is part of its key).
+        const sel = `[x-key="${job.id}"]`;
         const el = document.querySelector(sel);
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       });
-    },
-
-    async pollActiveGens() {
-      const active = [...this.imageHistory, ...this.videoHistory, ...this.avatarHistory, ...this.audioHistory]
-        .filter(g => ['pending', 'running'].includes(g.status));
-      if (active.length === 0) return;
-      try {
-        // Snapshot statuses BEFORE the refetch so we can detect the
-        // running→done|failed transition once and only once per gen.
-        const prevStatusById = {};
-        for (const g of active) prevStatusById[g.gen_id] = g.status;
-
-        const results = await Promise.all(active.map(g =>
-          fetch('/api/generations/' + g.gen_id).then(r => r.ok ? r.json() : null)
-        ));
-        for (const updated of results) {
-          if (!updated) continue;
-          const target = this._historyForKind(updated.kind);
-          const idx = target.findIndex(g => g.gen_id === updated.gen_id);
-          if (idx !== -1) target[idx] = updated;
-
-          // Fire a milestone notification on the first transition from
-          // pending/running → done|failed. _lastGenStatus is the durable
-          // dedup key so a long poll loop doesn't re-fire on re-entry.
-          const prev = prevStatusById[updated.gen_id];
-          const seen = this._lastGenStatus[updated.gen_id];
-          if ((prev === 'running' || prev === 'pending')
-              && ['done', 'failed'].includes(updated.status)
-              && seen !== updated.status) {
-            this._lastGenStatus[updated.gen_id] = updated.status;
-            const verb = updated.status === 'done' ? 'done' : 'failed';
-            const label = (updated.prompt || updated.model || updated.gen_id || '')
-                            .toString().slice(0, 80);
-            this.notifyMilestone(
-              `${updated.kind || 'gen'} ${verb}`,
-              label || `${updated.gen_id}`,
-              { kind: 'done', tag: `gen-${updated.gen_id}` },
-            );
-          }
-        }
-        if (results.some(r => r && ['done', 'failed'].includes(r.status))) {
-          this.loadDailyCost();
-        }
-      } catch (_) {}
-    },
-
-    // --- avatar generation (HeyGen) -----------------------------------------
-
-    currentAvatarModel() {
-      return (this.models.avatar || []).find(m => m.slug === this.avatarGen.model);
     },
 
     async loadElevenlabsVoices() {
@@ -1395,131 +994,11 @@ function studio() {
       } catch (e) {
         this.elevenlabsCatalogueError = String(e);
       }
-      // Restore last-used voice now that the list is loaded.
-      try {
-        const saved = localStorage.getItem('audioGen.voiceId');
-        if (saved && this.elevenlabsVoices.some(v => v.voice_id === saved)) {
-          this.audioGen.voiceId = saved;
-        }
-        const savedAv = localStorage.getItem('avatarGen.voiceId');
-        if (savedAv && this.avatarGen.voiceProvider === 'elevenlabs'
-            && this.elevenlabsVoices.some(v => v.voice_id === savedAv)) {
-          this.avatarGen.voiceId = savedAv;
-        }
-      } catch (_) {}
     },
 
     elevenlabsAvailable() {
       const m = (this.models.audio || []).find(x => x.slug === 'elevenlabs-vc');
       return !!m?.available;
-    },
-
-    // --- Audio tab (ElevenLabs Voice Changer) -------------------------------
-
-    currentAudioModel() {
-      return (this.models.audio || []).find(m => m.slug === this.audioGen.model);
-    },
-
-    setAudioSource(file) {
-      if (!file) return;
-      // Voice Changer also accepts video — the server extracts the audio,
-      // swaps the voice, then re-muxes it back into the original video.
-      const isVideo = (file.type || '').startsWith('video/')
-        || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name || '');
-      if (this.audioGen.sourceAudio?.url) URL.revokeObjectURL(this.audioGen.sourceAudio.url);
-      this.audioGen.sourceAudio = {
-        file, url: URL.createObjectURL(file), name: file.name, isVideo,
-      };
-    },
-
-    async submitAudioGen() {
-      const m = this.currentAudioModel();
-      if (!m?.available) { this.notifyError('ElevenLabs not configured'); return; }
-      if (!this.audioGen.voiceId) { this.notifyError('Pick a target voice'); return; }
-      if (this.audioGen.model === 'elevenlabs-vc' && !this.audioGen.sourceAudio) {
-        this.notifyError('Upload a source audio file');
-        return;
-      }
-      if (this.audioGen.model === 'elevenlabs-tts' && !this.audioGen.script.trim()) {
-        this.notifyError('Write some text to speak');
-        return;
-      }
-      this.audioGen.generating = true;
-      try {
-        const fd = new FormData();
-        fd.append('kind', 'audio');
-        fd.append('model', this.audioGen.model);
-        fd.append('voice_id', this.audioGen.voiceId);
-        if (this.audioGen.model === 'elevenlabs-vc') {
-          fd.append('prompt', '(voice changer)');  // server requires non-empty prompt
-          fd.append('files', this.audioGen.sourceAudio.file);
-        } else {
-          fd.append('prompt', this.audioGen.script.trim());
-        }
-        const r = await fetch('/api/generations', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Generate failed: ' + await r.text()); return; }
-        const gen = await r.json();
-        this.audioHistory = [gen, ...this.audioHistory];
-        // Preserve sourceAudio + script so users can iterate (tweak script
-        // for TTS, or A/B different voices for VC). Use clearAudioForm()
-        // to start fresh.
-      } catch (e) {
-        this._submitError('Ljud', e);
-      } finally {
-        this.audioGen.generating = false;
-      }
-    },
-
-    clearAudioForm() {
-      if (this.audioGen.sourceAudio?.url) URL.revokeObjectURL(this.audioGen.sourceAudio.url);
-      this.audioGen.sourceAudio = null;
-      this.audioGen.script = '';
-    },
-
-    // --- B-roll generator (audio → planned cinematic clips → final mp4) ----
-
-    setBrollSource(file) {
-      if (!file) return;
-      const isVideo = (file.type || '').startsWith('video/')
-        || /\.(mp4|mov|webm|mkv|avi|m4v)$/i.test(file.name || '');
-      if (this.brollGen.source?.url) URL.revokeObjectURL(this.brollGen.source.url);
-      this.brollGen.source = {
-        file, url: URL.createObjectURL(file), name: file.name, isVideo,
-      };
-    },
-
-    async submitBroll() {
-      if (!this.brollGen.source) { this.notifyError('Drop a narration file first'); return; }
-      this.brollGen.submitting = true;
-      try {
-        const fd = new FormData();
-        fd.append('file', this.brollGen.source.file);
-        fd.append('video_model', this.brollGen.videoModel || 'grok-imagine');
-        fd.append('aspect_ratio', this.brollGen.aspectRatio || '9:16');
-        const r = await fetch('/api/broll/generate', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('B-roll submit failed: ' + await r.text()); return; }
-        const job = await r.json();
-        this.brollHistory = [job, ...this.brollHistory.filter(b => b.broll_id !== job.broll_id)];
-        if (this.brollGen.source?.url) URL.revokeObjectURL(this.brollGen.source.url);
-        this.brollGen.source = null;
-        this.notifyInfo(`B-roll queued (${job.broll_id}) — polling for progress`);
-        this._startBrollPolling();
-      } catch (e) {
-        this._submitError('B-roll', e);
-      } finally {
-        this.brollGen.submitting = false;
-      }
-    },
-
-    async loadBrollHistory() {
-      try {
-        const r = await fetch('/api/broll');
-        if (!r.ok) return;
-        this.brollHistory = await r.json();
-        if (this.brollHistory.some(b => this._brollIsActive(b))) {
-          this._startBrollPolling();
-        }
-      } catch (_) {}
     },
 
     // --- Reengineer: video → scenes → swap → Kling clips → final ------------
@@ -3016,185 +2495,14 @@ function studio() {
       this._startReengineerPolling();
     },
 
-    // A broll is "active" (i.e. we should keep polling it) if the job
-    // status itself is mid-pipeline OR any of its clips are transient
-    // (single-clip regeneration after awaiting_approval).
-    _brollIsActive(b) {
-      const restingStatuses = ['done', 'failed', 'partial_success', 'awaiting_approval'];
-      if (!restingStatuses.includes(b.status)) return true;   // mid-pipeline
-      return this._hasInFlightClips(b);                       // mid-regen
-    },
-
-    async refreshBroll(brollId) {
-      try {
-        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}`);
-        if (!r.ok) return;
-        const fresh = await r.json();
-        const i = this.brollHistory.findIndex(b => b.broll_id === brollId);
-        const prevStatus = (i >= 0) ? this.brollHistory[i].status : null;
-        if (i >= 0) {
-          // Preserve client-side transient flags across server refreshes so
-          // the UI doesn't flicker spinner state during a poll.
-          const prev = this.brollHistory[i];
-          fresh._regenerating_idx = prev._regenerating_idx;
-          fresh._finalizing = prev._finalizing;
-          // Once the regenerated clip is back in flight, drop the marker.
-          if (prev._regenerating_idx != null) {
-            const c = (fresh.clips || [])[prev._regenerating_idx];
-            if (c && !['done', 'failed'].includes(c.status)) {
-              fresh._regenerating_idx = null;
-            }
-          }
-          // Once finalize lands (status becomes done/partial_success), drop flag.
-          if (prev._finalizing && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
-            fresh._finalizing = false;
-          }
-          this.brollHistory.splice(i, 1, fresh);
-        } else {
-          this.brollHistory = [fresh, ...this.brollHistory];
-        }
-        // Milestone: clips are done & b-roll is waiting for Hugo's approval
-        // before the optional finalize step. Or the whole b-roll is done.
-        const APPROVAL = 'awaiting_approval';
-        const TERMINAL = ['done', 'partial_success', 'failed'];
-        if (prevStatus !== APPROVAL && fresh.status === APPROVAL) {
-          this.notifyMilestone('B-roll ready — review clips',
-            `${fresh.broll_id}: pick which clips to keep before finalize`,
-            { kind: 'approval', tag: `broll-${fresh.broll_id}-approve` });
-        } else if (!TERMINAL.includes(prevStatus) && TERMINAL.includes(fresh.status)) {
-          const verb = fresh.status === 'done' ? 'done'
-                       : fresh.status === 'partial_success' ? 'done (partial)'
-                       : 'failed';
-          this.notifyMilestone(`B-roll ${verb}`,
-            `${fresh.broll_id}: final video ready`,
-            { kind: 'done', tag: `broll-${fresh.broll_id}-done` });
-        }
-      } catch (_) {}
-    },
-
-    async deleteBroll(brollId) {
-      if (!confirm(`Delete B-roll ${brollId}? This removes the source, clips, and final video.`)) return;
-      try {
-        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}`, { method: 'DELETE' });
-        if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
-        this.brollHistory = this.brollHistory.filter(b => b.broll_id !== brollId);
-      } catch (_) {}
-    },
-
-    async rejectClip(brollId, idx) {
-      const b = this.brollHistory.find(x => x.broll_id === brollId);
-      if (b) b._regenerating_idx = idx;
-      try {
-        const fd = new FormData();
-        fd.append('idx', String(idx));
-        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}/regenerate_clip`,
-          { method: 'POST', body: fd });
-        if (!r.ok) {
-          this.notifyError('Regenerate failed: ' + await r.text());
-          if (b) b._regenerating_idx = null;
-          return;
-        }
-        this.notifyInfo(`Regenerating clip #${idx + 1}…`);
-        // Polling will pick up the status change.
-        this._startBrollPolling();
-        // Clear the regenerating marker on the next refresh (when the
-        // clip's status flips away from done/failed).
-        setTimeout(() => { if (b) b._regenerating_idx = null; }, 8000);
-      } catch (e) {
-        this.notifyError('Regenerate failed: ' + e.message);
-        if (b) b._regenerating_idx = null;
-      }
-    },
-
-    async finalizeBroll(brollId) {
-      const b = this.brollHistory.find(x => x.broll_id === brollId);
-      if (b) b._finalizing = true;
-      try {
-        const r = await fetch(`/api/broll/${encodeURIComponent(brollId)}/finalize`,
-          { method: 'POST' });
-        if (!r.ok) {
-          this.notifyError('Finalize failed: ' + await r.text());
-          if (b) b._finalizing = false;
-          return;
-        }
-        this.notifyInfo('Finalizing video — concatenating + muxing audio');
-        this._startBrollPolling();
-        setTimeout(() => { if (b) b._finalizing = false; }, 8000);
-      } catch (e) {
-        this.notifyError('Finalize failed: ' + e.message);
-        if (b) b._finalizing = false;
-      }
-    },
-
-    // Are any of this broll's clips still mid-generation? Used to gate the
-    // Finalize button — can't concat while clips are in flight.
-    _hasInFlightClips(b) {
-      const transient = ['pending', 'image_running', 'image_done', 'video_running'];
-      return (b.clips || []).some(c => transient.includes(c.status));
-    },
-
-    _startBrollPolling() {
-      if (this._brollPollTimer) return;
-      const tick = async () => {
-        const active = this.brollHistory.filter(b => this._brollIsActive(b));
-        if (active.length === 0) {
-          clearInterval(this._brollPollTimer);
-          this._brollPollTimer = null;
-          return;
-        }
-        await Promise.all(active.map(b => this.refreshBroll(b.broll_id)));
-      };
-      this._brollPollTimer = setInterval(tick, 5000);
-      tick();
-    },
-
     // Image models offered in the SWAP flow. Google/Gemini models (Nano
-    // Banana, Nano Banana Pro) are intentionally EXCLUDED from Swap — they
-    // remain available in the standalone Image tab.
+    // Banana, Nano Banana Pro) are intentionally EXCLUDED from Swap.
     swapImageModels() {
       return ((this.models && this.models.image) || [])
         .filter(m => m.provider !== 'gemini');
     },
 
     // --- Video Editor (silence-trim + captions) -----------------------------
-
-    _restorePerTabPrefs() {
-      // Restore last-used picks from localStorage for every tab where it
-      // matters. Only restore if the saved value still references something
-      // that exists in the currently-loaded models/voices lists, so we
-      // don't pick a locked or removed item.
-      const get = k => { try { return localStorage.getItem(k); } catch (_) { return null; } };
-      const inList = (val, list, key='slug') => val && (list || []).some(x => x[key] === val);
-
-      const imageModels = (this.models?.image) || [];
-      const videoModels = (this.models?.video) || [];
-      const audioModels = (this.models?.audio) || [];
-
-      const im = get('imageGen.model');
-      if (inList(im, imageModels) && imageModels.find(m => m.slug === im)?.available) this.imageGen.model = im;
-      const ia = get('imageGen.aspect'); if (ia) this.imageGen.aspect = ia;
-
-      const vm = get('videoGen.model');
-      if (inList(vm, videoModels) && videoModels.find(m => m.slug === vm)?.available) this.videoGen.model = vm;
-      const va = get('videoGen.aspect'); if (va) this.videoGen.aspect = va;
-      const vd = get('videoGen.duration'); if (vd) this.videoGen.duration = Number(vd) || 10;
-
-      const am = get('audioGen.model');
-      if (inList(am, audioModels) && audioModels.find(m => m.slug === am)?.available) this.audioGen.model = am;
-
-      const avm = get('avatarGen.model');
-      if (avm) this.avatarGen.model = avm;
-      const avp = get('avatarGen.voiceProvider'); if (avp) this.avatarGen.voiceProvider = avp;
-
-      const bm = get('brollGen.videoModel');
-      if (inList(bm, videoModels) && videoModels.find(m => m.slug === bm)?.available) this.brollGen.videoModel = bm;
-      const ba = get('brollGen.aspectRatio');
-      if (ba && ['9:16','1:1','16:9'].includes(ba)) this.brollGen.aspectRatio = ba;
-
-      // Voice IDs are restored once the voices are loaded — handled lazily
-      // by `loadElevenlabsVoices` / `loadHeygenCatalogue` since those run
-      // asynchronously and aren't necessarily ready at init time.
-    },
 
     async loadEditorTemplates() {
       try {
@@ -4188,102 +3496,6 @@ function studio() {
       return (b / 1024 / 1024).toFixed(1) + ' MB';
     },
 
-    // --- Higgsfield Drive inbox ------------------------------------------
-    // Server polls a user-configured Drive folder for Supercomputer outputs
-    // and stages them under `output/higgsfield-inbox/`. UI shows them as a
-    // strip above the manual clips upload area; click → add to multi-clip
-    // list. Same shape as addMultiClips(fileList), but we fetch the file
-    // from our own /files/ mount and wrap it in a File object so all the
-    // downstream multi-clip code keeps working unchanged.
-
-    async loadHiggsfieldInbox() {
-      try {
-        const r = await fetch('/api/higgsfield/inbox');
-        if (!r.ok) return;
-        this.higgsfieldInbox = await r.json();
-      } catch { /* offline */ }
-    },
-
-    async pollHiggsfieldInbox() {
-      if (this.higgsfieldPolling) return;
-      this.higgsfieldPolling = true;
-      try {
-        const r = await fetch('/api/higgsfield/inbox/poll', { method: 'POST' });
-        if (!r.ok) {
-          this.notifyError('Higgsfield poll failed: ' + await r.text());
-          return;
-        }
-        const data = await r.json();
-        if (data?.ok === false) {
-          this.notifyError(`Higgsfield poll: ${data.reason}` +
-            (data.looked_for ? ` (looked for "${data.looked_for}")` : ''));
-        } else if ((data?.n_new || 0) > 0) {
-          this.notifyMilestone('Higgsfield inbox',
-            `${data.n_new} new clip${data.n_new === 1 ? '' : 's'} pulled from Drive`,
-            { kind: 'done', tag: 'higgsfield-poll' });
-        }
-        await this.loadHiggsfieldInbox();
-      } finally {
-        this.higgsfieldPolling = false;
-      }
-    },
-
-    async clearHiggsfieldInbox(driveId) {
-      try {
-        await fetch(`/api/higgsfield/inbox/${encodeURIComponent(driveId)}`,
-                    { method: 'DELETE' });
-        await this.loadHiggsfieldInbox();
-      } catch (e) {
-        this.notifyError('Inbox clear failed: ' + e);
-      }
-    },
-
-    async bootstrapHiggsfieldDrive() {
-      this.notify('info', 'A browser tab should open for Google OAuth. Complete it, then we poll Drive automatically.');
-      try {
-        const r = await fetch('/api/higgsfield/drive/bootstrap',
-                              { method: 'POST' });
-        const data = await r.json();
-        if (data?.ok) {
-          this.notifyMilestone('Drive connected',
-            'OAuth complete — watcher will start pulling clips on next poll.',
-            { kind: 'done', tag: 'higgsfield-oauth' });
-          await this.loadHiggsfieldInbox();
-        } else {
-          this.notifyError(
-            'Drive OAuth failed. Ensure `credentials.json` is at ~/character-swap-data/ and try again.',
-          );
-        }
-      } catch (e) {
-        this.notifyError('Bootstrap error: ' + e);
-      }
-    },
-
-    async addOneHiggsfieldInbox(item) {
-      // Fetch the staged file from /files/output/... → Blob → File so it
-      // slots into the same multiClips shape as a normal upload.
-      try {
-        const r = await fetch(item.file_url);
-        if (!r.ok) throw new Error('fetch failed');
-        const blob = await r.blob();
-        const file = new File([blob], item.name,
-                              { type: blob.type || 'video/mp4' });
-        this.addMultiClips([file]);
-      } catch (e) {
-        this.notifyError(`Couldn't add ${item.name}: ${e}`);
-      }
-    },
-
-    async addAllHiggsfieldInbox() {
-      const items = this.higgsfieldInbox?.items || [];
-      for (const it of items) {
-        await this.addOneHiggsfieldInbox(it);
-      }
-      this.notifyMilestone('Higgsfield clips added',
-        `${items.length} clip${items.length === 1 ? '' : 's'} ready for multi-clip auto-edit`,
-        { kind: 'done', tag: 'higgsfield-add-all' });
-    },
-
     async submitMultiAutoEdit() {
       if (this.multiClips.length < 1) { this.notifyError('Add at least one clip'); return; }
       if (!this.multiScript.trim()) { this.notifyError('Paste or write a script first'); return; }
@@ -4439,8 +3651,7 @@ function studio() {
     // Replacement for the old Resolve / Phase-4 path. Click "☁︎ Export to
     // Drive" → modal lets you name the file → backend uploads via the
     // drive.file scope. First time: bootstrap kicks off a browser OAuth
-    // consent for write access (separate from the read scope the
-    // Higgsfield inbox watcher uses).
+    // consent for write access.
     openDriveExport() {
       if (!this.driveExport) {
         this.driveExport = { open: false, filename: '', uploading: false, lastUrl: '' };
@@ -4848,391 +4059,6 @@ function studio() {
         this._remotionPlayerProps(),
       );
       this._remotionMounted = true;
-    },
-
-    async loadHeygenCatalogue() {
-      // Idempotent — only fetch once per session.
-      this.heygenCatalogueError = '';
-      try {
-        const [aR, vR] = await Promise.all([
-          fetch('/api/heygen/avatars'),
-          fetch('/api/heygen/voices'),
-        ]);
-        if (aR.ok) this.heygenAvatars = await aR.json();
-        else this.heygenCatalogueError = await aR.text();
-        if (vR.ok) this.heygenVoices = await vR.json();
-      } catch (e) {
-        this.heygenCatalogueError = String(e);
-      }
-      // Restore last-used HeyGen avatar + voice now that catalogue loaded.
-      try {
-        const savedAvatar = localStorage.getItem('avatarGen.avatarId');
-        if (savedAvatar && this.heygenAvatars.some(a => a.avatar_id === savedAvatar)) {
-          this.avatarGen.avatarId = savedAvatar;
-        }
-        if (this.avatarGen.voiceProvider === 'heygen' || !this.avatarGen.voiceProvider) {
-          const savedVoice = localStorage.getItem('avatarGen.voiceId');
-          if (savedVoice && this.heygenVoices.some(v => v.voice_id === savedVoice)) {
-            this.avatarGen.voiceId = savedVoice;
-          }
-        }
-      } catch (_) {}
-    },
-
-    // --- Photo-avatar from a swap variant ----------------------------------
-
-    photoAvatarAvailable() {
-      const m = (this.models.avatar || []).find(x => x.slug === 'heygen-photo-avatar');
-      return !!m?.available;
-    },
-
-    async openPhotoAvatarModal(variant, charName) {
-      this.photoAvatarModal = {
-        open: true,
-        variantUrl: variant.url,
-        variantImageId: variant.variant_id,
-        variantName: charName || 'character',
-        voiceId: '',
-        script: '',
-        submitting: false,
-      };
-      // Make sure the catalogue is loaded so the voice dropdown has options.
-      if (this.heygenVoices.length === 0 && this.photoAvatarAvailable()) {
-        await this.loadHeygenCatalogue();
-      }
-    },
-
-    closePhotoAvatarModal() {
-      if (this.photoAvatarModal.submitting) return;
-      this.photoAvatarModal.open = false;
-    },
-
-    async submitPhotoAvatarModal() {
-      const m = this.photoAvatarModal;
-      if (!m.script.trim()) { this.notifyError('Script is empty'); return; }
-      if (!m.voiceId) { this.notifyError('Pick a voice'); return; }
-      m.submitting = true;
-      try {
-        // Fetch the variant image and re-upload it as the source. The current
-        // file is on the local server's disk; an absolute /files/... URL works.
-        const imgResp = await fetch(m.variantUrl);
-        if (!imgResp.ok) { this.notifyError('Could not read variant image'); return; }
-        const blob = await imgResp.blob();
-        const ext = (blob.type.split('/')[1] || 'png').split('+')[0];
-        const fd = new FormData();
-        fd.append('kind', 'avatar');
-        fd.append('model', 'heygen-photo-avatar');
-        fd.append('prompt', m.script.trim());
-        fd.append('voice_id', m.voiceId);
-        fd.append('aspect_ratio', '9:16');
-        fd.append('files', new File([blob], `${m.variantName}.${ext}`, { type: blob.type }));
-        const r = await fetch('/api/generations', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Submit failed: ' + await r.text()); return; }
-        const gen = await r.json();
-        this.avatarHistory = [gen, ...this.avatarHistory];
-        this.notifyInfo('Avatar video queued — see the Avatar tab');
-        this.photoAvatarModal.open = false;
-      } catch (e) {
-        this._submitError('Avatar', e);
-      } finally {
-        m.submitting = false;
-      }
-    },
-
-    async submitAvatarGen() {
-      if (!this.avatarGen.script.trim()) return;
-      if (!this.avatarGen.avatarId || !this.avatarGen.voiceId) {
-        this.notifyError('Pick an avatar and a voice first');
-        return;
-      }
-      const m = this.currentAvatarModel();
-      if (!m?.available) { this.notifyError('Model not configured'); return; }
-      this.avatarGen.generating = true;
-      try {
-        const fd = new FormData();
-        fd.append('kind', 'avatar');
-        fd.append('model', this.avatarGen.model);
-        fd.append('prompt', this.avatarGen.script.trim());
-        fd.append('avatar_id', this.avatarGen.avatarId);
-        fd.append('voice_id', this.avatarGen.voiceId);
-        fd.append('voice_provider', this.avatarGen.voiceProvider || 'heygen');
-        if (this.avatarGen.aspect) fd.append('aspect_ratio', this.avatarGen.aspect);
-        const r = await fetch('/api/generations', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Generate failed: ' + await r.text()); return; }
-        const gen = await r.json();
-        this.avatarHistory = [gen, ...this.avatarHistory];
-        // Avatar + voice are kept selected (batch-generation friendly).
-        // Script preserved so users can iterate. Use clearAvatarForm()
-        // to start fresh.
-      } catch (e) {
-        this._submitError('Avatar', e);
-      } finally {
-        this.avatarGen.generating = false;
-      }
-    },
-
-    clearAvatarForm() {
-      this.avatarGen.script = '';
-    },
-
-    // --- generations: image -------------------------------------------------
-
-    // --- Paste + drop image refs into prompts (Image / Video tabs) ---
-
-    _filesFromClipboard(ev) {
-      const items = ev.clipboardData?.items || [];
-      const out = [];
-      for (const it of items) {
-        if (it.kind === 'file' && (it.type || '').startsWith('image/')) {
-          const f = it.getAsFile();
-          if (f) out.push(f);
-        }
-      }
-      return out;
-    },
-
-    onPromptPaste(ev, target) {
-      const files = this._filesFromClipboard(ev);
-      if (files.length === 0) return;            // text paste — let it through
-      ev.preventDefault();
-      if (target === 'image') {
-        this.addImageRefs(files);
-        this.notifyInfo(`Added ${files.length} reference image${files.length > 1 ? 's' : ''} from clipboard`);
-      } else if (target === 'video') {
-        this.setVideoRef(files[0]);
-        if (files.length > 1) this.notifyInfo('Video uses one ref — kept the first');
-        else this.notifyInfo('Reference image set from clipboard');
-      }
-    },
-
-    async onPromptDrop(ev, target) {
-      // Path 1: dragged from the character library — pull the image URL
-      // from the custom payload, fetch it, hand it in as a File.
-      const libUrl = ev.dataTransfer?.getData('text/x-charswap-image-url');
-      if (libUrl) {
-        ev.preventDefault();
-        this.promptDropActive = false;
-        try {
-          const resp = await fetch(libUrl);
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const blob = await resp.blob();
-          const ext = (libUrl.split('?')[0].split('.').pop() || 'png').toLowerCase();
-          const file = new File([blob], `char-ref.${ext}`,
-                                { type: blob.type || `image/${ext}` });
-          if (target === 'image') this.addImageRefs([file]);
-          else if (target === 'video') this.setVideoRef(file);
-        } catch (e) {
-          this.notifyError('Could not load character image: ' + e.message);
-        }
-        return;
-      }
-      // Path 2: OS-level file drop.
-      const files = Array.from(ev.dataTransfer?.files || []).filter(f => f.type.startsWith('image/'));
-      if (files.length === 0) return;
-      ev.preventDefault();
-      if (target === 'image') this.addImageRefs(files);
-      else if (target === 'video') this.setVideoRef(files[0]);
-      this.promptDropActive = false;
-    },
-
-    onPromptDragOver(ev) {
-      // Highlight for native file drags AND for drags from the character
-      // library (which carry text/x-charswap-image-url instead of files).
-      const types = Array.from(ev.dataTransfer?.types || []);
-      if (types.includes('Files') || types.includes('text/x-charswap-image-url')) {
-        ev.preventDefault();
-        this.promptDropActive = true;
-      }
-    },
-
-    onPromptDragLeave(ev) {
-      if (!ev.currentTarget.contains(ev.relatedTarget)) {
-        this.promptDropActive = false;
-      }
-    },
-
-    // Reuse a past generation's prompt + settings in the active form.
-    reuseImageGen(g) {
-      if (!g) return;
-      this.imageGen.prompt = g.prompt || '';
-      if (g.model) this.imageGen.model = g.model;
-      if (g.aspect_ratio) this.imageGen.aspect = g.aspect_ratio;
-      this.activeTab = 'image';
-      this.notifyInfo('Prompt loaded — drop new refs if needed');
-    },
-
-    reuseVideoGen(g) {
-      if (!g) return;
-      this.videoGen.prompt = g.prompt || '';
-      if (g.model) this.videoGen.model = g.model;
-      if (g.aspect_ratio) this.videoGen.aspect = g.aspect_ratio;
-      if (g.duration_secs) this.videoGen.duration = g.duration_secs;
-      this.activeTab = 'video';
-      this.notifyInfo('Prompt loaded — drop a reference image');
-    },
-
-    reuseAvatarGen(g) {
-      if (!g) return;
-      this.avatarGen.script = g.prompt || '';
-      if (g.model) this.avatarGen.model = g.model;
-      if (g.avatar_id) this.avatarGen.avatarId = g.avatar_id;
-      if (g.voice_id) this.avatarGen.voiceId = g.voice_id;
-      if (g.voice_provider) this.avatarGen.voiceProvider = g.voice_provider;
-      this.activeTab = 'avatar';
-      this.notifyInfo('Script + avatar + voice loaded');
-    },
-
-    reuseAudioGen(g) {
-      if (!g) return;
-      if (g.model) this.audioGen.model = g.model;
-      // Voice changer's "prompt" was a placeholder, not user-meaningful text;
-      // only restore script text for TTS.
-      if (g.model === 'elevenlabs-tts') this.audioGen.script = g.prompt || '';
-      if (g.voice_id) this.audioGen.voiceId = g.voice_id;
-      this.activeTab = 'audio';
-      this.notifyInfo(g.model === 'elevenlabs-vc'
-        ? 'Voice loaded — drop a new source clip'
-        : 'Script + voice loaded');
-    },
-
-    addImageRefs(fileList) {
-      const files = Array.from(fileList || []);
-      const slots = 3 - this.imageGen.refs.length;
-      for (const f of files.slice(0, Math.max(0, slots))) {
-        this.imageGen.refs.push({ file: f, url: URL.createObjectURL(f) });
-      }
-    },
-
-    async addLibraryImageAsRef(url) {
-      // Click-handler for the "+ ref" button on every library image. Fetches
-      // the URL into a File and routes it through the same addImageRefs /
-      // setVideoRef plumbing as drag-and-drop. Tabs without a reference-image
-      // slot (Avatar, Audio, B-roll, Editor, Swap) get a notify and no-op.
-      if (!url) return;
-      try {
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const blob = await resp.blob();
-        const ext = (url.split('?')[0].split('.').pop() || 'png').toLowerCase();
-        const file = new File([blob], `char-ref.${ext}`,
-                              { type: blob.type || `image/${ext}` });
-        if (this.activeTab === 'image') {
-          if (this.imageGen.refs.length >= 3) {
-            this.notifyInfo('Image tab already has 3 reference images — remove one first');
-            return;
-          }
-          this.addImageRefs([file]);
-          this.notifyInfo('Added as reference image');
-        } else if (this.activeTab === 'video') {
-          this.setVideoRef(file);
-          this.notifyInfo('Set as video reference image');
-        } else {
-          this.notifyInfo('Switch to the Image or Video tab first');
-        }
-      } catch (e) {
-        this.notifyError('Could not load image: ' + e.message);
-      }
-    },
-
-    removeImageRef(i) {
-      const r = this.imageGen.refs[i];
-      if (r?.url) URL.revokeObjectURL(r.url);
-      this.imageGen.refs.splice(i, 1);
-    },
-
-    async submitImageGen() {
-      if (!this.imageGen.prompt.trim()) return;
-      const m = this.currentImageModel();
-      if (!m?.available) { this.notifyError('Model not configured'); return; }
-      this.imageGen.generating = true;
-      try {
-        const fd = new FormData();
-        fd.append('kind', 'image');
-        fd.append('model', this.imageGen.model);
-        fd.append('prompt', this.imageGen.prompt.trim());
-        if (this.imageGen.aspect) fd.append('aspect_ratio', this.imageGen.aspect);
-        if (this.enrich.image) fd.append('enrich_prompt', 'true');
-        if (this.director.image && this.health.anthropic_key) fd.append('use_director', 'true');
-        for (const r of this.imageGen.refs) fd.append('files', r.file);
-        const resp = await fetch('/api/generations', { method: 'POST', body: fd });
-        if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
-        const gen = await resp.json();
-        this.imageHistory = [gen, ...this.imageHistory];
-        // Form state is intentionally preserved so users can tweak prompt
-        // and re-submit without re-uploading refs. Use the "Clear" button
-        // or `clearImageForm()` to start fresh.
-      } catch (e) {
-        this._submitError('Bild', e);
-      } finally {
-        this.imageGen.generating = false;
-      }
-    },
-
-    clearImageForm() {
-      for (const r of this.imageGen.refs) if (r.url) URL.revokeObjectURL(r.url);
-      this.imageGen.refs = [];
-      this.imageGen.prompt = '';
-    },
-
-    // --- generations: video -------------------------------------------------
-
-    setVideoRef(file) {
-      if (!file) return;
-      if (this.videoGen.ref?.url) URL.revokeObjectURL(this.videoGen.ref.url);
-      this.videoGen.ref = { file, url: URL.createObjectURL(file) };
-    },
-
-    async submitVideoGen() {
-      if (!this.videoGen.prompt.trim() || !this.videoGen.ref) return;
-      const m = this.currentVideoModel();
-      if (!m?.available) { this.notifyError('Model not configured'); return; }
-      this.videoGen.generating = true;
-      try {
-        const fd = new FormData();
-        fd.append('kind', 'video');
-        fd.append('model', this.videoGen.model);
-        fd.append('prompt', this.videoGen.prompt.trim());
-        if (this.videoGen.aspect) fd.append('aspect_ratio', this.videoGen.aspect);
-        if (this.videoGen.duration) fd.append('duration_secs', String(this.videoGen.duration));
-        if (this.enrich.video) fd.append('enrich_prompt', 'true');
-        if (this.director.video && this.health.anthropic_key) fd.append('use_director', 'true');
-        fd.append('files', this.videoGen.ref.file);
-        const resp = await fetch('/api/generations', { method: 'POST', body: fd });
-        if (!resp.ok) { this.notifyError('Generate failed: ' + await resp.text()); return; }
-        const gen = await resp.json();
-        this.videoHistory = [gen, ...this.videoHistory];
-        // Preserve form so user can tweak the prompt and re-animate the
-        // same reference image. Use clearVideoForm() to start fresh.
-      } catch (e) {
-        this._submitError('Video', e);
-      } finally {
-        this.videoGen.generating = false;
-      }
-    },
-
-    clearVideoForm() {
-      if (this.videoGen.ref?.url) URL.revokeObjectURL(this.videoGen.ref.url);
-      this.videoGen.ref = null;
-      this.videoGen.prompt = '';
-    },
-
-    // --- generations: retry + delete ----------------------------------------
-
-    async retryGen(genId) {
-      const r = await fetch('/api/generations/' + genId + '/retry', { method: 'POST' });
-      if (!r.ok) { this.notifyError('Retry failed: ' + await r.text()); return; }
-      await this.loadGenerations();
-    },
-
-    async deleteGen(genId) {
-      if (!confirm('Delete this generation and its file?')) return;
-      const r = await fetch('/api/generations/' + genId, { method: 'DELETE' });
-      if (!r.ok) { this.notifyError('Delete failed: ' + await r.text()); return; }
-      this.imageHistory = this.imageHistory.filter(g => g.gen_id !== genId);
-      this.videoHistory = this.videoHistory.filter(g => g.gen_id !== genId);
-      this.avatarHistory = this.avatarHistory.filter(g => g.gen_id !== genId);
-      this.audioHistory = this.audioHistory.filter(g => g.gen_id !== genId);
-      this.loadDisk();
     },
 
     _openFromUrl() {

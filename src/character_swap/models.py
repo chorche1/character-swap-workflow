@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -417,8 +416,8 @@ class Job(BaseModel):
 class GenKind(StrEnum):
     IMAGE = "image"
     VIDEO = "video"
-    AVATAR = "avatar"
-    AUDIO = "audio"
+    AVATAR = "avatar"   # legacy kinds — rows must still load (Avatar/Audio tabs
+    AUDIO = "audio"     # removed; old MediaGeneration rows keep these kinds)
     # A saved multi-clip Editor reel (2026-06-29). Persisted so the user can
     # come back after a reload/restart and find it — and press 🔁 Repurpose to
     # get a mirror-flipped copy, exactly like Swap/Reengineer finals. All the
@@ -478,35 +477,12 @@ class MediaGeneration(BaseModel):
     completed_at: datetime | None = None
 
 
-class ChatSession(BaseModel):
-    """One conversation with the Claude-driven agent in the Chat tab.
-
-    `messages` is the raw Anthropic Messages API shape: a list of
-    `{role, content}` dicts where `content` can be a string or a list of
-    content blocks (text / tool_use / tool_result). We replay the entire
-    list to Anthropic on every turn so the model has full context.
-
-    `media` is a flat side-list of generations this chat produced
-    (images / videos / audio). The UI renders them inline next to the
-    assistant message that produced them via the per-message `media_refs`
-    field on text content blocks.
-    """
-    chat_id: str
-    title: str = "New chat"
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-    messages: list[dict[str, Any]] = Field(default_factory=list)
-    # Flat record of generations this chat triggered. Each entry is
-    # `{kind, generation_id, url, prompt, created_at}` — kind ∈
-    # {image, video, audio, avatar, swap_variant, swap_video, broll_clip, edit}.
-    media: list[dict[str, Any]] = Field(default_factory=list)
-
-
 class AppState(BaseModel):
+    # NB: old state.json files may still contain a "chats" key from the removed
+    # Chat tab — pydantic's default extra="ignore" silently drops it on load.
     scenes: dict[str, SceneAsset] = Field(default_factory=dict)
     characters: dict[str, CharacterAsset] = Field(default_factory=dict)
     projects: dict[str, ProjectAsset] = Field(default_factory=dict)
     jobs: dict[str, Job] = Field(default_factory=dict)
     generations: dict[str, MediaGeneration] = Field(default_factory=dict)
-    chats: dict[str, ChatSession] = Field(default_factory=dict)
     last_updated: datetime = Field(default_factory=datetime.utcnow)

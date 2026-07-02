@@ -106,7 +106,10 @@ def test_models_payload_surfaces_end_frame_flag():
     assert by_slug["veo-3.1-fast"].get("end_frame") is True
     # Models without end-frame support must NOT carry a truthy flag.
     assert not by_slug["grok-imagine-1.5"].get("end_frame")
-    assert not by_slug["veo"].get("end_frame")
+    # The Gemini-path Veo 3 / Veo 3 Fast entries were REMOVED 2026-07-02:
+    # their submit path was an unimplemented stub, so every selection failed.
+    assert "veo" not in by_slug
+    assert "veo-3-fast" not in by_slug
 
 
 # --- routing (incl. end frame) --------------------------------------------

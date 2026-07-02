@@ -7,8 +7,8 @@ original footage, and the frames become the scenes of a regular Swap job
 (character swap → per-scene Kling v3 clips with NATIVE audio → trim to the
 original scene durations → concat per character).
 
-This module holds the pure pieces: per-run state I/O (same pattern as
-broll.py), ffmpeg scene detection + frame extraction, and the scene-analysis
+This module holds the pure pieces: per-run state I/O (a state.json per run
+dir), ffmpeg scene detection + frame extraction, and the scene-analysis
 agent. Orchestration lives in runner_reengineer.py.
 
 Storage per run under `output/reengineer/<re_id>/`:

@@ -338,7 +338,6 @@
     <!-- TAB NAVIGATION -->
     <div class="flex items-center gap-1 border-b border-neutral-200 dark:border-neutral-800 -mb-2 overflow-x-auto whitespace-nowrap">
       <template x-for="t in [
-          {slug: 'chat',   label: '💬 Chat'},
           {slug: 'swap',   label: 'Swap'},
           {slug: 'animate', label: '🎬 Animate'},
           {slug: 'reengineer', label: '♻️ Reengineer'},
@@ -353,180 +352,6 @@
       </template>
     </div>
 
-    <!-- ================= CHAT TAB (Claude-driven agent over all tabs) ================= -->
-    <div x-show="activeTab === 'chat'"
-         x-init="$watch('activeTab', t => { if (t === 'chat') initChat() })"
-         class="grid grid-cols-12 gap-4 h-[calc(100vh-12rem)] supports-[height:100dvh]:h-[calc(100dvh-12rem)]">
-
-      <!-- Sidebar: chat sessions -->
-      <aside class="col-span-3 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 p-3 overflow-y-auto">
-        <button @click="newChat()"
-                class="w-full px-3 py-2 mb-3 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
-          + New chat
-        </button>
-        <div class="space-y-1">
-          <template x-for="c in chatSessions" :key="'chat-'+c.chat_id">
-            <div class="group relative">
-              <button @click="selectChat(c.chat_id)"
-                      class="w-full text-left px-2 py-1.5 rounded text-xs truncate transition-colors pr-7"
-                      :class="activeChat?.chat_id === c.chat_id
-                                ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300'
-                                : 'hover:bg-neutral-100 dark:hover:bg-neutral-800 text-neutral-700 dark:text-neutral-300'"
-                      x-text="c.title || 'Untitled'"></button>
-              <button @click="deleteChat(c.chat_id)"
-                      class="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-neutral-400 hover:text-red-500 text-xs px-1"
-                      title="Delete chat">×</button>
-            </div>
-          </template>
-          <div x-show="chatSessions.length === 0"
-               class="text-xs text-neutral-500 dark:text-neutral-500 text-center py-4">
-            No chats yet. Click + New chat to start.
-          </div>
-        </div>
-      </aside>
-
-      <!-- Main: conversation + input -->
-      <section class="col-span-9 bg-white dark:bg-neutral-900 rounded-2xl border border-neutral-200 dark:border-neutral-800 flex flex-col overflow-hidden">
-
-        <!-- No-chat-selected placeholder -->
-        <div x-show="!activeChat" class="flex-1 flex items-center justify-center text-center p-8">
-          <div>
-            <div class="text-4xl mb-3">💬</div>
-            <h3 class="text-base font-semibold mb-2">Chat with Claude</h3>
-            <p class="text-sm text-neutral-500 dark:text-neutral-400 max-w-md mx-auto mb-4">
-              Tell Claude what you want to create and it will use your existing tools
-              (image gen, video gen, swap, captions, etc) to build it.
-            </p>
-            <p x-show="!health.anthropic_key"
-               class="text-xs text-amber-600 dark:text-amber-400">
-              ⚠️ Set ANTHROPIC_API_KEY in .env to enable the Chat tab.
-            </p>
-            <button x-show="health.anthropic_key" @click="newChat()"
-                    class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold">
-              Start your first chat
-            </button>
-          </div>
-        </div>
-
-        <!-- Active chat -->
-        <template x-if="activeChat">
-          <div class="flex-1 flex flex-col overflow-hidden">
-
-            <!-- Header -->
-            <div class="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-3">
-              <input type="text" x-model="activeChat.title"
-                     @blur="saveChatTitle()" @keydown.enter="$event.target.blur()"
-                     class="flex-1 bg-transparent text-sm font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-500 rounded px-2 py-1" />
-              <span class="text-[10px] text-neutral-500 dark:text-neutral-500"
-                    x-text="`${activeChat.n_messages || 0} messages · ${activeChat.n_media || 0} media`"></span>
-            </div>
-
-            <!-- Message log -->
-            <div class="flex-1 overflow-y-auto px-4 py-4 space-y-4"
-                 x-ref="chatLog">
-              <template x-for="(msg, mi) in (activeChat.messages || [])" :key="'msg-'+mi">
-                <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'">
-                  <div class="max-w-3xl space-y-2"
-                       :class="msg.role === 'user'
-                                 ? 'bg-indigo-600 text-white rounded-2xl rounded-br-sm px-4 py-2.5'
-                                 : 'bg-neutral-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-2xl rounded-bl-sm px-4 py-2.5'">
-
-                    <!-- User message: string content -->
-                    <template x-if="msg.role === 'user' && typeof msg.content === 'string'">
-                      <div class="whitespace-pre-wrap text-sm" x-text="msg.content"></div>
-                    </template>
-
-                    <!-- User message: tool_result blocks (rendered as small tool cards) -->
-                    <template x-if="msg.role === 'user' && Array.isArray(msg.content)">
-                      <div class="space-y-1.5">
-                        <template x-for="(b, bi) in msg.content" :key="'tr-'+mi+'-'+bi">
-                          <div x-show="b.type === 'tool_result'"
-                               class="text-[10px] font-mono bg-neutral-200 dark:bg-neutral-700 rounded p-2 max-w-xl overflow-hidden">
-                            <span class="text-neutral-500">tool result →</span>
-                            <span class="text-neutral-300" x-text="(b.content || '').slice(0, 200) + ((b.content || '').length > 200 ? '…' : '')"></span>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-
-                    <!-- Assistant message: list of content blocks -->
-                    <template x-if="msg.role === 'assistant' && Array.isArray(msg.content)">
-                      <div class="space-y-2">
-                        <template x-for="(b, bi) in msg.content" :key="'b-'+mi+'-'+bi">
-                          <div>
-                            <!-- Text block -->
-                            <div x-show="b.type === 'text'"
-                                 class="whitespace-pre-wrap text-sm" x-text="b.text"></div>
-
-                            <!-- Tool use block: small chip showing what's running -->
-                            <div x-show="b.type === 'tool_use'"
-                                 class="text-[11px] font-mono bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 rounded px-2 py-1 inline-block">
-                              🛠 <span x-text="b.name"></span>(<span x-text="JSON.stringify(b.input || {}).slice(0,80)"></span>)
-                            </div>
-                          </div>
-                        </template>
-
-                        <!-- Inline media generated by tools in THIS assistant turn -->
-                        <template x-for="m in inlineMediaForMessage(mi)" :key="'media-'+mi+'-'+m.url">
-                          <div class="mt-2">
-                            <video x-show="m.kind === 'video' || m.kind === 'avatar'"
-                                   :src="m.url" controls
-                                   class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700"></video>
-                            <img x-show="m.kind === 'image'" :src="m.url"
-                                 class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700" />
-                            <audio x-show="m.kind === 'audio'" :src="m.url" controls
-                                   class="w-full max-w-sm"></audio>
-                            <video x-show="m.kind === 'edit'" :src="m.url" controls
-                                   class="max-w-sm rounded-lg border border-neutral-300 dark:border-neutral-700"></video>
-                            <div class="text-[10px] text-neutral-500 mt-0.5"
-                                 x-text="`${m.kind} · ${m.model || ''}`"></div>
-                          </div>
-                        </template>
-                      </div>
-                    </template>
-                  </div>
-                </div>
-              </template>
-
-              <!-- Thinking indicator -->
-              <div x-show="chatPending" class="flex justify-start">
-                <div class="bg-neutral-100 dark:bg-neutral-800 rounded-2xl rounded-bl-sm px-4 py-2.5 max-w-md">
-                  <div class="flex items-center gap-2 text-sm text-neutral-500">
-                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse"></span>
-                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse" style="animation-delay: 200ms"></span>
-                    <span class="inline-block w-2 h-2 bg-neutral-400 rounded-full animate-pulse" style="animation-delay: 400ms"></span>
-                    <span class="ml-1 text-xs"
-                          x-text="chatPendingLabel || 'thinking…'"></span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Input -->
-            <div class="border-t border-neutral-200 dark:border-neutral-800 p-3 bg-neutral-50 dark:bg-neutral-900/40">
-              <div class="flex items-end gap-2">
-                <textarea x-model="chatInput"
-                          @keydown.enter.prevent="if (!$event.shiftKey) sendChat()"
-                          :disabled="chatPending"
-                          rows="2"
-                          placeholder="Tell Claude what to create… (Shift+Enter for newline)"
-                          class="flex-1 px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"></textarea>
-                <button @click="sendChat()"
-                        :disabled="!chatInput.trim() || chatPending"
-                        class="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-semibold shrink-0">
-                  Send
-                </button>
-              </div>
-              <div class="text-[10px] text-neutral-500 dark:text-neutral-500 mt-1.5">
-                Claude can call generate_image, generate_video, generate_audio, generate_avatar,
-                create_swap_job, caption_video, generate_broll, and a few list_/get_status tools.
-                Costs ~$0.05 per Claude call + each generation's own cost.
-              </div>
-            </div>
-          </div>
-        </template>
-      </section>
-    </div>
 
     <!-- ============ SWAP TAB (steps 1-6) + ANIMATE TAB (step A + 4-6) ============
          The two tabs share this container because they share `this.job` and all
@@ -2513,61 +2338,6 @@
                       class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"></textarea>
           </div>
 
-          <!-- Higgsfield Drive inbox — auto-imported Supercomputer clips -->
-          <div x-show="higgsfieldInbox !== null"
-               x-init="loadHiggsfieldInbox()"
-               class="border border-emerald-200 dark:border-emerald-900 rounded-xl p-3 bg-emerald-50/50 dark:bg-emerald-950/20">
-            <div class="flex items-center justify-between mb-2">
-              <div class="text-xs font-semibold text-emerald-700 dark:text-emerald-300">
-                🟢 Higgsfield Inbox
-                <span class="text-emerald-600 dark:text-emerald-400 font-normal"
-                      x-text="`(${higgsfieldInbox?.items?.length || 0} new)`"></span>
-              </div>
-              <div class="flex items-center gap-3">
-                <button class="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline"
-                        @click="pollHiggsfieldInbox()"
-                        :disabled="higgsfieldPolling">
-                  <span x-show="!higgsfieldPolling">🔄 poll now</span>
-                  <span x-show="higgsfieldPolling">polling…</span>
-                </button>
-                <button x-show="higgsfieldInbox?.items?.length > 1"
-                        class="text-[11px] text-emerald-700 dark:text-emerald-300 font-semibold hover:underline"
-                        @click="addAllHiggsfieldInbox()">
-                  + add all to clips
-                </button>
-              </div>
-            </div>
-            <div x-show="!higgsfieldInbox?.drive?.ready" class="text-[11px] text-amber-700 dark:text-amber-300">
-              ⚠️ Drive OAuth not set up. Place `credentials.json` in
-              <code>~/character-swap-data/</code>, then
-              <button class="underline ml-1" @click="bootstrapHiggsfieldDrive()">click here to authorize</button>.
-            </div>
-            <div x-show="higgsfieldInbox?.drive?.ready && (higgsfieldInbox?.items?.length || 0) === 0"
-                 class="text-[11px] text-neutral-600 dark:text-neutral-400">
-              Watching Drive folder
-              <code x-text="higgsfieldInbox?.drive?.folder_name"></code>.
-              New Supercomputer outputs land here within
-              <span x-text="higgsfieldInbox?.drive?.poll_secs"></span>s.
-            </div>
-            <div x-show="higgsfieldInbox?.items?.length > 0"
-                 class="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-5 gap-2 mt-2">
-              <template x-for="item in (higgsfieldInbox?.items || [])" :key="'inbox-'+item.drive_id">
-                <div class="relative border border-emerald-300 dark:border-emerald-800 rounded-lg overflow-hidden bg-black group">
-                  <video :src="item.file_url" class="w-full h-24 object-cover" muted preload="metadata"></video>
-                  <button class="absolute top-1 right-1 bg-black/70 hover:bg-red-600 text-white text-[10px] w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                          @click="clearHiggsfieldInbox(item.drive_id)"
-                          title="Remove from inbox">✕</button>
-                  <button class="absolute inset-0 flex items-center justify-center bg-black/0 hover:bg-emerald-600/40 transition-colors"
-                          @click="addOneHiggsfieldInbox(item)"
-                          title="Add to clips">
-                    <span class="opacity-0 group-hover:opacity-100 text-white text-xs font-semibold bg-emerald-600 rounded px-2 py-1">+ add</span>
-                  </button>
-                  <div class="p-1 text-[9px] text-emerald-100 truncate font-mono"
-                       :title="item.name" x-text="item.name"></div>
-                </div>
-              </template>
-            </div>
-          </div>
 
           <!-- Clips upload -->
           <div>
@@ -4435,9 +4205,6 @@
                     <button class="absolute top-0.5 right-0.5 bg-neutral-900/70 text-white text-[10px] w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 leading-none"
                             title="Remove this image"
                             @click.stop="deleteCharacterImage(ch.char_id, img.image_id)">✕</button>
-                    <button class="absolute bottom-0 inset-x-0 bg-indigo-600/85 hover:bg-indigo-600 text-white text-[10px] py-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                            title="Add as reference image on the active tab"
-                            @click.stop="addLibraryImageAsRef(img.url)">+ ref</button>
                   </div>
                 </template>
               </div>
@@ -4459,9 +4226,6 @@
                          class="absolute top-0.5 right-0.5 bg-emerald-500 text-white text-[9px] px-1 py-0.5 rounded leading-none">✓</div>
                     <div x-show="img.is_edit"
                          class="absolute top-0.5 left-0.5 bg-neutral-900/70 text-white text-[9px] px-1 py-0.5 rounded leading-none">↳</div>
-                    <button class="absolute bottom-0 inset-x-0 bg-indigo-600/85 hover:bg-indigo-600 text-white text-[10px] py-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                            title="Add as reference image on the active tab"
-                            @click.stop="addLibraryImageAsRef(img.url)">+ ref</button>
                   </div>
                 </template>
               </div>
@@ -4472,68 +4236,6 @@
     </div>
   </aside>
 
-  <!-- Photo-avatar modal (animate a swap variant with HeyGen Talking Photo) -->
-  <div x-show="photoAvatarModal.open"
-       @click="closePhotoAvatarModal()"
-       @keydown.window.escape="if (photoAvatarModal.open) closePhotoAvatarModal()"
-       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
-    <div @click.stop
-         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-2xl max-h-[85vh] flex flex-col">
-      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
-        <div>
-          <div class="text-sm font-semibold">Make this image speak</div>
-          <div class="text-xs text-neutral-500 dark:text-neutral-400">HeyGen Talking Photo — animates the selected variant with a chosen voice and script.</div>
-        </div>
-        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
-                @click="closePhotoAvatarModal()">✕</button>
-      </div>
-      <div class="p-5 space-y-4 overflow-y-auto">
-        <div class="flex items-start gap-4">
-          <img :src="photoAvatarModal.variantUrl"
-               class="w-32 h-auto rounded-lg border border-neutral-200 dark:border-neutral-800 object-cover shrink-0" />
-          <div class="flex-1 space-y-3">
-            <label class="block">
-              <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Voice</span>
-              <template x-if="heygenVoices.length === 0">
-                <div class="text-xs text-neutral-400 dark:text-neutral-500 mt-1">
-                  Voices populate once HEYGEN_API_KEY is present.
-                </div>
-              </template>
-              <select x-show="heygenVoices.length > 0" x-model="photoAvatarModal.voiceId"
-                      class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
-                <option value="">Choose a voice…</option>
-                <template x-for="vc in heygenVoices" :key="'pa-vc-'+vc.voice_id">
-                  <option :value="vc.voice_id"
-                          x-text="`${vc.name || vc.voice_id} · ${vc.language || ''} ${vc.gender ? '· ' + vc.gender : ''}`"></option>
-                </template>
-              </select>
-            </label>
-          </div>
-        </div>
-        <label class="block">
-          <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Script</span>
-          <textarea x-model="photoAvatarModal.script"
-                    rows="5"
-                    x-init="$nextTick(() => $el.focus())"
-                    class="mt-1 w-full border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900 focus:border-indigo-500"
-                    placeholder="What should the character say?"></textarea>
-        </label>
-        <div class="text-xs text-neutral-400 dark:text-neutral-500">
-          The video will appear in the Avatar tab once HeyGen finishes rendering.
-        </div>
-      </div>
-      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
-        <button class="text-sm text-neutral-500 dark:text-neutral-400 hover:underline px-2 py-1"
-                @click="closePhotoAvatarModal()">Cancel</button>
-        <button class="text-sm px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-                :disabled="!photoAvatarModal.script.trim() || !photoAvatarModal.voiceId || photoAvatarModal.submitting"
-                @click="submitPhotoAvatarModal()">
-          <span x-show="!photoAvatarModal.submitting">▶ Generate avatar video</span>
-          <span x-show="photoAvatarModal.submitting">Submitting…</span>
-        </button>
-      </div>
-    </div>
-  </div>
 
   <!-- Upload character images modal -->
   <div x-show="showUploadModal"

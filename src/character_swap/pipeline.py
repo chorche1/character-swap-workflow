@@ -787,8 +787,9 @@ def submit_video(
 
     `model` defaults to grok-imagine for back-compat with older callers that
     don't yet pass it. The Step-4 UI lets users pick any of: grok-imagine,
-    veo, veo-3-fast, kling*, runway*, luma-ray2, pika-2, hailuo*, sora-2,
-    wan*, seedance, higgsfield-*.
+    veo-3.1-fast, grok-imagine-1.5, kling*, runway*, luma-ray2, pika-2,
+    hailuo*, sora-2, wan*, seedance*, higgsfield-* (the Gemini-path veo /
+    veo-3-fast stubs were removed 2026-07-02).
 
     `aspect_ratio` overrides `settings.video_aspect_ratio` for this call.
     Used when a job needs a non-default aspect (1:1 for Instagram, 16:9 for
@@ -810,7 +811,7 @@ def submit_video(
 
     # Lazy imports so older keyless installs don't pay the import cost for
     # providers they'll never use.
-    from character_swap.clients import _stubs, google_genai, kling
+    from character_swap.clients import _stubs, kling
     if model == "kling-v3":
         # Kling 3.0 routes through fal.ai (the official API caps at 5/10s;
         # fal's Kling v3 accepts 3–15s + an optional end frame).
@@ -824,13 +825,6 @@ def submit_video(
             image=image, prompt=movement_prompt,
             duration_secs=effective_dur, end_image=end_image,
             generate_audio=audio, app_job_id=job_id,
-        )
-    if model in {"veo", "veo-3-fast"}:
-        return google_genai.submit_veo(
-            image=image, prompt=movement_prompt,
-            aspect_ratio=effective_ar,
-            duration_secs=effective_dur,
-            app_job_id=job_id,
         )
     if model == "veo-3.1-fast":
         # Veo 3.1 Fast routed through fal.ai (the Gemini path only carries Veo
@@ -991,12 +985,10 @@ def wait_for_video(
     # "processing" progress event up-front so the UI shows movement.
     if on_progress is not None:
         on_progress("processing", None)
-    from character_swap.clients import _stubs, google_genai, kling
+    from character_swap.clients import _stubs, kling
     if model == "kling-v3":
         from character_swap.clients import fal_kling
         fal_kling.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
-    elif model in {"veo", "veo-3-fast"}:
-        google_genai.wait_for_veo(op_id=job_id, dest=dest)
     elif model == "veo-3.1-fast":
         from character_swap.clients import fal_veo
         fal_veo.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)

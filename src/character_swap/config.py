@@ -46,32 +46,8 @@ class Settings(BaseSettings):
     # probe shows that's what the account's API expects.
     higgsfield_scene_field: str = Field(default="image_reference",
                                         validation_alias="HIGGSFIELD_SCENE_FIELD")
-    heygen_api_key: str = Field(default="", validation_alias="HEYGEN_API_KEY")        # HeyGen Avatar 5 (talking heads)
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY") # ElevenLabs voice library + TTS + Voice Changer
     fal_api_key: str = Field(default="", validation_alias="FAL_API_KEY")              # fal.ai (hosts VEED Subtitle Styling — auto-captioning)
-    # Higgsfield → Google Drive auto-import. User configures their Higgsfield
-    # Supercomputer account to export outputs to a Drive folder, our server
-    # polls that folder via Drive API every N seconds, downloads new MP4s to
-    # `output/higgsfield-inbox/`, and surfaces them in the Editor multi-clip
-    # tab. Folder can be specified by name (we resolve to ID on first run)
-    # OR directly by Drive folder ID (cheaper at startup).
-    higgsfield_drive_folder_name: str = Field(default="AI INF Videos",
-                                              validation_alias="HIGGSFIELD_DRIVE_FOLDER_NAME")
-    higgsfield_drive_folder_id: str = Field(default="",
-                                            validation_alias="HIGGSFIELD_DRIVE_FOLDER_ID")
-    higgsfield_drive_poll_secs: int = Field(default=60,
-                                            validation_alias="HIGGSFIELD_DRIVE_POLL_SECS")
-    # When True, every video extracted from a Drive-inbox ZIP is auto-fed
-    # through the Editor's single-clip auto-edit (trim+captions only) and
-    # the result is delivered to Telegram. Disable to revert to the
-    # manual workflow where Hugo picks clips from the inbox by hand.
-    higgsfield_auto_process: bool = Field(default=True,
-                                          validation_alias="HIGGSFIELD_AUTO_PROCESS")
-    # Telegram bot for the auto-delivery step. Get a token from @BotFather
-    # and your chat_id by messaging the bot once and curling
-    # https://api.telegram.org/bot<TOKEN>/getUpdates.
-    telegram_bot_token: str = Field(default="", validation_alias="TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: str = Field(default="", validation_alias="TELEGRAM_CHAT_ID")
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     # OpenAI image `quality`: "low" | "medium" | "high" | "auto". Defaults to
@@ -266,9 +242,6 @@ class Settings(BaseSettings):
     # Rough flat estimate per fal-hosted swap edit (Qwen Edit+ / Kontext Max /
     # Seedream Edit are all in the $0.03–0.08/image band).
     fal_swap_price_usd: float = Field(default=0.06, validation_alias="FAL_SWAP_PRICE_USD")
-    heygen_price_usd: float = Field(default=0.30, validation_alias="HEYGEN_PRICE_USD")
-    elevenlabs_tts_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_TTS_PRICE_USD")
-    elevenlabs_vc_price_usd: float = Field(default=0.05, validation_alias="ELEVENLABS_VC_PRICE_USD")
     # VEED Subtitle Styling on fal.ai is billed at ~$0.10/min input duration.
     # We record per-call instead of per-minute so the cost banner shows the
     # incremental hit; recompute via duration*rate inside fal_veed.render.
@@ -395,7 +368,6 @@ class Settings(BaseSettings):
             "bytedance":  bool(self.bytedance_api_key),
             "alibaba":    bool(self.alibaba_api_key),
             "higgsfield": bool(self.higgsfield_api_key and self.higgsfield_api_secret),
-            "heygen":     bool(self.heygen_api_key),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal":        bool(self.fal_api_key),
         }.get(provider, False)

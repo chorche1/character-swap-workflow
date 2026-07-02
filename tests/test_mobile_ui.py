@@ -165,8 +165,10 @@ def test_upload_submits_surface_network_errors(_=None):
     # no run, no error. Every upload submit must route a catch through the
     # shared _submitError helper so the failure is LOUD.
     assert "_submitError(label, e) {" in _JS
-    # reengineer (reported) + from_images + broll + audio + avatar×2 + image +
-    # video = 8 upload submits, each with a catch.
-    assert _JS.count("this._submitError(") >= 8
+    # reengineer (reported) + swap from_images — the only upload submits left
+    # after the 2026-07-02 de-scope (broll/audio/avatar/image/video tabs
+    # deleted). Each must carry a catch.
+    assert _JS.count("this._submitError(") >= 2
     # The exact reported path must be covered.
     assert "this._submitError('Reengineer', e)" in _JS
+    assert "this._submitError('Swap', e)" in _JS

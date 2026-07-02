@@ -522,24 +522,7 @@ async def lifespan(app: FastAPI):
     # forget: watchers run for as long as the runs do.
     from character_swap import runner_reengineer
     runner_reengineer._spawn(runner_reengineer.resume_all(), "reengineer-resume")
-    # Higgsfield→Drive watcher: poll the user's configured Drive folder
-    # for new Supercomputer outputs and stage them in the Editor inbox.
-    # Inert if Drive OAuth isn't configured yet — the loop logs "not set
-    # up" and tries again next cycle, so the server still boots fine.
-    from character_swap import runner_drive_watcher
-    _drive_stop = asyncio.Event()
-    _drive_task = asyncio.create_task(
-        runner_drive_watcher.watcher_loop(stop_event=_drive_stop),
-        name="higgsfield-drive-watcher",
-    )
-    try:
-        yield
-    finally:
-        _drive_stop.set()
-        try:
-            await asyncio.wait_for(_drive_task, timeout=5)
-        except (asyncio.TimeoutError, Exception):
-            _drive_task.cancel()
+    yield
 
 
 app = FastAPI(title="Character Swap Studio", lifespan=lifespan)
@@ -2077,8 +2060,6 @@ class MovementBody(BaseModel):
 # submits that would all fail with the same auth error.
 _VIDEO_MODEL_KEYS: dict[str, str] = {
     "grok-imagine": "xai",
-    "veo": "gemini",
-    "veo-3-fast": "gemini",
     "kling": "kling",
     "kling-2.1-pro": "kling",
     "kling-1.6": "kling",
@@ -3336,7 +3317,8 @@ def _models_payload() -> dict:
     return {
         "image":  [_entry(s, i) for s, i in runner_media.IMAGE_MODELS.items()],
         "video":  [_entry(s, i) for s, i in runner_media.VIDEO_MODELS.items()],
-        "avatar": [_entry(s, i) for s, i in runner_media.AVATAR_MODELS.items()],
+        # `audio` stays: app.js elevenlabsAvailable() gates every voice-swap
+        # picker on an available elevenlabs-vc entry here.
         "audio":  [_entry(s, i) for s, i in runner_media.AUDIO_MODELS.items()],
     }
 
@@ -3396,141 +3378,6 @@ async def get_swap_defaults(project_id: str | None = None,
         "image_model": model,
         "image_models": _models_payload()["image"],
     }
-
-
-@app.post("/api/generations")
-async def create_generation(
-    background: BackgroundTasks,
-    kind: str = Form(...),
-    model: str = Form(...),
-    prompt: str = Form(...),
-    aspect_ratio: str | None = Form(None),
-    duration_secs: int | None = Form(None),
-    avatar_id: str | None = Form(None),
-    voice_id: str | None = Form(None),
-    voice_provider: str | None = Form(None),
-    enrich_prompt: bool = Form(False),
-    use_director: bool = Form(False),
-    files: list[UploadFile] = File(default=[]),
-) -> dict:
-    try:
-        kind_enum = GenKind(kind)
-    except ValueError:
-        raise HTTPException(400, f"Invalid kind '{kind}' (use image, video, avatar, or audio)")
-    if not prompt.strip():
-        raise HTTPException(400, "Empty prompt")
-
-    info = runner_media.model_info(model)
-    if info is None:
-        raise HTTPException(400, f"Unknown model '{model}'")
-    if kind_enum is GenKind.IMAGE and model not in runner_media.IMAGE_MODELS:
-        raise HTTPException(400, f"Model '{model}' is not an image model")
-    if kind_enum is GenKind.VIDEO and model not in runner_media.VIDEO_MODELS:
-        raise HTTPException(400, f"Model '{model}' is not a video model")
-    if kind_enum is GenKind.AVATAR and model not in runner_media.AVATAR_MODELS:
-        raise HTTPException(400, f"Model '{model}' is not an avatar model")
-    if kind_enum is GenKind.AUDIO and model not in runner_media.AUDIO_MODELS:
-        raise HTTPException(400, f"Model '{model}' is not an audio model")
-    if not settings.has_provider(info["provider"]):
-        raise HTTPException(
-            503,
-            f"{info['label']} is not configured. Add the right API key to .env.",
-        )
-    if kind_enum is GenKind.VIDEO and not files:
-        raise HTTPException(400, "Video generation requires a reference image")
-    if kind_enum is GenKind.AVATAR:
-        if not voice_id:
-            raise HTTPException(400, "Avatar generation requires voice_id")
-        if model == "heygen-avatar-5" and not avatar_id:
-            raise HTTPException(400, "heygen-avatar-5 requires avatar_id")
-        if model == "heygen-photo-avatar" and not files:
-            raise HTTPException(400, "heygen-photo-avatar requires a reference image")
-        # Validate voice_provider when explicitly set; default behaviour is HeyGen.
-        if voice_provider and voice_provider not in {"heygen", "elevenlabs"}:
-            raise HTTPException(400, f"Invalid voice_provider '{voice_provider}'")
-        if voice_provider == "elevenlabs" and not settings.has_provider("elevenlabs"):
-            raise HTTPException(503, "ElevenLabs not configured. Add ELEVENLABS_API_KEY to .env.")
-    if kind_enum is GenKind.AUDIO:
-        if not voice_id:
-            raise HTTPException(400, "Audio generation requires voice_id")
-        if model == "elevenlabs-vc" and not files:
-            raise HTTPException(400, "Voice Changer requires a source audio file")
-
-    # Allow audio (and video, for VC) uploads for the Voice Changer flow;
-    # everything else stays image-only.
-    allow_audio_upload = (kind_enum is GenKind.AUDIO and model == "elevenlabs-vc")
-    allow_video_upload = (kind_enum is GenKind.AUDIO and model == "elevenlabs-vc")
-
-    gen_id = "g_" + secrets.token_hex(5)
-    gen_dir = settings.output_dir / "generations" / gen_id
-    gen_dir.mkdir(parents=True, exist_ok=True)
-    ref_paths: list[str] = []
-    for i, f in enumerate(files):
-        if not f.filename:
-            continue
-        ext = _safe_ext(f.filename, allow_audio=allow_audio_upload, allow_video=allow_video_upload)
-        data = await _read_capped(f)
-        if not data:
-            continue
-        dest = gen_dir / f"ref_{i}{ext}"
-        tmp = dest.with_suffix(dest.suffix + ".tmp")
-        tmp.write_bytes(data)
-        tmp.replace(dest)
-        ref_paths.append(str(dest))
-
-    gen = MediaGeneration(
-        gen_id=gen_id,
-        kind=kind_enum,
-        model=model,
-        prompt=prompt.strip(),
-        reference_paths=ref_paths,
-        aspect_ratio=aspect_ratio,
-        duration_secs=duration_secs,
-        avatar_id=avatar_id,
-        voice_id=voice_id,
-        voice_provider=voice_provider or ("heygen" if kind_enum is GenKind.AVATAR else None),
-        # Only enrich image + video — avatar/audio prompts are literal scripts,
-        # NOT creative descriptions, so enrichment would corrupt them.
-        enrich_prompt=enrich_prompt and kind_enum in (GenKind.IMAGE, GenKind.VIDEO),
-        # AI Director also limited to image + video (and requires a ref image
-        # since Director relies on vision input). Runner_media handles the
-        # no-ref case by silently skipping the Director call.
-        use_director=use_director and kind_enum in (GenKind.IMAGE, GenKind.VIDEO),
-    )
-    store().add_generation(gen)
-
-    if kind_enum is GenKind.IMAGE:
-        runner_fn = runner_media.run_image_gen
-    elif kind_enum is GenKind.VIDEO:
-        runner_fn = runner_media.run_video_gen
-    elif kind_enum is GenKind.AVATAR:
-        runner_fn = runner_media.run_avatar_gen
-    else:  # AUDIO
-        runner_fn = runner_media.run_audio_gen
-    background.add_task(_run_async, runner_fn, gen_id)
-    return _gen_to_dict(gen)
-
-
-@app.get("/api/heygen/avatars")
-async def heygen_avatars() -> list[dict]:
-    from character_swap.clients import heygen as _heygen
-    try:
-        return _heygen.list_avatars()
-    except ProviderNotConfigured as e:
-        raise HTTPException(503, str(e))
-    except NotImplementedError as e:
-        raise HTTPException(501, str(e))
-
-
-@app.get("/api/heygen/voices")
-async def heygen_voices() -> list[dict]:
-    from character_swap.clients import heygen as _heygen
-    try:
-        return _heygen.list_voices()
-    except ProviderNotConfigured as e:
-        raise HTTPException(503, str(e))
-    except NotImplementedError as e:
-        raise HTTPException(501, str(e))
 
 
 @app.get("/api/elevenlabs/voices")
@@ -3593,24 +3440,6 @@ async def delete_generation(gen_id: str) -> dict:
     if gen_dir.exists():
         shutil.rmtree(gen_dir, ignore_errors=True)
     return {"ok": True}
-
-
-@app.post("/api/generations/{gen_id}/retry")
-async def retry_generation(gen_id: str, background: BackgroundTasks) -> dict:
-    s = store()
-    gen = s.get_generation(gen_id)
-    if gen is None:
-        raise HTTPException(404, "Generation not found")
-    if gen.status not in {GenStatus.FAILED}:
-        raise HTTPException(409, f"Generation is '{gen.status}', only failed can retry")
-    gen.status = GenStatus.PENDING
-    gen.error = None
-    gen.completed_at = None
-    s.update_generation(gen)
-    runner_fn = runner_media.run_image_gen if gen.kind is GenKind.IMAGE \
-        else runner_media.run_video_gen
-    background.add_task(_run_async, runner_fn, gen_id)
-    return _gen_to_dict(gen)
 
 
 # --- Video Editor: silence-trim + auto-captions -------------------------------------
@@ -4901,105 +4730,6 @@ async def editor_export_resolve(edit_id: str):
             "Content-Length": str(len(zip_bytes)),
         },
     )
-
-
-# --- B-roll generation (audio → cinematic medical-realism clips → final mp4) -----
-
-@app.post("/api/broll/generate")
-async def broll_generate(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    video_model: str = Form("grok-imagine"),
-    aspect_ratio: str = Form("9:16"),
-) -> dict:
-    """Kick off a full B-roll generation from a narration audio file.
-    Returns a `broll_id` immediately; the actual work happens in a
-    background task. Poll `GET /api/broll/{broll_id}` for progress."""
-    from character_swap import broll as broll_mod, runner_broll
-
-    if not settings.openai_api_key:
-        raise HTTPException(503, "OpenAI API key required for transcription + planning")
-
-    if aspect_ratio not in {"9:16", "1:1", "16:9"}:
-        raise HTTPException(400,
-            f"aspect_ratio must be one of 9:16 / 1:1 / 16:9 (got {aspect_ratio!r})")
-
-    ext = Path(file.filename or "").suffix.lower()
-    allowed = ALLOWED_AUDIO_EXTS | {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
-    if ext not in allowed:
-        raise HTTPException(400,
-            f"Unsupported source type '{ext}'. Allowed: {sorted(allowed)}")
-
-    data = await _read_capped(file)
-    if not data:
-        raise HTTPException(400, "Empty upload")
-
-    broll_id = "br_" + secrets.token_hex(5)
-    work = broll_mod.broll_dir(broll_id)
-    source_path = work / f"source{ext}"
-    tmp = source_path.with_suffix(source_path.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(source_path)
-
-    # If source is a video, extract the audio so Whisper has something
-    # straightforward to chew on. We still keep the original file for the
-    # caller to reference.
-    audio_for_pipeline = source_path
-    if ext in {".mp4", ".mov", ".webm", ".mkv", ".m4v"}:
-        from character_swap import video_edit
-        extracted = work / "source.audio.wav"
-        await asyncio.to_thread(
-            video_edit._run,
-            [video_edit._ffmpeg(), "-y", "-i", str(source_path),
-             "-vn", "-ac", "1", "-ar", "16000", str(extracted)],
-        )
-        audio_for_pipeline = extracted
-
-    initial_state = {
-        "broll_id": broll_id,
-        "created_at": datetime.utcnow().isoformat() + "Z",
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-        "status": "queued",
-        "error": None,
-        "source_path": str(source_path),
-        "audio_path": str(audio_for_pipeline),
-        "source_url": _file_url(source_path),
-        "video_model": video_model,
-        "aspect_ratio": aspect_ratio,
-        "transcript": "",
-        "clips": [],
-        "final_video_path": None,
-        "final_video_url": None,
-    }
-    broll_mod.save_state(initial_state)
-
-    background_tasks.add_task(runner_broll.run_broll, broll_id)
-    return initial_state
-
-
-@app.get("/api/broll")
-async def broll_list() -> list[dict]:
-    from character_swap import broll as broll_mod
-    return broll_mod.list_states()
-
-
-@app.get("/api/broll/{broll_id}")
-async def broll_get(broll_id: str) -> dict:
-    from character_swap import broll as broll_mod
-    state = broll_mod.load_state(broll_id)
-    if not state:
-        raise HTTPException(404, "broll_id not found")
-    return state
-
-
-@app.delete("/api/broll/{broll_id}")
-async def broll_delete(broll_id: str) -> dict:
-    from character_swap import broll as broll_mod
-    work = broll_mod.broll_dir(broll_id)
-    if not work.exists():
-        raise HTTPException(404, "broll_id not found")
-    shutil.rmtree(work, ignore_errors=True)
-    return {"ok": True, "broll_id": broll_id}
 
 
 # ---------------------------------------------------------------------------
@@ -6797,80 +6527,9 @@ async def reengineer_animate_scenes(re_id: str,
     return {"ok": True, "re_id": re_id, "idxs": idxs, "skipped": skipped}
 
 
-@app.post("/api/broll/{broll_id}/regenerate_clip")
-async def broll_regenerate_clip(
-    broll_id: str,
-    background_tasks: BackgroundTasks,
-    idx: int = Form(...),
-) -> dict:
-    """Reject a single clip and regenerate it. Reuses the same line + prompt
-    + target_duration. Allowed only when the job is in awaiting_approval
-    (so it doesn't fight an in-flight pipeline)."""
-    from character_swap import broll as broll_mod, runner_broll
-    state = broll_mod.load_state(broll_id)
-    if not state:
-        raise HTTPException(404, "broll_id not found")
-    if state.get("status") not in {"awaiting_approval", "partial_success", "done"}:
-        raise HTTPException(409,
-            f"Can't regenerate while job status is '{state.get('status')}'")
-    clips = state.get("clips") or []
-    if idx < 0 or idx >= len(clips):
-        raise HTTPException(400, f"idx {idx} out of range (0..{len(clips) - 1})")
-    # Mark immediately so the UI sees it transition out of 'done'.
-    clip = clips[idx]
-    clip.update({"status": "image_running", "video_url": None,
-                 "video_path": None, "error": None})
-    state["clips"] = clips
-    # If we're regenerating after finalize, drop the old final video so we
-    # don't show stale output that doesn't match the new clip set.
-    if state.get("status") in {"done", "partial_success"}:
-        state["final_video_path"] = None
-        state["final_video_url"] = None
-    state["status"] = "awaiting_approval"
-    broll_mod.save_state(state)
-
-    background_tasks.add_task(runner_broll.regenerate_clip, broll_id, idx)
-    return {"ok": True, "broll_id": broll_id, "idx": idx}
-
-
-@app.post("/api/broll/{broll_id}/finalize")
-async def broll_finalize(
-    broll_id: str,
-    background_tasks: BackgroundTasks,
-) -> dict:
-    """Trim + concat + mux. Triggered by the user after reviewing each
-    clip in awaiting_approval. Refuses if any clip is mid-generation."""
-    from character_swap import broll as broll_mod, runner_broll
-    state = broll_mod.load_state(broll_id)
-    if not state:
-        raise HTTPException(404, "broll_id not found")
-    if state.get("status") not in {"awaiting_approval", "partial_success", "done"}:
-        raise HTTPException(409,
-            f"Can't finalize while job status is '{state.get('status')}'")
-    clips = state.get("clips") or []
-    in_flight = [c for c in clips
-                 if c.get("status") in {"pending", "image_running",
-                                        "image_done", "video_running"}]
-    if in_flight:
-        raise HTTPException(409,
-            f"{len(in_flight)} clip(s) still generating — wait or refresh")
-    successful = [c for c in clips if c.get("status") == "done"]
-    if not successful:
-        raise HTTPException(400, "No successful clips to finalize")
-
-    state["status"] = "concatenating"
-    broll_mod.save_state(state)
-    background_tasks.add_task(runner_broll.finalize_broll, broll_id)
-    return {"ok": True, "broll_id": broll_id, "n_clips": len(successful)}
-
-
 # Mount the editor outputs subtree so frontend can download the rendered files.
 _editor_dir = settings.output_dir / "editor"
 _editor_dir.mkdir(parents=True, exist_ok=True)
-
-# Same for b-roll outputs — exposes source.mp3, clips/clip-NN.mp4, final.mp4.
-_broll_dir = settings.output_dir / "broll"
-_broll_dir.mkdir(parents=True, exist_ok=True)
 
 
 
@@ -6900,31 +6559,18 @@ async def health() -> dict:
         "xai_key": bool(settings.xai_api_key),
         "gemini_key": bool(settings.gemini_api_key),
         "kling_key": bool(settings.kling_access_key and settings.kling_secret_key),
-        "heygen_key": bool(settings.heygen_api_key),
         "elevenlabs_key": bool(settings.elevenlabs_api_key),
         # Drives the lock state on `veed-*` caption templates in the Editor.
         "fal_key": bool(settings.fal_api_key),
         "remotion_available": _remotion_available(),
         # Phone push (ntfy) — true when NTFY_TOPIC is configured.
         "ntfy_enabled": push.enabled(),
-        # Higgsfield → Drive auto-import: whether OAuth is set up enough to
-        # let the watcher poll the user's configured folder.
-        "higgsfield_drive_ready": __import__(
-            "character_swap.clients.google_drive",
-            fromlist=["status"],
-        ).status()["ready"],
         # Drives the Editor's "☁︎ Export to Drive" button — whether the
         # drive.file (write) OAuth token has been issued.
         "drive_write_ready": __import__(
             "character_swap.clients.google_drive",
             fromlist=["write_status"],
         ).write_status()["ready"],
-        # Whether the Higgsfield auto-process pipeline can deliver to
-        # Telegram. False = files land in the inbox but don't get pushed.
-        "telegram_ready": bool(
-            settings.telegram_bot_token and settings.telegram_chat_id
-        ),
-        "higgsfield_auto_process": settings.higgsfield_auto_process,
     }
 
 
@@ -6998,135 +6644,6 @@ async def editor_drive_export(edit_id: str, body: DriveExportBody) -> dict:
         "size": result.get("size"),
         "mime_type": result.get("mimeType"),
     }
-
-
-# --- Chat tab (Claude-driven agent over the existing endpoints) ----------------
-
-class ChatTurnBody(BaseModel):
-    message: str
-
-
-def _chat_to_dict(chat) -> dict:
-    return {
-        "chat_id": chat.chat_id,
-        "title": chat.title,
-        "created_at": chat.created_at.isoformat() + "Z",
-        "updated_at": chat.updated_at.isoformat() + "Z",
-        "messages": chat.messages,
-        "media": chat.media,
-        "n_messages": len(chat.messages),
-        "n_media": len(chat.media),
-    }
-
-
-@app.post("/api/chats")
-async def chats_create() -> dict:
-    from character_swap import chat as chat_mod
-    if not settings.has_provider("anthropic"):
-        raise HTTPException(503,
-            "ANTHROPIC_API_KEY not set — required for the Chat tab. Add it to .env.")
-    chat = chat_mod.new_chat()
-    return _chat_to_dict(chat)
-
-
-@app.get("/api/chats")
-async def chats_list() -> list[dict]:
-    chats = store().list_chats() if hasattr(store(), "list_chats") else []
-    return [_chat_to_dict(c) for c in chats]
-
-
-@app.get("/api/chats/{chat_id}")
-async def chats_get(chat_id: str) -> dict:
-    chat = store().get_chat(chat_id) if hasattr(store(), "get_chat") else None
-    if chat is None:
-        raise HTTPException(404, f"Chat {chat_id!r} not found")
-    return _chat_to_dict(chat)
-
-
-@app.delete("/api/chats/{chat_id}")
-async def chats_delete(chat_id: str) -> dict:
-    if not hasattr(store(), "delete_chat"):
-        raise HTTPException(404, "Chat backend not available")
-    removed = store().delete_chat(chat_id)
-    if removed is None:
-        raise HTTPException(404, f"Chat {chat_id!r} not found")
-    return {"deleted": chat_id}
-
-
-@app.patch("/api/chats/{chat_id}")
-async def chats_update(chat_id: str, body: dict) -> dict:
-    chat = store().get_chat(chat_id) if hasattr(store(), "get_chat") else None
-    if chat is None:
-        raise HTTPException(404, f"Chat {chat_id!r} not found")
-    if "title" in body and isinstance(body["title"], str):
-        chat.title = body["title"][:200]
-    store().update_chat(chat)
-    return _chat_to_dict(chat)
-
-
-@app.post("/api/chats/{chat_id}/turn")
-async def chats_turn(chat_id: str, body: ChatTurnBody) -> dict:
-    """Run one agent loop: append the user message, call Claude until it
-    stops requesting tools. Blocks until done — can take 30s+ for multi-tool
-    turns (image gen alone is ~15-30s). Frontend should show a spinner."""
-    from character_swap import chat as chat_mod
-    if not settings.has_provider("anthropic"):
-        raise HTTPException(503, "ANTHROPIC_API_KEY not set")
-    if not body.message.strip():
-        raise HTTPException(400, "empty message")
-    chat = store().get_chat(chat_id)
-    if chat is None:
-        raise HTTPException(404, f"Chat {chat_id!r} not found")
-    chat = await chat_mod.run_turn(chat_id, body.message)
-    return _chat_to_dict(chat)
-
-
-# --- Higgsfield Drive inbox (auto-import from user's Drive folder) -------------
-
-@app.get("/api/higgsfield/inbox")
-async def higgsfield_inbox() -> dict:
-    """List clips currently staged in the local Higgsfield inbox + the
-    Drive-connection status the UI uses to decide what to render."""
-    from character_swap import runner_drive_watcher
-    from character_swap.clients import google_drive
-    drive_status = google_drive.status()
-    return {
-        "drive": {
-            **drive_status,
-            "folder_name": settings.higgsfield_drive_folder_name,
-            "folder_id": settings.higgsfield_drive_folder_id,
-            "poll_secs": settings.higgsfield_drive_poll_secs,
-        },
-        "items": runner_drive_watcher.list_inbox(),
-    }
-
-
-@app.post("/api/higgsfield/inbox/poll")
-async def higgsfield_inbox_poll() -> dict:
-    """Force an immediate poll cycle (otherwise the watcher runs every
-    `poll_secs`). Useful when the user just finished a Supercomputer
-    render and wants to pull it in NOW instead of waiting up to a minute."""
-    from character_swap import runner_drive_watcher
-    return await runner_drive_watcher.poll_once()
-
-
-@app.delete("/api/higgsfield/inbox/{drive_id}")
-async def higgsfield_inbox_clear(drive_id: str) -> dict:
-    """Remove one inbox item from local disk. The Drive `id` stays in our
-    seen set, so we don't re-download it on the next poll."""
-    from character_swap import runner_drive_watcher
-    removed = runner_drive_watcher.clear_inbox_item(drive_id)
-    return {"removed": removed, "drive_id": drive_id}
-
-
-@app.post("/api/higgsfield/drive/bootstrap")
-async def higgsfield_drive_bootstrap() -> dict:
-    """Kick off the Google OAuth flow for the watcher's `drive.readonly`
-    scope. Opens the user's browser (server-side flow) — must run on the
-    same machine the user is on. Idempotent: a no-op when a valid token
-    already exists."""
-    from character_swap.clients import google_drive
-    return google_drive.bootstrap_oauth()
 
 
 @app.exception_handler(404)
