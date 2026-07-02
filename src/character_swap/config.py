@@ -280,7 +280,16 @@ class Settings(BaseSettings):
     # garbled TTS like "baking goda") + frame-sampled vision check for
     # impossible motion/anatomy. Auto-resubmits the clip on failure — video is
     # the expensive step, so only 1 retry by default. VIDEO_QC=0 disables.
+    #   - VIDEO_QC_MAX_RETRIES=0 turns the checks into FLAG-ONLY: a failing clip
+    #     is KEPT and marked qc_status="failed" (⚠ in the UI) but never
+    #     re-rendered (no extra cost). Hugo 2026-07-03: "bara flagga, behåll".
+    #   - VIDEO_QC_VISUAL=0 runs ONLY the speech/dialogue check (skips the
+    #     anatomy vision call).
+    #   - VIDEO_QC_SPEECH_THRESHOLD is the min word-similarity to PASS; lower it
+    #     (e.g. 0.35) so only clips saying something *completely* different are
+    #     flagged, letting minor garble through.
     video_qc_enabled: bool = Field(default=True, validation_alias="VIDEO_QC")
+    video_qc_visual_enabled: bool = Field(default=True, validation_alias="VIDEO_QC_VISUAL")
     video_qc_max_retries: int = Field(default=1, validation_alias="VIDEO_QC_MAX_RETRIES")
     video_qc_speech_threshold: float = Field(default=0.7,
                                              validation_alias="VIDEO_QC_SPEECH_THRESHOLD")

@@ -307,10 +307,14 @@ def test_video_qc_retry_then_pass(monkeypatch, tmp_path):
     _stub_runner_persistence(monkeypatch, tmp_path)
     monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
     monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
-    # This test exercises the QC retry path, so QC must be ON regardless of the
-    # ambient .env (VIDEO_QC=0 in Hugo's shared env would otherwise force 1 take).
+    # This test exercises the QC retry path, so QC must be ON *and* retries > 0
+    # regardless of the ambient .env (Hugo's shared env is VIDEO_QC=0 pre-2026-07-03
+    # and VIDEO_QC_MAX_RETRIES=0 after — flag-only — either of which would force a
+    # single take and defeat the retry assertion).
     monkeypatch.setattr(type(runner.settings), "video_qc_enabled",
                         property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(runner.settings), "video_qc_max_retries",
+                        property(lambda self: 1), raising=False)
 
     submits = []
     monkeypatch.setattr(runner.pipeline, "submit_video",
@@ -363,6 +367,46 @@ def test_video_qc_disabled_single_attempt(monkeypatch, tmp_path):
     asyncio.run(runner._animate_one_video(job, jc, video, "prompt"))
     assert len(submits) == 1
     assert video.qc_status == "skipped"
+
+
+def test_video_qc_flag_only_no_retry(monkeypatch, tmp_path):
+    """VIDEO_QC on + VIDEO_QC_MAX_RETRIES=0 = FLAG-ONLY (Hugo 2026-07-03 "bara
+    flagga, behåll"): a dialogue-mismatch clip is KEPT (status DONE) and marked
+    qc_status='failed' with the reason, but the provider is called exactly
+    ONCE — no re-render, and no qcreject snapshot (the shown clip IS the take)."""
+    from character_swap.models import VideoStatus, VideoVariant
+    job, jc, v_img = _job_one_variant(tmp_path)
+    v_img.status = VariantStatus.READY
+    jc.approved_variant_ids = ["v1"]; jc.approved_variant_id = "v1"
+    Path(v_img.path).write_bytes(b"img")
+    video = VideoVariant(video_id="vd1", grok_job_id="",
+                         status=VideoStatus.PENDING, source_variant_id="v1")
+    jc.videos = [video]
+    _stub_runner_persistence(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
+    monkeypatch.setattr(type(runner.settings), "video_qc_enabled",
+                        property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(runner.settings), "video_qc_max_retries",
+                        property(lambda self: 0), raising=False)
+    submits = []
+    monkeypatch.setattr(runner.pipeline, "submit_video",
+                        lambda **kw: (submits.append(kw), "req-1")[1])
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+    monkeypatch.setattr(runner.video_qc, "inspect_clip",
+                        lambda *a, **kw: video_qc.ClipVerdict(
+                            False, 'dialogue mismatch: heard "something else"',
+                            'say the line'))
+
+    asyncio.run(runner._animate_one_video(job, jc, video, 'P says: "baking soda"'))
+
+    assert len(submits) == 1                       # NO re-render
+    assert video.status == VideoStatus.DONE        # clip kept, usable downstream
+    assert video.qc_status == "failed"             # but flagged with the reason
+    assert "something else" in (video.qc_reason or "")
+    assert video.qc_attempts == 1
+    assert video.qc_rejects == []                  # nothing snapshotted; take IS the clip
 
 
 def _animate_capture(monkeypatch, tmp_path, prompt, char_id="cA"):
@@ -457,6 +501,9 @@ def test_animate_keeps_spanish_through_qc_retry(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
     monkeypatch.setattr(type(runner.settings), "video_qc_enabled",
                         property(lambda self: True), raising=False)
+    # Retry path — pin retries on regardless of the ambient flag-only .env.
+    monkeypatch.setattr(type(runner.settings), "video_qc_max_retries",
+                        property(lambda self: 1), raising=False)
     submits = []
     monkeypatch.setattr(runner.pipeline, "submit_video",
                         lambda **kw: (submits.append(kw), f"req-{len(submits)}")[1])
@@ -527,3 +574,40 @@ def test_inspect_clip_gating(monkeypatch):
     assert verdict is not None and not verdict.passed
     assert "baking goda" in verdict.reason
     assert "baking soda" in verdict.corrective_hint
+
+
+def test_inspect_clip_visual_disabled_runs_speech_only(monkeypatch):
+    """VIDEO_QC_VISUAL=0 → the anatomy vision call is never made; only the
+    dialogue check decides the verdict (Hugo 2026-07-03 'bara repliken'). A
+    would-fail visual check must be skipped entirely when speech passes."""
+    cfg = __import__('character_swap.config', fromlist=['settings']).settings
+    monkeypatch.setattr(type(cfg), "video_qc_enabled",
+                        property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(cfg), "video_qc_visual_enabled",
+                        property(lambda self: False), raising=False)
+    visual_calls = []
+    monkeypatch.setattr(video_qc, "check_visual",
+                        lambda *a, **k: (visual_calls.append(1),
+                                         video_qc.ClipVerdict(False, "extra arm", "fix"))[1])
+    monkeypatch.setattr(video_qc, "check_speech",
+                        lambda *a, **k: (True, "baking soda", 0.99))
+    verdict = video_qc.inspect_clip(
+        Path("/x.mp4"), movement_prompt='says: "baking soda"')
+    assert verdict is not None and verdict.passed     # speech ran + passed
+    assert visual_calls == []                         # visual never consulted
+
+
+def test_inspect_clip_visual_enabled_still_runs(monkeypatch):
+    """Default (VIDEO_QC_VISUAL unset → True) keeps the anatomy check wired: a
+    failing visual verdict fails the clip even when speech is unavailable."""
+    cfg = __import__('character_swap.config', fromlist=['settings']).settings
+    monkeypatch.setattr(type(cfg), "video_qc_enabled",
+                        property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(cfg), "video_qc_visual_enabled",
+                        property(lambda self: True), raising=False)
+    monkeypatch.setattr(video_qc, "check_speech", lambda *a, **k: None)
+    monkeypatch.setattr(video_qc, "check_visual",
+                        lambda *a, **k: video_qc.ClipVerdict(False, "extra arm", "fix"))
+    verdict = video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="no dialogue")
+    assert verdict is not None and not verdict.passed
+    assert "extra arm" in verdict.reason

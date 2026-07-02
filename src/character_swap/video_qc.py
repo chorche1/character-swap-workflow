@@ -223,10 +223,14 @@ def inspect_clip(video: Path, *, movement_prompt: str,
                                  "pronouncing every word clearly and correctly."),
             )
 
-    visual = check_visual(video, app_job_id=app_job_id)
-    if visual is not None:
-        ran_any = True
-        if not visual.passed:
-            return visual
+    # The anatomy/vision check is skippable independently (VIDEO_QC_VISUAL=0)
+    # so a run can flag ONLY dialogue mismatches without paying for a vision
+    # call per clip (Hugo 2026-07-03: "bara repliken").
+    if settings.video_qc_visual_enabled:
+        visual = check_visual(video, app_job_id=app_job_id)
+        if visual is not None:
+            ran_any = True
+            if not visual.passed:
+                return visual
 
     return ClipVerdict(passed=True, reason="", corrective_hint="") if ran_any else None
