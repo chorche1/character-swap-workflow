@@ -440,6 +440,7 @@ function studio() {
     ws: null,
     wsConnected: false,
     _wsBackoff: 1000,
+    _wsReconnectTimer: null,
     _sidebarRefreshTimer: null,
     // Coalesce the per-WS-event job refetch (see _refreshJobSoon): one shared
     // in-flight GET /api/jobs/{id} instead of one per event during a burst.
@@ -959,10 +960,16 @@ function studio() {
       // Audio/Avatar/B-roll tabs were removed 2026-06-10 — a thumbnail that
       // jumps to a nonexistent tab would land on a blank page).
       const out = [];
+      // `key` must be UNIQUE per entry — the strip's x-for is keyed on it, and
+      // a multi-character run emits one entry PER character final all sharing
+      // re_id (same for a reel + its 🔁 mirror sharing gen_id). Duplicate keys
+      // corrupt Alpine's keyed diff (duplicated/stale/vanishing thumbnails).
+      // `id` stays the navigation id for jumpToActiveJob.
       for (const r of this.reengineerHistory) {
         for (const [cid, f] of Object.entries(r.finals || {})) {
           if (f.final_url) out.push({
             kind: 'reengineer', id: r.re_id, tab: 'reengineer',
+            key: 'reengineer-' + r.re_id + '-' + cid,
             thumb: f.final_url,
             label: (r.source_name || r.re_id).slice(0, 40),
             created_at: r.completed_at || r.created_at,
@@ -973,6 +980,7 @@ function studio() {
       for (const g of this.editorJobs) {
         if (g.output_url) out.push({
           kind: 'editor', id: g.gen_id, tab: 'editor',
+          key: 'editor-' + g.gen_id,
           thumb: g.output_url,
           label: (g.prompt || g.gen_id || '').toString().slice(0, 40),
           created_at: g.completed_at || g.created_at,
@@ -980,6 +988,7 @@ function studio() {
         const rp = g.editor && g.editor.repurpose_url;
         if (rp) out.push({
           kind: 'editor', id: g.gen_id, tab: 'editor',
+          key: 'editor-' + g.gen_id + '-rp',
           thumb: rp,
           label: '🔁 ' + (g.prompt || g.gen_id || '').toString().slice(0, 37),
           created_at: g.completed_at || g.created_at,
@@ -1564,8 +1573,21 @@ function studio() {
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dirty: true }),
         });
-        if (r.ok) this._spliceReengineerView(await r.json());
-      } catch (_) {}
+        if (r.ok) { this._spliceReengineerView(await r.json()); return; }
+        this._requeueDirtyMark(run.re_id, idx);   // 409/5xx: retry next tick
+      } catch (_) {
+        // Transient network error / server mid-restart: losing the mark
+        // silently would ship an edited image's OLD clip unbadged — requeue
+        // so the next refresh tick retries the PATCH.
+        this._requeueDirtyMark(run.re_id, idx);
+      }
+    },
+
+    _requeueDirtyMark(reId, idx) {
+      const q = this._reDirtyPending[reId] || [];
+      if (!q.includes(idx)) {
+        this._reDirtyPending = { ...this._reDirtyPending, [reId]: [...q, idx] };
+      }
     },
 
     async reengineerUploadEndFrame(run, sc, ev) {
@@ -2609,6 +2631,8 @@ function studio() {
         this.notifyMilestone('Trim done',
           `${data.saved_secs}s removed (${data.n_cuts} segments kept)`,
           { kind: 'done', tag: 'editor-trim' });
+      } catch (e) {
+        this._submitError('Trim', e);
       } finally {
         this.editor.trimming = false;
       }
@@ -2662,6 +2686,8 @@ function studio() {
         this.notifyMilestone('Captions done',
           `${data.n_words} words · ${data.template}`,
           { kind: 'done', tag: 'editor-captions' });
+      } catch (e) {
+        this._submitError('Captions', e);
       } finally {
         this.editor.captioning = false;
       }
@@ -2701,9 +2727,13 @@ function studio() {
         // If the user edited captions, send the modified words back so the
         // server persists + re-renders against THEM. Skip when unchanged
         // to keep the rerender path identical to the no-edit case.
+        let sentWords = null;
         if (this.editor.captionEditOpen && this.editor.editedWords.length) {
           const cleanWords = this._editedWordsForPost();
-          if (cleanWords) fd.append('words_json', JSON.stringify(cleanWords));
+          if (cleanWords) {
+            fd.append('words_json', JSON.stringify(cleanWords));
+            sentWords = cleanWords;
+          }
         }
         const r = await fetch('/api/editor/rerender', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Rerender failed: ' + await r.text()); return; }
@@ -2717,6 +2747,19 @@ function studio() {
           n_words: data.n_words,
           version: data.version,
         };
+        if (sentWords) {
+          // The server just persisted words_json to words.json — refresh the
+          // LOCAL baseline too. openCaptionEditor/captionEditsDirty re-seed and
+          // diff against lastResult(.captions).words; leaving the pre-edit list
+          // there meant the next open showed the old transcript and the next
+          // save silently REVERTED the fixes this save just persisted.
+          this.editor.lastResult.words = sentWords;
+          if (this.editor.lastResult.captions?.words) {
+            this.editor.lastResult.captions = {
+              ...this.editor.lastResult.captions, words: sentWords,
+            };
+          }
+        }
         this.editorHistory = [{
           edit_id: data.edit_id, kind: 'rerender', version: data.version,
           template: data.template, n_words: data.n_words,
@@ -2725,6 +2768,8 @@ function studio() {
         this.notifyMilestone('Rerender done',
           `v${data.version} · ${data.template}`,
           { kind: 'done', tag: `editor-rerender-${data.version}` });
+      } catch (e) {
+        this._submitError('Rerender', e);
       } finally {
         this.editor.rerendering = false;
       }
@@ -2741,10 +2786,27 @@ function studio() {
     // persists the edits back to `words.json` so subsequent rerenders pick
     // them up automatically.
 
-    openCaptionEditor() {
-      const words = this.editor.lastResult?.captions?.words
+    async openCaptionEditor() {
+      let words = this.editor.lastResult?.captions?.words
         || this.editor.lastResult?.words
         || [];
+      // Editor-tab renders (auto_edit / multi_auto_edit) return caption
+      // SUMMARIES without the word list — only GET /api/editor/edit/{id}
+      // serves words.json. Fetch it on demand and stash it as the local
+      // baseline (captionEditsDirty/revert diff against lastResult.words),
+      // so ✎ works for renders born in this tab, not just adopted finals.
+      if (!words.length && this.editor.lastResult?.edit_id) {
+        try {
+          const r = await fetch('/api/editor/edit/' + this.editor.lastResult.edit_id);
+          if (r.ok) {
+            const data = await r.json();
+            if (Array.isArray(data.words) && data.words.length) {
+              words = data.words;
+              this.editor.lastResult.words = words;
+            }
+          }
+        } catch (_) { /* falls through to the no-transcript error below */ }
+      }
       if (!words.length) {
         this.notifyError('No transcript on this render to edit');
         return;
@@ -3120,7 +3182,10 @@ function studio() {
     // Click anywhere on the timeline track → jump playhead AND seek
     // the Remotion preview to that point. Same handler used for the
     // mousedown that starts a playhead drag.
-    seekTimeline(ev) {
+    // NOT named seekTimeline: the CapCut timeline below defines that key, and
+    // in an object literal the later key silently WINS — this handler was dead
+    // (caption-track clicks ran the CapCut seek against a hidden 0-width ref).
+    seekCaptionTimeline(ev) {
       const track = ev.currentTarget;
       const rect = track.getBoundingClientRect();
       const x = (ev.clientX ?? (ev.touches && ev.touches[0]?.clientX)) - rect.left;
@@ -3326,7 +3391,12 @@ function studio() {
     closeTimeline() {
       this.timeline.open = false;
       const v = this.$refs.timelineVideo;
-      if (v) { v.pause(); v.src = ''; }
+      if (v) v.pause();
+      // Release the buffered video via the Alpine binding, NEVER v.src='':
+      // the element's src is :src-bound to timeline.sourceUrl, and openTimeline
+      // re-assigns the SAME url string — a same-value set that Alpine skips —
+      // so a direct DOM wipe left the player permanently black on reopen.
+      this.timeline.sourceUrl = '';
     },
 
     timelineOutputDuration() {
@@ -3528,6 +3598,8 @@ function studio() {
         // Re-anchor the timeline to the new render so the user can iterate
         // again on the result of this round.
         this.openTimeline();
+      } catch (e) {
+        this._submitError('Timeline render', e);
       } finally {
         this.timeline.rendering = false;
       }
@@ -3598,6 +3670,8 @@ function studio() {
         // The backend persisted this reel (kind=editor) — refresh the saved
         // list so it shows up immediately and can be repurposed.
         this.loadEditorJobs();
+      } catch (e) {
+        this._submitError('Multi auto-edit', e);
       } finally {
         this.multiAutoEditing = false;
       }
@@ -3637,6 +3711,8 @@ function studio() {
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }
+      } catch (e) {
+        this._submitError('Auto-edit', e);
       } finally {
         this.editor.autoEditing = false;
       }
@@ -4333,7 +4409,22 @@ function studio() {
     },
 
     async loadLibrary() {
-      this.library = await (await fetch('/api/characters')).json();
+      // Guarded like every other init() loader: an unguarded throw here (or a
+      // FastAPI error dict making this.library a non-array so init's .map()
+      // crashed) aborted the ENTIRE init chain — the app booted blank with no
+      // sidebar, no history and no polling, and nothing told the user why.
+      // Never throw; this.library stays an array no matter what comes back.
+      try {
+        const r = await fetch('/api/characters');
+        if (!r.ok) {
+          this.notifyError('Could not load character library: ' + await r.text());
+          return;
+        }
+        const data = await r.json();
+        this.library = Array.isArray(data) ? data : (this.library || []);
+      } catch (e) {
+        this.notifyError('Could not load character library: ' + e);
+      }
     },
 
     // --- Extra reference image (3rd ref in Swap Step 2) -------------------
@@ -5809,7 +5900,26 @@ function studio() {
           return;
         }
         const job = await r.json();
-        if (m.reRun) m.reRun.job = job;
+        if (m.reRun) {
+          // Same follow-ups as reengineerRetryVariant (✕↻): the retry endpoint
+          // regenerates IN PLACE into the same variant file and returns before
+          // the background task runs, and on a finished run neither WS nor the
+          // 5s poll is live — without nonce + optimistic flip + poll restart
+          // the paid regen looked like a silent no-op (browser kept the cached
+          // OLD image). Resolve the LIVE run by re_id: a background refresh may
+          // have spliced the history while the modal was open, detaching reRun.
+          const live = (this.reengineerHistory || [])
+            .find(x => x.re_id === m.reRun.re_id) || m.reRun;
+          live.job = job;
+          this.reengineerRetryNonce = { ...this.reengineerRetryNonce, [m.variantId]: Date.now() };
+          const slot = (live.job?.characters?.[m.charId]?.images || [])
+            .find(v => v.variant_id === m.variantId);
+          if (slot) slot.status = 'generating';
+          // A regenerated image differs from the clip that animated the old one.
+          await this._reMarkVariantSceneDirty(live, m.charId, m.variantId);
+          this._startReengineerPolling();
+          await this.refreshReengineer(live.re_id);
+        }
         else if (this.job?.job_id === m.jobId) this.job = job;
         this.imgRegenModal.open = false;
         this.notifyInfo(`Regenererar ${m.charName}s bild med den ändrade prompten…`);
@@ -6216,10 +6326,16 @@ function studio() {
     // the new model's default. Wired via @change on the model <select>.
     syncDurationToModel() {
       const spec = this.videoDurationSpec();
-      if (this.swapDurationSecs && spec.options.includes(this.swapDurationSecs)) {
-        return;  // user's pick is still valid — keep it
+      if (!(this.swapDurationSecs && spec.options.includes(this.swapDurationSecs))) {
+        this.swapDurationSecs = spec.default;
       }
-      this.swapDurationSecs = spec.default;
+      // Per-scene durations resolve against each scene's EFFECTIVE model —
+      // its override, else the job-wide pick that just changed. Without this
+      // re-snap a stored per-scene pick the new model rejects is DISPLAYED as
+      // the model default (per-option :selected matches nothing) while submit
+      // still sends the stale value, which the server silently drops.
+      // Scenes with their own override are untouched (their pick stays valid).
+      for (const sc of (this.job?.scenes || [])) this.onSceneVideoModelChange(sc);
     },
 
     // --- Per-SCENE video-model override (Step-4 opt-in) ---------------------
@@ -6396,6 +6512,13 @@ function studio() {
     },
 
     connectWS(jobId) {
+      // A reconnect timer scheduled in onclose can fire AFTER the user switched
+      // jobs (openJob's close event lands mid-await, while this.job is still
+      // the old job) — connecting then would clobber this.ws with a socket for
+      // the PREVIOUS job and its snapshot would flip the screen back to it.
+      // Only ever attach to the job that is open RIGHT NOW.
+      if (!this.job || this.job.job_id !== jobId) return;
+      if (this._wsReconnectTimer) { clearTimeout(this._wsReconnectTimer); this._wsReconnectTimer = null; }
       const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host
         + '/ws/jobs/' + jobId;
       const ws = new WebSocket(url);
@@ -6407,7 +6530,9 @@ function studio() {
         if (this.job && this.job.job_id === jobId) {
           const delay = Math.min(this._wsBackoff, 10000);
           this._wsBackoff = Math.min(this._wsBackoff * 2, 10000);
-          setTimeout(() => this.connectWS(jobId), delay);
+          // Tracked so a job switch (or an earlier reconnect) can cancel it;
+          // the connectWS guard above re-validates when it fires anyway.
+          this._wsReconnectTimer = setTimeout(() => this.connectWS(jobId), delay);
         }
       };
       ws.onerror = () => {};
@@ -6421,6 +6546,9 @@ function studio() {
       // picks it up the moment they blur.
       if (this._isTypingProtectedField()) { this._pendingJobRefresh = true; return; }
       if (evt.kind === 'snapshot') {
+        // A snapshot from a stale socket (late reconnect for a previously open
+        // job) must NOT replace the job the user is looking at.
+        if (!this.job || (evt.job && evt.job.job_id !== this.job.job_id)) return;
         this.job = evt.job;
         this._fireSwapMilestones(this.job);
         return;
@@ -6498,15 +6626,20 @@ function studio() {
     _fireSwapMilestones(job) {
       if (!job || !job.job_id) return;
       const TERMINAL = new Set(['done', 'rejected', 'failed']);
-      const prevSnap = this._lastSwapJobSnapshot[job.job_id] || { chars: {}, allTerminal: false };
+      // First sight of a job this page-session is the WS-connect snapshot —
+      // treat it as the BASELINE, never as a transition. Comparing it against
+      // a fabricated {allTerminal: false} fired a false 'Swap job complete'
+      // chime + OS popup (and a spurious approval chime) every time an
+      // already-finished job was merely opened.
+      const prevSnap = this._lastSwapJobSnapshot[job.job_id] || null;
       const nextChars = {};
       let allTerminal = true;
       const charEntries = Object.entries(job.characters || {});
       for (const [cid, jc] of charEntries) {
         nextChars[cid] = jc.status;
         if (!TERMINAL.has(jc.status)) allTerminal = false;
-        const prevStatus = prevSnap.chars[cid];
-        if (prevStatus !== 'awaiting_approval' && jc.status === 'awaiting_approval') {
+        const prevStatus = prevSnap ? prevSnap.chars[cid] : undefined;
+        if (prevSnap && prevStatus !== 'awaiting_approval' && jc.status === 'awaiting_approval') {
           this.notifyMilestone(
             'Variant ready — approve',
             `${jc.name || cid}: first variant landed, pick one to keep`,
@@ -6514,7 +6647,7 @@ function studio() {
           );
         }
       }
-      if (charEntries.length > 0 && !prevSnap.allTerminal && allTerminal) {
+      if (prevSnap && charEntries.length > 0 && !prevSnap.allTerminal && allTerminal) {
         this.notifyMilestone(
           'Swap job complete',
           `${job.title || job.job_id}: all characters finished`,

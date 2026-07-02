@@ -49,7 +49,10 @@ def test_timeline_drag_supports_touch():
     assert "window.addEventListener('touchmove', this._tlOnMove" in seg[:3000]
     seek = _JS.split("seekTimeline(event)")[1]
     assert "event.touches?.[0]?.clientX" in seek[:600]
-    assert "@touchstart.self.passive=\"seekTimeline($event)\"" in _HTML
+    # The caption-editor track has its OWN handler (seekCaptionTimeline): it
+    # used to share the `seekTimeline` key with the CapCut one — in an object
+    # literal the later key wins, so caption-track clicks were a dead no-op.
+    assert "@touchstart.self.passive=\"seekCaptionTimeline($event)\"" in _HTML
     assert _HTML.count("startHandleDrag($event, i,") == 4   # mouse+touch × 2
 
 

@@ -12,7 +12,9 @@ cli.py don't change.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +35,8 @@ from character_swap.models import (
     SceneAsset,
     VideoVariant,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _backfill_character_images(state: AppState) -> bool:
@@ -71,9 +75,35 @@ class JsonStateStore:
             with self.path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             state = AppState.model_validate(data)
-        except (json.JSONDecodeError, ValueError):
-            backup = self.path.with_suffix(".json.corrupt")
-            self.path.replace(backup)
+        except (json.JSONDecodeError, ValueError) as parse_err:
+            # NEVER silently discard the library (Hugo's standing rule —
+            # audit 2026-07-01). This path fires for truncated JSON AND any
+            # schema-invalid state (pydantic ValidationError subclasses
+            # ValueError — e.g. an older checkout reading a state.json
+            # written by a newer one). The old code moved the file to a
+            # FIXED-name backup with zero logging: the user booted into a
+            # blank app with no explanation, and a repeat corruption
+            # clobbered the previous backup. Now: COPY the unreadable file
+            # to a timestamped backup, scream in the log, and boot empty so
+            # the server still starts (the first save() writes a fresh
+            # state.json; the original stays preserved in the backup).
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            backup = self.path.with_name(f"{self.path.name}.corrupt-{ts}")
+            try:
+                shutil.copy2(self.path, backup)
+            except OSError:
+                logger.exception(
+                    "state file %s is unreadable AND backing it up to %s "
+                    "failed — the original is left in place", self.path,
+                    backup)
+                return AppState()
+            logger.error(
+                "state file %s is unreadable (%s: %s) — a copy is preserved "
+                "at %s; starting with an EMPTY state. Recover by fixing the "
+                "backup and moving it back to %s before the next save "
+                "overwrites the original.",
+                self.path, type(parse_err).__name__, parse_err, backup,
+                self.path)
             return AppState()
         if _backfill_character_images(state):
             # Persist the synthesized image rows on next save tick (no extra IO here).

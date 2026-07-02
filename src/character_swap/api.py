@@ -5856,6 +5856,17 @@ async def reengineer_add_scene(
     # window) with the pre-await snapshot.
     state = _reload_reengineer_state_after_await(re_id)
     entries = state.get("scenes") or []
+    # Content-addressing collapses a re-upload of the SAME image onto an
+    # existing entry's scene_id — a shared-id sibling corrupts per-scene
+    # prompt sync/_collect_clips and (direct=True) silently flips the
+    # sibling's mode too. Mint a distinct __dup id, like from_images does.
+    if any(e.get("scene_id") == scene_id for e in entries):
+        frame_bytes = Path(_path).read_bytes()
+        scene_id, _path = _register_scene_duplicate(
+            scene_id, frame_bytes, file.filename or "Egen scen")
+        entry["scene_id"] = scene_id
+        if direct:
+            entry["direct_image_path"] = str(_path)
     pos = position if 0 <= position <= len(entries) else len(entries)
     entries.insert(pos, entry)
     state["scenes"] = entries
@@ -5921,6 +5932,7 @@ async def reengineer_set_direct(re_id: str, idx: int,
         raise HTTPException(409, "underlying job disappeared")
 
     if file is not None and (file.filename or "").strip():
+        expect_sid = entry.get("scene_id")
         ext = _safe_ext(file.filename or "")
         data = await _read_capped(file)
         if not data:
@@ -5929,6 +5941,13 @@ async def reengineer_set_direct(re_id: str, idx: int,
         # doesn't clobber concurrent state writes with the pre-await snapshot.
         state = _reload_reengineer_state_after_await(re_id)
         entry = _reengineer_entry(state, idx)
+        # Identity check, not just index: a concurrent add/delete/reorder can
+        # shift the list during the upload — mutating whatever now sits at
+        # `idx` would gut the WRONG scene's variants. (import_clip has the
+        # same guard.)
+        if entry.get("scene_id") != expect_sid:
+            raise HTTPException(409, "scenerna ändrades under uppladdningen "
+                                     "— försök igen")
         run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
         run_dir.mkdir(parents=True, exist_ok=True)
         up = run_dir / f"direct_{secrets.token_hex(4)}{ext}"
@@ -6626,6 +6645,7 @@ async def reengineer_replace_scene_image(re_id: str, idx: int,
     if job is None:
         raise HTTPException(409, "underlying job missing")
 
+    expect_sid = entry.get("scene_id")
     ext = _safe_ext(file.filename or "upload.png")          # image-only
     data = await _read_capped(file)
     if not data:
@@ -6634,6 +6654,12 @@ async def reengineer_replace_scene_image(re_id: str, idx: int,
     # doesn't clobber concurrent state writes with the pre-await snapshot.
     state = _reload_reengineer_state_after_await(re_id)
     entry = _reengineer_entry(state, idx)
+    # Identity check, not just index: a concurrent add/delete/reorder can
+    # shift the list during the upload — re-pointing whatever now sits at
+    # `idx` would withdraw the WRONG scene's approvals.
+    if entry.get("scene_id") != expect_sid:
+        raise HTTPException(409, "scenerna ändrades under uppladdningen "
+                                 "— försök igen")
     old_sid = entry["scene_id"]
     run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
     run_dir.mkdir(parents=True, exist_ok=True)

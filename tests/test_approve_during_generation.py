@@ -103,3 +103,22 @@ def test_first_ready_variant_still_flips_generating_char(monkeypatch, tmp_path):
 
     assert v2.status == VariantStatus.READY
     assert jc.status == CharStatus.AWAITING_APPROVAL
+
+
+def test_regen_demoted_approved_char_is_restored_to_approved(monkeypatch, tmp_path):
+    """The adjacent door (seam review 2026-07-02): regen_scene_variants
+    demotes an APPROVED char to GENERATING while rebuilding one scene. The
+    completion persist must land back on APPROVED (approvals survive), not
+    AWAITING_APPROVAL — set_movement filters on status == APPROVED, so the
+    old behavior silently dropped the char from Step 4."""
+    job, jc, v2 = _job(tmp_path)
+    _wire(monkeypatch)
+    jc.status = CharStatus.GENERATING            # regen demotion
+    jc.approved_variant_ids = ["v1"]             # approvals survived it
+    jc.approved_variant_id = "v1"
+
+    asyncio.run(runner._generate_one_variant(job, jc, v2, asyncio.Semaphore(1)))
+
+    assert v2.status == VariantStatus.READY
+    assert jc.status == CharStatus.APPROVED      # restored, not AWAITING
+    assert jc.approved_variant_ids == ["v1"]

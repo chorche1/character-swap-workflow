@@ -516,8 +516,16 @@ async def _generate_one_variant(
     # run_video_synthesis (which filter on status == APPROVED) silently
     # dropped the character from Step 4 with no error anywhere.
     if jc.status not in (CharStatus.AWAITING_APPROVAL, CharStatus.APPROVED):
-        await asyncio.to_thread(_persist, job, jc,
-                                status=CharStatus.AWAITING_APPROVAL)
+        # A char with surviving approvals comes back as APPROVED, never
+        # AWAITING_APPROVAL: regen_scene_variants demotes an approved char
+        # to GENERATING while rebuilding one scene, and set_movement /
+        # run_video_synthesis filter on status == APPROVED — landing on
+        # AWAITING_APPROVAL silently dropped the char from Step 4 while its
+        # green ✓ approvals still rendered.
+        restored = (CharStatus.APPROVED
+                    if (jc.approved_variant_ids or jc.approved_variant_id)
+                    else CharStatus.AWAITING_APPROVAL)
+        await asyncio.to_thread(_persist, job, jc, status=restored)
     await _emit(job.job_id, "variant.ready",
                 char_id=jc.char_id, variant_id=variant.variant_id,
                 path=variant.path)

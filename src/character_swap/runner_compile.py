@@ -488,10 +488,19 @@ async def run_editor_pipeline(
                     pad_secs=pad_secs, job_id=edit_id,
                 )
                 current = trimmed
-            except RuntimeError:
-                # Trim failed (e.g. no silences detected) — keep going with
-                # the un-trimmed source rather than failing the whole compile.
-                pass
+            except RuntimeError as trim_err:
+                # Trim failed — keep going with the un-trimmed source rather
+                # than failing the whole compile. But NEVER silently (Hugo's
+                # standing rule — audit 2026-07-01): trim_silences handles
+                # "no silences found" internally, so a RuntimeError here is a
+                # real ffmpeg failure and the final ships with its pauses
+                # kept despite the user asking for the trim.
+                logger.warning("%s: interior silence trim skipped: %s: %s",
+                               edit_id, type(trim_err).__name__, trim_err)
+                if warn is not None:
+                    await warn(f"tystnads-trim hoppades över "
+                               f"({type(trim_err).__name__}: "
+                               f"{str(trim_err)[:200]})")
 
     # Step 3: voice swap via ElevenLabs (optional — only when the caller
     # resolved a voice AND the key is configured).
@@ -573,8 +582,23 @@ async def run_editor_pipeline(
                     video_edit.transcribe_words, current, job_id=edit_id,
                     script_hint=script_hint,
                 )
-            except Exception:
+            except Exception as tx_err:
+                # Transcription failure must not fail the build, but NEVER
+                # silently (Hugo's standing rule — audit 2026-07-01): with no
+                # script hint there is nothing to rebuild caption words from,
+                # so caption burn-in below disengages and a captions-enabled
+                # compile would ship an UNCAPTIONED final marked 'done'.
+                # Surface that as a ⚠ warning. (With a script hint,
+                # _resolve_caption_words below recovers via the even-timed
+                # script fallback and reports itself.)
                 words = []
+                logger.warning("%s: transcription failed: %s: %s", edit_id,
+                               type(tx_err).__name__, tx_err)
+                if enable_captions and not script_hint and warn is not None:
+                    await warn(f"Whisper misslyckades "
+                               f"({type(tx_err).__name__}: "
+                               f"{str(tx_err)[:200]}) — finalen saknar "
+                               f"captions")
         if (enable_captions or enable_wpm_normalize) and script_hint:
             words = await _resolve_caption_words(
                 words, current, script_hint=script_hint, edit_id=edit_id,
@@ -626,8 +650,17 @@ async def run_editor_pipeline(
                 )
                 words = video_edit.scale_word_timestamps(words, speed)
                 current = stretched
-        except Exception:
-            pass
+        except Exception as wpm_err:
+            # A WPM failure must not fail the build, but NEVER silently
+            # (Hugo's standing rule — audit 2026-07-01): the user asked for a
+            # pace change and the final ships at the original tempo instead —
+            # surface it as a ⚠ warning like every other skipped step.
+            logger.warning("%s: WPM normalize skipped: %s: %s", edit_id,
+                           type(wpm_err).__name__, wpm_err)
+            if warn is not None:
+                await warn(f"WPM-normalisering misslyckades — originaltempo "
+                           f"behållet ({type(wpm_err).__name__}: "
+                           f"{str(wpm_err)[:200]})")
 
     # Step 4b.5: global playback speed (Hugo 2026-06-13 — the same Speed
     # control as the Editor tab). Pitch-preserving time-stretch applied on

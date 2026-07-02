@@ -242,7 +242,7 @@
                 x-text="recentMedia.length"></span>
         </summary>
         <div class="grid grid-cols-4 gap-1 p-2 max-h-72 overflow-y-auto">
-          <template x-for="m in recentMedia.slice(0, 32)" :key="m.kind+'-'+m.id">
+          <template x-for="m in recentMedia.slice(0, 32)" :key="m.key">
             <button class="relative aspect-square rounded overflow-hidden border border-neutral-200 dark:border-neutral-700 hover:ring-2 hover:ring-indigo-400 transition-shadow"
                     @click="jumpToActiveJob({tab: m.tab, id: m.id, kind: m.kind})"
                     :title="`${m.kind} · ${m.label || m.id}`">
@@ -3581,7 +3581,11 @@
           <button x-show="editor.lastResult?.kind === 'auto' && editor.lastResult?.rerender_available !== false"
                   class="ml-auto px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
                   @click="openRerenderPanel()">Edit result</button>
-          <button x-show="(editor.lastResult?.captions?.words?.length || editor.lastResult?.words?.length) && editor.lastResult?.edit_id"
+          <!-- captions?.n_words: Editor-tab renders carry only a caption
+               SUMMARY (no words list) — openCaptionEditor fetches the words
+               on demand from /api/editor/edit/{id}. Plain 'captions'-kind
+               renders stay hidden: they have no words.json, rerender 404s. -->
+          <button x-show="(editor.lastResult?.captions?.words?.length || editor.lastResult?.words?.length || editor.lastResult?.captions?.n_words) && editor.lastResult?.edit_id"
                   class="px-3 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-xs font-medium"
                   title="Edit caption text or word-level timings, then re-render"
                   @click="openCaptionEditor()">✎ Edit captions</button>
@@ -3804,8 +3808,8 @@
                   </span>
                 </div>
                 <div class="cap-tl-track relative h-14 select-none rounded-md bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 cursor-pointer overflow-hidden"
-                     @mousedown.self="seekTimeline($event)"
-                     @touchstart.self.passive="seekTimeline($event)">
+                     @mousedown.self="seekCaptionTimeline($event)"
+                     @touchstart.self.passive="seekCaptionTimeline($event)">
                   <!-- Card rectangles, positioned by start/end. The body is
                        draggable to shift the whole block; the left/right
                        edge handles retime the first/last word. -->

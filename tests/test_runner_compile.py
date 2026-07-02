@@ -633,3 +633,131 @@ def test_resolve_caption_falls_back_when_both_diverge(monkeypatch):
     out = _resolve(hint, plain=plain, dur=12.0, monkeypatch=monkeypatch)
     assert [w.text for w in out] == _SCRIPT.split()      # script text, not garble
     assert out[0].start == 0.0 and out[-1].end == pytest.approx(12.0)
+
+
+# --- run_editor_pipeline: swallowed step failures must warn (audit 2026-07-01) ---------
+#
+# REFUSE LOUDLY OVER SILENT PARTIAL (Hugo's standing rule): a degraded final
+# must always carry a visible ⚠ warning. These lock the three swallow sites
+# that used to ship a wrong output marked 'done' with no trace: whole-concat
+# Whisper failure (uncaptioned final), WPM-normalize failure (wrong pace),
+# and the legacy-chain interior-trim failure (pauses kept).
+
+
+def _fake_assemble(monkeypatch):
+    """assemble_clips stub: writes the concat file, returns no clip_keeps →
+    forces the whole-concat caption path."""
+    monkeypatch.setattr(
+        video_edit, "assemble_clips",
+        lambda paths, out, **kw: (Path(out).write_bytes(b"mp4"), {})[1])
+
+
+def _run_pipeline(edit_dir, paths, warn, **kw):
+    defaults = dict(
+        edit_id="ed_t", edit_dir=edit_dir, template="minimal",
+        overrides=None, enable_trim=False, enable_captions=False,
+        enable_wpm_normalize=False, target_wpm=190.0, threshold_db=-30.0,
+        min_silence_secs=0.30, pad_secs=0.03, voice_id=None,
+        enable_transcribe=False, warn=warn)
+    defaults.update(kw)
+    return asyncio.run(runner_compile.run_editor_pipeline(paths, **defaults))
+
+
+def _raiser(msg):
+    def _boom(*_a, **_k):
+        raise RuntimeError(msg)
+    return _boom
+
+
+def test_whisper_failure_without_script_hint_warns_missing_captions(
+        tmp_path, monkeypatch):
+    """Audit 2026-07-01: whole-concat Whisper failure with NO script hint was
+    swallowed bare — a captions-enabled compile shipped an UNCAPTIONED final
+    marked 'done' with no warning. The build must still ship (don't-block
+    behavior kept) but carry the ⚠ warning."""
+    _fake_assemble(monkeypatch)
+    monkeypatch.setattr(video_edit, "transcribe_words",
+                        _raiser("quota exceeded"))
+    src = tmp_path / "a.mp4"; src.write_bytes(b"x")
+    edit_dir = tmp_path / "ed"; edit_dir.mkdir()
+    warnings: list[str] = []
+
+    async def warn(msg: str) -> None:
+        warnings.append(msg)
+
+    result = _run_pipeline(edit_dir, [src], warn,
+                           enable_captions=True, script_hint=None)
+    assert result.final.exists()                       # still ships
+    assert any("Whisper misslyckades" in w and "saknar captions" in w
+               for w in warnings)
+
+
+def test_whisper_failure_with_script_hint_recovers_without_missing_warning(
+        tmp_path, monkeypatch):
+    """Scoping: with a known script the even-timed fallback REBUILDS the
+    captions and reports itself — 'finalen saknar captions' must NOT also
+    fire (captions aren't missing)."""
+    _fake_assemble(monkeypatch)
+    monkeypatch.setattr(video_edit, "transcribe_words",
+                        _raiser("quota exceeded"))
+    monkeypatch.setattr(video_edit, "_probe_duration", lambda *_a, **_k: 9.0)
+    monkeypatch.setattr(video_edit, "render_captions",
+                        lambda src, dst, **k: Path(dst).write_bytes(b"cap"))
+    src = tmp_path / "a.mp4"; src.write_bytes(b"x")
+    edit_dir = tmp_path / "ed"; edit_dir.mkdir()
+    warnings: list[str] = []
+
+    async def warn(msg: str) -> None:
+        warnings.append(msg)
+
+    result = _run_pipeline(edit_dir, [src], warn, enable_captions=True,
+                           script_hint="hello there my friend")
+    assert result.final.name == "04-final.mp4"         # captions burned in
+    assert not any("saknar captions" in w for w in warnings)
+    assert any("byggde" in w for w in warnings)        # fallback's own warning
+
+
+def test_wpm_normalize_failure_warns_original_tempo_kept(tmp_path, monkeypatch):
+    """Audit 2026-07-01: a WPM-normalize failure was `except Exception: pass`
+    — the final shipped 'done' at the wrong pace with no trace anywhere."""
+    _fake_assemble(monkeypatch)
+    monkeypatch.setattr(video_edit, "transcribe_words",
+                        lambda *a, **k: _words("one two three four"))
+    monkeypatch.setattr(video_edit, "compute_speed_factor",
+                        _raiser("atempo blew up"))
+    src = tmp_path / "a.mp4"; src.write_bytes(b"x")
+    edit_dir = tmp_path / "ed"; edit_dir.mkdir()
+    warnings: list[str] = []
+
+    async def warn(msg: str) -> None:
+        warnings.append(msg)
+
+    result = _run_pipeline(edit_dir, [src], warn, enable_wpm_normalize=True)
+    assert result.final.exists()                       # still ships
+    assert any("WPM-normalisering misslyckades" in w
+               and "originaltempo behållet" in w for w in warnings)
+
+
+def test_legacy_interior_trim_failure_warns(tmp_path, monkeypatch):
+    """Same audit, legacy-chain twin: `except RuntimeError: pass` around
+    trim_silences shipped the final with its pauses kept while the user had
+    asked for the trim (trim_silences handles 'no silences' internally — a
+    RuntimeError is a REAL ffmpeg failure)."""
+    monkeypatch.setattr(video_edit, "assemble_clips",
+                        _raiser("combined pass failed"))
+    monkeypatch.setattr(video_edit, "trim_leading_silence",
+                        lambda src, dst, **k: Path(dst).write_bytes(b"t"))
+    monkeypatch.setattr(video_edit, "concat_videos",
+                        lambda paths, out, **k: Path(out).write_bytes(b"c"))
+    monkeypatch.setattr(video_edit, "trim_silences",
+                        _raiser("ffmpeg exploded"))
+    src = tmp_path / "a.mp4"; src.write_bytes(b"x")
+    edit_dir = tmp_path / "ed"; edit_dir.mkdir()
+    warnings: list[str] = []
+
+    async def warn(msg: str) -> None:
+        warnings.append(msg)
+
+    result = _run_pipeline(edit_dir, [src], warn, enable_trim=True)
+    assert result.final.exists()                       # still ships
+    assert any("tystnads-trim hoppades över" in w for w in warnings)
