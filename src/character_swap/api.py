@@ -513,9 +513,86 @@ def _job_summary(job: Job) -> dict:
 
 # --- lifespan ------------------------------------------------------------------------
 
+def _recover_startup_orphans() -> dict[str, int]:
+    """Flip work orphaned by a server restart to failed + retryable.
+
+    The phases handled here run purely IN-PROCESS (Step-6 compile, 🔁
+    repurpose, the Resolve pipeline, editor-reel repurpose) or belong to
+    deleted subsystems (legacy free-form generations, whose runners are
+    gone) — nothing re-attaches them after a restart, so a lingering
+    non-terminal status is always a lie: the card spins forever, retry is
+    blocked, and DELETE refuses non-terminal rows. Fail-loud rule: mark
+    them failed with a clear message so the per-item ↻ retry applies."""
+    s = store()
+    counts = {"compile": 0, "repurpose": 0, "pipeline": 0,
+              "reel_repurpose": 0, "generation": 0}
+    for job in s.list_jobs():
+        dirty = False
+        for jc in job.characters.values():
+            if jc.compile_status == "compiling":
+                jc.compile_status = "failed"
+                jc.compile_error = ("avbruten av serveromstart — "
+                                    "kör om kompileringen (↻)")
+                counts["compile"] += 1
+                dirty = True
+            if jc.repurpose_status == "compiling":
+                jc.repurpose_status = "failed"
+                jc.repurpose_error = ("avbruten av serveromstart — "
+                                      "kör om repurpose")
+                counts["repurpose"] += 1
+                dirty = True
+            if jc.pipeline_status not in (None, "done", "failed"):
+                jc.pipeline_status = "failed"
+                jc.pipeline_error = ("avbruten av serveromstart — OBS: en "
+                                     "Resolve-rendering kan fortfarande köra "
+                                     "i bakgrunden; vänta ut den innan du "
+                                     "kör om pipelinen")
+                counts["pipeline"] += 1
+                dirty = True
+        if dirty:
+            s.update_job(job)
+    # Reengineer runs: the `repurposing` spinner flag is cleared only
+    # in-process — a restart mid-repurpose leaves the run "busy" forever
+    # (resume_all skips it since its status is already terminal).
+    from character_swap import reengineer as reengineer_mod
+    for st in reengineer_mod.list_states():
+        if st.get("repurposing"):
+            st["repurposing"] = False
+            st["error"] = ("repurpose avbröts av serveromstart — "
+                           "kör 🔁 Repurpose igen")
+            reengineer_mod.save_state(st)
+            counts["re_repurpose"] = counts.get("re_repurpose", 0) + 1
+    for gen in s.list_generations():
+        changed = False
+        if gen.kind is GenKind.EDITOR:
+            rep = (gen.editor_meta or {}).get("repurpose") or {}
+            if rep.get("status") == "compiling":
+                rep["status"] = "failed"
+                rep["error"] = "avbruten av serveromstart — repurposa igen"
+                gen.editor_meta["repurpose"] = rep
+                counts["reel_repurpose"] += 1
+                changed = True
+        elif gen.status in (GenStatus.PENDING, GenStatus.RUNNING):
+            # Legacy free-form rows: their runners were deleted in the
+            # 2026-07-02 de-scope, so pending/running can never finish AND
+            # blocked DELETE (which refuses non-terminal rows).
+            gen.status = GenStatus.FAILED
+            gen.error = ("avbruten — flödet togs bort 2026-07-02; "
+                         "raden kan nu raderas")
+            counts["generation"] += 1
+            changed = True
+        if changed:
+            s.update_generation(gen)
+    return counts
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_dirs()
+    recovered = _recover_startup_orphans()
+    if any(recovered.values()):
+        logging.getLogger("api").warning(
+            "startup recovery flipped orphaned work to failed: %s", recovered)
     for job in store().list_jobs():
         await runner.resume_pending(job.job_id)
     # Re-attach reengineer runs orphaned by the restart (their phase watchers

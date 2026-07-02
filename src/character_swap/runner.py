@@ -1916,7 +1916,18 @@ async def resume_pending(job_id: str) -> None:
         # out the same way the live path does. Guarded so already-terminal
         # chars across job history aren't re-persisted on every startup.
         if jc.status == CharStatus.ANIMATING:
-            _maybe_complete_char(job, jc)
+            if not jc.videos:
+                # Restart hit the window between the ANIMATING persist and
+                # the video-placeholder persist: no rows exist to retry, so
+                # _maybe_complete_char no-ops and the char sat "animating"
+                # forever. Fail loud; the user re-submits movement (no
+                # auto-resubmit — no billing without a click).
+                _persist(job, jc, status=CharStatus.FAILED,
+                         error=("avbruten av serveromstart innan videor "
+                                "skapades — lås upp movement (unlock) och "
+                                "skicka om"))
+            else:
+                _maybe_complete_char(job, jc)
 
 
 async def retry_failed_videos(job_id: str, char_id: str | None = None) -> None:

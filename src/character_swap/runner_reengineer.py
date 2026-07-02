@@ -189,14 +189,32 @@ async def resume_all() -> None:
             else:
                 _spawn(run_reengineer(re_id), f"reengineer-resume-{re_id}")
         elif status == "swapping":
-            _spawn(_resume_swapping(re_id, state), f"reengineer-resume-{re_id}")
+            _spawn(_guarded_resume(re_id, _resume_swapping(re_id, state)),
+                   f"reengineer-resume-{re_id}")
         elif status == "animating":
-            _spawn(_resume_animating(re_id, state), f"reengineer-resume-{re_id}")
+            _spawn(_guarded_resume(re_id, _resume_animating(re_id, state)),
+                   f"reengineer-resume-{re_id}")
         elif status == "reanimating":
             # Edit-mode re-animation: finalize WITHOUT assembling.
-            _spawn(_resume_reanimating(re_id, state), f"reengineer-resume-{re_id}")
+            _spawn(_guarded_resume(re_id, _resume_reanimating(re_id, state)),
+                   f"reengineer-resume-{re_id}")
         elif status == "assembling":
             _spawn(assemble(re_id), f"reengineer-resume-{re_id}")
+
+
+async def _guarded_resume(re_id: str, coro) -> None:
+    """A crash inside a crash-RESUME watcher must not strand the run in its
+    old non-terminal status with the exception swallowed by the task
+    callback — every live-path entry point already flips to failed in its
+    own try/except; these resume paths lacked that wrapper."""
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        _log.exception("resume watcher for %s crashed", re_id)
+        _update(re_id, status="failed",
+                error=f"resume efter omstart kraschade: {type(e).__name__}: {e}")
 
 
 async def _resume_swapping(re_id: str, state: dict) -> None:
@@ -2000,6 +2018,12 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
         if entries[i].get("is_direct"):
             # Redo of a direct scene re-renders the ONE shared clip (it has no
             # per-character variants). _render_direct_clip overwrites the path.
+            # Null the stale path FIRST (same invariant _do_animate establishes
+            # at phase start): the crash-resume's revival condition is
+            # `is_direct and not shared_clip_path`, so leaving the old path in
+            # place made a restarted redo silently ship the pre-edit clip.
+            entries[i]["shared_clip_path"] = None
+            reengineer.save_state(state)
             tasks.append(_render_direct_clip(re_id, sid))
             acted.append(i)
             continue
@@ -2056,6 +2080,18 @@ async def _resume_reanimating(re_id: str, state: dict) -> None:
     if not job_id or store().get_job(job_id) is None:
         _update(re_id, status="failed", error="underlying job lost across restart")
         return
+    # Direct-scene redos live OUTSIDE the job (no VideoVariant), so
+    # resume_pending never revives them — re-render unfinished ones, exactly
+    # like _resume_animating (_do_reanimate nulls shared_clip_path at redo
+    # start, so `not shared_clip_path` identifies interrupted redos). Tasks
+    # are anchored in _RESUME_TASKS so an early return can't GC them.
+    direct_tasks = []
+    for e in (state.get("scenes") or []):
+        if e.get("is_direct") and not e.get("shared_clip_path"):
+            t = asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
+            _RESUME_TASKS.add(t)
+            t.add_done_callback(_RESUME_TASKS.discard)
+            direct_tasks.append(t)
     deadline = asyncio.get_event_loop().time() + _VIDEO_PHASE_TIMEOUT_SECS
     while True:
         await asyncio.sleep(_POLL_SECS)
@@ -2063,7 +2099,13 @@ async def _resume_reanimating(re_id: str, state: dict) -> None:
         if job is None:
             _update(re_id, status="failed", error="underlying job disappeared")
             return
-        if _videos_terminal(job):
+        # All-direct runs have ZERO per-char VideoVariants and
+        # _videos_terminal() is False for an empty list — same landmine
+        # _watch_video_phase guards. Exit only when the job clips (if any)
+        # are terminal AND every revived direct redo has finished.
+        job_vids = [v for jc in job.characters.values() for v in jc.videos]
+        vids_done = _videos_terminal(job) or not job_vids
+        if vids_done and all(t.done() for t in direct_tasks):
             break
         if asyncio.get_event_loop().time() > deadline:
             st = reengineer.load_state(re_id) or {}
@@ -2072,6 +2114,33 @@ async def _resume_reanimating(re_id: str, state: dict) -> None:
                     resume_status=None, reanimate_idxs=None,
                     reanimate_clear_dirty=None)
             return
+    # If the restart killed redo clips (resume_pending marks them FAILED
+    # "interrupted"), the re-animation did NOT happen for those scenes.
+    # Clearing dirty would ship the pre-edit clip with no warning — keep
+    # the flags so "▶ Animera om ändrade" still offers them, and say so.
+    # Scoped to the REANIMATED scenes only: a stale interrupted extra-take
+    # from an old restart elsewhere in the job must not keep flagging every
+    # future reanimate (billing re-runs of clips that succeeded).
+    job = store().get_job(job_id)
+    st_now = reengineer.load_state(re_id) or {}
+    entries = st_now.get("scenes") or []
+    redo_sids = {entries[i]["scene_id"]
+                 for i in (st_now.get("reanimate_idxs") or [])
+                 if 0 <= i < len(entries)}
+    def _scene_of(jc, v):
+        var = next((iv for iv in jc.images
+                    if iv.variant_id == v.source_variant_id), None)
+        return var.scene_id if var else None
+    interrupted = job is not None and any(
+        v.status == VideoStatus.FAILED and "interrupted" in (v.error or "")
+        and (not redo_sids or _scene_of(jc, v) in redo_sids)
+        for jc in job.characters.values() for v in jc.videos)
+    if interrupted:
+        _finalize_reanimate(re_id, clear_dirty=False)
+        _update(re_id, error=("omstarten avbröt några klipp — scenerna är "
+                              "fortfarande markerade 'ändrade'; ↻ ta om "
+                              "klippen och kör ▶ Animera om ändrade igen"))
+        return
     st = reengineer.load_state(re_id) or {}
     _finalize_reanimate(re_id,
                         clear_dirty=bool(st.get("reanimate_clear_dirty", True)))
