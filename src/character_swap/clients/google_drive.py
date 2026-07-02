@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -55,10 +56,16 @@ def _write_token_path() -> Path:
 
 
 def _load_credentials(*, scopes: list[str] | None = None,
-                      token_file: Path | None = None):
+                      token_file: Path | None = None,
+                      interactive: bool = True):
     """Return google-auth Credentials for the requested scope set, refreshing
     or running the OAuth flow as needed. Returns None if credentials.json is
     missing or OAuth fails.
+
+    `interactive=False` NEVER launches the consent flow — a request-thread
+    caller (the push endpoints) must get None back (→ 409 → the UI runs the
+    bootstrap deliberately) instead of blocking the HTTP request inside
+    run_local_server while a browser window opens on the server machine.
 
     Defaults to the read-only Drive scope (back-compat with the original
     Higgsfield-inbox watcher). Pass DRIVE_FILE_SCOPE + _write_token_path()
@@ -99,8 +106,8 @@ def _load_credentials(*, scopes: list[str] | None = None,
             creds = None
 
     # No valid token — run the auth flow. This opens the user's browser.
-    # We only attempt this if we're in an interactive terminal; otherwise
-    # we return None and the user has to run the bootstrap CLI command.
+    if not interactive:
+        return None
     try:
         flow = InstalledAppFlow.from_client_secrets_file(
             str(creds_path), scopes,
@@ -113,10 +120,12 @@ def _load_credentials(*, scopes: list[str] | None = None,
 
 
 def _service(*, scopes: list[str] | None = None,
-             token_file: Path | None = None):
+             token_file: Path | None = None,
+             interactive: bool = True):
     """Build a Drive v3 service handle for the requested scope, or None if
     auth fails."""
-    creds = _load_credentials(scopes=scopes, token_file=token_file)
+    creds = _load_credentials(scopes=scopes, token_file=token_file,
+                              interactive=interactive)
     if creds is None:
         return None
     try:
@@ -126,10 +135,12 @@ def _service(*, scopes: list[str] | None = None,
         return None
 
 
-def _write_service():
+def _write_service(*, interactive: bool = True):
     """Drive service authorized for `drive.file` — can upload but only sees
-    files our app created. Used by the Editor's 'Export to Drive' button."""
-    return _service(scopes=DRIVE_FILE_SCOPE, token_file=_write_token_path())
+    files our app created. Used by the Editor's 'Export to Drive' button and
+    the push-to-Drive endpoints (those pass interactive=False)."""
+    return _service(scopes=DRIVE_FILE_SCOPE, token_file=_write_token_path(),
+                    interactive=interactive)
 
 
 def status() -> dict[str, Any]:
@@ -203,6 +214,143 @@ def bootstrap_write_oauth() -> dict[str, Any]:
         "ok": svc is not None,
         **write_status(),
     }
+
+
+class DriveNotAuthorized(RuntimeError):
+    """drive.file write access hasn't been granted yet — the caller should
+    point the user at the bootstrap flow instead of a generic 500."""
+
+
+def _q_escape(name: str) -> str:
+    return name.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _find_child_folder(svc, parent_id: str | None, name: str) -> str | None:
+    """ID of an app-visible folder `name` under `parent_id` (Drive root when
+    None). drive.file only sees folders THIS app created — exactly the set the
+    push feature manages."""
+    parent_clause = f" and '{parent_id}' in parents" if parent_id else ""
+    results = svc.files().list(
+        q=(f"name = '{_q_escape(name)}' "
+           f"and mimeType = 'application/vnd.google-apps.folder' "
+           f"and trashed = false{parent_clause}"),
+        spaces="drive",
+        fields="files(id, name)",
+        pageSize=5,
+    ).execute()
+    items = results.get("files", [])
+    return items[0]["id"] if items else None
+
+
+# Serializes find-or-create across concurrent pushes: without it, two pushes
+# that both miss a folder each create it → duplicate folders, and the
+# overwrite-by-name guarantee silently breaks (files scatter across dupes).
+_folder_lock = threading.Lock()
+
+
+def ensure_folder_path(names: list[str]) -> str:
+    """Find-or-create the nested folder path `names` (e.g. ["Character Swap",
+    "Chang"]) and return the leaf folder's ID. Raises DriveNotAuthorized when
+    write access is missing and RuntimeError (with the real reason) on API
+    errors — the push endpoints surface both loudly, never silently."""
+    svc = _write_service(interactive=False)
+    if svc is None:
+        raise DriveNotAuthorized(
+            "Google Drive write access is not authorized — run the one-time "
+            "Drive authorization first."
+        )
+    with _folder_lock:
+        return _ensure_folder_path_locked(svc, names)
+
+
+def _ensure_folder_path_locked(svc, names: list[str]) -> str:
+    parent: str | None = None
+    for name in names:
+        try:
+            found = _find_child_folder(svc, parent, name)
+            if found is None:
+                body: dict[str, Any] = {
+                    "name": name,
+                    "mimeType": "application/vnd.google-apps.folder",
+                }
+                if parent:
+                    body["parents"] = [parent]
+                found = svc.files().create(body=body, fields="id").execute()["id"]
+            parent = found
+        except DriveNotAuthorized:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"Drive folder setup failed at {name!r}: {type(e).__name__}: {e}"
+            ) from e
+    assert parent is not None
+    return parent
+
+
+def upload_or_replace(source: Path, *,
+                      drive_filename: str,
+                      folder_id: str,
+                      file_id: str | None = None) -> dict[str, Any]:
+    """Upload `source` into `folder_id`, OVERWRITING the previous upload
+    (Drive keeps its own version history — Hugo's re-push choice 2026-07-02).
+
+    Overwrite resolution, most-robust first: (1) `file_id` from the persisted
+    receipt of an earlier push — survives job/character RENAMES, and the
+    Drive file is renamed to the new `drive_filename` in the same update;
+    (2) exact-name match in the folder; (3) create new. Returns the Drive
+    file resource. Raises DriveNotAuthorized / RuntimeError instead of
+    returning None — a failed push must be loud."""
+    svc = _write_service(interactive=False)
+    if svc is None:
+        raise DriveNotAuthorized(
+            "Google Drive write access is not authorized — run the one-time "
+            "Drive authorization first."
+        )
+    try:
+        from googleapiclient.http import MediaFileUpload
+        ext = source.suffix.lower()
+        mime = {
+            ".mp4": "video/mp4", ".mov": "video/quicktime",
+            ".webm": "video/webm", ".mkv": "video/x-matroska",
+            ".m4v": "video/x-m4v", ".png": "image/png",
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav",
+        }.get(ext, "application/octet-stream")
+        media = MediaFileUpload(str(source), mimetype=mime, resumable=True)
+        fields = "id, name, webViewLink, webContentLink, size, mimeType"
+        if file_id:
+            try:
+                return svc.files().update(
+                    fileId=file_id, body={"name": drive_filename},
+                    media_body=media, fields=fields,
+                ).execute()
+            except Exception:
+                # Receipt points at a file deleted/trashed on Drive —
+                # fall through to by-name resolution.
+                pass
+        existing = svc.files().list(
+            q=(f"name = '{_q_escape(drive_filename)}' "
+               f"and '{folder_id}' in parents and trashed = false"),
+            spaces="drive",
+            fields="files(id)",
+            pageSize=2,
+        ).execute().get("files", [])
+        if existing:
+            return svc.files().update(
+                fileId=existing[0]["id"], media_body=media, fields=fields,
+            ).execute()
+        return svc.files().create(
+            body={"name": drive_filename, "parents": [folder_id]},
+            media_body=media,
+            fields=fields,
+        ).execute()
+    except DriveNotAuthorized:
+        raise
+    except Exception as e:
+        raise RuntimeError(
+            f"Drive upload of {drive_filename!r} failed: "
+            f"{type(e).__name__}: {e}"
+        ) from e
 
 
 def resolve_folder_id(folder_name: str) -> str | None:

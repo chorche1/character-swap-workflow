@@ -988,6 +988,16 @@
                      :download="`${jc.name}-final.mp4`"
                      title="Download MP4"
                      class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
+                  <button x-show="jc.compile_status === 'done' && jc.compiled_video_url"
+                          class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                          :disabled="driveBusy(job.job_id+':'+cid+':final')"
+                          title="Ladda upp till Google Drive → Character Swap/<karaktär>/ (skriver över samma fil vid om-push)"
+                          @click="drivePush(`/api/jobs/${job.job_id}/characters/${cid}/drive_push`, job.job_id+':'+cid+':final', {variant: 'final'})"
+                          x-text="driveLabel(job.job_id+':'+cid+':final', jc.drive_pushes?.final)"></button>
+                  <a x-show="driveReceipt(job.job_id+':'+cid+':final', jc.drive_pushes?.final)"
+                     :href="driveReceipt(job.job_id+':'+cid+':final', jc.drive_pushes?.final)?.url" target="_blank"
+                     title="Öppna i Google Drive"
+                     class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                   <a x-show="jc.compile_status === 'done'"
                      :href="`/api/jobs/${job.job_id}/characters/${cid}/export_resolve`"
                      :download="`${jc.name}-resolve.zip`"
@@ -1066,6 +1076,16 @@
                        :download="`${jc.name}-repurpose.mp4`"
                        title="Download mirrored MP4"
                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
+                    <button x-show="jc.repurpose_status === 'done' && jc.repurposed_video_url"
+                            class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                            :disabled="driveBusy(job.job_id+':'+cid+':repurpose')"
+                            title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/<karaktär>/"
+                            @click="drivePush(`/api/jobs/${job.job_id}/characters/${cid}/drive_push`, job.job_id+':'+cid+':repurpose', {variant: 'repurpose'})"
+                            x-text="driveLabel(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)"></button>
+                    <a x-show="driveReceipt(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)"
+                       :href="driveReceipt(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)?.url" target="_blank"
+                       title="Öppna i Google Drive"
+                       class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                     <button x-show="jc.repurpose_status === 'done' && jc.repurpose_edit_id"
                             class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
                             title="Öppna den spegelvända finalen i Editor-tabben"
@@ -2255,6 +2275,16 @@
                             class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
                             title="Öppna finalen i Editor-tabben — re-rendera captions, redigera ord, trimma eller ändra hastighet (gratis, inga nya Kling-klipp)"
                             @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
+                    <button x-show="f.final_url && f.status === 'done'"
+                            class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                            :disabled="driveBusy(r.re_id+':'+cid+':final')"
+                            title="Ladda upp till Google Drive → Character Swap/<karaktär>/ (skriver över samma fil vid om-push)"
+                            @click="drivePush(`/api/reengineer/${r.re_id}/chars/${cid}/drive_push`, r.re_id+':'+cid+':final', {variant: 'final'})"
+                            x-text="driveLabel(r.re_id+':'+cid+':final', f.drive)"></button>
+                    <a x-show="driveReceipt(r.re_id+':'+cid+':final', f.drive)"
+                       :href="driveReceipt(r.re_id+':'+cid+':final', f.drive)?.url" target="_blank"
+                       title="Öppna i Google Drive"
+                       class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                   </div>
                 </div>
               </template>
@@ -2278,6 +2308,16 @@
                               class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
                               title="Öppna den spegelvända finalen i Editor-tabben"
                               @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
+                      <button x-show="f.final_url && f.status === 'done'"
+                              class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                              :disabled="driveBusy(r.re_id+':'+cid+':repurpose')"
+                              title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/<karaktär>/"
+                              @click="drivePush(`/api/reengineer/${r.re_id}/chars/${cid}/drive_push`, r.re_id+':'+cid+':repurpose', {variant: 'repurpose'})"
+                              x-text="driveLabel(r.re_id+':'+cid+':repurpose', f.drive)"></button>
+                      <a x-show="driveReceipt(r.re_id+':'+cid+':repurpose', f.drive)"
+                         :href="driveReceipt(r.re_id+':'+cid+':repurpose', f.drive)?.url" target="_blank"
+                         title="Öppna i Google Drive"
+                         class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                     </div>
                   </div>
                 </template>
@@ -4043,7 +4083,18 @@
                 </div>
                 <div class="flex items-center justify-between text-[10px] text-neutral-500 dark:text-neutral-400">
                   <span x-text="(g.editor && g.editor.n_clips ? g.editor.n_clips + ' klipp · ' : '') + (g.editor && g.editor.settings && g.editor.settings.template || '')"></span>
-                  <a :href="g.output_url" :download="friendlyName(g)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ ladda ner</a>
+                  <div class="flex items-center gap-2">
+                    <a :href="g.output_url" :download="friendlyName(g)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ ladda ner</a>
+                    <button class="text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                            :disabled="driveBusy('reel:'+g.gen_id+':final')"
+                            title="Ladda upp till Google Drive → Character Swap/Editor/ (skriver över samma fil vid om-push)"
+                            @click="drivePush(`/api/editor/${g.editor.edit_id}/drive_export`, 'reel:'+g.gen_id+':final', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'final'})"
+                            x-text="driveLabel('reel:'+g.gen_id+':final', g.editor?.drive?.final)"></button>
+                    <a x-show="driveReceipt('reel:'+g.gen_id+':final', g.editor?.drive?.final)"
+                       :href="driveReceipt('reel:'+g.gen_id+':final', g.editor?.drive?.final)?.url" target="_blank"
+                       title="Öppna i Google Drive"
+                       class="text-emerald-600 dark:text-emerald-400 hover:underline">✓</a>
+                  </div>
                 </div>
 
                 <!-- Repurpose action + result (mirrors Swap's character card) -->
@@ -4065,6 +4116,16 @@
                         <div class="flex items-center gap-2">
                           <a :href="g.editor.repurpose_url" :download="friendlyName(g, 'mp4').replace(/\.mp4$/, '-mirror.mp4')" class="hover:underline">↓</a>
                           <button class="hover:text-fuchsia-700" title="Repurposa igen" @click="openRepurposeModal('editor', g)">↻</button>
+                          <button x-show="g.editor.repurpose_edit_id"
+                                  class="text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                                  :disabled="driveBusy('reel:'+g.gen_id+':repurpose')"
+                                  title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/Editor/"
+                                  @click="drivePush(`/api/editor/${g.editor.repurpose_edit_id}/drive_export`, 'reel:'+g.gen_id+':repurpose', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` -mirror [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'repurpose'})"
+                                  x-text="driveLabel('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)"></button>
+                          <a x-show="driveReceipt('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)"
+                             :href="driveReceipt('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)?.url" target="_blank"
+                             title="Öppna i Google Drive"
+                             class="text-emerald-600 dark:text-emerald-400 hover:underline">✓</a>
                         </div>
                       </div>
                       <video :src="g.editor.repurpose_url" controls preload="metadata" class="w-full bg-black rounded"></video>

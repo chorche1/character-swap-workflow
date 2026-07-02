@@ -246,6 +246,11 @@ class JobCharacter(BaseModel):
     repurpose_status: str | None = None      # None | "compiling" | "done" | "failed"
     repurpose_error: str | None = None
     repurpose_warning: str | None = None
+    # Push-to-Drive (2026-07-02): per-variant upload receipts, keyed
+    # "final" | "repurpose" → {file_id, url, name, at}. A re-push OVERWRITES
+    # the same Drive file (same filename in the character's folder — Drive
+    # keeps version history), so the receipt just refreshes in place.
+    drive_pushes: dict[str, dict] = Field(default_factory=dict)
     # Phase 4 (Full pipeline) per-character status. The "🚀 Run full pipeline"
     # button in Step 6 chains: compile-no-captions → package zip into a temp
     # dir → spawn `python automate.py` (Resolve render → Drive upload) → wait

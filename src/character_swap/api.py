@@ -399,6 +399,8 @@ def _job_to_dict(job: Job) -> dict:
                 "repurpose_edit_id": jc.repurpose_edit_id,
                 "repurpose_error": jc.repurpose_error,
                 "repurpose_warning": jc.repurpose_warning,
+                # Push-to-Drive receipts, "final" | "repurpose" → {url, at, ...}.
+                "drive_pushes": dict(jc.drive_pushes or {}),
                 "pipeline_status": jc.pipeline_status,
                 "pipeline_error": jc.pipeline_error,
                 "pipeline_drive_link": jc.pipeline_drive_link,
@@ -3283,10 +3285,13 @@ def _gen_to_dict(gen: MediaGeneration) -> dict:
             "n_clips": meta.get("n_clips"),
             "settings": meta.get("settings") or {},
             "repurpose_status": rep.get("status"),
+            "repurpose_edit_id": rep.get("edit_id"),
             "repurpose_url": (_file_url(Path(rep["video_path"]))
                               if rep.get("video_path") else None),
             "repurpose_error": rep.get("error"),
             "repurpose_settings": rep.get("settings") or {},
+            # Push-to-Drive receipts: {"final": {...}, "repurpose": {...}}.
+            "drive": meta.get("drive") or {},
         }
     return out
 
@@ -6579,21 +6584,23 @@ async def health() -> dict:
 class DriveExportBody(BaseModel):
     filename: str
     folder_id: str | None = None
+    # When set, the upload receipt is persisted into the saved reel's
+    # editor_meta["drive"][slot] so the ✓ survives page reloads.
+    gen_id: str | None = None
+    slot: str = "final"           # "final" | "repurpose"
 
 
 @app.post("/api/editor/drive_export/bootstrap")
 async def editor_drive_export_bootstrap() -> dict:
     """One-time OAuth flow for the drive.file (write) scope. Opens a browser
     on the server's machine; user clicks through Google consent. Token is
-    persisted at ~/character-swap-data/drive_write_token.json — separate
-    from the read-only token the Higgsfield-inbox watcher uses."""
+    persisted at ~/character-swap-data/drive_write_token.json."""
     from character_swap.clients import google_drive
     if not (settings.state_dir.parent / "credentials.json").exists():
         raise HTTPException(
             409,
             "credentials.json not in ~/character-swap-data/. Complete the "
-            "Google Cloud OAuth Desktop-client setup first (same flow as the "
-            "Higgsfield-inbox auth).",
+            "Google Cloud OAuth Desktop-client setup first.",
         )
     result = await asyncio.to_thread(google_drive.bootstrap_write_oauth)
     if not result.get("ok"):
@@ -6601,11 +6608,145 @@ async def editor_drive_export_bootstrap() -> dict:
     return result
 
 
+# ---- Push-to-Drive (2026-07-02, Hugo's directive) --------------------------
+# One-click upload of finished videos. Folder layout on Drive (auto-created
+# under the drive.file scope, so only app-created folders are ever touched):
+#   Character Swap/<character name>/   ← Swap Step-6 + Reengineer finals
+#   Character Swap/Editor/             ← Editor finals + repurposed reels
+# Re-push OVERWRITES the same file (same name in the same folder — Drive keeps
+# its own version history). Failures are LOUD: 409 when write auth is missing
+# (the UI offers the bootstrap), 502 with the real reason on upload errors.
+
+DRIVE_ROOT_FOLDER = "Character Swap"
+
+
+def _drive_safe_name(name: str) -> str:
+    return (name or "").replace("/", "_").replace("\\", "_").strip() or "video"
+
+
+async def _drive_push_file(source: Path, subfolders: list[str],
+                           filename: str,
+                           prior_file_id: str | None = None) -> dict:
+    """ensure folders + upload_or_replace, mapped to loud HTTP errors.
+    `prior_file_id` (from an earlier push's receipt) makes the overwrite
+    survive job/character renames — the SAME Drive file is updated (and
+    renamed) instead of a second copy appearing under the new name."""
+    from character_swap.clients import google_drive
+    if not source.is_file():
+        raise HTTPException(404, f"Video file not found: {source.name}")
+    try:
+        folder_id = await asyncio.to_thread(
+            google_drive.ensure_folder_path,
+            [DRIVE_ROOT_FOLDER, *subfolders])
+        result = await asyncio.to_thread(
+            lambda: google_drive.upload_or_replace(
+                source, drive_filename=filename, folder_id=folder_id,
+                file_id=prior_file_id))
+    except google_drive.DriveNotAuthorized as e:
+        raise HTTPException(409, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e
+    return {
+        "ok": True,
+        "file_id": result.get("id"),
+        "url": result.get("webViewLink"),
+        "name": result.get("name"),
+        "at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+class DrivePushBody(BaseModel):
+    variant: str = "final"        # "final" | "repurpose"
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/drive_push")
+async def job_char_drive_push(job_id: str, char_id: str,
+                              body: DrivePushBody) -> dict:
+    """Push a character's Step-6 compiled final (or its repurposed variant)
+    to Drive under Character Swap/<character name>/. The filename embeds the
+    job id so a rebuilt final re-pushes over the SAME Drive file while other
+    jobs' finals coexist in the folder."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in this job")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    path = (jc.compiled_video_path if body.variant == "final"
+            else jc.repurposed_video_path)
+    status = (jc.compile_status if body.variant == "final"
+              else jc.repurpose_status)
+    if not path or status != "done":
+        raise HTTPException(
+            409, "No finished video to push — compile it first.")
+    char_name = _drive_safe_name(jc.name or char_id)
+    base = _drive_safe_name(job.title or "swap")
+    suffix = " — repurpose" if body.variant == "repurpose" else ""
+    filename = f"{base} — {char_name}{suffix} [{job_id}].mp4"
+    prior = (jc.drive_pushes.get(body.variant) or {}).get("file_id")
+    receipt = await _drive_push_file(Path(path), [char_name], filename,
+                                     prior_file_id=prior)
+    jc.drive_pushes[body.variant] = receipt
+    s.update_job(job)
+    return receipt
+
+
+@app.post("/api/reengineer/{re_id}/chars/{char_id}/drive_push")
+async def reengineer_char_drive_push(re_id: str, char_id: str,
+                                     body: DrivePushBody) -> dict:
+    """Push a Reengineer character final (or repurposed variant) to Drive
+    under Character Swap/<character name>/."""
+    from character_swap import reengineer as reengineer_mod
+    state = reengineer_mod.load_state(re_id)
+    if state is None:
+        raise HTTPException(404, "Run not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    bucket = "finals" if body.variant == "final" else "repurposed"
+    entry = (state.get(bucket) or {}).get(char_id)
+    if not entry or entry.get("status") != "done" or not entry.get("final_path"):
+        raise HTTPException(
+            409, "No finished video to push — build the final first.")
+    char = store().get_character(char_id)
+    char_name = _drive_safe_name(char.name if char else char_id)
+    # Production run states carry no title/name of their own — the display
+    # name lives on the linked swap JOB (auto-titled from the characters).
+    base_src = state.get("title") or state.get("name")
+    if not base_src and state.get("job_id"):
+        linked = store().get_job(state["job_id"])
+        base_src = linked.title if linked else None
+    base = _drive_safe_name(base_src or re_id)
+    suffix = " — repurpose" if body.variant == "repurpose" else ""
+    filename = f"{base} — {char_name}{suffix} [{re_id}].mp4"
+    prior = (entry.get("drive") or {}).get("file_id")
+    receipt = await _drive_push_file(
+        Path(entry["final_path"]), [char_name], filename,
+        prior_file_id=prior)
+    # The upload can take minutes — RELOAD before writing so we don't clobber
+    # state changes persisted meanwhile (another push finishing, a repurpose
+    # writing its results) with our stale pre-upload snapshot.
+    fresh = reengineer_mod.load_state(re_id)
+    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
+        fresh[bucket][char_id]["drive"] = receipt
+        reengineer_mod.save_state(fresh)
+    else:
+        entry["drive"] = receipt
+        reengineer_mod.save_state(state)
+    return receipt
+
+
 @app.post("/api/editor/{edit_id}/drive_export")
 async def editor_drive_export(edit_id: str, body: DriveExportBody) -> dict:
     """Upload the captioned final MP4 of `edit_id` to the user's Drive.
     Filename comes from the request body — caller picks. `.mp4` is appended
-    if no extension is supplied."""
+    if no extension is supplied.
+
+    Since 2026-07-02 (Hugo's push-to-Drive directive): with no explicit
+    `folder_id` the upload lands in the shared "Character Swap/Editor" folder
+    (auto-created), and a same-named file there is OVERWRITTEN in place."""
     from character_swap.clients import google_drive
 
     edit_dir = settings.output_dir / "editor" / edit_id
@@ -6617,33 +6758,48 @@ async def editor_drive_export(edit_id: str, body: DriveExportBody) -> dict:
     if final is None:
         raise HTTPException(404, f"No rendered video in {edit_id!r}")
 
-    raw = (body.filename or "").strip()
-    if not raw:
+    if not (body.filename or "").strip():
         raise HTTPException(400, "filename is required")
-    # Strip path separators — Drive treats filenames as flat strings.
-    raw = raw.replace("/", "_").replace("\\", "_")
+    raw = _drive_safe_name(body.filename)
     if "." not in raw:
         raw = raw + ".mp4"
 
-    result = await asyncio.to_thread(
-        google_drive.upload_file, final,
-        drive_filename=raw, folder_id=body.folder_id,
-    )
-    if result is None:
-        raise HTTPException(
-            500,
-            "Drive upload failed. Make sure Drive write access is authorized "
-            "(POST /api/editor/drive_export/bootstrap) and the file is "
-            "under Drive's 5TB single-file size cap.",
+    if body.folder_id:
+        # Caller-picked folder: keep the exact pre-2026-07-02 create-only
+        # behavior (no overwrite hunting in folders we don't manage).
+        result = await asyncio.to_thread(
+            google_drive.upload_file, final,
+            drive_filename=raw, folder_id=body.folder_id,
         )
-    return {
-        "ok": True,
-        "drive_id": result.get("id"),
-        "name": result.get("name"),
-        "url": result.get("webViewLink"),
-        "size": result.get("size"),
-        "mime_type": result.get("mimeType"),
-    }
+        if result is None:
+            raise HTTPException(
+                500,
+                "Drive upload failed. Make sure Drive write access is "
+                "authorized (POST /api/editor/drive_export/bootstrap) and the "
+                "file is under Drive's 5TB single-file size cap.",
+            )
+        receipt = {
+            "ok": True,
+            "file_id": result.get("id"),
+            "url": result.get("webViewLink"),
+            "name": result.get("name"),
+            "at": datetime.utcnow().isoformat() + "Z",
+        }
+    else:
+        receipt = await _drive_push_file(final, ["Editor"], raw)
+    if body.gen_id:
+        gen = store().get_generation(body.gen_id)
+        if gen is not None:
+            # Legacy reels can carry editor_meta=None — initialize rather than
+            # silently skip; the checkmark must survive reloads (fail-loud rule).
+            if gen.editor_meta is None:
+                gen.editor_meta = {}
+            gen.editor_meta.setdefault("drive", {})[body.slot] = receipt
+            store().update_generation(gen)
+        else:
+            receipt["persisted"] = False   # upload OK, receipt NOT saved — UI warns
+    # Back-compat aliases for the existing modal's response handling.
+    return {**receipt, "drive_id": receipt.get("file_id")}
 
 
 @app.exception_handler(404)

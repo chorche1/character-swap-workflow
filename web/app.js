@@ -226,6 +226,11 @@ function studio() {
       uploading: false,
       lastUrl: '',
     },
+    // Push-to-Drive (2026-07-02): transient per-button upload state, keyed
+    // '<owner id>:<char/gen id>:<variant>'. The DURABLE receipt lives on the
+    // entity itself (jc.drive_pushes / finals[cid].drive / g.editor.drive) so
+    // the checkmark survives reloads; this map only carries in-flight state.
+    drivePushState: {},
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
@@ -3664,6 +3669,63 @@ function studio() {
       this.driveExport.filename = slug.replace(/\.mp4$/i, '');
       this.driveExport.open = true;
       this.driveExport.lastUrl = '';
+    },
+
+    // ---- Push-to-Drive (2026-07-02) ---------------------------------------
+    // One-click upload of a finished video. `key` identifies the button;
+    // `persisted` is the entity's durable receipt (if any). A re-push
+    // OVERWRITES the same Drive file (Hugo's choice — Drive keeps versions).
+    driveBusy(key) {
+      return !!(this.drivePushState[key] && this.drivePushState[key].uploading);
+    },
+    driveReceipt(key, persisted) {
+      const st = this.drivePushState[key];
+      return (st && st.receipt) || persisted || null;
+    },
+    driveLabel(key, persisted) {
+      if (this.driveBusy(key)) return '⏳ Drive…';
+      return this.driveReceipt(key, persisted) ? '↻ Drive' : '⬆ Drive';
+    },
+    async drivePush(url, key, payload = {}) {
+      if (this.driveBusy(key)) return;
+      this.drivePushState = { ...this.drivePushState, [key]: { uploading: true } };
+      const post = () => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const errOf = async (r) => {
+        const j = await r.json().catch(() => ({}));
+        return j.detail || j.error || `HTTP ${r.status}`;
+      };
+      try {
+        let r = await post();
+        if (r.status === 409) {
+          const detail = await errOf(r.clone ? r.clone() : r);
+          if (/authoriz|credentials/i.test(detail)) {
+            // One-time drive.file OAuth, then retry the push once.
+            this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
+            const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
+            if (!b.ok) throw new Error(await errOf(b));
+            r = await post();
+          } else {
+            throw new Error(detail);
+          }
+        }
+        if (!r.ok) throw new Error(await errOf(r));
+        const receipt = await r.json();
+        this.drivePushState = { ...this.drivePushState, [key]: { uploading: false, receipt } };
+        if (receipt.persisted === false) {
+          this.notify('info', 'Uppladdad till Drive ✓ — men kvittot kunde inte sparas, så ✓-markeringen försvinner vid omladdning.');
+        } else {
+          this.notify('info', 'Uppladdad till Drive ✓');
+        }
+        return receipt;
+      } catch (e) {
+        this.drivePushState = { ...this.drivePushState, [key]: { uploading: false } };
+        this.notifyError('Drive-push misslyckades: ' + (e.message || e));
+        return null;
+      }
     },
 
     async bootstrapDriveWrite() {
