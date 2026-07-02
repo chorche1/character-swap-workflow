@@ -681,20 +681,25 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None,
     if not _has_audio_stream(video_path):
         return []
     audio_path = _extract_audio(video_path)
-    client = openai_image._client()  # reuses settings.openai_api_key + auth
-    extra: dict = {}
-    if script_hint and script_hint.strip():
-        extra["prompt"] = script_hint.strip()[-800:]
-    with record(phase="editor_transcribe", model="whisper-1",
-                character="editor", job_id=job_id):
-        with audio_path.open("rb") as f:
-            result = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=f,
-                response_format="verbose_json",
-                timestamp_granularities=["word"],
-                **extra,
-            )
+    try:
+        client = openai_image._client()  # reuses settings.openai_api_key + auth
+        extra: dict = {}
+        if script_hint and script_hint.strip():
+            extra["prompt"] = script_hint.strip()[-800:]
+        with record(phase="editor_transcribe", model="whisper-1",
+                    character="editor", job_id=job_id):
+            with audio_path.open("rb") as f:
+                result = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=f,
+                    response_format="verbose_json",
+                    timestamp_granularities=["word"],
+                    **extra,
+                )
+    finally:
+        # The wav is per-call scratch — remove it even when the Whisper API
+        # call raises (it used to leak one .audio.wav per failed call).
+        audio_path.unlink(missing_ok=True)
     # The SDK returns an object; words live on `result.words` (list of dicts).
     words: list[Word] = []
     raw = getattr(result, "words", None) or []
@@ -708,7 +713,6 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None,
             words.append(Word(text=getattr(w, "word", ""),
                               start=float(getattr(w, "start", 0)),
                               end=float(getattr(w, "end", 0))))
-    audio_path.unlink(missing_ok=True)
     return words
 
 
@@ -2418,29 +2422,41 @@ def apply_timeline(input_path: Path, output_path: Path, *,
                 "segments": [{"start": round(start, 3), "end": round(end, 3)}],
             }
 
+        # Audio-less inputs are a supported class end-to-end (Higgsfield
+        # Supercomputer clips are silent) — an unguarded [0:a] chain makes
+        # ffmpeg fail with "matches no streams". Mirror concat_videos: probe
+        # once, and build a video-only graph when there is no audio track.
+        has_audio = _has_audio_stream(input_path)
+
         parts: list[str] = []
         for i, (start, end) in enumerate(clean):
             parts.append(
                 f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
                 f"fps=30,format=yuv420p[v{i}]"
             )
-            parts.append(
-                f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
-                f"aresample=44100,aformat=channel_layouts=stereo[a{i}]"
-            )
-        labels = "".join(f"[v{i}][a{i}]" for i in range(len(clean)))
-        parts.append(f"{labels}concat=n={len(clean)}:v=1:a=1[outv][outa]")
+            if has_audio:
+                parts.append(
+                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS,"
+                    f"aresample=44100,aformat=channel_layouts=stereo[a{i}]"
+                )
+        if has_audio:
+            labels = "".join(f"[v{i}][a{i}]" for i in range(len(clean)))
+            parts.append(f"{labels}concat=n={len(clean)}:v=1:a=1[outv][outa]")
+        else:
+            labels = "".join(f"[v{i}]" for i in range(len(clean)))
+            parts.append(f"{labels}concat=n={len(clean)}:v=1:a=0[outv]")
         filter_complex = ";".join(parts)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        _run([
-            _ffmpeg(), "-y", "-i", str(input_path),
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]",
-            *_enc_v(),
-            "-c:a", "aac", "-b:a", "192k",
-            str(output_path),
-        ])
+        cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+               "-filter_complex", filter_complex,
+               "-map", "[outv]"]
+        if has_audio:
+            cmd += ["-map", "[outa]", *_enc_v(), "-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += [*_enc_v(), "-an"]
+        cmd += [str(output_path)]
+        _run(cmd)
         return {
             "n_segments": len(clean),
             "duration": round(_probe_duration(output_path), 2),

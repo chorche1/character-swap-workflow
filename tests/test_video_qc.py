@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import tempfile
+import types
 from pathlib import Path
 
 import pytest
 
-from character_swap import reengineer, runner, swap_qc, video_qc
+from character_swap import reengineer, runner, swap_qc, video_edit, video_qc
 from character_swap.models import (
     CharacterAsset,
     CharStatus,
@@ -32,6 +35,34 @@ def test_expected_speech_handles_smart_quotes_and_absence():
     assert video_qc.expected_speech("") == ""
 
 
+def test_expected_speech_recognizes_director_labeled_dialogue():
+    """2026-07-02 audit: the AI Director writes `AUDIO — … Dialogue: "…"`
+    with no `says` verb (the re_87e851d21f/Chang shape, fixed for captions in
+    f68651e). The QC's private extraction returned "" for such prompts, so
+    the speech check silently disengaged. expected_speech must see the line."""
+    p = ('Cinematic kitchen shot, warm light. AUDIO — upbeat tone. '
+         'Dialogue: "This is raw honey." No music.')
+    assert video_qc.expected_speech(p) == "This is raw honey."
+
+
+def test_expected_speech_strips_stage_directions():
+    """`(while he points at the jar)` inside the quotes is never SPOKEN
+    (70f3537) — leaving it in false-fails the Whisper similarity check."""
+    p = ('The person says: "This is store-bought honey (while he points at '
+         'the jar), and this is raw honey"')
+    assert video_qc.expected_speech(p) == (
+        "This is store-bought honey, and this is raw honey")
+
+
+def test_expected_speech_delegates_to_canonical_extractor(monkeypatch):
+    """expected_speech must BE video_edit.extract_dialogue — a local re-
+    implementation drifted twice (06-26 CTA truncation, 07-02 labeled-form
+    miss). Lock the delegation so it can never drift a third time."""
+    monkeypatch.setattr(video_edit, "extract_dialogue",
+                        lambda text: f"CANON<{text}>")
+    assert video_qc.expected_speech("some prompt") == "CANON<some prompt>"
+
+
 def test_speech_similarity_catches_garbled_words():
     ok = video_qc.speech_similarity("add a teaspoon of baking soda",
                                     "add a teaspoon of baking soda")
@@ -48,6 +79,61 @@ def test_repair_prompt_mentions_hint_and_minimal_change():
     p = swap_qc.repair_prompt("the face does not match the reference")
     assert "the face does not match the reference" in p
     assert "as little" in p.lower()
+
+
+# ------------------------------------------------- _sample_frames cleanup
+
+def _lavfi_clip(dest: Path, secs: float = 1.0) -> Path:
+    """Tiny real video for frame sampling (no audio needed)."""
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-y",
+         "-f", "lavfi", "-i", f"color=c=red:s=160x284:d={secs}:r=12",
+         "-pix_fmt", "yuv420p", str(dest)],
+        check=True, capture_output=True)
+    return dest
+
+
+def test_sample_frames_removes_temp_dir_after_use(tmp_path):
+    """2026-07-02 audit: every visual-QC inspection leaked a vqc_* temp dir
+    with up to 4 JPEGs. The context manager must reclaim it on exit."""
+    clip = _lavfi_clip(tmp_path / "clip.mp4")
+    with video_qc._sample_frames(clip, n=2) as frames:
+        assert frames, "expected at least one sampled frame"
+        tmp_dir = frames[0].parent
+        assert tmp_dir.name.startswith("vqc_")
+        assert all(f.exists() for f in frames)
+    assert not tmp_dir.exists()
+
+
+def test_sample_frames_cleans_up_on_exception(tmp_path):
+    clip = _lavfi_clip(tmp_path / "clip2.mp4")
+    with pytest.raises(RuntimeError, match="boom"):
+        with video_qc._sample_frames(clip, n=1) as frames:
+            tmp_dir = frames[0].parent
+            raise RuntimeError("boom")
+    assert not tmp_dir.exists()
+
+
+def test_sample_frames_cleans_up_when_no_frames_extracted(tmp_path, monkeypatch):
+    """Zero extracted frames (undecodable clip) must not leave an empty
+    vqc_* dir behind either."""
+    monkeypatch.setattr(video_edit, "_probe_duration", lambda p: 1.0)
+    monkeypatch.setattr(
+        video_qc.subprocess, "run",
+        lambda *a, **kw: types.SimpleNamespace(returncode=1, stdout="", stderr=""))
+    made: list[str] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking_mkdtemp(*a, **kw):
+        d = real_mkdtemp(*a, **kw)
+        made.append(d)
+        return d
+
+    monkeypatch.setattr(video_qc.tempfile, "mkdtemp", tracking_mkdtemp)
+
+    with video_qc._sample_frames(tmp_path / "broken.mp4", n=2) as frames:
+        assert frames == []
+    assert made and not Path(made[0]).exists()
 
 
 # --------------------------------------------------------------- image QC loop

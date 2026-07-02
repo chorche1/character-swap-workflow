@@ -21,7 +21,9 @@ after exhausted retries the LAST clip is kept with qc_status="failed".
 """
 from __future__ import annotations
 
+import contextlib
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -35,7 +37,12 @@ from character_swap import video_edit
 # `Comment "Skin" …` to just `Comment ` (a review caught it diverging from the
 # fix applied to runner_reengineer + app.js), feeding expected_speech() a
 # corrupted line → false "dialogue mismatch" QC rejections + misleading hints
-# the moment VIDEO_QC is re-enabled. Reuse the ONE source of truth instead.
+# the moment VIDEO_QC is re-enabled. Sharing the regex was NOT enough: the
+# extractor FUNCTION kept evolving (labeled `Dialogue: "…"` fallback f68651e,
+# stage-direction stripping 70f3537) while this module's local extraction
+# stood still — so expected_speech now delegates to the whole
+# video_edit.extract_dialogue (2026-07-02). The alias below stays exported for
+# the cross-module sync test.
 _DIALOGUE_RE = video_edit.DIALOGUE_RE
 
 VISUAL_QC_SYSTEM = """\
@@ -82,9 +89,13 @@ class ClipVerdict:
 
 def expected_speech(prompt: str) -> str:
     """Dialogue the clip is supposed to contain, extracted from the motion
-    prompt's `The person says: "..."` clause(s). "" when the prompt carries
-    no dialogue (then the speech check is skipped)."""
-    return " ".join(m.group(1).strip() for m in _DIALOGUE_RE.finditer(prompt or ""))
+    prompt. Delegates to the canonical `video_edit.extract_dialogue` (the
+    single source of truth for every caller): says-clause(s) first, then the
+    AI Director's labeled `AUDIO — Dialogue: "…"` / `Voice-over: "…"` form,
+    with unspoken `(stage directions)` stripped from inside the quotes.
+    "" when the prompt carries no dialogue (then the speech check is
+    skipped)."""
+    return video_edit.extract_dialogue(prompt or "")
 
 
 def _norm_words(text: str) -> str:
@@ -113,22 +124,30 @@ def check_speech(video: Path, expected: str, *, app_job_id: str | None = None
         return None
 
 
-def _sample_frames(video: Path, n: int = 4) -> list[Path]:
+@contextlib.contextmanager
+def _sample_frames(video: Path, n: int = 4):
+    """Yield up to `n` frame JPEGs sampled evenly across the clip. The frames
+    live in a private vqc_* temp dir that is ALWAYS removed on exit — every
+    visual-QC inspection used to leak the dir + JPEGs for the process's
+    lifetime."""
     from character_swap.video_edit import _probe_duration
     dur = max(0.1, _probe_duration(video))
     tmp = Path(tempfile.mkdtemp(prefix="vqc_"))
-    frames: list[Path] = []
-    for i in range(n):
-        at = dur * (i + 0.5) / n
-        dest = tmp / f"f{i}.jpg"
-        proc = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-y", "-ss", f"{at:.3f}", "-i", str(video),
-             "-frames:v", "1", "-q:v", "4", str(dest)],
-            capture_output=True, text=True,
-        )
-        if proc.returncode == 0 and dest.exists():
-            frames.append(dest)
-    return frames
+    try:
+        frames: list[Path] = []
+        for i in range(n):
+            at = dur * (i + 0.5) / n
+            dest = tmp / f"f{i}.jpg"
+            proc = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-y", "-ss", f"{at:.3f}", "-i", str(video),
+                 "-frames:v", "1", "-q:v", "4", str(dest)],
+                capture_output=True, text=True,
+            )
+            if proc.returncode == 0 and dest.exists():
+                frames.append(dest)
+        yield frames
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def check_visual(video: Path, *, app_job_id: str | None = None) -> ClipVerdict | None:
@@ -138,15 +157,17 @@ def check_visual(video: Path, *, app_job_id: str | None = None) -> ClipVerdict |
         return None
     try:
         from character_swap.clients import anthropic_client
-        frames = _sample_frames(video)
-        if not frames:
-            return None
-        content: list[dict] = [
-            {"type": "text",
-             "text": f"{len(frames)} frames sampled evenly from one clip, in order:"},
-        ]
-        for f in frames:
-            content.append(anthropic_client._file_to_image_block(f))
+        with _sample_frames(video) as frames:
+            if not frames:
+                return None
+            content: list[dict] = [
+                {"type": "text",
+                 "text": f"{len(frames)} frames sampled evenly from one clip, in order:"},
+            ]
+            # _file_to_image_block reads + base64s each frame NOW, so the
+            # temp dir can be reclaimed before the (slow) vision call.
+            for f in frames:
+                content.append(anthropic_client._file_to_image_block(f))
         resp = anthropic_client.messages_with_tools(
             system=VISUAL_QC_SYSTEM,
             messages=[{"role": "user", "content": content}],
