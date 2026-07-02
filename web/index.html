@@ -737,6 +737,13 @@
                         <span x-show="!['failed','error'].includes(vv.status)" class="animate-pulse">🎬 <span x-text="vv.status || 'submitting…'"></span></span>
                       </div>
                     </template>
+                    <!-- Flag-only video-QC (Hugo 2026-07-03): the clip is KEPT
+                         but its spoken audio was completely different from the
+                         prompt's line (VIDEO_QC_MAX_RETRIES=0). Hover = reason. -->
+                    <template x-if="vv.qc_status === 'failed'">
+                      <div class="absolute top-1 left-1 z-10 bg-rose-600/90 text-white text-[10px] px-1.5 py-0.5 rounded font-medium cursor-help"
+                           :title="'QC: ' + (vv.qc_reason || 'klippet säger något annat än repliken')">⚠ QC</div>
+                    </template>
                   </div>
                   <div class="p-2 flex items-center justify-between gap-2">
                     <div class="text-[10px] text-neutral-400 dark:text-neutral-500 truncate flex-1 min-w-0">
@@ -1852,6 +1859,12 @@
                               <div x-show="reClipForVariant(jc, v.variant_id)?.imported"
                                    class="text-[8px] text-emerald-500 leading-tight mt-0.5"
                                    title="Det här klippet är ett eget importerat klipp">📥 importerat klipp</div>
+                              <!-- Flag-only video-QC (Hugo 2026-07-03): clip KEPT
+                                   but its spoken audio was completely different
+                                   from the prompt line (VIDEO_QC_MAX_RETRIES=0). -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).qc_status === 'failed'"
+                                   class="text-[8px] text-rose-400 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'QC: ' + ((reClipForVariant(jc, v.variant_id) || {}).qc_reason || 'klippet säger något annat än repliken')">⚠ QC: säger annat än repliken</div>
                               <!-- QC-rejected takes of THIS clip (Hugo 2026-06-20):
                                    every clip video-QC threw away before the final
                                    take, shown by default. Empty when QC passed. -->
