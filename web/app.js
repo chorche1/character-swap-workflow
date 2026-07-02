@@ -1929,6 +1929,14 @@ function studio() {
             this.notifyInfo('Repurpose med ' + stale.length + ' ändrad(e) scen(er) — '
               + 'befintliga (äldre) klipp används.');
           }
+          // Never-approved characters are skipped from the repurpose, exactly
+          // like the assemble — the drop is noted, never silent.
+          const excluded = (data && data.excluded) || [];
+          if (excluded.length) {
+            const names = excluded.map(c => c.name).join(', ');
+            this.notifyInfo('Hoppar över ' + excluded.length + ' karaktär(er) utan '
+              + 'godkänd bild/klipp: ' + names + '.');
+          }
           const run = this.reengineerHistory.find(x => x.re_id === m.id);
           if (run) run.repurposing = true;
           this._startReengineerPolling();

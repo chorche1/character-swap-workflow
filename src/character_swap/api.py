@@ -5575,7 +5575,10 @@ async def reengineer_repurpose(re_id: str, background_tasks: BackgroundTasks,
     state["repurposing"] = True
     _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner_reengineer.repurpose, re_id)
-    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"]}
+    # `excluded` mirrors the assemble endpoint: never-approved characters are
+    # skipped by _do_repurpose, and the drop must be visible, never silent.
+    return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"],
+            "excluded": gaps.get("excluded", [])}
 
 
 def _assembly_refusal_message(gaps: dict) -> str:
