@@ -122,3 +122,81 @@ def test_regen_demoted_approved_char_is_restored_to_approved(monkeypatch, tmp_pa
     assert v2.status == VariantStatus.READY
     assert jc.status == CharStatus.APPROVED      # restored, not AWAITING
     assert jc.approved_variant_ids == ["v1"]
+
+
+# ------------------- FAILURE path of the same demotion (re-audit 2026-07-03)
+
+def _wire_failing(monkeypatch) -> dict:
+    """Same harness as _wire, but generation RAISES (e.g. a moderation
+    rejection surviving the ladder, or a transient provider error)."""
+    box: dict = {}
+    monkeypatch.setattr(runner, "store", lambda: _Store(box))
+
+    def _boom(**kw):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(runner.pipeline, "generate_variant", _boom)
+
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(runner, "_emit", _noop)
+    monkeypatch.setattr(runner, "_scene_path_for_variant",
+                        lambda j, v: Path("/scene.png"))
+    return box
+
+
+def test_regen_demoted_approved_char_restored_when_variant_fails(monkeypatch,
+                                                                 tmp_path):
+    """The failure half of the adjacent door (re-audit 2026-07-03): the regen
+    placeholder FAILS while another scene still holds a READY variant — the
+    all-failed guard is false, and the char used to sit GENERATING forever
+    with zero in-flight work, silently dropped from Step 4 (set_movement /
+    run_video_synthesis filter on status == APPROVED) while its green ✓
+    approvals still rendered. Must land back on APPROVED; the failed
+    variant's red card + ↻ retry stays visible."""
+    job, jc, v2 = _job(tmp_path)
+    _wire_failing(monkeypatch)
+    jc.status = CharStatus.GENERATING            # regen demotion
+    jc.approved_variant_ids = ["v1"]
+    jc.approved_variant_id = "v1"
+
+    asyncio.run(runner._generate_one_variant(job, jc, v2, asyncio.Semaphore(1)))
+
+    assert v2.status == VariantStatus.FAILED
+    assert jc.status == CharStatus.APPROVED      # actionable, not stuck
+    assert jc.approved_variant_ids == ["v1"]
+
+
+def test_failed_last_variant_lands_awaiting_when_no_approvals(monkeypatch,
+                                                              tmp_path):
+    """Same failure path without surviving approvals (retry_single_variant
+    demotes AWAITING_APPROVAL → GENERATING): a READY sibling exists, so the
+    char must land AWAITING_APPROVAL — never stuck GENERATING, never FAILED
+    while usable variants remain."""
+    job, jc, v2 = _job(tmp_path)
+    _wire_failing(monkeypatch)
+    jc.status = CharStatus.GENERATING
+
+    asyncio.run(runner._generate_one_variant(job, jc, v2, asyncio.Semaphore(1)))
+
+    assert v2.status == VariantStatus.FAILED
+    assert jc.status == CharStatus.AWAITING_APPROVAL
+
+
+def test_failed_variant_keeps_generating_while_sibling_in_flight(monkeypatch,
+                                                                 tmp_path):
+    """Not the last in-flight slot → the char stays GENERATING; the sibling's
+    own completion (success or failure) performs the restore."""
+    job, jc, v2 = _job(tmp_path)
+    _wire_failing(monkeypatch)
+    jc.images.append(GeneratedImage(variant_id="v3",
+                                    path=str(tmp_path / "v3.png"),
+                                    prompt="p", scene_id="s1",
+                                    status=VariantStatus.GENERATING))
+    jc.status = CharStatus.GENERATING
+    jc.approved_variant_ids = ["v1"]
+
+    asyncio.run(runner._generate_one_variant(job, jc, v2, asyncio.Semaphore(1)))
+
+    assert v2.status == VariantStatus.FAILED
+    assert jc.status == CharStatus.GENERATING    # sibling still rendering

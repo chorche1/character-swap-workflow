@@ -6,13 +6,24 @@ backup with zero logging: the user booted into a blank app with no
 explanation, and a repeat corruption clobbered the previous backup. This
 locks the loud path: the unreadable file is COPIED to
 `state.json.corrupt-<UTC timestamp>` and an ERROR log names the backup + the
-parse error. The server must stay bootable either way (never raise).
+parse error. The server stays bootable whenever a backup could be secured.
+
+2026-07-03 re-audit: the backup-FAILURE branch (copy2 raised OSError — most
+plausibly the same full disk that truncated state.json in the first place)
+logged "the original is left in place" and booted empty anyway, but the very
+first save() os.replace'd state.json and destroyed the sole un-backed-up
+copy of the library. Now: copy failure → MOVE the original aside (same-dir
+rename needs no free space); move failure too → REFUSE to boot. Booting
+empty is only allowed once the original is safe somewhere.
 """
 from __future__ import annotations
 
 import json
 import logging
 
+import pytest
+
+from character_swap import state as state_mod
 from character_swap.models import SceneAsset
 from character_swap.state import JsonStateStore
 
@@ -88,3 +99,74 @@ def test_healthy_state_loads_without_backup_or_error(tmp_path, caplog):
     assert "sc1" in s2.state.scenes
     assert list(tmp_path.glob("state.json.corrupt-*")) == []
     assert _error_messages(caplog) == []
+
+
+# --- backup-FAILURE branch (2026-07-03 re-audit) ----------------------------
+
+
+def test_copy_failure_moves_original_aside_before_booting_empty(
+        tmp_path, caplog, monkeypatch):
+    """copy2 fails (full disk) → the original is RENAMED to the backup name
+    (metadata-only, needs no free space) so the first save() writes a fresh
+    state.json without ever touching the sole copy of the library."""
+    p = tmp_path / "state.json"
+    p.write_text(_TRUNCATED, encoding="utf-8")
+
+    def _no_space(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_mod.shutil, "copy2", _no_space)
+    with caplog.at_level(logging.ERROR, logger="character_swap.state"):
+        s = JsonStateStore(path=p)
+
+    # Boots empty — but the original is safe under the timestamped name,
+    # and state.json is GONE (moved, not copied).
+    assert s.state.jobs == {}
+    backups = list(tmp_path.glob("state.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == _TRUNCATED
+    assert not p.exists()
+    msgs = _error_messages(caplog)
+    assert any("MOVED" in m and str(backups[0]) in m for m in msgs)
+
+    # The doom path from the audit: the first save() must NOT destroy the
+    # original — it writes a fresh state.json while the backup survives.
+    s.add_scene(SceneAsset(scene_id="sc1", filename="sc1.png",
+                           original_name="sc1.png"))
+    assert "sc1" in json.loads(p.read_text(encoding="utf-8"))["scenes"]
+    assert backups[0].read_text(encoding="utf-8") == _TRUNCATED
+
+
+def test_copy_and_move_both_failing_refuses_to_boot(tmp_path, monkeypatch):
+    """When the original can be neither copied nor moved, booting empty would
+    leave save() one click away from destroying the only copy — refuse loudly
+    instead (fail-loud over silent partial, Hugo's standing rule)."""
+    p = tmp_path / "state.json"
+    p.write_text(_TRUNCATED, encoding="utf-8")
+
+    def _no_space(*_a, **_kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(state_mod.shutil, "copy2", _no_space)
+    monkeypatch.setattr(state_mod.os, "replace", _no_space)
+
+    with pytest.raises(RuntimeError, match="refusing to boot"):
+        JsonStateStore(path=p)
+
+    # The original is untouched — recovery stays possible.
+    assert p.read_text(encoding="utf-8") == _TRUNCATED
+    assert list(tmp_path.glob("state.json.corrupt-*")) == []
+
+
+def test_copy_failure_does_not_hide_healthy_saves(tmp_path, monkeypatch):
+    """shutil.copy2 is only in the corrupt path — a healthy store never
+    consults it, so patching it here proves the guard doesn't leak into
+    normal operation."""
+    monkeypatch.setattr(
+        state_mod.shutil, "copy2",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("not called")))
+    p = tmp_path / "state.json"
+    s = JsonStateStore(path=p)
+    s.add_scene(SceneAsset(scene_id="sc1", filename="sc1.png",
+                           original_name="sc1.png"))
+    assert "sc1" in json.loads(p.read_text(encoding="utf-8"))["scenes"]

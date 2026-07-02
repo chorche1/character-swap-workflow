@@ -51,7 +51,13 @@ _STATUS_MARKERS: list[tuple[re.Pattern, str, str | None]] = [
     (re.compile(r"^\s+drive(?:\s+:)?\s+uploading"),   "uploading",  None),
     (re.compile(r"^\s+drive OK\s+:\s+(?P<link>\S+)"), "done",       "link"),
     (re.compile(r"^\s+drive SKIP"),                   "done",       None),
-    (re.compile(r"^\s+drive ERROR\s*:\s*(?P<err>.+)"), "done",      None),
+    # drive ERROR is NOT "done": automate.py swallows the upload exception,
+    # prints this line, then prints "Done." and exits 0 — mapping it to done
+    # shipped a silent failure of the pipeline's whole point (the upload).
+    # The captured reason is stashed and the post-exit block lands "failed"
+    # loudly (re-audit 2026-07-03). Status "uploading" is a no-op transition
+    # here (we're already there), so no misleading UI flash.
+    (re.compile(r"^\s+drive ERROR\s*:\s*(?P<err>.+)"), "uploading", "err"),
     (re.compile(r"^Done\."),                          "done",       None),
 ]
 
@@ -243,6 +249,7 @@ async def _run_char_pipeline(job_id: str, char_id: str) -> None:
 
     log_path = temp_dir / "automate.log"
     drive_link: str | None = None
+    drive_error: str | None = None
     fatal_seen: str | None = None
     last_status = "rendering"
 
@@ -270,6 +277,13 @@ async def _run_char_pipeline(job_id: str, char_id: str) -> None:
                 detail = m.group(capture_name) if capture_name else None
                 if capture_name == "link" and detail:
                     drive_link = detail
+                if capture_name == "err" and detail:
+                    drive_error = detail.strip()
+                if new_status == "done" and drive_error:
+                    # automate.py prints "Done." even after a Drive failure —
+                    # don't flash a success status; the post-exit block lands
+                    # "failed" with the real reason.
+                    break
                 if new_status != last_status:
                     last_status = new_status
                     _persist_pipeline(job, jc, pipeline_status=new_status)
@@ -299,13 +313,29 @@ async def _run_char_pipeline(job_id: str, char_id: str) -> None:
                     error=f"exit {rc} — log: {log_path}")
         return
 
-    # Success path: also cache the Drive token back to the shared location so
-    # the next run for any character is consent-free.
+    # Cache the Drive token back to the shared location so the next run for
+    # any character is consent-free. Done even on a Drive-upload failure —
+    # the auth may have succeeded (e.g. quota error after consent).
     token = _shared_drive_token()
     if token:
         candidate = temp_dir / "token.json"
         if candidate.exists():
             shutil.copyfile(candidate, token)
+
+    if drive_error:
+        # rc == 0 does NOT mean the reel reached Drive: automate.py swallows
+        # upload exceptions ("drive ERROR : ..."), prints "Done." and exits 0.
+        # The upload is the pipeline's deliverable — landing "done" with no
+        # link and no error shipped a silent partial (re-audit 2026-07-03).
+        # Fail loud, and say the render itself succeeded so the user knows
+        # what to fix (Drive) vs what to keep (the MP4 in Resolve/temp dir).
+        msg = (f"Drive upload failed: {drive_error} "
+               f"(Resolve render OK — see {log_path})")
+        _persist_pipeline(job, jc,
+                          pipeline_status="failed",
+                          pipeline_error=msg)
+        await _emit(job_id, char_id, status="failed", error=msg)
+        return
 
     _persist_pipeline(job, jc,
                       pipeline_status="done",
@@ -508,6 +538,7 @@ async def run_editor_pipeline(edit_id: str) -> None:
 
     log_path = temp_dir / "automate.log"
     drive_link: str | None = None
+    drive_error: str | None = None
     fatal_seen: str | None = None
     last_status = "rendering"
 
@@ -532,6 +563,12 @@ async def run_editor_pipeline(edit_id: str) -> None:
                 detail = m.group(capture_name) if capture_name else None
                 if capture_name == "link" and detail:
                     drive_link = detail
+                if capture_name == "err" and detail:
+                    drive_error = detail.strip()
+                if new_status == "done" and drive_error:
+                    # "Done." prints even after a Drive failure — no success
+                    # flash; the post-exit block lands "failed" loudly.
+                    break
                 if new_status != last_status:
                     last_status = new_status
                     _persist_editor_pipeline(edit_id, status=new_status,
@@ -551,12 +588,22 @@ async def run_editor_pipeline(edit_id: str) -> None:
         )
         return
 
-    # Cache the Drive token back so the next run is consent-free.
+    # Cache the Drive token back so the next run is consent-free (even on a
+    # Drive-upload failure — the auth may have succeeded).
     token = _shared_drive_token()
     if token:
         candidate = temp_dir / "token.json"
         if candidate.exists():
             shutil.copyfile(candidate, token)
+
+    if drive_error:
+        # Mirror of the job path: rc == 0 with "drive ERROR" means the render
+        # succeeded but the upload — the deliverable — did not. Fail loud.
+        _persist_editor_pipeline(
+            edit_id, status="failed",
+            error=(f"Drive upload failed: {drive_error} "
+                   f"(Resolve render OK — see {log_path})"))
+        return
 
     _persist_editor_pipeline(edit_id, status="done",
                              error=None, drive_link=drive_link)

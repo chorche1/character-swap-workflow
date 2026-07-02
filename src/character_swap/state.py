@@ -39,6 +39,20 @@ from character_swap.models import (
 logger = logging.getLogger(__name__)
 
 
+def _entity_gone(kind: str, entity_id: str, method: str) -> None:
+    """Log-and-skip marker for update_* calls on a deleted entity.
+
+    The update_* methods used to be unconditional upserts: a runner holding a
+    stale Job across awaits would RESURRECT a job the user deleted from the
+    sidebar mid-generation (JSON backend / SQLite full path), or crash the
+    generation task with an FK IntegrityError (SQLite granular fast paths
+    INSERTing child rows whose job_id references a deleted jobs row — audit
+    2026-07-03). Deletion wins: the write is dropped, loudly."""
+    logger.warning(
+        "%s: %s %s no longer exists (deleted mid-flight) — dropping the "
+        "update instead of resurrecting it", method, kind, entity_id)
+
+
 def _backfill_character_images(state: AppState) -> bool:
     """Ensure every CharacterAsset has at least one CharacterImage matching its
     primary `filename`. Returns True if anything changed (caller persists)."""
@@ -92,10 +106,38 @@ class JsonStateStore:
             try:
                 shutil.copy2(self.path, backup)
             except OSError:
-                logger.exception(
-                    "state file %s is unreadable AND backing it up to %s "
-                    "failed — the original is left in place", self.path,
-                    backup)
+                # copy2 needs free space — and a truncated state.json is most
+                # plausibly CAUSED by a full disk, so the two failures arrive
+                # together. The old branch logged "the original is left in
+                # place" and booted empty anyway: the very first save() then
+                # os.replace'd state.json, permanently destroying the sole
+                # un-backed-up copy of the library. Instead MOVE the original
+                # aside (a same-dir rename is metadata-only — needs no free
+                # space) so the fresh state.json can never overwrite it; if
+                # even the rename fails, REFUSE to boot (audit 2026-07-03).
+                try:
+                    os.replace(self.path, backup)
+                except OSError as move_err:
+                    logger.critical(
+                        "state file %s is unreadable AND could be neither "
+                        "copied nor moved to %s — refusing to boot so the "
+                        "next save cannot destroy the only copy. Free disk "
+                        "space / fix permissions on %s, then restart.",
+                        self.path, backup, self.path.parent)
+                    raise RuntimeError(
+                        f"state file {self.path} is unreadable and backing it "
+                        f"up to {backup} failed ({move_err}) — refusing to "
+                        "boot with an empty state that would overwrite the "
+                        "only copy of the library. Free disk space / fix "
+                        "permissions, then restart."
+                    ) from parse_err
+                logger.error(
+                    "state file %s is unreadable (%s: %s) AND copying it to "
+                    "a backup failed — the original has been MOVED to %s so "
+                    "the next save cannot destroy it. Recover by fixing that "
+                    "file and moving it back to %s.",
+                    self.path, type(parse_err).__name__, parse_err, backup,
+                    self.path)
                 return AppState()
             logger.error(
                 "state file %s is unreadable (%s: %s) — a copy is preserved "
@@ -169,6 +211,9 @@ class JsonStateStore:
         return list(self._state.jobs.values())
 
     def update_job(self, job: Job) -> None:
+        if job.job_id not in self._state.jobs:
+            _entity_gone("job", job.job_id, "update_job")
+            return
         job.updated_at = datetime.utcnow()
         self._state.jobs[job.job_id] = job
         self.save()
@@ -232,6 +277,9 @@ class JsonStateStore:
         return list(self._state.generations.values())
 
     def update_generation(self, gen: MediaGeneration) -> None:
+        if gen.gen_id not in self._state.generations:
+            _entity_gone("generation", gen.gen_id, "update_generation")
+            return
         self._state.generations[gen.gen_id] = gen
         self.save()
 
@@ -320,6 +368,9 @@ class SqliteStateStore:
         return list(self._state.jobs.values())
 
     def update_job(self, job: Job) -> None:
+        if job.job_id not in self._state.jobs:
+            _entity_gone("job", job.job_id, "update_job")
+            return
         job.updated_at = datetime.utcnow()
         self._state.jobs[job.job_id] = job
         with self._lock, db.transaction(self._conn) as conn:
@@ -348,6 +399,12 @@ class SqliteStateStore:
 
     def update_variant(self, job: Job, jc: JobCharacter,
                        variant: GeneratedImage) -> None:
+        if job.job_id not in self._state.jobs:
+            # Guard BEFORE the in-memory re-add: an INSERT against the
+            # deleted jobs row's FK raises IntegrityError (PRAGMA
+            # foreign_keys=ON) and killed the generation task mid-flight.
+            _entity_gone("job", job.job_id, "update_variant")
+            return
         try:
             v_pos = next(i for i, x in enumerate(jc.images)
                          if x.variant_id == variant.variant_id)
@@ -364,6 +421,9 @@ class SqliteStateStore:
             db.touch_job(conn, job.job_id, job.updated_at.isoformat())
 
     def update_job_character(self, job: Job, jc: JobCharacter) -> None:
+        if job.job_id not in self._state.jobs:
+            _entity_gone("job", job.job_id, "update_job_character")
+            return
         try:
             char_pos = self._positions(job, jc)
         except ValueError:
@@ -381,6 +441,9 @@ class SqliteStateStore:
 
     def update_video(self, job: Job, jc: JobCharacter,
                      video: VideoVariant) -> None:
+        if job.job_id not in self._state.jobs:
+            _entity_gone("job", job.job_id, "update_video")
+            return
         try:
             v_pos = next(i for i, x in enumerate(jc.videos)
                          if x.video_id == video.video_id)
@@ -437,6 +500,9 @@ class SqliteStateStore:
         return list(self._state.generations.values())
 
     def update_generation(self, gen: MediaGeneration) -> None:
+        if gen.gen_id not in self._state.generations:
+            _entity_gone("generation", gen.gen_id, "update_generation")
+            return
         self._state.generations[gen.gen_id] = gen
         with self._lock, db.transaction(self._conn) as conn:
             db.upsert_generation(conn, gen)

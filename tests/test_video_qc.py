@@ -75,6 +75,40 @@ def test_speech_similarity_catches_garbled_words():
                                                 "completely different words")
 
 
+def test_speech_similarity_long_transcript_no_autojunk_collapse():
+    """2026-07-03 audit: speech_similarity used a CHAR-level SequenceMatcher
+    with default autojunk — on transcripts >200 chars, frequent letters become
+    'junk' and matching collapses, so a near-perfect Whisper transcript of a
+    longer dialogue line scored below the 0.7 threshold and burned a full
+    video regeneration on a good clip. This exact pair scored 0.414 under the
+    old matcher; word-level + autojunk=False (the same fix as
+    video_edit.caption_transcript_ratio, 2026-06-22) keeps it high."""
+    expected = (
+        "this is store-bought honey and this is raw honey straight from "
+        "the hive most people have no idea what the difference does to "
+        "your body the processed one spikes your blood sugar like candy "
+        "while the raw one feeds the good bacteria in your gut save this "
+        "before it gets taken down")
+    # Whisper-typical mishearings scattered through an otherwise-correct read:
+    heard = (
+        "this is store-bought hunny and this is raw honey straight from "
+        "the hive most people have no idea what the differents does to "
+        "your body the processed one spike your blood sugar like canned "
+        "while the raw one feeds the good bacteria in your gut save this "
+        "before it gets taking down")
+    assert len(expected) > 200          # the autojunk trigger zone
+    sim = video_qc.speech_similarity(expected, heard)
+    from character_swap.config import settings
+    assert sim >= settings.video_qc_speech_threshold, (
+        f"near-perfect long transcript must PASS the speech check, got {sim}")
+    # A genuinely wrong long transcript still fails:
+    wrong = ("thanks for watching everyone i hope you found this video "
+             "helpful please like and subscribe and see you in the next one "
+             "bye " * 3)
+    assert video_qc.speech_similarity(expected, wrong) < \
+        settings.video_qc_speech_threshold
+
+
 def test_repair_prompt_mentions_hint_and_minimal_change():
     p = swap_qc.repair_prompt("the face does not match the reference")
     assert "the face does not match the reference" in p

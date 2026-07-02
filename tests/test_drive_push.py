@@ -261,6 +261,161 @@ def test_upload_or_replace_prefers_prior_file_id(monkeypatch, tmp_path):
     assert not files.created
 
 
+def test_drive_push_uploads_snapshot_not_live_path(monkeypatch, tmp_path):
+    """The push source is a stable path a recompile/rebuild overwrites IN
+    PLACE while the upload streams for minutes — pushing the live path landed
+    a torn mix of old/new bytes on Drive with an ok:True receipt. The upload
+    must read a local snapshot pinned at push-click time."""
+    src = tmp_path / "final.mp4"
+    src.write_bytes(b"ORIGINAL")
+    seen = {}
+
+    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
+        # A recompile's shutil.copyfile lands mid-upload…
+        src.write_bytes(b"REWRITTEN-BY-RECOMPILE")
+        seen["source"] = Path(source)
+        seen["bytes"] = Path(source).read_bytes()
+        return {"id": "d1", "name": drive_filename,
+                "webViewLink": "https://drive/d1"}
+
+    monkeypatch.setattr(google_drive, "ensure_folder_path", lambda names: "f1")
+    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+
+    receipt = _run(api._drive_push_file(src, ["Chang"], "x.mp4"))
+
+    assert receipt["ok"]
+    assert seen["source"] != src               # snapshot, not the live path
+    assert seen["bytes"] == b"ORIGINAL"        # …but the pushed bytes are coherent
+    assert not seen["source"].exists()         # snapshot cleaned up after
+
+
+def test_drive_push_snapshot_cleaned_up_on_upload_failure(monkeypatch, tmp_path):
+    src = tmp_path / "final.mp4"
+    src.write_bytes(b"vid")
+    seen = {}
+
+    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
+        seen["source"] = Path(source)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(google_drive, "ensure_folder_path", lambda names: "f1")
+    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api._drive_push_file(src, ["Chang"], "x.mp4"))
+    assert ei.value.status_code == 502
+    assert not seen["source"].exists()         # no temp-file leak on failure
+
+
+def test_reengineer_drive_push_409_while_assemble_in_flight(monkeypatch, tmp_path):
+    """_do_assemble overwrites final_<cid>.mp4 in place while the bucket entry
+    stays "done" — pushing during the rebuild must refuse, not stream a file
+    that's being rewritten under the upload."""
+    from character_swap import reengineer as reengineer_mod
+    final = tmp_path / "final_c1.mp4"
+    final.write_bytes(b"vid")
+    state = {"re_id": "re1", "title": "T", "status": "assembling",
+             "finals": {"c1": {"status": "done", "final_path": str(final)}}}
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda re_id: dict(state))
+    monkeypatch.setattr(reengineer_mod, "save_state", lambda st: None)
+    calls = _patch_drive(monkeypatch)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.reengineer_char_drive_push(
+            "re1", "c1", api.DrivePushBody(variant="final")))
+    assert ei.value.status_code == 409
+    assert calls == {}                          # upload never started
+
+
+def test_reengineer_drive_push_409_while_repurpose_in_flight(monkeypatch, tmp_path):
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    final = tmp_path / "repurpose_c1.mp4"
+    final.write_bytes(b"vid")
+    # Cover the in-process set too (the state flag may lag the runner).
+    state = {"re_id": "re1", "title": "T", "status": "done",
+             "repurposed": {"c1": {"status": "done",
+                                   "final_path": str(final)}}}
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda re_id: dict(state))
+    monkeypatch.setattr(reengineer_mod, "save_state", lambda st: None)
+    monkeypatch.setattr(runner_reengineer, "_REPURPOSING", {"re1"})
+    calls = _patch_drive(monkeypatch)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.reengineer_char_drive_push(
+            "re1", "c1", api.DrivePushBody(variant="repurpose")))
+    assert ei.value.status_code == 409
+    assert calls == {}
+
+
+def test_reengineer_drive_push_never_saves_stale_snapshot_when_entry_dropped(
+        monkeypatch, tmp_path):
+    """A rebuild finishing during the multi-minute upload can DROP this char
+    from the fresh bucket (excluded after its approvals were withdrawn). The
+    fallback used to save the PRE-upload snapshot — silently rolling back
+    every state write from the window (other chars' fresh finals, flags,
+    prompt edits). Now: never write state; return the receipt with a note."""
+    from character_swap import reengineer as reengineer_mod
+    final = tmp_path / "final_c1.mp4"
+    final.write_bytes(b"vid")
+    stale = {"re_id": "re1", "title": "T", "status": "done",
+             "finals": {"c1": {"status": "done", "final_path": str(final)},
+                        "c2": {"status": "done", "final_path": "/old-c2.mp4"}}}
+    fresh = {"re_id": "re1", "title": "T", "status": "done",
+             "finals": {"c2": {"status": "done", "final_path": "/new-c2.mp4",
+                               "edit_id": "NEW"}}}
+    loads = iter([stale, fresh])
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda re_id: next(loads))
+    saved = []
+    monkeypatch.setattr(reengineer_mod, "save_state",
+                        lambda st: saved.append(st))
+
+    class _Char:
+        name = "Chang"
+
+    monkeypatch.setattr(api, "store",
+                        lambda: _FakeStore(chars={"c1": _Char()}))
+    _patch_drive(monkeypatch)
+
+    receipt = _run(api.reengineer_char_drive_push(
+        "re1", "c1", api.DrivePushBody(variant="final")))
+
+    assert receipt["ok"] is True
+    assert receipt["persisted"] is False
+    assert "sparades inte" in receipt["note"]
+    assert saved == []          # the stale pre-upload snapshot is NEVER written
+
+
+def test_reengineer_drive_push_never_saves_stale_snapshot_when_run_deleted(
+        monkeypatch, tmp_path):
+    from character_swap import reengineer as reengineer_mod
+    final = tmp_path / "final_c1.mp4"
+    final.write_bytes(b"vid")
+    stale = {"re_id": "re1", "title": "T", "status": "done",
+             "finals": {"c1": {"status": "done", "final_path": str(final)}}}
+    loads = iter([stale, None])                 # DELETE landed mid-upload
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda re_id: next(loads))
+    saved = []
+    monkeypatch.setattr(reengineer_mod, "save_state",
+                        lambda st: saved.append(st))
+
+    class _Char:
+        name = "Chang"
+
+    monkeypatch.setattr(api, "store",
+                        lambda: _FakeStore(chars={"c1": _Char()}))
+    _patch_drive(monkeypatch)
+
+    receipt = _run(api.reengineer_char_drive_push(
+        "re1", "c1", api.DrivePushBody(variant="final")))
+
+    assert receipt["ok"] is True and receipt["persisted"] is False
+    assert saved == []                          # deleted run NOT resurrected
+
+
 def test_reengineer_drive_push_falls_back_to_job_title(monkeypatch, tmp_path):
     # Production run states have NO title/name keys — the display name lives
     # on the linked swap job. The filename must use it, not the opaque re_id.

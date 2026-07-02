@@ -44,9 +44,11 @@ def _first_match(line: str):
      "https://drive.google.com/file/d/xxx/view"),
     # Skip line (no credentials) still counts as done — pipeline completed.
     ("  drive SKIP   : no credentials.json next to automate.py", "done", None),
-    # Error line — also "done" status because rendering succeeded; Drive
-    # failure surfaces via the absence of pipeline_drive_link, not via failed.
-    ("  drive ERROR : quota exceeded", "done", None),
+    # Error line — a RUNTIME upload failure is captured (err group) and the
+    # post-exit block lands "failed" loudly. It used to map to "done" with the
+    # reason discarded — a silent partial on the pipeline's whole point, the
+    # upload (re-audit 2026-07-03). "uploading" is a no-op transition here.
+    ("  drive ERROR : quota exceeded", "uploading", "quota exceeded"),
     # Final banner — last-line safety net.
     ("Done. Project 'ed_abc' is open in Resolve.", "done", None),
 ])
@@ -196,3 +198,142 @@ def test_run_full_pipeline_selects_only_eligible_chars(monkeypatch, tmp_path):
 
     asyncio.run(runner_pipeline.run_full_pipeline("j1"))
     assert scheduled == ["good"]
+
+
+# --- Drive-upload failure fails LOUD (re-audit 2026-07-03) ------------------
+#
+# automate.py swallows upload_to_drive() exceptions: it prints
+# "  drive ERROR : <reason>", then "Done.", and exits 0. rc==0 therefore does
+# NOT mean the reel reached Drive — the pipeline must land "failed" with the
+# reason (and say the render itself succeeded), never a silent "done" with no
+# link and no error.
+
+class _FakeProc:
+    """Stands in for the automate.py subprocess: canned stdout lines, rc=0."""
+
+    def __init__(self, lines: list[str], rc: int = 0):
+        self._buf = [line.encode("utf-8") + b"\n" for line in lines]
+        self._rc = rc
+        self.stdout = self
+
+    async def readline(self):
+        return self._buf.pop(0) if self._buf else b""
+
+    async def wait(self):
+        return self._rc
+
+
+def _wire_editor_pipeline(monkeypatch, tmp_path, stdout_lines):
+    """Minimal harness for run_editor_pipeline: real pipeline_state.json on
+    disk, fake export zip, fake automate.py subprocess."""
+    import io
+    import zipfile
+    from character_swap import config, exporter
+
+    monkeypatch.setattr(config.settings, "output_dir", tmp_path / "output")
+    monkeypatch.setattr(config.settings, "state_dir", tmp_path / "state")
+    edit_dir = tmp_path / "output" / "editor" / "e1"
+    edit_dir.mkdir(parents=True)
+    (edit_dir / "04-final.mp4").write_bytes(b"fake video")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("e1/automate.py", "print('unused')")
+    monkeypatch.setattr(exporter, "build_export_zip",
+                        lambda **kw: buf.getvalue())
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc(stdout_lines)
+
+    monkeypatch.setattr(runner_pipeline.asyncio, "create_subprocess_exec",
+                        fake_exec)
+    return edit_dir
+
+
+def test_editor_pipeline_drive_error_fails_loud(monkeypatch, tmp_path):
+    import asyncio
+    import json
+
+    edit_dir = _wire_editor_pipeline(monkeypatch, tmp_path, [
+        "Project ready: 'e1'",
+        "  render OK    : e1-final.mp4 (12.3 MB)",
+        "  drive       : uploading e1-final.mp4 (12.3 MB)…",
+        "  drive ERROR : <HttpError 403 storageQuotaExceeded>",
+        "Done. Project 'e1' is open in Resolve.",
+    ])
+    asyncio.run(runner_pipeline.run_editor_pipeline("e1"))
+
+    state = json.loads((edit_dir / "pipeline_state.json").read_text("utf-8"))
+    assert state["status"] == "failed"                       # not silent done
+    assert "storageQuotaExceeded" in state["error"]          # the real reason
+    assert "render OK" in state["error"]                     # render did work
+    assert not state.get("drive_link")
+
+
+def test_editor_pipeline_drive_ok_still_lands_done(monkeypatch, tmp_path):
+    """Success path unchanged: drive OK → done with the link, no error."""
+    import asyncio
+    import json
+
+    edit_dir = _wire_editor_pipeline(monkeypatch, tmp_path, [
+        "Project ready: 'e1'",
+        "  render OK    : e1-final.mp4 (12.3 MB)",
+        "  drive       : uploading e1-final.mp4 (12.3 MB)…",
+        "  drive OK    : https://drive.google.com/file/d/xxx/view",
+        "Done. Project 'e1' is open in Resolve.",
+    ])
+    asyncio.run(runner_pipeline.run_editor_pipeline("e1"))
+
+    state = json.loads((edit_dir / "pipeline_state.json").read_text("utf-8"))
+    assert state["status"] == "done"
+    assert state["drive_link"] == "https://drive.google.com/file/d/xxx/view"
+    assert state["error"] is None
+
+
+def test_char_pipeline_drive_error_fails_loud(monkeypatch, tmp_path):
+    """Job-path mirror: a Drive failure after a successful render must land
+    pipeline_status='failed' + pipeline_error naming the cause — never a
+    silent 'done' with no link (re-audit 2026-07-03)."""
+    import asyncio
+    import io
+    import zipfile
+    from types import SimpleNamespace
+    from character_swap import config, exporter
+    from character_swap.models import Job
+
+    jc = _pipeline_eligible_jc("cX", tmp_path)
+    jc.compile_status = "done"
+    jc.compiled_video_path = str(tmp_path / "cX.mp4")
+    job = Job(job_id="j1", scene_id="sc1", scene_image_path="/tmp/sc1.png",
+              scene_ids=["sc1"], characters={"cX": jc})
+
+    monkeypatch.setattr(config.settings, "output_dir", tmp_path / "output")
+    monkeypatch.setattr(config.settings, "state_dir", tmp_path / "state")
+    monkeypatch.setattr(runner_pipeline, "store",
+                        lambda: SimpleNamespace(get_job=lambda jid: job,
+                                                update_job=lambda j: None))
+
+    async def fake_compile(job_id, **kw):
+        return None
+    monkeypatch.setattr(runner_pipeline, "compile_job_videos", fake_compile)
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("cX/automate.py", "print('unused')")
+    monkeypatch.setattr(exporter, "build_export_zip",
+                        lambda **kw: buf.getvalue())
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc([
+            "  render OK    : cX-final.mp4 (5 MB)",
+            "  drive ERROR : quota exceeded",
+            "Done. Project 'cX' is open in Resolve.",
+        ])
+    monkeypatch.setattr(runner_pipeline.asyncio, "create_subprocess_exec",
+                        fake_exec)
+
+    asyncio.run(runner_pipeline._run_char_pipeline("j1", "cX"))
+
+    assert jc.pipeline_status == "failed"
+    assert "quota exceeded" in jc.pipeline_error
+    assert jc.pipeline_drive_link is None

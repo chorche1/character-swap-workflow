@@ -103,7 +103,18 @@ def _norm_words(text: str) -> str:
 
 
 def speech_similarity(expected: str, heard: str) -> float:
-    return SequenceMatcher(None, _norm_words(expected), _norm_words(heard)).ratio()
+    """Symmetric similarity of expected vs heard dialogue in [0, 1].
+
+    Compared on WORD tokens with autojunk disabled. CHARACTER-level matching
+    with difflib's default autojunk heuristic collapses to ~0 on transcripts
+    >200 chars (frequent letters become "junk" and stop matching) — the exact
+    root cause already fixed in `video_edit.caption_transcript_ratio`
+    (2026-06-22) but missed here: a near-perfect Whisper transcript of a
+    longer dialogue line scored below `video_qc_speech_threshold` and burned
+    a full video regeneration on a good clip (audit 2026-07-03)."""
+    a = _norm_words(expected).split()
+    b = _norm_words(heard).split()
+    return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
 def check_speech(video: Path, expected: str, *, app_job_id: str | None = None

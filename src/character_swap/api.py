@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -530,7 +531,7 @@ def _recover_startup_orphans() -> dict[str, int]:
     them failed with a clear message so the per-item ↻ retry applies."""
     s = store()
     counts = {"compile": 0, "repurpose": 0, "pipeline": 0,
-              "reel_repurpose": 0, "generation": 0}
+              "editor_pipeline": 0, "reel_repurpose": 0, "generation": 0}
     for job in s.list_jobs():
         dirty = False
         for jc in job.characters.values():
@@ -567,6 +568,28 @@ def _recover_startup_orphans() -> dict[str, int]:
                            "kör 🔁 Repurpose igen")
             reengineer_mod.save_state(st)
             counts["re_repurpose"] = counts.get("re_repurpose", 0) + 1
+    # Editor-side Resolve pipeline (runner_pipeline.run_editor_pipeline):
+    # status lives in output/editor/<edit_id>/pipeline_state.json, written
+    # only by the in-process stdout-parsing loop — a restart mid-run strands
+    # it at queued/packaging/rendering/uploading forever (the UI poll only
+    # stops on done/failed and nothing else ever rewrites the file). Same
+    # fail-loud flip as jc.pipeline_status above.
+    from character_swap import runner_pipeline
+    editor_root = settings.output_dir / "editor"
+    if editor_root.is_dir():
+        for state_path in editor_root.glob("*/pipeline_state.json"):
+            try:
+                pst = json.loads(state_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue        # unreadable → the GET already returns {}
+            if pst.get("status") in (None, "done", "failed"):
+                continue
+            runner_pipeline._persist_editor_pipeline(
+                state_path.parent.name, status="failed",
+                error=("avbruten av serveromstart — OBS: en Resolve-"
+                       "rendering kan fortfarande köra i bakgrunden; vänta "
+                       "ut den innan du kör om pipelinen"))
+            counts["editor_pipeline"] += 1
     for gen in s.list_generations():
         changed = False
         if gen.kind is GenKind.EDITOR:
@@ -3136,6 +3159,19 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
+    # In-flight guard (mirrors the reengineer _ASSEMBLING/_REPURPOSING 409s):
+    # a second submit while a compile is running would race two editor
+    # pipelines onto the same output/<job_id>/compiled/<char_id>.mp4 (torn
+    # copyfile writes, edit_id describing different bytes than the disk) and
+    # double-bill Whisper/ElevenLabs. Startup recovery flips restart-orphaned
+    # "compiling" to failed, so a live "compiling" is genuinely in flight.
+    busy = [jc.name or cid for cid, jc in job.characters.items()
+            if jc.compile_status == "compiling"
+            and (body.char_ids is None or cid in body.char_ids)]
+    if busy:
+        raise HTTPException(
+            409, "Compile already running for: " + ", ".join(busy)
+                 + " — wait for it to finish before starting another.")
     # Sanity check: at least one char must have approved variants + done video.
     eligible = [
         cid for cid, jc in job.characters.items()
@@ -3204,6 +3240,15 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
+    # In-flight guard — same rationale as compile_job_videos above (the twin
+    # race writes output/<job_id>/compiled/<char_id>__repurpose.mp4).
+    busy = [jc.name or cid for cid, jc in job.characters.items()
+            if jc.repurpose_status == "compiling"
+            and (body.char_ids is None or cid in body.char_ids)]
+    if busy:
+        raise HTTPException(
+            409, "Repurpose already running for: " + ", ".join(busy)
+                 + " — wait for it to finish before starting another.")
     eligible = [
         cid for cid, jc in job.characters.items()
         if (jc.approved_variant_ids or jc.approved_variant_id)
@@ -6917,22 +6962,36 @@ async def _drive_push_file(source: Path, subfolders: list[str],
     """ensure folders + upload_or_replace, mapped to loud HTTP errors.
     `prior_file_id` (from an earlier push's receipt) makes the overwrite
     survive job/character renames — the SAME Drive file is updated (and
-    renamed) instead of a second copy appearing under the new name."""
+    renamed) instead of a second copy appearing under the new name.
+
+    Uploads a local SNAPSHOT of `source`, never the live path: every push
+    source is a stable path that a recompile/rebuild overwrites IN PLACE
+    (shutil.copyfile truncates + rewrites the same file), and the upload
+    streams for minutes — pushing the live path would land a torn mix of
+    old and new bytes on Drive with an ok:True receipt. The snapshot pins
+    the bytes that existed when the user clicked push."""
     from character_swap.clients import google_drive
     if not source.is_file():
         raise HTTPException(404, f"Video file not found: {source.name}")
+    fd, tmp_name = tempfile.mkstemp(prefix="drive-push-",
+                                    suffix=source.suffix or ".mp4")
+    os.close(fd)
+    snapshot = Path(tmp_name)
     try:
+        await asyncio.to_thread(shutil.copyfile, source, snapshot)
         folder_id = await asyncio.to_thread(
             google_drive.ensure_folder_path,
             [DRIVE_ROOT_FOLDER, *subfolders])
         result = await asyncio.to_thread(
             lambda: google_drive.upload_or_replace(
-                source, drive_filename=filename, folder_id=folder_id,
+                snapshot, drive_filename=filename, folder_id=folder_id,
                 file_id=prior_file_id))
     except google_drive.DriveNotAuthorized as e:
         raise HTTPException(409, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(502, str(e)) from e
+    finally:
+        snapshot.unlink(missing_ok=True)
     return {
         "ok": True,
         "file_id": result.get("id"),
@@ -6986,7 +7045,7 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
                                      body: DrivePushBody) -> dict:
     """Push a Reengineer character final (or repurposed variant) to Drive
     under Character Swap/<character name>/."""
-    from character_swap import reengineer as reengineer_mod
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
@@ -6997,6 +7056,22 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
     if not entry or entry.get("status") != "done" or not entry.get("final_path"):
         raise HTTPException(
             409, "No finished video to push — build the final first.")
+    # The final_/repurpose_<cid>.mp4 files are overwritten IN PLACE by a
+    # rebuild while the bucket entry stays "done" — an upload streaming that
+    # path as _do_assemble/_do_repurpose copies over it would land a torn
+    # file on Drive with an ok receipt. Refuse while the owning build is in
+    # flight; the snapshot in _drive_push_file covers a rebuild that STARTS
+    # mid-upload.
+    if body.variant == "final":
+        building = (state.get("status") == "assembling"
+                    or re_id in runner_reengineer._ASSEMBLING)
+    else:
+        building = (bool(state.get("repurposing"))
+                    or re_id in runner_reengineer._REPURPOSING)
+    if building:
+        raise HTTPException(
+            409, "Bygget pågår för den här körningen — vänta tills det är "
+                 "klart innan du pushar till Drive.")
     char = store().get_character(char_id)
     char_name = _drive_safe_name(char.name if char else char_id)
     # Production run states carry no title/name of their own — the display
@@ -7020,8 +7095,19 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
         fresh[bucket][char_id]["drive"] = receipt
         reengineer_mod.save_state(fresh)
     else:
-        entry["drive"] = receipt
-        reengineer_mod.save_state(state)
+        # The run was deleted mid-upload (fresh is None) or a rebuild that
+        # finished during the window dropped this character from the bucket
+        # (e.g. excluded after its approvals were withdrawn). NEVER save the
+        # pre-upload `state` snapshot here — it would silently roll back
+        # every write that landed during the multi-minute upload (other
+        # characters' fresh finals, repurposing/finals_stale flags, prompt
+        # edits) — the exact clobber class _reload_reengineer_state_after_await
+        # refuses. The upload itself succeeded; only the receipt goes
+        # unpersisted — say so instead of writing stale state.
+        receipt["persisted"] = False
+        receipt["note"] = ("uppladdad till Drive, men körningens final "
+                           "byggdes om eller togs bort under uppladdningen — "
+                           "kvittot sparades inte")
     return receipt
 
 

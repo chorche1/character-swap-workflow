@@ -10,6 +10,7 @@ are LOUD (failed + message) — never silently resumed-and-hoped.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -78,7 +79,8 @@ def test_recovery_fails_stuck_compile_repurpose_pipeline(monkeypatch):
     assert jc.repurpose_status == "failed" and "omstart" in jc.repurpose_error
     assert jc.pipeline_status == "failed" and "omstart" in jc.pipeline_error
     assert counts == {"compile": 1, "repurpose": 1, "pipeline": 1,
-                      "reel_repurpose": 0, "generation": 0}
+                      "editor_pipeline": 0, "reel_repurpose": 0,
+                      "generation": 0}
     assert store.updated_jobs == ["j1"]
 
 
@@ -101,6 +103,55 @@ def test_recovery_fails_stuck_legacy_generation_so_delete_works(monkeypatch):
     assert gen.status is GenStatus.FAILED
     assert "raderas" in gen.error
     assert counts["generation"] == 1
+
+
+def test_recovery_fails_stuck_editor_pipeline_state(monkeypatch, tmp_path):
+    """The EDITOR-side Resolve pipeline (runner_pipeline.run_editor_pipeline)
+    tracks status in output/editor/<edit_id>/pipeline_state.json — nothing
+    re-attaches it after a restart, so a non-terminal file was stranded at
+    'rendering' forever (the UI poll only stops on done/failed). The startup
+    sweep must flip it to failed, same as jc.pipeline_status."""
+    monkeypatch.setattr(api.settings, "output_dir", tmp_path)
+    stuck = tmp_path / "editor" / "e1"
+    stuck.mkdir(parents=True)
+    (stuck / "pipeline_state.json").write_text(
+        json.dumps({"status": "rendering"}), encoding="utf-8")
+    done = tmp_path / "editor" / "e2"
+    done.mkdir(parents=True)
+    (done / "pipeline_state.json").write_text(
+        json.dumps({"status": "done", "drive_link": "https://drive/x"}),
+        encoding="utf-8")
+    no_pipeline = tmp_path / "editor" / "e3"     # edit without a pipeline run
+    no_pipeline.mkdir(parents=True)
+    monkeypatch.setattr(api, "store", lambda: _FakeStore())
+
+    counts = api._recover_startup_orphans()
+
+    flipped = json.loads((stuck / "pipeline_state.json").read_text())
+    assert flipped["status"] == "failed" and "omstart" in flipped["error"]
+    assert counts["editor_pipeline"] == 1
+    # Terminal states are left alone — no gratuitous rewrite, no error added.
+    untouched = json.loads((done / "pipeline_state.json").read_text())
+    assert untouched == {"status": "done", "drive_link": "https://drive/x"}
+
+
+def test_recovery_editor_pipeline_sweep_flips_every_nonterminal_phase(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(api.settings, "output_dir", tmp_path)
+    for i, status in enumerate(("queued", "packaging", "uploading")):
+        d = tmp_path / "editor" / f"p{i}"
+        d.mkdir(parents=True)
+        (d / "pipeline_state.json").write_text(
+            json.dumps({"status": status}), encoding="utf-8")
+    monkeypatch.setattr(api, "store", lambda: _FakeStore())
+
+    counts = api._recover_startup_orphans()
+
+    assert counts["editor_pipeline"] == 3
+    for i in range(3):
+        st = json.loads(
+            (tmp_path / "editor" / f"p{i}" / "pipeline_state.json").read_text())
+        assert st["status"] == "failed"
 
 
 def test_recovery_fails_stuck_editor_reel_repurpose(monkeypatch):
@@ -131,6 +182,24 @@ def test_resume_fails_animating_char_with_no_video_rows(monkeypatch):
     jc = job.characters["c1"]
     assert jc.status is CharStatus.FAILED
     assert "movement" in (jc.error or "")
+
+
+def test_resume_animating_flip_message_is_flow_aware_for_reengineer(monkeypatch):
+    """Reengineer jobs have no 'unlock movement' control — the flip's fix
+    instruction must point at the ✎ per-scene redo instead (re-audit
+    2026-07-03)."""
+    job = _job()
+    job.origin = "reengineer:re1"
+    job.characters["c1"].status = CharStatus.ANIMATING
+    store = _FakeStore(jobs=[job])
+    monkeypatch.setattr(runner, "store", lambda: store)
+
+    _run(runner.resume_pending("j1"))
+
+    jc = job.characters["c1"]
+    assert jc.status is CharStatus.FAILED
+    assert "Redigera" in (jc.error or "")
+    assert "unlock" not in (jc.error or "")      # Swap-only control
 
 
 def test_resume_still_completes_animating_char_with_terminal_videos(monkeypatch):
@@ -300,7 +369,9 @@ def test_reanimate_resume_terminates_for_all_direct_runs(monkeypatch):
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
                         lambda re_id: {"re_id": re_id})
 
-    state = {"re_id": "re1", "job_id": "j1",
+    # reanimate_idxs is always persisted by _do_reanimate BEFORE the clip
+    # tasks are awaited, so a crash-resumed reanimating run carries it.
+    state = {"re_id": "re1", "job_id": "j1", "reanimate_idxs": [0],
              "scenes": [{"scene_id": "scD", "is_direct": True,
                          "shared_clip_path": None}]}
     _run(asyncio.wait_for(
@@ -308,3 +379,79 @@ def test_reanimate_resume_terminates_for_all_direct_runs(monkeypatch):
 
     assert rendered == ["scD"]                   # redo revived
     assert finalized["clear_dirty"] is True      # and the run finalized
+
+
+def test_reanimate_resume_does_not_revive_unrelated_direct_scene(monkeypatch):
+    """No billing without a click (re-audit 2026-07-03): a clip-less direct
+    scene that was NOT part of the interrupted redo — e.g. one just added
+    post-gate with an EMPTY motion prompt the user hadn't finished, or one
+    whose original animate failed — must NOT be re-rendered on restart.
+    The revival is scoped to reanimate_idxs, like the keep-dirty check."""
+    job = _job()
+    jc = job.characters["c1"]
+    jc.videos = [VideoVariant(video_id="vB", source_variant_id="ivB",
+                              grok_job_id="r2", status=VideoStatus.DONE,
+                              final_video_path="b.mp4")]
+    store = _FakeStore(jobs=[job])
+    monkeypatch.setattr(runner_reengineer, "store", lambda: store)
+    monkeypatch.setattr(runner_reengineer, "_POLL_SECS", 0.01)
+    rendered = []
+
+    async def fake_render(re_id, sid):
+        rendered.append(sid)
+
+    monkeypatch.setattr(runner_reengineer, "_render_direct_clip", fake_render)
+    finalized = {}
+    monkeypatch.setattr(runner_reengineer, "_finalize_reanimate",
+                        lambda re_id, clear_dirty: finalized.update(
+                            {"clear_dirty": clear_dirty}))
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
+                        lambda re_id: {"re_id": re_id})
+
+    # The redo touched only idx 0 (a swap scene). Idx 1 is an unrelated
+    # never-animated direct scene: dirty, empty prompt, no shared_clip_path.
+    state = {"re_id": "re1", "job_id": "j1", "reanimate_idxs": [0],
+             "scenes": [{"scene_id": "scB"},
+                        {"scene_id": "scNEW", "is_direct": True,
+                         "dirty": True, "motion_prompt": ""}]}
+    _run(asyncio.wait_for(
+        runner_reengineer._resume_reanimating("re1", state), timeout=5))
+
+    assert rendered == []                        # no unrequested paid clip
+    assert finalized["clear_dirty"] is True      # run still finalizes
+
+
+# --------------------- _resume_animating: stranded run (zero video rows)
+
+def test_resume_animating_fails_fast_when_no_video_rows(monkeypatch):
+    """Swap scenes present but ZERO video rows after resume_pending's flip
+    (the restart hit _animate_character's window before the placeholders
+    persisted): no clip will ever appear without a click, and
+    _watch_video_phase's exit needs bool(vids) — the run used to sit busy
+    'animating' for the full 1h timeout, then fail with the WRONG reason
+    ('video phase timed out'). Must fail NOW with the real cause and must
+    NOT bill direct-clip renders into the dead run."""
+    job = _job()                                 # swap scene s1, no videos
+    job.characters["c1"].status = CharStatus.FAILED
+    store = _FakeStore(jobs=[job])
+    monkeypatch.setattr(runner_reengineer, "store", lambda: store)
+    rendered = []
+
+    async def fake_render(re_id, sid):
+        rendered.append(sid)
+
+    monkeypatch.setattr(runner_reengineer, "_render_direct_clip", fake_render)
+    updates = {}
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda re_id, **c: updates.update(c))
+
+    state = {"re_id": "re1", "job_id": "j1",
+             "scenes": [{"scene_id": "s1"},
+                        {"scene_id": "scD", "is_direct": True}]}
+    _run(asyncio.wait_for(
+        runner_reengineer._resume_animating("re1", state), timeout=5))
+
+    assert updates["status"] == "failed"
+    assert "omstart" in updates["error"]         # the real cause
+    assert "timed out" not in updates["error"]
+    assert rendered == []                        # no billing into a dead run

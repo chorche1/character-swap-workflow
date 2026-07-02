@@ -220,7 +220,22 @@ def _generate_image_once(*, prompt: str, character: str = "freeform",
     raise GrokError(f"Image response had neither b64_json nor url. body={data!r}")
 
 
+@retry(
+    retry=retry_if_exception(_should_retry),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=2, max=60),
+    reraise=True,
+)
 def download_video(*, url: str, dest: Path) -> None:
+    """Stream the finished video to `dest`, retrying like submit()/status().
+
+    By the time this runs, the generation is already BILLED — and this is the
+    largest single transfer in the flow (tens of MB, up to 300s), the call
+    most exposed to mid-stream resets and CDN 5xx. Without the retry a
+    transient blip discarded the finished video and the user's ↻ retry
+    re-submitted (and re-paid) a brand-new generation (audit 2026-07-03).
+    Each attempt rewrites the .tmp from scratch ("wb" truncates); `dest`
+    only appears via os.replace on a complete, non-empty download."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     with httpx.stream("GET", url, timeout=300) as r:

@@ -249,8 +249,27 @@ async def _resume_animating(re_id: str, state: dict) -> None:
     # Video polling itself is already resumed by runner.resume_pending in the
     # lifespan; we only need to re-attach the watcher that assembles at the end.
     job_id = state.get("job_id")
-    if not job_id or store().get_job(job_id) is None:
+    job = store().get_job(job_id) if job_id else None
+    if job is None:
         _update(re_id, status="failed", error="underlying job lost across restart")
+        return
+    # Stranded check (re-audit 2026-07-03): resume_pending has already run
+    # (lifespan order) and it never auto-resubmits. If the job has swap
+    # scenes but ZERO video rows — the restart hit _animate_character's
+    # window between the ANIMATING persist and the video-placeholder
+    # persist, so resume_pending flipped the chars to FAILED — no clip will
+    # EVER appear without fresh user action. _watch_video_phase's exit needs
+    # `bool(vids)`, so it would sit busy "animating" for the full 1 h
+    # timeout and then fail with the wrong reason ("video phase timed out").
+    # Fail loud NOW with the real cause; the per-scene ↻ redo in ✎ edit
+    # mode recovers everything (a click, so billing is sanctioned).
+    swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
+    job_vids = [v for jc in job.characters.values() for v in jc.videos]
+    if swap_present and not job_vids:
+        _update(re_id, status="failed",
+                error=("omstarten avbröt animeringen innan några klipp "
+                       "skapades — ↻ ta om scenernas klipp (✎ Redigera) "
+                       "och bygg sedan ihop"))
         return
     # Direct-scene shared clips live OUTSIDE the job (no VideoVariant), so
     # resume_pending never revives them — re-render any that didn't finish.
@@ -2102,12 +2121,23 @@ async def _resume_reanimating(re_id: str, state: dict) -> None:
         _update(re_id, status="failed", error="underlying job lost across restart")
         return
     # Direct-scene redos live OUTSIDE the job (no VideoVariant), so
-    # resume_pending never revives them — re-render unfinished ones, exactly
-    # like _resume_animating (_do_reanimate nulls shared_clip_path at redo
-    # start, so `not shared_clip_path` identifies interrupted redos). Tasks
-    # are anchored in _RESUME_TASKS so an early return can't GC them.
+    # resume_pending never revives them — re-render unfinished ones. Scoped
+    # to reanimate_idxs (the same scoping the keep-dirty check below uses):
+    # `not shared_clip_path` ALONE also matches direct scenes the redo never
+    # touched — one just added post-gate (possibly with an EMPTY motion
+    # prompt the user hadn't finished) or one whose original animate failed —
+    # and reviving those submits an unrequested paid clip (no billing
+    # without a click, re-audit 2026-07-03). _do_reanimate persists
+    # reanimate_idxs BEFORE awaiting clip tasks and nulls shared_clip_path
+    # only for direct scenes IN the redo, so idx-scoping identifies
+    # interrupted redos exactly. Tasks are anchored in _RESUME_TASKS so an
+    # early return can't GC them.
+    scenes_now = state.get("scenes") or []
     direct_tasks = []
-    for e in (state.get("scenes") or []):
+    for i in (state.get("reanimate_idxs") or []):
+        if not (0 <= i < len(scenes_now)):
+            continue
+        e = scenes_now[i]
         if e.get("is_direct") and not e.get("shared_clip_path"):
             t = asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
             _RESUME_TASKS.add(t)

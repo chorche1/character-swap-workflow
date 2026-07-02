@@ -503,6 +503,23 @@ async def _generate_one_variant(
         if all(v.status == VariantStatus.FAILED for v in jc.images):
             await asyncio.to_thread(_persist, job, jc, status=CharStatus.FAILED,
                                     error="all variants failed")
+        elif (jc.status == CharStatus.GENERATING
+              and not any(v.status == VariantStatus.GENERATING
+                          for v in jc.images)):
+            # Failure-path mirror of the success-path restore below (re-audit
+            # 2026-07-03): regen_scene_variants demotes an APPROVED char (and
+            # retry_single_variant demotes AWAITING_APPROVAL) to GENERATING
+            # before regenerating. When the LAST in-flight variant FAILS while
+            # other scenes still hold READY variants, the all-failed guard
+            # above is false and the char sat GENERATING forever with zero
+            # in-flight work — silently dropped from Step 4 (set_movement /
+            # run_video_synthesis filter on status == APPROVED) while its
+            # green ✓ approvals still rendered. Land on an actionable status;
+            # the failed variant's red card + ↻ retry stays visible.
+            restored = (CharStatus.APPROVED
+                        if (jc.approved_variant_ids or jc.approved_variant_id)
+                        else CharStatus.AWAITING_APPROVAL)
+            await asyncio.to_thread(_persist, job, jc, status=restored)
         return
 
     variant.status = VariantStatus.READY
@@ -1944,12 +1961,17 @@ async def resume_pending(job_id: str) -> None:
                 # Restart hit the window between the ANIMATING persist and
                 # the video-placeholder persist: no rows exist to retry, so
                 # _maybe_complete_char no-ops and the char sat "animating"
-                # forever. Fail loud; the user re-submits movement (no
-                # auto-resubmit — no billing without a click).
+                # forever. Fail loud; the user re-submits (no auto-resubmit —
+                # no billing without a click). The instruction is flow-aware:
+                # "unlock movement" is a Swap-tab control that doesn't exist
+                # in the Reengineer UI (re-audit 2026-07-03) — there the
+                # recovery is the per-scene ↻ redo in ✎ edit mode.
+                fix = ("ta om scenernas klipp (✎ Redigera → ↻)"
+                       if job.from_reengineer else
+                       "lås upp movement (unlock) och skicka om")
                 _persist(job, jc, status=CharStatus.FAILED,
                          error=("avbruten av serveromstart innan videor "
-                                "skapades — lås upp movement (unlock) och "
-                                "skicka om"))
+                                f"skapades — {fix}"))
             else:
                 _maybe_complete_char(job, jc)
 

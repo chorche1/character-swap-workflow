@@ -565,6 +565,20 @@ def trim_silences(input_path: Path, output_path: Path, *,
     with record(phase="editor_trim", model="ffmpeg-silencedetect",
                 character="editor", job_id=job_id) as entry:
         duration = _probe_duration(input_path)
+        # Audio-less clips (Higgsfield Supercomputer) have no silences to
+        # trim — and the filter_complex below maps [0:a], which ffmpeg
+        # rejects with "matches no streams" on a video-only input. Pass
+        # through untouched, mirroring trim_leading_silence (audio-less
+        # inputs are a supported class end-to-end).
+        has_audio = _has_audio_stream(input_path)
+        entry["has_audio"] = has_audio
+        if not has_audio:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(input_path, output_path)
+            entry["n_cuts"] = 0
+            return {"original_duration": round(duration, 2),
+                    "trimmed_duration": round(duration, 2),
+                    "n_cuts": 0, "saved_secs": 0.0}
         silences = _detect_silences(input_path, threshold_db, min_silence_secs)
         keep = _invert_silences(silences, duration, pad_secs)
         entry["n_silences"] = len(silences)

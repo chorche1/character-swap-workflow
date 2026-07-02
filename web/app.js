@@ -1318,6 +1318,11 @@ function studio() {
       // value → the "spegelvänder…" spinner hangs forever even though the
       // mirrored videos finished. (Hugo 2026-06-27.)
       if (r.repurposing) return true;
+      // Queued dirty-marks (deferred during a video phase, or requeued after
+      // a failed PATCH) are flushed by refreshReengineer — which only runs
+      // while the run counts as active. Without this, a mark requeued on an
+      // idle run would never retry and the edited scene ships unbadged.
+      if ((this._reDirtyPending[r.re_id] || []).length) return true;
       // awaiting_approval / finished runs count as active while edit-mode
       // work is in flight (per-slot retries, added-scene images, clip redos)
       // — otherwise the poll filter drops the run and nothing repaints.
@@ -1588,6 +1593,10 @@ function studio() {
       if (!q.includes(idx)) {
         this._reDirtyPending = { ...this._reDirtyPending, [reId]: [...q, idx] };
       }
+      // Restart the poll loop if it already stopped (idle run): the flush
+      // lives in refreshReengineer, and _reengineerIsActive counts pending
+      // marks — but nothing else would start the loop again.
+      this._startReengineerPolling();
     },
 
     async reengineerUploadEndFrame(run, sc, ev) {
@@ -1965,6 +1974,11 @@ function studio() {
         }
         this.repurposeModal.open = false;
         this.notifyInfo('Repurpose startad — spegelvänder reel:en…');
+      } catch (e) {
+        // fetch() THROWS on a dropped connection (mobile/Tailscale) — without
+        // this catch the submit was a silent no-op: spinner stops, no run,
+        // no error (same class as the 2026-06-19 upload-submit bug).
+        this._submitError('Repurpose', e);
       } finally {
         this.repurposeModal.busy = false;
       }
