@@ -280,6 +280,10 @@ FFMPEG_CRF=16                     # every local re-encode in video_edit.py (trim
 FFMPEG_PRESET=medium              # concat, time-stretch, ASS captions). Was hardcoded
                                   # veryfast/CRF-20 → measured ~2-3 Mbps off a 21 Mbps
                                   # Kling master at the FIRST hop (2026-06-12 audit).
+FFMPEG_TIMEOUT_SECS=3600          # hard kill+fail ceiling on EVERY video_edit._run
+                                  # ffmpeg call (2026-07-02): a wedged encode (e.g. an
+                                  # unbounded lavfi source) must fail loudly, never
+                                  # hang the pipeline while the output fills the disk.
 REMOTION_CRF=16                   # Remotion caption render quality (was Remotion
 REMOTION_JPEG_QUALITY=100         # defaults: CRF ~23 + JPEG-80 frame captures).
                                   # Both are part of the render-cache SHA key.

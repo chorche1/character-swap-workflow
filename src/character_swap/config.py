@@ -200,6 +200,12 @@ class Settings(BaseSettings):
     # transparent per generation at acceptable encode speed (2026-06-12).
     ffmpeg_crf: int = Field(default=16, validation_alias="FFMPEG_CRF")
     ffmpeg_preset: str = Field(default="medium", validation_alias="FFMPEG_PRESET")
+    # Hard ceiling on every local ffmpeg invocation (video_edit._run). The
+    # longest legitimate encode (multi-scene Step-6 concat at CRF 16) is
+    # minutes, not hours — anything past this is a wedged process (e.g. an
+    # unbounded lavfi source) and must be killed + failed loudly rather than
+    # hang the pipeline and grow the output file until the disk fills.
+    ffmpeg_timeout_secs: int = Field(default=3600, validation_alias="FFMPEG_TIMEOUT_SECS")
     # Remotion caption-render quality. Remotion's defaults (CRF 23-ish for
     # h264 + JPEG-80 frame captures) were the last lossy hop — measured
     # ~3.2 Mbps finals. JPEG 100 + CRF 16 makes the caption pass nearly

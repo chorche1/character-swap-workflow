@@ -192,15 +192,31 @@ def _resolve_font_for_weight(font_name: str, font_weight: int | None) -> str:
     return font_name
 
 
-def _run(args: list[str]) -> str:
+def _run(args: list[str], *, timeout_secs: float | None = None) -> str:
     """Run ffmpeg with the given args. Returns combined stdout+stderr.
-    Raises CalledProcessError with output on failure."""
-    proc = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    Raises RuntimeError with the stderr tail on failure or timeout.
+
+    Every invocation is bounded by FFMPEG_TIMEOUT_SECS (default 1 h) — a
+    wedged encode (e.g. an unbounded lavfi source) must kill the child and
+    fail loudly, never hang the calling pipeline forever."""
+    limit = timeout_secs if timeout_secs is not None else settings.ffmpeg_timeout_secs
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=limit,
+        )
+    except subprocess.TimeoutExpired as exc:
+        tail = exc.stderr or b""
+        if isinstance(tail, bytes):
+            tail = tail.decode("utf-8", "replace")
+        raise RuntimeError(
+            f"ffmpeg timed out after {limit:.0f}s and was killed:\n"
+            f"cmd: {shlex.join(args)}\n"
+            f"stderr: {tail[-2000:]}"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg failed (exit {proc.returncode}):\n"
@@ -2060,11 +2076,26 @@ def concat_videos(video_paths: list[Path], output_path: Path,
         if any_audio:
             # Pick the audio source for this clip: real audio from the clip
             # itself if it has one, else the synth-silent anullsrc input.
-            audio_src_idx = i if has_audio_flags[i] else synth_indices[i]
-            parts.append(
-                f"[{audio_src_idx}:a]aresample=44100,aformat=channel_layouts=stereo,"
-                f"asetpts=PTS-STARTPTS[a{i}]"
-            )
+            if has_audio_flags[i]:
+                parts.append(
+                    f"[{i}:a]aresample=44100,aformat=channel_layouts=stereo,"
+                    f"asetpts=PTS-STARTPTS[a{i}]"
+                )
+            else:
+                # anullsrc is an INFINITE stream — without a bound the concat
+                # filter's audio leg never reaches EOF and ffmpeg encodes
+                # silence forever (same fix as assemble_clips' synth input).
+                dur = _probe_duration(video_paths[i])
+                if dur <= 0:
+                    raise RuntimeError(
+                        f"concat_videos: could not probe duration of audio-less "
+                        f"clip {video_paths[i]} to bound its silent audio track"
+                    )
+                parts.append(
+                    f"[{synth_indices[i]}:a]atrim=start=0:end={dur:.3f},"
+                    f"asetpts=PTS-STARTPTS,aresample=44100,"
+                    f"aformat=channel_layouts=stereo[a{i}]"
+                )
 
     if any_audio:
         labels = "".join(f"[v{i}][a{i}]" for i in range(len(video_paths)))
