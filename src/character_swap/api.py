@@ -6990,6 +6990,21 @@ async def _ensure_drive_authorized() -> None:
         raise HTTPException(502, str(e)) from e
 
 
+def _raise_if_drive_unauthorized(results: list) -> None:
+    """A per-item DriveNotAuthorized — auth lost AFTER the preflight, mid-batch
+    (a revoked/expired-unrefreshable token during the multi-minute uploads) —
+    surfaces from _drive_push_file as HTTPException(409) and is captured by
+    gather(return_exceptions=True). Re-raise it as a batch-level 409 so the
+    frontend runs the one-time bootstrap and retries the WHOLE batch (a re-push
+    just overwrites) — the same self-heal the single push gets. Without this a
+    200 with the 409 folded into `failed` would leave the user stuck with a
+    plain error and no re-auth prompt. (_drive_push_file's only 409 is the auth
+    case — missing files are 404, upload errors 502 — so 409 ⇒ re-auth.)"""
+    for res in results:
+        if isinstance(res, HTTPException) and res.status_code == 409:
+            raise HTTPException(409, str(res.detail))
+
+
 async def _drive_push_file(source: Path, subfolders: list[str],
                            filename: str,
                            prior_file_id: str | None = None) -> dict:
@@ -7185,9 +7200,12 @@ async def job_drive_push_all(job_id: str, body: DrivePushBody) -> dict:
     results = await asyncio.gather(
         *[_one(cid, jc, p, n) for (cid, jc, p, n) in targets],
         return_exceptions=True)
+    _raise_if_drive_unauthorized(results)
     pushed: dict[str, dict] = {}
     failed: dict[str, str] = {}
-    for (cid, jc, _p, _n), res in zip(targets, results):
+    names: dict[str, str] = {}     # cid → display name, for a legible toast
+    for (cid, jc, _p, char_name), res in zip(targets, results):
+        names[cid] = char_name
         if isinstance(res, BaseException):
             failed[cid] = _exc_detail(res)
         else:
@@ -7196,7 +7214,7 @@ async def job_drive_push_all(job_id: str, body: DrivePushBody) -> dict:
     if pushed:
         s.update_job(job)          # one flush for every receipt
     return {"ok": not failed, "variant": body.variant,
-            "pushed": pushed, "failed": failed}
+            "pushed": pushed, "failed": failed, "names": names}
 
 
 @app.post("/api/reengineer/{re_id}/drive_push_all")
@@ -7251,9 +7269,12 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     results = await asyncio.gather(
         *[_one(p, n, pr) for (_cid, p, n, pr) in targets],
         return_exceptions=True)
+    _raise_if_drive_unauthorized(results)
     pushed: dict[str, dict] = {}
     failed: dict[str, str] = {}
-    for (cid, _p, _n, _pr), res in zip(targets, results):
+    names: dict[str, str] = {}     # cid → display name, for a legible toast
+    for (cid, _p, char_name, _pr), res in zip(targets, results):
+        names[cid] = char_name
         if isinstance(res, BaseException):
             failed[cid] = _exc_detail(res)
         else:
@@ -7279,7 +7300,8 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
                 receipt["persisted"] = False
             persisted = False
     return {"ok": not failed, "variant": body.variant,
-            "pushed": pushed, "failed": failed, "persisted": persisted}
+            "pushed": pushed, "failed": failed, "persisted": persisted,
+            "names": names}
 
 
 @app.post("/api/editor/{edit_id}/drive_export")

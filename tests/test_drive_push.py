@@ -563,9 +563,32 @@ def test_job_drive_push_all_partial_failure_keeps_the_rest(monkeypatch, tmp_path
     assert set(out["pushed"]) == {"c1"}
     assert set(out["failed"]) == {"c2"}
     assert "boom" in out["failed"]["c2"]
+    # Response carries display names so the toast can say "Ravi", not "c2".
+    assert out["names"] == {"c1": "Chang", "c2": "Ravi"}
     assert job.characters["c1"].drive_pushes.get("final")
     assert "final" not in job.characters["c2"].drive_pushes   # no false receipt
     assert len(store.updated) == 1                            # persisted the win
+
+
+def test_job_drive_push_all_reraises_409_on_midbatch_auth_loss(monkeypatch, tmp_path):
+    # Auth passes the preflight but a per-file upload loses it (token revoked
+    # mid-batch) → the batch must surface a TOP-LEVEL 409 so the UI re-auths
+    # and retries, not a 200 with the 409 buried in `failed`.
+    job = _two_char_job(tmp_path)
+    monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
+    monkeypatch.setattr(google_drive, "ensure_folder_path", lambda names: "leaf")
+
+    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
+        raise google_drive.DriveNotAuthorized("write access is not authorized")
+
+    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.job_drive_push_all("j1", api.DrivePushBody(variant="final")))
+    assert ei.value.status_code == 409
+    assert "authoriz" in str(ei.value.detail).lower()
+    # Nothing persisted — the retry (after bootstrap) does the real work.
+    assert not job.characters["c1"].drive_pushes
 
 
 def test_reengineer_drive_push_all_pushes_every_final(monkeypatch, tmp_path):

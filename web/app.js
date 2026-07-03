@@ -4027,13 +4027,19 @@ function studio() {
         this.drivePushState = patch;
         const nOk = Object.keys(pushed).length;
         const nFail = Object.keys(failed).length;
+        const nameFor = (c) => (data.names && data.names[c]) || c;
         if (nFail) {
           this.notifyError(`Drive: ${nOk} uppladdade, ${nFail} misslyckades — ` +
-            Object.entries(failed).map(([c, m]) => `${c}: ${m}`).join('; '));
-        } else if (data.persisted === false) {
-          this.notify('info', `Laddade upp ${nOk} till Drive ✓ — men kvitton kunde inte sparas (körningen ändrades under uppladdningen).`);
-        } else {
+            Object.entries(failed).map(([c, m]) => `${nameFor(c)}: ${m}`).join('; '));
+        } else if (nOk) {
           this.notify('info', `Laddade upp ${nOk} till Drive ✓`);
+        }
+        // Independent of the success/failure toast: warn if any receipt could
+        // not be persisted, so the user knows those ✓ marks may vanish on
+        // reload (a run rebuilt/deleted mid-upload). "några" = some, not all —
+        // the per-card ✓ still reflects each receipt correctly.
+        if (data.persisted === false) {
+          this.notify('info', 'Obs: några kvitton kunde inte sparas (körningen ändrades under uppladdningen) — ✓ kan försvinna vid omladdning.');
         }
         return data;
       } catch (e) {
