@@ -167,7 +167,8 @@ def test_job_char_drive_push_persists_receipt(monkeypatch, tmp_path):
         "j1", "c1", api.DrivePushBody(variant="final")))
 
     assert calls["folders"] == ["Character Swap", "Chang"]
-    assert calls["filename"] == "Honey run — Chang [j1].mp4"
+    # Character name FIRST (Hugo 2026-07-03) so Drive sorts by character.
+    assert calls["filename"] == "Chang — Honey run [j1].mp4"
     assert receipt["url"] == "https://drive/d1"
     assert job.characters["c1"].drive_pushes["final"]["file_id"] == "d1"
     assert store.updated                       # persisted
@@ -223,7 +224,8 @@ def test_reengineer_drive_push_uses_char_folder(monkeypatch, tmp_path):
         "re1", "c1", api.DrivePushBody(variant="final")))
 
     assert calls["folders"] == ["Character Swap", "Chang"]
-    assert calls["filename"] == "Reengineer 6 bilder — Chang [re1].mp4"
+    # Character name FIRST (Hugo 2026-07-03).
+    assert calls["filename"] == "Chang — Reengineer 6 bilder [re1].mp4"
     assert state["finals"]["c1"]["drive"]["url"] == receipt["url"]
     assert saved                                # state persisted
 
@@ -440,4 +442,183 @@ def test_reengineer_drive_push_falls_back_to_job_title(monkeypatch, tmp_path):
 
     _run(api.reengineer_char_drive_push(
         "re1", "c1", api.DrivePushBody(variant="final")))
-    assert calls["filename"] == "Reengineer 6 bilder — Chang [re1].mp4"
+    assert calls["filename"] == "Chang — Reengineer 6 bilder [re1].mp4"
+
+
+# ------------------------------------------------- push-ALL batch endpoints
+# One click pushes every finished final (or repurpose) of a run to Drive, so
+# the user never clicks the per-video button character by character (Hugo
+# 2026-07-03). Per-character resilient; auth failure 409s the whole batch.
+
+def _patch_drive_multi(monkeypatch):
+    """Like _patch_drive but records EVERY upload (batch pushes ≥2)."""
+    calls = {"uploads": [], "folders": []}
+
+    def fake_ensure(names):
+        calls["folders"].append(list(names))
+        return "leaf-" + (names[-1] if names else "root")
+
+    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
+        calls["uploads"].append({
+            "file": Path(source), "filename": drive_filename,
+            "folder_id": folder_id, "prior_file_id": file_id})
+        return {"id": "d-" + drive_filename, "name": drive_filename,
+                "webViewLink": "https://drive/" + drive_filename}
+
+    monkeypatch.setattr(google_drive, "ensure_folder_path", fake_ensure)
+    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+    return calls
+
+
+def _two_char_job(tmp_path) -> Job:
+    f1 = tmp_path / "c1.mp4"; f1.write_bytes(b"a")
+    f2 = tmp_path / "c2.mp4"; f2.write_bytes(b"b")
+    return Job(
+        job_id="j1", title="Honey run", scene_id="s1", scene_ids=["s1"],
+        scene_image_path="scene.png",
+        characters={
+            "c1": JobCharacter(char_id="c1", name="Chang",
+                               source_image_path="x.png",
+                               compiled_video_path=str(f1),
+                               compile_status="done"),
+            "c2": JobCharacter(char_id="c2", name="Ravi",
+                               source_image_path="y.png",
+                               compiled_video_path=str(f2),
+                               compile_status="done"),
+        })
+
+
+def test_job_drive_push_all_pushes_every_final(monkeypatch, tmp_path):
+    job = _two_char_job(tmp_path)
+    store = _FakeStore(job)
+    monkeypatch.setattr(api, "store", lambda: store)
+    calls = _patch_drive_multi(monkeypatch)
+
+    out = _run(api.job_drive_push_all("j1", api.DrivePushBody(variant="final")))
+
+    assert out["ok"] is True and not out["failed"]
+    assert set(out["pushed"]) == {"c1", "c2"}
+    names = sorted(u["filename"] for u in calls["uploads"])
+    # Char-name-first for every file, one per character.
+    assert names == ["Chang — Honey run [j1].mp4", "Ravi — Honey run [j1].mp4"]
+    # Each char folder created; receipts persisted with a SINGLE job flush.
+    assert ["Character Swap", "Chang"] in calls["folders"]
+    assert ["Character Swap", "Ravi"] in calls["folders"]
+    assert job.characters["c1"].drive_pushes["final"]["file_id"]
+    assert job.characters["c2"].drive_pushes["final"]["file_id"]
+    assert len(store.updated) == 1
+
+
+def test_job_drive_push_all_409_when_none_ready(monkeypatch, tmp_path):
+    job = _two_char_job(tmp_path)
+    for jc in job.characters.values():
+        jc.compile_status = "compiling"
+    monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
+    _patch_drive_multi(monkeypatch)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.job_drive_push_all("j1", api.DrivePushBody(variant="final")))
+    assert ei.value.status_code == 409
+
+
+def test_job_drive_push_all_409_when_unauthorized(monkeypatch, tmp_path):
+    job = _two_char_job(tmp_path)
+    monkeypatch.setattr(api, "store", lambda: _FakeStore(job))
+
+    def raise_unauth(names):
+        raise google_drive.DriveNotAuthorized("authorize first")
+
+    monkeypatch.setattr(google_drive, "ensure_folder_path", raise_unauth)
+    monkeypatch.setattr(google_drive, "upload_or_replace",
+                        lambda *a, **k: pytest.fail("upload before auth check"))
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.job_drive_push_all("j1", api.DrivePushBody(variant="final")))
+    assert ei.value.status_code == 409
+    assert "authorize" in str(ei.value.detail)
+
+
+def test_job_drive_push_all_partial_failure_keeps_the_rest(monkeypatch, tmp_path):
+    # One character's upload errors mid-batch — it lands in `failed`, but the
+    # others still push (return_exceptions=True, per-item resilient) and only
+    # the successes get a persisted receipt.
+    job = _two_char_job(tmp_path)
+    store = _FakeStore(job)
+    monkeypatch.setattr(api, "store", lambda: store)
+
+    monkeypatch.setattr(google_drive, "ensure_folder_path",
+                        lambda names: "leaf")
+
+    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
+        if "Ravi" in drive_filename:
+            raise RuntimeError("drive 500 boom")     # c2 upload fails
+        return {"id": "d1", "name": drive_filename,
+                "webViewLink": "https://drive/d1"}
+
+    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+
+    out = _run(api.job_drive_push_all("j1", api.DrivePushBody(variant="final")))
+
+    assert out["ok"] is False
+    assert set(out["pushed"]) == {"c1"}
+    assert set(out["failed"]) == {"c2"}
+    assert "boom" in out["failed"]["c2"]
+    assert job.characters["c1"].drive_pushes.get("final")
+    assert "final" not in job.characters["c2"].drive_pushes   # no false receipt
+    assert len(store.updated) == 1                            # persisted the win
+
+
+def test_reengineer_drive_push_all_pushes_every_final(monkeypatch, tmp_path):
+    from character_swap import reengineer as reengineer_mod
+    f1 = tmp_path / "final_c1.mp4"; f1.write_bytes(b"a")
+    f2 = tmp_path / "final_c2.mp4"; f2.write_bytes(b"b")
+    state = {"re_id": "re1", "title": "Reengineer 6 bilder", "status": "done",
+             "finals": {
+                 "c1": {"status": "done", "final_path": str(f1)},
+                 "c2": {"status": "done", "final_path": str(f2)}}}
+    saved = []
+    monkeypatch.setattr(reengineer_mod, "load_state",
+                        lambda re_id: state if re_id == "re1" else None)
+    monkeypatch.setattr(reengineer_mod, "save_state",
+                        lambda st: saved.append(st))
+
+    class _C1:
+        name = "Chang"
+
+    class _C2:
+        name = "Ravi"
+
+    monkeypatch.setattr(api, "store",
+                        lambda: _FakeStore(chars={"c1": _C1(), "c2": _C2()}))
+    calls = _patch_drive_multi(monkeypatch)
+
+    out = _run(api.reengineer_drive_push_all(
+        "re1", api.DrivePushBody(variant="final")))
+
+    assert out["ok"] is True and out["persisted"] is True
+    assert set(out["pushed"]) == {"c1", "c2"}
+    names = sorted(u["filename"] for u in calls["uploads"])
+    assert names == ["Chang — Reengineer 6 bilder [re1].mp4",
+                     "Ravi — Reengineer 6 bilder [re1].mp4"]
+    # Both receipts persisted in ONE reload+save.
+    assert len(saved) == 1
+    assert state["finals"]["c1"]["drive"]["file_id"]
+    assert state["finals"]["c2"]["drive"]["file_id"]
+
+
+def test_reengineer_drive_push_all_409_while_assembling(monkeypatch, tmp_path):
+    from character_swap import reengineer as reengineer_mod
+    f1 = tmp_path / "final_c1.mp4"; f1.write_bytes(b"a")
+    state = {"re_id": "re1", "title": "T", "status": "assembling",
+             "finals": {"c1": {"status": "done", "final_path": str(f1)}}}
+    monkeypatch.setattr(reengineer_mod, "load_state", lambda re_id: state)
+    monkeypatch.setattr(reengineer_mod, "save_state",
+                        lambda st: pytest.fail("must not save during build"))
+    monkeypatch.setattr(api, "store", lambda: _FakeStore())
+    monkeypatch.setattr(google_drive, "upload_or_replace",
+                        lambda *a, **k: pytest.fail("upload during build"))
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        _run(api.reengineer_drive_push_all(
+            "re1", api.DrivePushBody(variant="final")))
+    assert ei.value.status_code == 409

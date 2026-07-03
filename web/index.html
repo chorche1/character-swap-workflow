@@ -946,6 +946,20 @@
         </button>
       </div>
 
+      <!-- Push ALL finished finals to Drive at once (Hugo 2026-07-03) — shown
+           once ≥2 characters have a compiled final, so you don't click the
+           per-video ⬆ Drive button character by character. -->
+      <div x-show="driveSwapReadyCount('final') >= 2" class="mt-3">
+        <button class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
+                :disabled="driveAllBusy(job.job_id, 'final')"
+                title="Ladda upp ALLA färdiga finalvideor i den här körningen till Google Drive → Character Swap/<karaktär>/ (skriver över samma filer vid om-push)"
+                @click="drivePushAll(`/api/jobs/${job.job_id}/drive_push_all`, job.job_id, 'final')">
+          <span x-show="!driveAllBusy(job.job_id, 'final')"
+                x-text="`⬆ Pusha alla till Drive (${driveSwapReadyCount('final')})`"></span>
+          <span x-show="driveAllBusy(job.job_id, 'final')" class="animate-pulse">⏳ laddar upp alla…</span>
+        </button>
+      </div>
+
       <!-- Per-character compiled-video cards. Live status updates from WS. -->
       <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-4">
         <template x-for="(jc, cid) in compilableCharacters()" :key="'cmp-'+cid">
@@ -1048,7 +1062,18 @@
            One card per character that has been repurposed; mirror is applied
            server-side, captions stay upright. -->
       <div x-show="Object.values(compilableCharacters()).some(jc => jc.repurpose_status)" class="mt-4">
-        <div class="text-sm font-medium mb-2 text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (mirrored)</div>
+        <div class="flex items-center justify-between gap-2 mb-2">
+          <div class="text-sm font-medium text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (mirrored)</div>
+          <button x-show="driveSwapReadyCount('repurpose') >= 2"
+                  class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
+                  :disabled="driveAllBusy(job.job_id, 'repurpose')"
+                  title="Ladda upp ALLA spegelvända kopior i den här körningen till Google Drive → Character Swap/<karaktär>/"
+                  @click="drivePushAll(`/api/jobs/${job.job_id}/drive_push_all`, job.job_id, 'repurpose')">
+            <span x-show="!driveAllBusy(job.job_id, 'repurpose')"
+                  x-text="`⬆ Pusha alla till Drive (${driveSwapReadyCount('repurpose')})`"></span>
+            <span x-show="driveAllBusy(job.job_id, 'repurpose')" class="animate-pulse">⏳ laddar upp alla…</span>
+          </button>
+        </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
           <template x-for="(jc, cid) in compilableCharacters()" :key="'rp-'+cid">
             <div x-show="jc.repurpose_status" class="card border border-fuchsia-200 dark:border-fuchsia-900 rounded-xl overflow-hidden flex flex-col">
@@ -2250,23 +2275,36 @@
           <div x-show="Object.keys(r.finals || {}).length" class="border-t border-neutral-100 dark:border-neutral-900 pt-3">
             <div class="flex items-center justify-between mb-2">
               <div class="text-sm font-medium">Final videos</div>
-              <!-- Repurpose (Hugo 2026-06-27): mirror-flip every final (text stays
-                   upright) into a NEW set with its own edit settings — for
-                   cross-posting the same reel as fresh content. -->
-              <!-- :disabled MUST coerce to a real boolean. `repurposing` is a
-                   client-only field never sent by the server, so on every run
-                   object the KEY IS MISSING (not `false`). Alpine's boolean
-                   :disabled binding inside x-for treats a missing property as
-                   truthy → the button renders permanently disabled and clicks
-                   are dead no-ops. `!!` makes it an explicit false. (Hugo
-                   2026-06-27: this was why "inget händer" on Repurpose.) -->
-              <button class="text-xs px-2.5 py-1 rounded-lg border border-fuchsia-300 dark:border-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950 disabled:opacity-40"
-                      :disabled="!!r.repurposing"
-                      title="Skapa en spegelvänd kopia av alla finalvideor (texten förblir rättvänd) — välj nya edit-inställningar"
-                      @click="openRepurposeModal('reengineer', r)">
-                <span x-show="!r.repurposing">🔁 Repurpose</span>
-                <span x-show="r.repurposing" class="animate-pulse">spegelvänder…</span>
-              </button>
+              <div class="flex items-center gap-2">
+                <!-- Push ALL finished finals to Drive at once (Hugo 2026-07-03).
+                     Shown once ≥2 finals are done, so you don't push per video. -->
+                <button x-show="driveReReadyCount(r, 'final') >= 2"
+                        class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
+                        :disabled="driveAllBusy(r.re_id, 'final')"
+                        title="Ladda upp ALLA färdiga finalvideor i den här körningen till Google Drive → Character Swap/<karaktär>/"
+                        @click="drivePushAll(`/api/reengineer/${r.re_id}/drive_push_all`, r.re_id, 'final')">
+                  <span x-show="!driveAllBusy(r.re_id, 'final')"
+                        x-text="`⬆ Pusha alla till Drive (${driveReReadyCount(r, 'final')})`"></span>
+                  <span x-show="driveAllBusy(r.re_id, 'final')" class="animate-pulse">⏳ laddar upp alla…</span>
+                </button>
+                <!-- Repurpose (Hugo 2026-06-27): mirror-flip every final (text stays
+                     upright) into a NEW set with its own edit settings — for
+                     cross-posting the same reel as fresh content. -->
+                <!-- :disabled MUST coerce to a real boolean. `repurposing` is a
+                     client-only field never sent by the server, so on every run
+                     object the KEY IS MISSING (not `false`). Alpine's boolean
+                     :disabled binding inside x-for treats a missing property as
+                     truthy → the button renders permanently disabled and clicks
+                     are dead no-ops. `!!` makes it an explicit false. (Hugo
+                     2026-06-27: this was why "inget händer" on Repurpose.) -->
+                <button class="text-xs px-2.5 py-1 rounded-lg border border-fuchsia-300 dark:border-fuchsia-800 text-fuchsia-700 dark:text-fuchsia-300 hover:bg-fuchsia-50 dark:hover:bg-fuchsia-950 disabled:opacity-40"
+                        :disabled="!!r.repurposing"
+                        title="Skapa en spegelvänd kopia av alla finalvideor (texten förblir rättvänd) — välj nya edit-inställningar"
+                        @click="openRepurposeModal('reengineer', r)">
+                  <span x-show="!r.repurposing">🔁 Repurpose</span>
+                  <span x-show="r.repurposing" class="animate-pulse">spegelvänder…</span>
+                </button>
+              </div>
             </div>
             <div class="flex gap-4 flex-wrap">
               <template x-for="[cid, f] of Object.entries(r.finals || {})" :key="r.re_id+'-f-'+cid">
@@ -2305,7 +2343,18 @@
 
             <!-- Repurposed (mirror-flipped) variants, directly under the finals -->
             <div x-show="Object.keys(r.repurposed || {}).length" class="mt-3">
-              <div class="text-xs font-medium mb-2 text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (spegelvänd)</div>
+              <div class="flex items-center justify-between gap-2 mb-2">
+                <div class="text-xs font-medium text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (spegelvänd)</div>
+                <button x-show="driveReReadyCount(r, 'repurpose') >= 2"
+                        class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
+                        :disabled="driveAllBusy(r.re_id, 'repurpose')"
+                        title="Ladda upp ALLA spegelvända kopior i den här körningen till Google Drive → Character Swap/<karaktär>/"
+                        @click="drivePushAll(`/api/reengineer/${r.re_id}/drive_push_all`, r.re_id, 'repurpose')">
+                  <span x-show="!driveAllBusy(r.re_id, 'repurpose')"
+                        x-text="`⬆ Pusha alla till Drive (${driveReReadyCount(r, 'repurpose')})`"></span>
+                  <span x-show="driveAllBusy(r.re_id, 'repurpose')" class="animate-pulse">⏳ laddar upp alla…</span>
+                </button>
+              </div>
               <div class="flex gap-4 flex-wrap">
                 <template x-for="[cid, f] of Object.entries(r.repurposed || {})" :key="r.re_id+'-rp-'+cid">
                   <div class="w-44">

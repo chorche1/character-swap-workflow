@@ -3965,6 +3965,84 @@ function studio() {
       }
     },
 
+    // ---- Push ALL finals in a run to Drive (Hugo 2026-07-03) --------------
+    // One click uploads every finished final (or every repurpose) of a run,
+    // instead of clicking the per-video button N times. The batch key drives
+    // the button's own spinner; each returned receipt is fanned out into the
+    // SAME per-character drivePushState keys the individual buttons read, so
+    // every card flips to "✓ öppna" together.
+    driveAllBusy(idPrefix, variant) {
+      return this.driveBusy(idPrefix + ':__all__:' + variant);
+    },
+    // Count of ready finals/repurposes in the currently-open Swap job.
+    driveSwapReadyCount(variant) {
+      const chars = this.compilableCharacters();
+      return Object.values(chars || {}).filter(jc =>
+        variant === 'final'
+          ? (jc.compile_status === 'done' && jc.compiled_video_url)
+          : (jc.repurpose_status === 'done' && jc.repurposed_video_url)
+      ).length;
+    },
+    // Count of ready finals/repurposes in a Reengineer run object.
+    driveReReadyCount(r, variant) {
+      const m = (variant === 'final' ? r.finals : r.repurposed) || {};
+      return Object.values(m).filter(f => f.status === 'done' && f.final_url).length;
+    },
+    async drivePushAll(url, idPrefix, variant) {
+      const batchKey = idPrefix + ':__all__:' + variant;
+      if (this.driveBusy(batchKey)) return;
+      this.drivePushState = { ...this.drivePushState, [batchKey]: { uploading: true } };
+      const post = () => fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variant }),
+      });
+      const errOf = async (r) => {
+        const j = await r.json().catch(() => ({}));
+        return j.detail || j.error || `HTTP ${r.status}`;
+      };
+      try {
+        let r = await post();
+        if (r.status === 409) {
+          const detail = await errOf(r.clone ? r.clone() : r);
+          if (/authoriz|credentials/i.test(detail)) {
+            // One-time drive.file OAuth, then retry the whole batch once.
+            this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
+            const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
+            if (!b.ok) throw new Error(await errOf(b));
+            r = await post();
+          } else {
+            throw new Error(detail);   // e.g. "no finished videos" / "bygget pågår"
+          }
+        }
+        if (!r.ok) throw new Error(await errOf(r));
+        const data = await r.json();
+        const pushed = data.pushed || {};
+        const failed = data.failed || {};
+        // Fan each receipt into the per-character key so its card shows ✓.
+        const patch = { ...this.drivePushState, [batchKey]: { uploading: false } };
+        for (const cid of Object.keys(pushed)) {
+          patch[idPrefix + ':' + cid + ':' + variant] = { uploading: false, receipt: pushed[cid] };
+        }
+        this.drivePushState = patch;
+        const nOk = Object.keys(pushed).length;
+        const nFail = Object.keys(failed).length;
+        if (nFail) {
+          this.notifyError(`Drive: ${nOk} uppladdade, ${nFail} misslyckades — ` +
+            Object.entries(failed).map(([c, m]) => `${c}: ${m}`).join('; '));
+        } else if (data.persisted === false) {
+          this.notify('info', `Laddade upp ${nOk} till Drive ✓ — men kvitton kunde inte sparas (körningen ändrades under uppladdningen).`);
+        } else {
+          this.notify('info', `Laddade upp ${nOk} till Drive ✓`);
+        }
+        return data;
+      } catch (e) {
+        this.drivePushState = { ...this.drivePushState, [batchKey]: { uploading: false } };
+        this.notifyError('Drive-push (alla) misslyckades: ' + (e.message || e));
+        return null;
+      }
+    },
+
     async bootstrapDriveWrite() {
       try {
         const r = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });

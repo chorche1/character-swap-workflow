@@ -6956,6 +6956,40 @@ def _drive_safe_name(name: str) -> str:
     return (name or "").replace("/", "_").replace("\\", "_").strip() or "video"
 
 
+def _drive_final_name(char_name: str, base: str, variant: str,
+                      run_id: str) -> str:
+    """Drive filename for a per-character final, CHARACTER NAME FIRST (Hugo
+    2026-07-03 — so the folder listing sorts by character). `base` = job/run
+    title; `run_id` keeps different runs' finals distinct and, together with
+    the persisted file_id, is the overwrite key. Single- and batch-push paths
+    share this so the two never drift apart."""
+    suffix = " — repurpose" if variant == "repurpose" else ""
+    return f"{char_name} — {base}{suffix} [{run_id}].mp4"
+
+
+def _exc_detail(exc: BaseException) -> str:
+    """HTTPException → its .detail, anything else → str(). Used to fold a
+    per-item push failure into a batch response without aborting the batch."""
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    return str(exc)
+
+
+async def _ensure_drive_authorized() -> None:
+    """Validate drive.file write auth ONCE before a batch push so an
+    unauthorized run fails LOUD with 409 (→ the UI runs the one-time bootstrap
+    and retries) instead of every file erroring individually. Also
+    find-or-creates the root folder, which the pushes need anyway."""
+    from character_swap.clients import google_drive
+    try:
+        await asyncio.to_thread(google_drive.ensure_folder_path,
+                                [DRIVE_ROOT_FOLDER])
+    except google_drive.DriveNotAuthorized as e:
+        raise HTTPException(409, str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(502, str(e)) from e
+
+
 async def _drive_push_file(source: Path, subfolders: list[str],
                            filename: str,
                            prior_file_id: str | None = None) -> dict:
@@ -7030,8 +7064,7 @@ async def job_char_drive_push(job_id: str, char_id: str,
             409, "No finished video to push — compile it first.")
     char_name = _drive_safe_name(jc.name or char_id)
     base = _drive_safe_name(job.title or "swap")
-    suffix = " — repurpose" if body.variant == "repurpose" else ""
-    filename = f"{base} — {char_name}{suffix} [{job_id}].mp4"
+    filename = _drive_final_name(char_name, base, body.variant, job_id)
     prior = (jc.drive_pushes.get(body.variant) or {}).get("file_id")
     receipt = await _drive_push_file(Path(path), [char_name], filename,
                                      prior_file_id=prior)
@@ -7081,8 +7114,7 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
         linked = store().get_job(state["job_id"])
         base_src = linked.title if linked else None
     base = _drive_safe_name(base_src or re_id)
-    suffix = " — repurpose" if body.variant == "repurpose" else ""
-    filename = f"{base} — {char_name}{suffix} [{re_id}].mp4"
+    filename = _drive_final_name(char_name, base, body.variant, re_id)
     prior = (entry.get("drive") or {}).get("file_id")
     receipt = await _drive_push_file(
         Path(entry["final_path"]), [char_name], filename,
@@ -7109,6 +7141,145 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
                            "byggdes om eller togs bort under uppladdningen — "
                            "kvittot sparades inte")
     return receipt
+
+
+@app.post("/api/jobs/{job_id}/drive_push_all")
+async def job_drive_push_all(job_id: str, body: DrivePushBody) -> dict:
+    """Push EVERY finished character final (or every repurpose) of a job to
+    Drive in ONE click — so the user never has to click per video (Hugo
+    2026-07-03). Char-name-first filenames under Character Swap/<char>/, same
+    overwrite-by-file_id semantics as the single push.
+
+    Per-character resilient: one file failing (missing on disk, upload error)
+    does NOT abort the batch — the response lists `pushed` + `failed`. A
+    missing Drive authorization is pre-flighted and fails the WHOLE call with
+    409 so the UI can bootstrap + retry (mirrors the single-push flow)."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    base = _drive_safe_name(job.title or "swap")
+    # (char_id, jc, snapshot-source path, sanitized char name) per ready final.
+    targets: list[tuple[str, JobCharacter, Path, str]] = []
+    for cid, jc in job.characters.items():
+        if body.variant == "final":
+            path, status = jc.compiled_video_path, jc.compile_status
+        else:
+            path, status = jc.repurposed_video_path, jc.repurpose_status
+        if path and status == "done" and Path(path).is_file():
+            targets.append(
+                (cid, jc, Path(path), _drive_safe_name(jc.name or cid)))
+    if not targets:
+        raise HTTPException(
+            409, "No finished videos to push — compile them first.")
+    await _ensure_drive_authorized()
+
+    async def _one(cid: str, jc: JobCharacter, path: Path, char_name: str):
+        filename = _drive_final_name(char_name, base, body.variant, job_id)
+        prior = (jc.drive_pushes.get(body.variant) or {}).get("file_id")
+        return await _drive_push_file(path, [char_name], filename,
+                                      prior_file_id=prior)
+
+    results = await asyncio.gather(
+        *[_one(cid, jc, p, n) for (cid, jc, p, n) in targets],
+        return_exceptions=True)
+    pushed: dict[str, dict] = {}
+    failed: dict[str, str] = {}
+    for (cid, jc, _p, _n), res in zip(targets, results):
+        if isinstance(res, BaseException):
+            failed[cid] = _exc_detail(res)
+        else:
+            jc.drive_pushes[body.variant] = res
+            pushed[cid] = res
+    if pushed:
+        s.update_job(job)          # one flush for every receipt
+    return {"ok": not failed, "variant": body.variant,
+            "pushed": pushed, "failed": failed}
+
+
+@app.post("/api/reengineer/{re_id}/drive_push_all")
+async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
+    """Push EVERY finished Reengineer final (or repurpose) of a run to Drive in
+    ONE click. Same per-character resilience + 409-preflight as the Swap batch;
+    all receipts are persisted in ONE reload-before-save (a rebuild or another
+    push landing during the multi-minute upload must not be clobbered)."""
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if state is None:
+        raise HTTPException(404, "Run not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    bucket = "finals" if body.variant == "final" else "repurposed"
+    # Refuse while the owning build is in flight — same guard the single push
+    # uses; a streaming upload of an in-place-overwritten file lands torn bytes.
+    if body.variant == "final":
+        building = (state.get("status") == "assembling"
+                    or re_id in runner_reengineer._ASSEMBLING)
+    else:
+        building = (bool(state.get("repurposing"))
+                    or re_id in runner_reengineer._REPURPOSING)
+    if building:
+        raise HTTPException(
+            409, "Bygget pågår för den här körningen — vänta tills det är "
+                 "klart innan du pushar till Drive.")
+    base_src = state.get("title") or state.get("name")
+    if not base_src and state.get("job_id"):
+        linked = store().get_job(state["job_id"])
+        base_src = linked.title if linked else None
+    base = _drive_safe_name(base_src or re_id)
+    # (char_id, final path, sanitized name, prior file_id) per ready final.
+    targets: list[tuple[str, Path, str, str | None]] = []
+    for cid, entry in (state.get(bucket) or {}).items():
+        fp = entry.get("final_path")
+        if entry.get("status") == "done" and fp and Path(fp).is_file():
+            char = store().get_character(cid)
+            char_name = _drive_safe_name(char.name if char else cid)
+            prior = (entry.get("drive") or {}).get("file_id")
+            targets.append((cid, Path(fp), char_name, prior))
+    if not targets:
+        raise HTTPException(
+            409, "No finished videos to push — build the finals first.")
+    await _ensure_drive_authorized()
+
+    async def _one(path: Path, char_name: str, prior: str | None):
+        filename = _drive_final_name(char_name, base, body.variant, re_id)
+        return await _drive_push_file(path, [char_name], filename,
+                                      prior_file_id=prior)
+
+    results = await asyncio.gather(
+        *[_one(p, n, pr) for (_cid, p, n, pr) in targets],
+        return_exceptions=True)
+    pushed: dict[str, dict] = {}
+    failed: dict[str, str] = {}
+    for (cid, _p, _n, _pr), res in zip(targets, results):
+        if isinstance(res, BaseException):
+            failed[cid] = _exc_detail(res)
+        else:
+            pushed[cid] = res
+    # Persist every receipt in ONE reload+save (see the single endpoint for why
+    # the pre-upload snapshot must never be written back).
+    persisted = True
+    if pushed:
+        fresh = reengineer_mod.load_state(re_id)
+        if fresh is not None:
+            changed = False
+            for cid, receipt in pushed.items():
+                if (fresh.get(bucket) or {}).get(cid):
+                    fresh[bucket][cid]["drive"] = receipt
+                    changed = True
+                else:
+                    receipt["persisted"] = False
+                    persisted = False
+            if changed:
+                reengineer_mod.save_state(fresh)
+        else:
+            for receipt in pushed.values():
+                receipt["persisted"] = False
+            persisted = False
+    return {"ok": not failed, "variant": body.variant,
+            "pushed": pushed, "failed": failed, "persisted": persisted}
 
 
 @app.post("/api/editor/{edit_id}/drive_export")
