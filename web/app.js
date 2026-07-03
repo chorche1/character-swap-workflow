@@ -300,8 +300,8 @@ function studio() {
     reAsmByRun: {},
     _reAsmDefault: (() => {
       const defaults = {
-        template: 'capcut-bluebox',     // Hugo 2026-06-16: bluebox @ 60 is
-        captionSize: 60,                // the Swap/Reengineer-final standard
+        template: 'capcut-bluebox',     // Hugo 2026-07-04: bluebox @ 56 is
+        captionSize: 56,                // the Swap/Reengineer-final standard
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
@@ -318,10 +318,14 @@ function studio() {
         playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.0)
       };
       try {
-        // v2 (2026-06-16): supersedes v1 so the new bluebox @ 60 default
-        // replaces any saved 68 from before; older reAsm prefs reset to current.
+        // v2 (2026-06-16): supersedes v1 so the new bluebox default replaces
+        // any saved 68 from before; older reAsm prefs reset to current.
         const saved = JSON.parse(localStorage.getItem('reassemble.settings.v3') || '{}');
-        return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+        const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+        // 2026-07-04: caption-size standard 60→56. Bump a saved value still on
+        // the OLD default; a deliberately-tuned size (anything ≠ 60) survives.
+        if (merged.captionSize === 60) merged.captionSize = defaults.captionSize;
+        return merged;
       } catch (_) { return defaults; }
     })(),
     compiling: false,
@@ -1836,7 +1840,7 @@ function studio() {
         template: s.template,
         // Caption size rides as a style override (works for both caption
         // engines). Clamped so a typo can't render unreadable captions.
-        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 60)) },
+        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 56)) },
         enable_trim: !!s.enableTrim,
         enable_captions: !!s.enableCaptions,
         enable_wpm_normalize: !!s.enableWpmNormalize,
@@ -1923,7 +1927,7 @@ function studio() {
         const rs = (run.editor && run.editor.repurpose_settings) || {};
         seed = {
           template: es.template || 'capcut-bluebox',
-          captionSize: (es.overrides && es.overrides.size) || 60,
+          captionSize: (es.overrides && es.overrides.size) || 56,
           enableTrim: es.enable_trim !== false,
           enableCaptions: es.enable_captions !== false,
           enableWpmNormalize: !!es.enable_wpm_normalize,
@@ -1950,7 +1954,7 @@ function studio() {
                                 id: run.re_id, busy: false };
       } else {
         // Swap Step-6 compile settings have no caption-size / speed → seed them.
-        seed = { captionSize: 60, playbackSpeed: 1.0,
+        seed = { captionSize: 56, playbackSpeed: 1.0,
                  ...this.compileFor(this.job),
                  ...this._mapStoredToReAsm(this.job && this.job.repurpose_settings) };
         this.repurposeModal = { open: true, kind: 'swap',
@@ -1966,7 +1970,7 @@ function studio() {
       const s = this.repurposeSettings || {};
       return {
         template: s.template,
-        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 60)) },
+        overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 56)) },
         enable_trim: !!s.enableTrim,
         enable_captions: !!s.enableCaptions,
         enable_wpm_normalize: !!s.enableWpmNormalize,

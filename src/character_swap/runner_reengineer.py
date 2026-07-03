@@ -1256,12 +1256,12 @@ async def assemble(re_id: str) -> None:
 # both are opt-in via the ⚙ panel. Only keys listed here are accepted from
 # state["assemble_settings"] (anything else is ignored).
 ASSEMBLE_DEFAULTS: dict = {
-    # capcut-bluebox at size 60 is the editor-wide standard (Hugo 2026-06-21 —
-    # the Step-6 compile + standalone Editor tab now default here too).
+    # capcut-bluebox at size 56 is the editor-wide standard (Hugo 2026-07-04,
+    # was 60 — the Step-6 compile + standalone Editor tab default here too).
     # The size rides as a caption style override and is user-tunable in the ⚙
     # panel. (Matches the baked capcut-bluebox template size in video_edit.py.)
     "template": "capcut-bluebox",
-    "overrides": {"size": 60},
+    "overrides": {"size": 56},
     "enable_trim": True,
     "enable_captions": True,
     "enable_wpm_normalize": False,
