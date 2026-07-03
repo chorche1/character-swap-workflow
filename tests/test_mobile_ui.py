@@ -160,6 +160,48 @@ def test_background_refresh_defers_while_typing(_=None):
     assert "_shouldDeferRefresh" not in _JS
 
 
+def test_scene_save_never_splices_mid_interaction(_=None):
+    # Hugo 2026-07-03 ("klistra in prompten och välja längden 2 gånger"): the
+    # poll was gated while typing, but reengineerSaveScene spliced the run view
+    # UNCONDITIONALLY when its PATCH returned. The textarea's blur-save fires
+    # exactly when you click the Kling-längd <select>, so the response landed
+    # while the native popup was OPEN — churning the options makes macOS Chrome
+    # dismiss the popup without committing the pick (no change event → pick #1
+    # lost → pick again). It also deleted the WHOLE draft on return, reverting
+    # fields edited while the PATCH was in flight (the pasted prompt).
+    save_fn = _JS.split("async reengineerSaveScene(run, sc) {")[1]
+    save_fn = save_fn.split("_flushReSceneDrafts(run) {")[0]
+    # 1) While a protected field is focused, the fresh view is PARKED —
+    #    the guard must run before the splice, which parks and returns.
+    assert save_fn.index("_isTypingProtectedField()") \
+        < save_fn.index("_spliceReengineerView(fresh)")
+    parked = save_fn.split("_isTypingProtectedField()")[1]
+    assert "_rePendingSaveViews" in parked.split("_spliceReengineerView")[0]
+    # 2) Drafts are REBASED onto the fresh view, never deleted: deleting a
+    #    mounted draft makes x-model re-seed one from a possibly-STALE x-for
+    #    scope (Alpine runs inner effects before the x-for re-scopes the row),
+    #    visibly reverting the fields. Mid-flight edits (paste while a save
+    #    was in flight) keep the user's value via the `sent` snapshot diff.
+    assert "const sent = { ...draft }" in save_fn
+    assert "sent[f] !== v" in save_fn
+    assert "_reSeedDraft(" in save_fn
+    assert "} = this.reSceneDrafts" not in save_fn        # the delete pattern
+    # 3) The focusout flush applies parked views, then rebases drafts.
+    flush = _JS.split("async _flushDeferredRefresh() {")[1].split("_refreshJobSoon()")[0]
+    assert "_rePendingSaveViews" in flush
+    assert "_rebaseReSceneDrafts()" in flush
+    assert "_rebaseReSceneDrafts() {" in _JS
+    # 4) The poll re-checks the guard at RESPONSE time too (a menu opened while
+    #    the fetch was in flight must defer, not splice), and a fresher poll
+    #    view supersedes a parked save view.
+    re_fn = _JS.split("async refreshReengineer(reId) {")[1]
+    re_fn = re_fn.split("_startReengineerPolling() {")[0]
+    after_fetch = re_fn.split("await r.json()")[1]
+    assert after_fetch.index("_isTypingProtectedField()") \
+        < after_fetch.index("splice(i, 1, fresh)")
+    assert "_rePendingSaveViews" in after_fetch
+
+
 def test_upload_submits_surface_network_errors(_=None):
     # Hugo 2026-06-19: a reengineer video upload from the phone "loaded then
     # stopped, no result at all". fetch() THROWS (not just !r.ok) when an upload

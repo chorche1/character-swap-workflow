@@ -162,6 +162,14 @@ function studio() {
     // can't clobber a half-typed prompt; per-run add-scene form state.
     reEdit: {},
     reSceneDrafts: {},
+    // Run views returned by a scene-save PATCH that landed while the user was
+    // still inside a protected field (open duration <select>, focused motion
+    // textarea). Splicing them in immediately would churn the x-for scope
+    // mid-interaction — macOS Chrome dismisses an open native select popup
+    // when its options are touched, eating the pick ("choose the length
+    // twice"). Parked here (re_id → view) and applied on blur by
+    // _flushDeferredRefresh; a fresher poll view supersedes them.
+    _rePendingSaveViews: {},
     rePersonChoices: {},   // "${re_id}:${idx}" → {swap_person_idx}
     reAdd: {},
     editor: {
@@ -1384,6 +1392,18 @@ function studio() {
     // after they leave a protected field (focusout listener wired in init()).
     async _flushDeferredRefresh() {
       if (this._isTypingProtectedField()) return;   // moved to another protected field
+      // Apply run views parked by reengineerSaveScene while the user was still
+      // in a protected field (splicing mid-edit cancels an open <select> popup
+      // / re-seeds x-model fields), then rebase the drafts onto the fresh
+      // views so a saved value can't linger as a stale divergence. Fields that
+      // still differ from server state keep the user's value (their save is in
+      // flight, or it failed loudly).
+      const parked = Object.values(this._rePendingSaveViews);
+      if (parked.length) {
+        this._rePendingSaveViews = {};
+        for (const view of parked) this._spliceReengineerView(view);
+      }
+      this._rebaseReSceneDrafts();
       if (this._pendingJobRefresh && this.job && this.job.job_id) {
         this._pendingJobRefresh = false;
         try {
@@ -1394,6 +1414,37 @@ function studio() {
       for (const run of (this.reengineerHistory || [])) {
         if (this._reengineerIsActive(run)) this.refreshReengineer(run.re_id);
       }
+    },
+
+    // Rebase every scene draft onto its run's current view: fields that equal
+    // the server value (same normalizations as the reengineerSaveScene diff)
+    // re-seed from the scene, fields that differ keep the user's value (their
+    // save is in flight or failed loudly). Drafts are never DELETED — a
+    // mounted x-model instantly re-seeds a missing draft, and Alpine may run
+    // that inner effect against a stale x-for scope, reverting the fields.
+    _rebaseReSceneDrafts() {
+      const out = {};
+      for (const [key, draft] of Object.entries(this.reSceneDrafts)) {
+        const cut = key.lastIndexOf(':');
+        const run = this.reengineerHistory.find(x => x.re_id === key.slice(0, cut));
+        const sc = run && (run.scenes || []).find(s => s.idx === Number(key.slice(cut + 1)));
+        if (!sc) { out[key] = draft; continue; }
+        const rebased = this._reSeedDraft(sc);
+        if (draft.motion_prompt !== undefined
+            && (draft.motion_prompt ?? '') !== (sc.motion_prompt ?? ''))
+          rebased.motion_prompt = draft.motion_prompt;
+        if (draft.kling_secs !== undefined
+            && (Number(draft.kling_secs) || 0) !== (sc.kling_secs || 0))
+          rebased.kling_secs = draft.kling_secs;
+        if (draft.duration !== undefined
+            && Number(draft.duration) !== sc.duration)
+          rebased.duration = draft.duration;
+        if (draft.video_model !== undefined
+            && (draft.video_model || '') !== (sc.video_model || ''))
+          rebased.video_model = draft.video_model;
+        out[key] = rebased;
+      }
+      this.reSceneDrafts = out;
     },
 
     // Coalesce the per-event GET /api/jobs/{id}. A generation burst delivers
@@ -1457,10 +1508,25 @@ function studio() {
         const r = await fetch('/api/reengineer/' + reId + '?slim=1');
         if (!r.ok) return;
         const fresh = await r.json();
+        // Re-check at RESPONSE time too: the user may have focused a field /
+        // opened a duration menu while the fetch was in flight — splicing now
+        // would churn the row mid-interaction just like the call-time case.
+        if (this._isTypingProtectedField()) {
+          clearTimeout(this._reRefreshTimers[reId]);
+          this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 700);
+          return;
+        }
         const i = this.reengineerHistory.findIndex(x => x.re_id === reId);
         const prev = i >= 0 ? this.reengineerHistory[i] : null;
         if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
         else this.reengineerHistory.unshift(fresh);
+        // This fetch started after any parked save-PATCH response was written
+        // server-side, so it's the fresher view — drop the parked one instead
+        // of letting the focusout flush regress to it.
+        if (this._rePendingSaveViews[reId]) {
+          const { [reId]: _stale, ...restViews } = this._rePendingSaveViews;
+          this._rePendingSaveViews = restViews;
+        }
         // Flush dirty-marks deferred while the run was animating/reanimating/
         // assembling (see _reMarkSceneDirtyIdx) — the backend PATCH accepts
         // them again now. Polling is guaranteed live through those phases
@@ -2085,15 +2151,17 @@ function studio() {
     // reengineerSaveScene stays correct because the seed == sc until edited.
     reSceneDraft(run, sc) {
       const key = run.re_id + ':' + sc.idx;
-      let d = this.reSceneDrafts[key];
-      if (!d) {
-        d = {
-          motion_prompt: sc.motion_prompt ?? '',
-          kling_secs: sc.kling_secs ? String(sc.kling_secs) : '',
-        };
-        this.reSceneDrafts = { ...this.reSceneDrafts, [key]: d };
+      if (!this.reSceneDrafts[key]) {
+        this.reSceneDrafts = { ...this.reSceneDrafts, [key]: this._reSeedDraft(sc) };
       }
       return this.reSceneDrafts[key];
+    },
+
+    _reSeedDraft(sc) {
+      return {
+        motion_prompt: sc.motion_prompt ?? '',
+        kling_secs: sc.kling_secs ? String(sc.kling_secs) : '',
+      };
     },
 
     // EXACT mirror of runner_reengineer._kling_duration: the whole-second
@@ -2250,23 +2318,48 @@ function studio() {
           && (draft.video_model || '') !== (sc.video_model || '')) {
         body.video_model = draft.video_model || '';   // '' = clear → run default
       }
-      if (!Object.keys(body).length) {
-        const { [key]: _, ...rest } = this.reSceneDrafts;
-        this.reSceneDrafts = rest;
-        return;
-      }
-      // No need to gate the background refresh here: the field's value lives in
-      // the draft (reSceneVal = draft-or-state) until AFTER the splice below, so
-      // a poll that lands mid-save can't revert it. The open-picker churn is
-      // handled by data-keep-focus + _isTypingProtectedField while focused.
+      // Empty diff → nothing to PATCH. Leave the draft in place: deleting a
+      // draft whose controls are still mounted makes the x-model binding
+      // re-seed a new one — possibly from a STALE x-for scope (Alpine runs
+      // the inner binding effects before the x-for re-scopes the row), which
+      // visibly reverts the fields. A draft that equals server state is inert.
+      if (!Object.keys(body).length) return;
+      // Snapshot what this save reflects: fields edited while the PATCH is in
+      // flight (text pasted into the textarea, a length picked right after)
+      // must survive the cleanup below — deleting the whole draft used to
+      // revert them to server state ("paste the prompt twice", Hugo 2026-07-03).
+      const sent = { ...draft };
       const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
       if (!r.ok) { this.notifyError('Kunde inte spara scenen: ' + await r.text()); return; }
-      this._spliceReengineerView(await r.json());
-      const { [key]: _, ...rest } = this.reSceneDrafts;
-      this.reSceneDrafts = rest;
+      const fresh = await r.json();
+      // NEVER splice the run view while the user is inside a protected field:
+      // replacing the run object re-runs every binding in the x-for row, and
+      // touching the options of an OPEN native <select> makes macOS Chrome
+      // dismiss the popup without committing the pick (the textarea's blur-save
+      // lands ~1s after you click the duration menu — Hugo's "choose the length
+      // twice" bug). Park the view; the focusout flush applies it on blur, and
+      // the kept draft keeps every field showing the user's value meanwhile.
+      if (this._isTypingProtectedField()) {
+        this._rePendingSaveViews = { ...this._rePendingSaveViews, [run.re_id]: fresh };
+        return;
+      }
+      this._spliceReengineerView(fresh);
+      // REBASE the draft onto the fresh view instead of deleting it: fields
+      // edited while the PATCH was in flight (pasted prompt, a second length
+      // pick) keep the user's value — their own @change → save persists them —
+      // and everything else re-seeds from the server response. Never delete:
+      // a mounted x-model would instantly re-seed from a possibly-stale x-for
+      // scope and visibly revert the fields (the OTHER half of "do it twice").
+      const freshSc = (fresh.scenes || []).find(s => s.idx === sc.idx);
+      const cur = this.reSceneDrafts[key] || {};
+      const rebased = freshSc ? this._reSeedDraft(freshSc) : { ...cur };
+      if (freshSc) {
+        for (const [f, v] of Object.entries(cur)) if (sent[f] !== v) rebased[f] = v;
+      }
+      this.reSceneDrafts = { ...this.reSceneDrafts, [key]: rebased };
     },
 
     // Commit any typed-but-UNBLURRED scene field edits (Kling-längd, motion
