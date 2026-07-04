@@ -1114,16 +1114,23 @@ def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
 async def _resolve_end_image(job: Job, jc: JobCharacter,
                              scene_id: str | None) -> Path | None:
     """Optional per-scene END FRAME (end-frame-capable models only — Kling 3.0,
-    Seedance 2.0 and Veo 3.1 Fast; see runner_media.END_FRAME_VIDEO_MODELS):
-    prefer the frame already generated (the character swapped into the end pose);
-    fall back to swapping now if it's missing. Errors are surfaced on
-    `end_frame_errors` + an event, never swallowed. Shared by the initial
-    batch, "+ N more" AND per-clip retries — the latter two previously
+    Seedance 2.0 and Veo 3.1 Fast; see runner_media.END_FRAME_VIDEO_MODELS).
+    Precedence: (1) a VERBATIM per-character upload (a FINISHED end frame the
+    user handed in — used exactly as-is, no swap) wins over everything; else
+    (2) the frame already generated (the character swapped into the shared end
+    pose); else (3) swap now from the pose ref if it's missing. Errors are
+    surfaced on `end_frame_errors` + an event, never swallowed. Shared by the
+    initial batch, "+ N more" AND per-clip retries — the latter two previously
     DROPPED the end frame on regenerated clips (review 2026-06-13), which
     also broke Reengineer's reanimate path."""
     if scene_id is None or not runner_media.supports_end_frame(
             _eff_video_model_for_scene(job, scene_id)):
         return None
+    # (1) A verbatim finished frame the user uploaded for THIS character wins
+    #     over the swap-into-pose result (Hugo 2026-07-04). Used exactly as-is.
+    manual = (jc.end_frame_uploads or {}).get(scene_id)
+    if manual and Path(manual).exists():
+        return Path(manual)
     pre = (jc.end_frame_paths or {}).get(scene_id)
     if pre and Path(pre).exists():
         return Path(pre)

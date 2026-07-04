@@ -1968,56 +1968,88 @@
                       </div>
                     </template>
                   </div>
-                  <!-- 🎯 END FRAME per scene (Hugo 2026-06-13): upload an end
-                       pose AFTER the scenes exist → every character is
-                       swapped into it → the scene's clip interpolates
-                       start → end. NOT a new scene. Only end-frame-capable
-                       models honor it (Kling 3.0 / Seedance 2.0). -->
+                  <!-- 🎯 END FRAME per scene. Two independent mechanisms:
+                       (a) a SHARED end pose that swaps every character into it
+                       (Hugo 2026-06-13), and (b) a per-character VERBATIM
+                       upload — a FINISHED end frame used as-is (no swap) that
+                       WINS over the swap (Hugo 2026-07-04). NOT a new scene.
+                       Only end-frame-capable models honor either (Kling 3.0 /
+                       Seedance 2.0 / Veo 3.1 Fast). -->
                   <div x-show="!sc.is_direct && (r.status === 'awaiting_approval' || r.status === 'awaiting_assembly' || reEdit[r.re_id]) && reSceneSupportsEndFrame(r, sc)"
-                       class="flex gap-2 mt-1 flex-wrap items-center text-[10px]">
-                    <template x-if="!reSceneEndFrameUrl(r, sc)">
-                      <label class="text-indigo-500 hover:underline cursor-pointer"
-                             title="Ladda upp en SLUT-bild för scenen — varje karaktär swappas in i den och Kling animerar från startbilden till slutbilden. Räknas INTE som en ny scen.">
-                        🎯 End frame
-                        <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
-                               @change="reengineerUploadEndFrame(r, sc, $event)" />
-                      </label>
-                    </template>
-                    <template x-if="reSceneEndFrameUrl(r, sc)">
-                      <div class="flex items-center gap-2 flex-wrap">
-                        <a :href="reSceneEndFrameUrl(r, sc)" target="_blank"
-                           class="text-neutral-400 hover:underline" title="Slutposen du laddade upp (öppna i full storlek)">🎯 End frame:</a>
-                        <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-ef-'+sc.idx+'-'+cid">
-                          <div>
-                            <template x-if="(jc.end_frame_urls || {})[sc.scene_id]">
-                              <a :href="jc.end_frame_urls[sc.scene_id]" target="_blank">
-                                <img :src="jc.end_frame_urls[sc.scene_id] + (reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] ? '?r=' + reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] : '')"
-                                     class="w-14 rounded object-cover border-2 border-indigo-400"
-                                     :title="jc.name + ' — swappad slutbild (Kling animerar hit)'" />
-                              </a>
-                            </template>
-                            <span x-show="(jc.end_frame_errors || {})[sc.scene_id]"
-                                  class="text-rose-500 cursor-help"
-                                  :title="(jc.end_frame_errors || {})[sc.scene_id]"
-                                  x-text="'✕ ' + jc.name"></span>
-                            <span x-show="!(jc.end_frame_urls || {})[sc.scene_id] && !(jc.end_frame_errors || {})[sc.scene_id]"
-                                  class="inline-block w-14 h-24 skeleton rounded"
-                                  :title="jc.name + ' — genererar slutbild…'"></span>
-                          </div>
-                        </template>
-                        <button class="text-indigo-500 hover:underline"
-                                title="Generera om slutbilderna för alla karaktärer (t.ex. efter fel)"
-                                @click="reengineerRegenEndFrame(r, sc)">↻</button>
-                        <label class="text-indigo-500 hover:underline cursor-pointer" title="Byt slutpose">
-                          ⇪
+                       class="flex flex-col gap-1 mt-1 text-[10px]">
+                    <!-- (a) shared end pose: swap every character into it -->
+                    <div class="flex gap-2 flex-wrap items-center">
+                      <template x-if="!reSceneEndFrameUrl(r, sc)">
+                        <label class="text-indigo-500 hover:underline cursor-pointer"
+                               title="Ladda upp en SLUT-bild för scenen — varje karaktär SWAPPAS in i den och animeras från startbilden till slutbilden. Räknas INTE som en ny scen.">
+                          🎯 End frame (swappa alla)
                           <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
                                  @change="reengineerUploadEndFrame(r, sc, $event)" />
                         </label>
-                        <button class="text-rose-500 hover:underline"
-                                title="Ta bort end framen (tillbaka till enbart startbild)"
-                                @click="reengineerClearEndFrame(r, sc)">✕</button>
-                      </div>
-                    </template>
+                      </template>
+                      <template x-if="reSceneEndFrameUrl(r, sc)">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <a :href="reSceneEndFrameUrl(r, sc)" target="_blank"
+                             class="text-neutral-400 hover:underline" title="Gemensam slutpose du laddade upp (öppna i full storlek)">🎯 Gemensam slutpose:</a>
+                          <button class="text-indigo-500 hover:underline"
+                                  title="Generera om (swappa alla karaktärer in i slutposen igen, t.ex. efter fel)"
+                                  @click="reengineerRegenEndFrame(r, sc)">↻</button>
+                          <label class="text-indigo-500 hover:underline cursor-pointer" title="Byt gemensam slutpose">
+                            ⇪
+                            <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                   @change="reengineerUploadEndFrame(r, sc, $event)" />
+                          </label>
+                          <button class="text-rose-500 hover:underline"
+                                  title="Ta bort den gemensamma slutposen"
+                                  @click="reengineerClearEndFrame(r, sc)">✕</button>
+                        </div>
+                      </template>
+                    </div>
+                    <!-- (b) per-character end frame: verbatim upload wins,
+                         else the swapped frame, else error / generating -->
+                    <div class="flex gap-2 flex-wrap items-start">
+                      <span class="text-neutral-500 mt-1 whitespace-nowrap">Per karaktär:</span>
+                      <template x-for="[cid, jc] of Object.entries(r.job?.characters || {})" :key="r.re_id+'-efc-'+sc.idx+'-'+cid">
+                        <div class="flex flex-col items-center gap-0.5">
+                          <!-- verbatim upload (green) beats swapped frame (indigo) -->
+                          <template x-if="(jc.end_frame_upload_urls || {})[sc.scene_id]">
+                            <a :href="jc.end_frame_upload_urls[sc.scene_id]" target="_blank">
+                              <img :src="jc.end_frame_upload_urls[sc.scene_id] + (reengineerRetryNonce['efu-'+sc.scene_id+'-'+cid] ? '?r=' + reengineerRetryNonce['efu-'+sc.scene_id+'-'+cid] : '')"
+                                   class="w-14 rounded object-cover border-2 border-emerald-400"
+                                   :title="jc.name + ' — egen färdig slutbild (används exakt som den är)'" />
+                            </a>
+                          </template>
+                          <template x-if="!(jc.end_frame_upload_urls || {})[sc.scene_id] && (jc.end_frame_urls || {})[sc.scene_id]">
+                            <a :href="jc.end_frame_urls[sc.scene_id]" target="_blank">
+                              <img :src="jc.end_frame_urls[sc.scene_id] + (reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] ? '?r=' + reengineerRetryNonce['ef-'+sc.scene_id+'-'+cid] : '')"
+                                   class="w-14 rounded object-cover border-2 border-indigo-400"
+                                   :title="jc.name + ' — swappad slutbild (animerar hit)'" />
+                            </a>
+                          </template>
+                          <span x-show="!(jc.end_frame_upload_urls || {})[sc.scene_id] && (jc.end_frame_errors || {})[sc.scene_id]"
+                                class="text-rose-500 cursor-help"
+                                :title="(jc.end_frame_errors || {})[sc.scene_id]"
+                                x-text="'✕ ' + jc.name"></span>
+                          <!-- skeleton only while a shared-pose swap is generating -->
+                          <span x-show="!(jc.end_frame_upload_urls || {})[sc.scene_id] && !(jc.end_frame_urls || {})[sc.scene_id] && !(jc.end_frame_errors || {})[sc.scene_id] && reSceneEndFrameUrl(r, sc)"
+                                class="inline-block w-14 h-24 skeleton rounded"
+                                :title="jc.name + ' — genererar slutbild…'"></span>
+                          <span class="text-neutral-400 max-w-[3.5rem] truncate" x-text="jc.name" :title="jc.name"></span>
+                          <div class="flex items-center gap-1">
+                            <label class="text-emerald-500 hover:underline cursor-pointer"
+                                   :title="'Ladda upp en FÄRDIG slutbild för ' + jc.name + ' — används exakt som den är (ingen swap, ingen QC)'">
+                              ⬆ egen
+                              <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
+                                     @change="reengineerUploadCharEndFrame(r, sc, cid, $event)" />
+                            </label>
+                            <button x-show="(jc.end_frame_upload_urls || {})[sc.scene_id]"
+                                    class="text-rose-500 hover:underline"
+                                    :title="'Ta bort egen slutbild för ' + jc.name"
+                                    @click="reengineerClearCharEndFrame(r, sc, cid)">✕</button>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
                   </div>
                   <!-- per-(scene × character) clips — edit mode on finished runs -->
                   <div x-show="r.status === 'awaiting_assembly' || (reEdit[r.re_id] && ['done','partial_success','failed','reanimating'].includes(r.status))"

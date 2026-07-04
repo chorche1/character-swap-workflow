@@ -420,6 +420,13 @@ def _job_to_dict(job: Job) -> dict:
                 # Per-scene end-frame generation errors, surfaced so a failed
                 # swap is visible in Step 3 instead of silently swallowed.
                 "end_frame_errors": dict(jc.end_frame_errors or {}),
+                # Per-character VERBATIM end frames the user uploaded (finished
+                # images used as-is, no swap) — win over end_frame_urls in the
+                # UI + at animate time. scene_id → URL. Empty when none set.
+                "end_frame_upload_urls": {
+                    sid: _file_url(p)
+                    for sid, p in (jc.end_frame_uploads or {}).items()
+                },
                 "images": [
                     {
                         "variant_id": v.variant_id,
@@ -2471,6 +2478,9 @@ def _apply_scene_duplicate(job: Job, scene_id: str) -> str:
         # copy starts with the same end pose (the user can still change it).
         if (jc.end_frame_paths or {}).get(scene_id):
             jc.end_frame_paths[new_sid] = jc.end_frame_paths[scene_id]
+        # Carry a per-character VERBATIM upload to the duplicate too.
+        if (jc.end_frame_uploads or {}).get(scene_id):
+            jc.end_frame_uploads[new_sid] = jc.end_frame_uploads[scene_id]
 
     # Carry the scene's end-pose reference to the duplicate too.
     if (job.end_frames_by_scene or {}).get(scene_id):
@@ -2537,6 +2547,11 @@ def _repoint_scene(job: Job, state: dict, idx: int, old_sid: str,
             jc.end_frame_paths.pop(old_sid, None)
         if jc.end_frame_errors:
             jc.end_frame_errors.pop(old_sid, None)
+        # A verbatim per-character upload is scene-AGNOSTIC user content — the
+        # new background doesn't invalidate it, so re-KEY it (don't drop) so it
+        # survives the "byt scenbild" re-point instead of orphaning.
+        if jc.end_frame_uploads and old_sid in jc.end_frame_uploads:
+            jc.end_frame_uploads[new_sid] = jc.end_frame_uploads.pop(old_sid)
 
     # Re-key the cached Director plan (no-op when Director is off / no plan).
     from character_swap import prompt_director
@@ -2780,6 +2795,88 @@ async def regen_scene_end_frame(job_id: str, scene_id: str,
     s.update_job(job)
     background.add_task(_run_async, runner.regen_scene_end_frames, job_id, scene_id)
     await events.publish(job_id, {"kind": "scene.end_frame_regen", "job_id": job_id,
+                                  "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/scenes/{scene_id}/end_frame_upload")
+async def upload_char_end_frame(job_id: str, char_id: str, scene_id: str,
+                                file: UploadFile = File(...)) -> dict:
+    """Upload a FINISHED end frame for ONE character on ONE scene — used
+    VERBATIM (no swap, no QC) as that character's end frame. Wins over the
+    swap-into-pose result (JobCharacter.end_frame_paths) in _resolve_end_image;
+    the shared end-pose mechanism stays available for characters without an
+    upload (Hugo 2026-07-04). Only end-frame-capable models honor it (Kling 3.0
+    / Seedance 2.0 / Veo 3.1 Fast); other models ignore it.
+
+    Movement lock relaxed for Reengineer-origin jobs, same as the shared
+    end-pose endpoints — this per-character control lives on the post-gate
+    block of Reengineer-backed runs (Swap-from-images + Reengineer)."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    # Relaxed for Reengineer-origin jobs (Hugo 2026-06-13): edit mode adds
+    # end frames AFTER the clips exist — its own dirty/reanimate flow gates
+    # the expensive work. Plain Swap jobs stay locked.
+    if _movement_locked(job) and not job.from_reengineer:
+        raise HTTPException(409, "Movement already submitted; end frames are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, f"Character not in job: {char_id}")
+    if scene_id not in _effective_scene_ids(job):
+        raise HTTPException(404, f"Scene not in job: {scene_id}")
+    ext = _safe_ext(file.filename or "")
+    safe_scene = scene_id.replace("/", "_")
+    dest = (settings.output_dir / job_id / char_id
+            / f"endframe_upload_{safe_scene}{ext}")
+    await _save_upload(file, dest)
+    jc.end_frame_uploads = {**(jc.end_frame_uploads or {}), scene_id: str(dest)}
+    # A verbatim upload supersedes any swapped frame / stale error for this
+    # scene — the character's clip now ends on the uploaded image.
+    jc.end_frame_errors.pop(scene_id, None)
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "char.end_frame_uploaded", "job_id": job_id,
+                                  "char_id": char_id, "scene_id": scene_id})
+    return _job_to_dict(job)
+
+
+@app.delete("/api/jobs/{job_id}/characters/{char_id}/scenes/{scene_id}/end_frame_upload")
+async def clear_char_end_frame(job_id: str, char_id: str, scene_id: str) -> dict:
+    """Remove a character's VERBATIM end-frame upload for a scene → the end
+    frame falls back to the swap-into-pose result (or none). Does not touch the
+    shared end pose or any other character."""
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if _movement_locked(job) and not job.from_reengineer:
+        raise HTTPException(409, "Movement already submitted; end frames are locked")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, f"Character not in job: {char_id}")
+    uploads = dict(jc.end_frame_uploads or {})
+    old = uploads.pop(scene_id, None)
+    jc.end_frame_uploads = uploads
+    # A duplicated scene shares the SAME file string (_apply_scene_duplicate:
+    # end_frame_uploads[new_sid] = [scene_id]) — unlinking here would destroy
+    # the duplicate's still-referenced end frame. Refcount across EVERY scene
+    # key on EVERY character (same convention as delete_variant/compact_job)
+    # before touching the file.
+    if old:
+        still_referenced = any(
+            p == old
+            for c in job.characters.values()
+            for p in (c.end_frame_uploads or {}).values()
+        )
+        if not still_referenced:
+            with contextlib.suppress(OSError):
+                Path(old).unlink(missing_ok=True)
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+    await events.publish(job_id, {"kind": "char.end_frame_upload_cleared",
+                                  "job_id": job_id, "char_id": char_id,
                                   "scene_id": scene_id})
     return _job_to_dict(job)
 

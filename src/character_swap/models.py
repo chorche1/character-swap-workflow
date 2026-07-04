@@ -224,6 +224,14 @@ class JobCharacter(BaseModel):
     # instead of silently swallowed — that bare-except swallow was why the
     # first version of this feature was reverted.
     end_frame_errors: dict[str, str] = Field(default_factory=dict)
+    # Per-scene VERBATIM end frames the user uploaded (scene_id → path). Unlike
+    # end_frame_paths (this character swapped into a SHARED end pose), these are
+    # FINISHED images the user hands in for THIS character — used EXACTLY as-is,
+    # no swap, no QC. Take precedence over end_frame_paths in _resolve_end_image
+    # so a hand-provided frame overrides the swap-into-pose result; the shared
+    # swap-into-pose mechanism stays available for characters without an upload
+    # (Hugo 2026-07-04). Only honored by end-frame-capable models.
+    end_frame_uploads: dict[str, str] = Field(default_factory=dict)
     # Step 6 (Compile) per-character output. When the user clicks "Compile
     # final videos" in Step 6, runner_compile concatenates every scene's
     # approved-variant video for this character and runs them through the

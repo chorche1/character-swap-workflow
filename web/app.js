@@ -1723,6 +1723,50 @@ function studio() {
       await this._reMarkSceneDirtyIdx(run, sc.idx);
     },
 
+    // Upload a FINISHED end frame for ONE character — used verbatim (no swap,
+    // no QC), wins over the swap-into-pose result (Hugo 2026-07-04).
+    async reengineerUploadCharEndFrame(run, sc, cid, ev) {
+      const file = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!file || !run.job_id) return;
+      if (!file.type || !file.type.startsWith('image/')) {
+        this.notifyError('Slutbilden måste vara en bildfil');
+        return;
+      }
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/characters/${cid}/scenes/${sc.scene_id}/end_frame_upload`,
+        { method: 'POST', body: fd });
+      if (!r.ok) {
+        this.notifyError('Egen slutbild misslyckades: ' + await r.text());
+        return;
+      }
+      run.job = await r.json();
+      // Cache-buster: a re-upload reuses the same file path.
+      this.reengineerRetryNonce = {
+        ...this.reengineerRetryNonce,
+        ['efu-' + sc.scene_id + '-' + cid]: Date.now(),
+      };
+      this.notifyInfo('Egen slutbild uppladdad — används som den är (ingen swap).');
+      await this._reMarkSceneDirtyIdx(run, sc.idx);   // new end ≠ old clip
+      await this.refreshReengineer(run.re_id);
+    },
+
+    async reengineerClearCharEndFrame(run, sc, cid) {
+      if (!confirm('Ta bort den egna slutbilden för den här karaktären?'
+                   + ' (faller tillbaka till swappad slutpose eller ingen)')) return;
+      const r = await fetch(
+        `/api/jobs/${run.job_id}/characters/${cid}/scenes/${sc.scene_id}/end_frame_upload`,
+        { method: 'DELETE' });
+      if (!r.ok) {
+        this.notifyError('Kunde inte ta bort egen slutbild: ' + await r.text());
+        return;
+      }
+      run.job = await r.json();
+      await this._reMarkSceneDirtyIdx(run, sc.idx);
+    },
+
     // Human-readable one-liner for a failed variant slot — shown as visible
     // text in the strip (the tooltip-only error was invisible on iPhone).
     // The full raw error stays in the title attribute.
