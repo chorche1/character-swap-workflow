@@ -194,6 +194,21 @@ class VideoVariant(BaseModel):
     # an uploaded file instead of being generated. QC is skipped, re-animation
     # never clobbers it, and assembly prefers it over a generated take.
     imported: bool = False
+    # Set when this clip auto-fell-back to the moderation fallback model after
+    # its chosen video model rejected it on CONTENT-POLICY / NSFW grounds (Hugo
+    # 2026-07-14; the fallback is grok-imagine-1.5 since 2026-07-26). The runner
+    # re-submits ONCE on a different provider stack that may pass where
+    # Kling/Veo blocked; if the fallback ALSO rejects, the clip fails LOUDLY.
+    # Recorded here, emitted as a `video.fallback` event, and rendered as a ⇄
+    # chip in the Swap/Reengineer clip strips — mirrors
+    # GeneratedImage.fallback_model on the image side.
+    fallback_model: str | None = None
+    # True when that fallback COST this clip its 🎯 end pose: the chosen model
+    # honored the end frame but the fallback model does not support one, so the
+    # clip was rendered start-frame-only (Hugo 2026-07-26 — a clip without the
+    # end pose beats no clip, but the loss must never be silent). Surfaced as an
+    # explicit "slutposen tappades" note next to the ⇄ chip.
+    fallback_dropped_end_frame: bool = False
 
 
 class JobCharacter(BaseModel):

@@ -759,6 +759,12 @@
                       <span x-show="vv.imported"
                             class="ml-1 text-emerald-600 dark:text-emerald-400"
                             title="Eget importerat klipp">📥</span>
+                      <span x-show="vv.fallback_model"
+                            class="ml-1 text-violet-600 dark:text-violet-400"
+                            :title="'NSFW/content-policy: klippet gjordes om på reservmodellen ' + vv.fallback_model">⇄</span>
+                      <span x-show="vv.fallback_dropped_end_frame"
+                            class="ml-1 text-amber-600 dark:text-amber-400"
+                            :title="'Slutposen tappades: reservmodellen ' + (vv.fallback_model || '') + ' har inget stöd för slutrutor, så klippet gjordes bara från startbilden'">🎯✕ slutpose tappad</span>
                     </div>
                     <div class="flex gap-2 text-xs shrink-0 items-center">
                       <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
@@ -1905,6 +1911,18 @@
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).qc_status === 'failed'"
                                    class="text-[8px] text-rose-400 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'QC: ' + ((reClipForVariant(jc, v.variant_id) || {}).qc_reason || 'klippet säger något annat än repliken')">⚠ QC: säger annat än repliken</div>
+                              <!-- NSFW/content-policy fallback (Hugo 2026-07-14):
+                                   the chosen model refused this clip, so it was
+                                   re-rendered on grok-imagine-1.5. -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).fallback_model"
+                                   class="text-[8px] text-violet-500 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'NSFW/content-policy: klippet gjordes om på reservmodellen ' + ((reClipForVariant(jc, v.variant_id) || {}).fallback_model || '')">⇄ NSFW-reserv: <span x-text="(reClipForVariant(jc, v.variant_id) || {}).fallback_model || ''"></span></div>
+                              <!-- That fallback has no end-frame input, so a clip
+                                   with a 🎯 end pose lost it (Hugo 2026-07-26 —
+                                   never silent). -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).fallback_dropped_end_frame"
+                                   class="text-[8px] text-amber-500 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'Reservmodellen har inget stöd för slutrutor, så klippet gjordes bara från startbilden — slutposen användes inte'">🎯✕ slutposen tappad</div>
                               <!-- QC-rejected takes of THIS clip (Hugo 2026-06-20):
                                    every clip video-QC threw away before the final
                                    take, shown by default. Empty when QC passed. -->

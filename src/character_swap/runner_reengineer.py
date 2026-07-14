@@ -1053,29 +1053,57 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     model = _scene_video_model(entry, state)
     dur = _scene_duration(entry, state)
     dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
-    try:
-        from character_swap import pipeline
-        provider_job_id = await asyncio.to_thread(
-            pipeline.submit_video,
-            image=image, movement_prompt=prompt,
-            character_name="(delad scen)", job_id=job.job_id,
-            model=model,
-            duration_secs=dur, generate_audio=job.video_audio)
-        await asyncio.to_thread(
-            pipeline.wait_for_video,
-            job_id=provider_job_id, character_name="(delad scen)",
-            dest=dest, app_job_id=job.job_id,
-            model=model)
-        await _persist_direct(re_id, scene_id,
-                              shared_clip_path=str(dest), direct_error=None)
-        await events.publish(job.job_id, {"kind": "direct.clip.done",
-                                          "job_id": job.job_id,
-                                          "scene_id": scene_id})
-    except Exception as e:
-        _log.exception("reengineer %s: direct clip for scene %s failed",
-                       re_id, scene_id)
-        await _persist_direct(re_id, scene_id,
-                              direct_error=f"{type(e).__name__}: {e}")
+    from character_swap import content_policy, pipeline, runner_media
+    # Content-policy / NSFW fallback (Hugo 2026-07-14): a direct clip rejected
+    # on moderation grounds retries ONCE on the fallback model (grok-imagine-1.5)
+    # before giving up — same rescue as the per-character swap clips in
+    # runner._animate_one_video. Direct clips never carry an end frame, so the
+    # fallback's missing end-frame support costs nothing here.
+    fb_model = runner_media.VIDEO_MODERATION_FALLBACK_MODEL
+    models_to_try = [model] + ([fb_model] if model != fb_model else [])
+    for _midx, active_model in enumerate(models_to_try):
+        try:
+            provider_job_id = await asyncio.to_thread(
+                pipeline.submit_video,
+                image=image, movement_prompt=prompt,
+                character_name="(delad scen)", job_id=job.job_id,
+                model=active_model,
+                duration_secs=dur, generate_audio=job.video_audio)
+            await asyncio.to_thread(
+                pipeline.wait_for_video,
+                job_id=provider_job_id, character_name="(delad scen)",
+                dest=dest, app_job_id=job.job_id,
+                model=active_model)
+            await _persist_direct(re_id, scene_id,
+                                  shared_clip_path=str(dest), direct_error=None)
+            await events.publish(job.job_id, {"kind": "direct.clip.done",
+                                              "job_id": job.job_id,
+                                              "scene_id": scene_id})
+            return
+        except Exception as e:
+            if (_midx + 1 < len(models_to_try)
+                    and content_policy.is_content_rejection(e)):
+                _log.warning("reengineer %s: direct clip scene %s rejected on "
+                             "content policy by %s — retrying on %s",
+                             re_id, scene_id, active_model, fb_model)
+                await events.publish(job.job_id,
+                                     {"kind": "direct.clip.fallback",
+                                      "job_id": job.job_id,
+                                      "scene_id": scene_id, "model": fb_model})
+                continue
+            _log.exception("reengineer %s: direct clip for scene %s failed",
+                           re_id, scene_id)
+            err = f"{type(e).__name__}: {e}"
+            if active_model == fb_model and model != fb_model:
+                # Distinguish a genuine content refusal by the fallback from a
+                # transient/billing failure on that leg (Hugo: real reason).
+                if content_policy.is_content_rejection(e):
+                    err = (f"content-policy: reservmodellen {fb_model} "
+                           f"nekades också: {e}")
+                else:
+                    err = f"reservmodellen {fb_model} misslyckades: {err}"
+            await _persist_direct(re_id, scene_id, direct_error=err)
+            return
 
 
 async def _do_animate(re_id: str, state: dict) -> None:

@@ -1121,7 +1121,17 @@ def _eff_video_model_for_variant(job: Job, jc: JobCharacter,
 def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
     """Effective video model for one VideoVariant — the per-clip override on the
     approved image it animates (`source_variant_id`), else that image's scene
-    (VideoVariant stores no model field)."""
+    (VideoVariant stores no model field).
+
+    A clip that auto-fell-back after a content-policy rejection
+    (`fallback_model`, Hugo 2026-07-14) resolves to THAT model, so the salvage
+    re-poll and post-restart resume paths poll the provider the clip was
+    ACTUALLY submitted under — fal request_ids are endpoint-scoped, so polling
+    the original model with a fallback job id would 404. A fresh retry mints a
+    new VideoVariant (fallback_model=None) and so still starts on the clip's
+    chosen model."""
+    if video.fallback_model:
+        return video.fallback_model
     target = video.source_variant_id or jc.approved_variant_id
     return _eff_video_model_for_variant(job, jc, target)
 
@@ -1272,86 +1282,144 @@ async def _animate_one_video(
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
-    try:
-        for attempt in range(1, max_attempts + 1):
-            video.qc_attempts = attempt
-            phase = "submit"
-            provider_job_id = await asyncio.to_thread(
-                pipeline.submit_video,
-                image=Path(approved.path),
-                movement_prompt=prompt_text,
-                character_name=jc.name,
-                job_id=job.job_id,
-                model=video_model,
-                duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
-                end_image=end_image,
-                generate_audio=job.video_audio,
-            )
-            # `grok_job_id` is misnamed for non-grok providers but kept for DB
-            # back-compat (it's the provider's external job/task id either way).
-            video.grok_job_id = provider_job_id
-            _replace_video(job, jc, video)
-            await _emit(job.job_id, "video.submitted",
-                        char_id=jc.char_id, video_id=video.video_id,
-                        grok_job_id=provider_job_id)
-
-            phase = "wait"
-            await asyncio.to_thread(
-                pipeline.wait_for_video,
-                job_id=provider_job_id,
-                character_name=jc.name,
-                dest=dest,
-                on_progress=_progress,
-                app_job_id=job.job_id,
-                model=video_model,
-            )
-
-            verdict = (await asyncio.to_thread(
-                video_qc.inspect_clip, dest,
-                movement_prompt=prompt_text, app_job_id=job.job_id,
-            ) if video_qc_on else None)
-            if verdict is None:
-                video.qc_status = "skipped"
-                video.qc_reason = None
-                break
-            if verdict.passed:
-                video.qc_status = "passed"
-                video.qc_reason = None
-                break
-            video.qc_status = "failed"
-            video.qc_reason = verdict.reason
-            if attempt < max_attempts:
-                await _emit(job.job_id, "video.qc_retry",
+    # Content-policy / NSFW fallback (Hugo 2026-07-14): if the chosen video
+    # model refuses this clip on moderation grounds, retry it ONCE on
+    # grok-imagine-1.5 — a DIFFERENT provider stack (xAI via fal), markedly more
+    # permissive than Kling/Veo. ONLY genuine content-policy rejections trigger
+    # it (content_policy.is_content_rejection); timeouts / network / billing keep
+    # the normal fail path. If the fallback ALSO rejects, the clip fails LOUDLY
+    # (no silent partial — Hugo's standing rule).
+    #
+    # END FRAMES: the fallback model does NOT support them, so a clip with a
+    # resolved end pose loses it (`pipeline.submit_video` simply never forwards
+    # `end_image` for that model). Hugo 2026-07-26: fall back anyway — a clip
+    # without the end pose beats no clip — but flag the loss on the variant so
+    # the UI can say it out loud. `end_image` is still passed unchanged; the
+    # dispatch ignores it, and a scene whose original model already ignored the
+    # pose loses nothing (hence the supports_end_frame guard).
+    fb_model = runner_media.VIDEO_MODERATION_FALLBACK_MODEL
+    fb_drops_end = bool(end_image) and runner_media.fallback_drops_end_frame(
+        video_model)
+    models_to_try = [video_model] + (
+        [fb_model] if video_model != fb_model else [])
+    for _model_idx, active_model in enumerate(models_to_try):
+        # A fallback take starts from the clean prompt (drop any QC-retry hint
+        # appended while the previous model was failing).
+        prompt_text = movement_prompt
+        try:
+            for attempt in range(1, max_attempts + 1):
+                video.qc_attempts = attempt
+                phase = "submit"
+                provider_job_id = await asyncio.to_thread(
+                    pipeline.submit_video,
+                    image=Path(approved.path),
+                    movement_prompt=prompt_text,
+                    character_name=jc.name,
+                    job_id=job.job_id,
+                    model=active_model,
+                    duration_secs=duration_secs if duration_secs is not None else job.duration_secs,
+                    end_image=end_image,
+                    generate_audio=job.video_audio,
+                )
+                # `grok_job_id` is misnamed for non-grok providers but kept for
+                # DB back-compat (it's the provider's external job/task id).
+                video.grok_job_id = provider_job_id
+                _replace_video(job, jc, video)
+                await _emit(job.job_id, "video.submitted",
                             char_id=jc.char_id, video_id=video.video_id,
-                            attempt=attempt, reason=verdict.reason)
-                # Preserve the rejected clip before the next take overwrites
-                # `dest` — Hugo 2026-06-20 wants every QC-failed clip visible.
-                # Cumulative count, not per-run attempt (a reused slot resets
-                # attempt to 1) — see the image path for the rationale.
-                reject_clip = dest.with_name(
-                    f"{dest.stem}.qcreject{len(video.qc_rejects) + 1}.mp4")
-                try:
-                    await asyncio.to_thread(shutil.copyfile, dest, reject_clip)
-                except OSError:
-                    pass
-                else:
-                    video.qc_rejects.append(QCReject(
-                        path=str(reject_clip), reason=verdict.reason,
-                        attempt=attempt, kind="video"))
-                hint = (verdict.corrective_hint or verdict.reason or "").strip()
-                prompt_text = movement_prompt + (
-                    f" IMPORTANT — the previous take was rejected by quality "
-                    f"control: {hint}" if hint else "")
+                            grok_job_id=provider_job_id)
+
+                phase = "wait"
+                await asyncio.to_thread(
+                    pipeline.wait_for_video,
+                    job_id=provider_job_id,
+                    character_name=jc.name,
+                    dest=dest,
+                    on_progress=_progress,
+                    app_job_id=job.job_id,
+                    model=active_model,
+                )
+
+                verdict = (await asyncio.to_thread(
+                    video_qc.inspect_clip, dest,
+                    movement_prompt=prompt_text, app_job_id=job.job_id,
+                ) if video_qc_on else None)
+                if verdict is None:
+                    video.qc_status = "skipped"
+                    video.qc_reason = None
+                    break
+                if verdict.passed:
+                    video.qc_status = "passed"
+                    video.qc_reason = None
+                    break
+                video.qc_status = "failed"
+                video.qc_reason = verdict.reason
+                if attempt < max_attempts:
+                    await _emit(job.job_id, "video.qc_retry",
+                                char_id=jc.char_id, video_id=video.video_id,
+                                attempt=attempt, reason=verdict.reason)
+                    # Preserve the rejected clip before the next take overwrites
+                    # `dest` — Hugo 2026-06-20 wants every QC-failed clip visible.
+                    # Cumulative count, not per-run attempt (a reused slot resets
+                    # attempt to 1) — see the image path for the rationale.
+                    reject_clip = dest.with_name(
+                        f"{dest.stem}.qcreject{len(video.qc_rejects) + 1}.mp4")
+                    try:
+                        await asyncio.to_thread(shutil.copyfile, dest, reject_clip)
+                    except OSError:
+                        pass
+                    else:
+                        video.qc_rejects.append(QCReject(
+                            path=str(reject_clip), reason=verdict.reason,
+                            attempt=attempt, kind="video"))
+                    hint = (verdict.corrective_hint or verdict.reason or "").strip()
+                    prompt_text = movement_prompt + (
+                        f" IMPORTANT — the previous take was rejected by quality "
+                        f"control: {hint}" if hint else "")
+                    video.status = VideoStatus.PROCESSING
+                    _replace_video(job, jc, video)
+        except Exception as e:
+            # Retry ONCE on the fallback model when THIS model refused the clip
+            # on content-policy grounds AND a fallback model is still queued.
+            if (_model_idx + 1 < len(models_to_try)
+                    and content_policy.is_content_rejection(e)):
+                video.fallback_model = fb_model
+                video.fallback_dropped_end_frame = fb_drops_end
                 video.status = VideoStatus.PROCESSING
                 _replace_video(job, jc, video)
-    except Exception as e:
-        video.status = VideoStatus.ERROR
-        video.error = f"submit: {e}" if phase == "submit" else str(e)
-        _replace_video(job, jc, video)
-        await _emit(job.job_id, "video.failed",
-                    char_id=jc.char_id, video_id=video.video_id, error=str(e))
-        _maybe_complete_char(job, jc)
-        return
+                await _emit(job.job_id, "video.fallback",
+                            char_id=jc.char_id, video_id=video.video_id,
+                            model=fb_model, reason=str(e),
+                            dropped_end_frame=fb_drops_end)
+                if fb_drops_end:
+                    logger.warning(
+                        "job %s char %s video %s: falling back to %s — the "
+                        "resolved end frame is DROPPED (%s has no end-frame "
+                        "input)", job.job_id, jc.char_id, video.video_id,
+                        fb_model, fb_model)
+                continue
+            video.status = VideoStatus.ERROR
+            base = f"submit: {e}" if phase == "submit" else str(e)
+            if video.fallback_model and content_policy.is_content_rejection(e):
+                # The fallback was tried and ALSO refused on content grounds —
+                # say so plainly (both providers blocked the clip).
+                video.error = (f"content-policy: reservmodellen {fb_model} "
+                               f"nekades också ({phase}): {e}")
+            elif video.fallback_model:
+                # We fell back but it failed for a NON-content reason (timeout /
+                # network / fal balance) — report the REAL cause, never a false
+                # content block (Hugo: fail loud, real reason).
+                video.error = f"reservmodellen {fb_model} misslyckades ({phase}): {e}"
+            else:
+                video.error = base
+            _replace_video(job, jc, video)
+            await _emit(job.job_id, "video.failed",
+                        char_id=jc.char_id, video_id=video.video_id,
+                        error=video.error)
+            _maybe_complete_char(job, jc)
+            return
+        # This model's QC loop finished without raising → the clip is good.
+        break
 
     video.status = VideoStatus.DONE
     video.completed_at = datetime.utcnow()

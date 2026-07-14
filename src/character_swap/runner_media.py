@@ -153,6 +153,32 @@ def supports_end_frame(model: str) -> bool:
     return model in END_FRAME_VIDEO_MODELS
 
 
+# When a video clip is rejected on CONTENT-POLICY / NSFW grounds by its chosen
+# model, the runner retries it ONCE on this model (Hugo 2026-07-14; switched
+# from seedance-2.0 to grok-imagine-1.5 on 2026-07-26 at Hugo's direction) —
+# a DIFFERENT provider stack (xAI Grok via fal) that is markedly more permissive
+# than Kling/Veo, so it passes clips they refuse.
+#
+# CAVEAT — this model does NOT support end frames (it is absent from
+# END_FRAME_VIDEO_MODELS; `pipeline.submit_video` never forwards `end_image` for
+# it). A clip WITH a resolved 🎯 end pose still falls back (Hugo's decision: a
+# clip without the end pose beats no clip at all) but the dropped pose is
+# recorded on `VideoVariant.fallback_dropped_end_frame` and surfaced in the UI —
+# never silently. Use `fallback_drops_end_frame(chosen)` to detect the case.
+# SINGLE SOURCE OF TRUTH — read by runner._animate_one_video and
+# runner_reengineer._render_direct_clip.
+VIDEO_MODERATION_FALLBACK_MODEL = "grok-imagine-1.5"
+
+
+def fallback_drops_end_frame(chosen_model: str) -> bool:
+    """True when falling back from `chosen_model` to the moderation fallback
+    would LOSE a resolved end frame — i.e. the chosen model honors end frames
+    but the fallback does not. Callers use this to flag the degradation loudly
+    instead of shipping a silently different clip."""
+    return (supports_end_frame(chosen_model)
+            and not supports_end_frame(VIDEO_MODERATION_FALLBACK_MODEL))
+
+
 def video_duration_spec(model: str) -> dict:
     """Return the {options, default} spec for a video model. Falls back to
     a single-value [env-default] spec when the model isn't registered."""

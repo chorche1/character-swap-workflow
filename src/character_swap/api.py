@@ -486,6 +486,11 @@ def _job_to_dict(job: Job) -> dict:
                         "qc_rejects": _qc_rejects_dicts(vv.qc_rejects),
                         # User-imported clip (Hugo 2026-06-21) → UI badge.
                         "imported": vv.imported,
+                        # Content-policy fallback to grok-imagine-1.5 (Hugo
+                        # 2026-07-14) → ⇄ chip on the clip, plus an explicit
+                        # note when that fallback cost the clip its end pose.
+                        "fallback_model": vv.fallback_model,
+                        "fallback_dropped_end_frame": vv.fallback_dropped_end_frame,
                         "download_name": _video_download_name(jc, vv),
                         # Per-video override + the fallback per-scene prompt,
                         # so the Step 5 regen modal can pre-fill correctly
