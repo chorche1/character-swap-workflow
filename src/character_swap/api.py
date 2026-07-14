@@ -7142,6 +7142,51 @@ async def _provider_not_configured(request, exc: ProviderNotConfigured):
     return JSONResponse(status_code=503, content={"error": str(exc), "provider": exc.provider})
 
 
+# --- OpenAI 429 (out-of-credits / rate limit) → legible, actionable error ----
+# A Whisper or GPT-Image call that returns HTTP 429 raises openai.RateLimitError,
+# which is NOT a RuntimeError — so the `except RuntimeError` blocks in the Editor
+# endpoints (stitch + auto-edit, single auto-edit, captions) miss it and it used
+# to surface as a bare "500 Internal Server Error". When the account is out of
+# credits (`insufficient_quota`) that made a billing problem look like a broken
+# feature. This maps the two 429 flavors to clean, actionable payloads.
+_OPENAI_QUOTA_MSG = (
+    "OpenAI-krediter slut (insufficient_quota). Fyll på saldo på "
+    "platform.openai.com/settings/organization/billing — sen funkar "
+    "stitch + auto-edit och captions igen. Whisper-transkribering krävs för "
+    "att stitcha och texta, så inget av det går utan krediter på kontot."
+)
+_OPENAI_RATE_MSG = (
+    "OpenAI rate limit — för många anrop just nu. Vänta en liten stund och "
+    "försök igen (ingen kodändring behövs)."
+)
+
+
+def _openai_limit_response(message: str) -> tuple[int, dict]:
+    """Classify an OpenAI 429 error message → (http_status, json_body).
+
+    Pure/string-based so it is unit-testable without constructing a real
+    openai.RateLimitError (whose ctor needs a live httpx response). Account
+    out of credits → 402 Payment Required; a plain rate limit → 429.
+    """
+    m = (message or "").lower()
+    if ("insufficient_quota" in m or "exceeded your current quota" in m
+            or "check your plan and billing" in m):
+        return 402, {"error": _OPENAI_QUOTA_MSG, "reason": "openai_insufficient_quota"}
+    return 429, {"error": _OPENAI_RATE_MSG, "reason": "openai_rate_limit"}
+
+
+try:  # openai is a hard dependency (Whisper + GPT Image); stay defensive anyway.
+    from openai import RateLimitError as _OpenAIRateLimitError
+except Exception:  # pragma: no cover
+    _OpenAIRateLimitError = None
+
+if _OpenAIRateLimitError is not None:
+    @app.exception_handler(_OpenAIRateLimitError)
+    async def _openai_rate_limited(request, exc):  # noqa: ANN001
+        status, body = _openai_limit_response(str(exc))
+        return JSONResponse(status_code=status, content=body)
+
+
 @app.post("/api/push/test")
 async def push_test() -> dict:
     """Fire a test phone push so the user can confirm ntfy is wired up.

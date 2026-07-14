@@ -1145,6 +1145,20 @@ function studio() {
       console.warn(label + ' submit failed:', e);
     },
 
+    // Pull a legible message out of a failed fetch Response. The backend
+    // returns clean JSON error bodies ({error} for e.g. OpenAI-out-of-credits,
+    // {detail.message} for structured 409s) — surface those instead of dumping
+    // raw JSON, and fall back to plain text / status code.
+    async _errText(r) {
+      try {
+        const j = await r.json();
+        const d = (j && j.detail !== undefined) ? j.detail : j;
+        return (d && (d.error || d.message)) || (typeof d === 'string' ? d : JSON.stringify(d));
+      } catch (_) {
+        try { return await r.text(); } catch (__) { return String(r.status); }
+      }
+    },
+
     async submitReengineer() {
       const g = this.reengineerGen;
       if (!g.file || !g.charIds.length || g.submitting) return;
@@ -2889,7 +2903,7 @@ function studio() {
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/captions', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Captions failed: ' + await r.text()); return; }
+        if (!r.ok) { this.notifyError('Captions: ' + await this._errText(r)); return; }
         const data = await r.json();
         this.editor.lastResult = { ...data, kind: 'captions' };
         this.editorHistory = [{ ...data, kind: 'captions', ts: Date.now() }, ...this.editorHistory];
@@ -3861,7 +3875,7 @@ function studio() {
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/multi_auto_edit', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Multi auto-edit failed: ' + await r.text()); return; }
+        if (!r.ok) { this.notifyError('Stitch + auto-edit: ' + await this._errText(r)); return; }
         const data = await r.json();
         this.multiResult = data;
         // Slot the final result into the same lastResult slot so the existing
@@ -3912,7 +3926,7 @@ function studio() {
         const overrides = this._activeOverrides();
         if (Object.keys(overrides).length) fd.append('overrides', JSON.stringify(overrides));
         const r = await fetch('/api/editor/auto_edit', { method: 'POST', body: fd });
-        if (!r.ok) { this.notifyError('Auto-edit failed: ' + await r.text()); return; }
+        if (!r.ok) { this.notifyError('Auto-edit: ' + await this._errText(r)); return; }
         const data = await r.json();
         this.editor.lastResult = { ...data, kind: 'auto' };
         this.editorHistory = [{ ...data, kind: 'auto', ts: Date.now() }, ...this.editorHistory];
