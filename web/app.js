@@ -6371,6 +6371,9 @@ function studio() {
             body: JSON.stringify({
               char_id: this.regenModal.charId,
               video_id: this.regenModal.videoId,
+              // Lets the server recover if videoId went stale (each retry
+              // mints a new id) by re-resolving the scene's current clip.
+              scene_id: this.regenModal.sceneId || null,
               prompt: (this.regenModal.prompt || '').trim() || null,
             }),
           });
@@ -6469,6 +6472,15 @@ function studio() {
       if (!r.ok) { this.notifyError('Retry all failed: ' + await r.text()); return; }
       const updated = await r.json();
       if (this.job && this.job.job_id === j.job_id) this.job = updated;
+      // Reengineer run cards render their clip ↻/✕ buttons from run.job —
+      // every retried clip gets a NEW video_id server-side, so refresh the
+      // owning run and restart the poll, or the card's buttons keep carrying
+      // dead ids (404 "clip not found for this character", 2026-07-16).
+      const run = (this.reengineerHistory || []).find(x => x.job?.job_id === j.job_id);
+      if (run) {
+        this._startReengineerPolling();
+        await this.refreshReengineer(run.re_id);
+      }
       this.notifyInfo('Retrying ' + n + ' failed clip' + (n === 1 ? '' : 's') + '…');
     },
 

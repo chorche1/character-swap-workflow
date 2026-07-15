@@ -137,3 +137,63 @@ def test_regen_clip_409_when_run_not_editable(wired):
             "re_t", BackgroundTasks(),
             api.ReClipRegenBody(char_id="c0", video_id="c0-vid1")))
     assert ei.value.status_code == 409
+
+
+# --- Stale video_id recovery (2026-07-16) ---------------------------------
+# Every retry mints a NEW video_id (retry_one_video replaces the row), so a
+# run card rendered before a "Ta om misslyckade" carries dead ids — the ↻
+# used to 404 "clip not found for this character". With scene_id in the body
+# the endpoint re-resolves the character's CURRENT clip for that scene.
+
+def test_regen_clip_stale_id_resolves_via_scene(wired):
+    wired["job"] = _job()
+    wired["states"]["re_t"] = _state("done", finals=True)
+    bg = BackgroundTasks()
+    asyncio.run(api.reengineer_regen_clip(
+        "re_t", bg,
+        api.ReClipRegenBody(char_id="c0", video_id="old-dead-id",
+                            scene_id="s1", prompt="pour slower")))
+    # Resolved to the character's CURRENT clip for scene s1 — not the stale id.
+    assert bg.tasks[0].args[1:] == ("j1", "c0", "c0-vid1", "pour slower")
+
+
+def test_regen_clip_stale_id_without_scene_still_404s(wired):
+    wired["job"] = _job()
+    wired["states"]["re_t"] = _state("done", finals=True)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_regen_clip(
+            "re_t", BackgroundTasks(),
+            api.ReClipRegenBody(char_id="c0", video_id="old-dead-id")))
+    assert ei.value.status_code == 404
+
+
+def test_regen_clip_stale_id_ambiguous_scene_404s(wired):
+    # Two takes animate the same scene variant → can't know which one the
+    # user meant; refuse loudly instead of regenerating the wrong take.
+    job = _job()
+    job.characters["c0"].videos.append(
+        VideoVariant(video_id="c0-vid2", grok_job_id="g2",
+                     source_variant_id="c0-v1", status=VideoStatus.DONE))
+    wired["job"] = job
+    wired["states"]["re_t"] = _state("done", finals=True)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_regen_clip(
+            "re_t", BackgroundTasks(),
+            api.ReClipRegenBody(char_id="c0", video_id="old-dead-id",
+                                scene_id="s1")))
+    assert ei.value.status_code == 404
+
+
+def test_regen_clip_exact_id_still_wins_over_scene(wired):
+    # A valid video_id is used as-is — scene_id must not re-route it.
+    job = _job()
+    job.characters["c0"].videos.append(
+        VideoVariant(video_id="c0-vid2", grok_job_id="g2",
+                     source_variant_id="c0-v1", status=VideoStatus.DONE))
+    wired["job"] = job
+    wired["states"]["re_t"] = _state("done", finals=True)
+    bg = BackgroundTasks()
+    asyncio.run(api.reengineer_regen_clip(
+        "re_t", bg,
+        api.ReClipRegenBody(char_id="c0", video_id="c0-vid2", scene_id="s1")))
+    assert bg.tasks[0].args[1:] == ("j1", "c0", "c0-vid2", None)

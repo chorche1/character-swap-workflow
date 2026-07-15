@@ -6465,6 +6465,14 @@ class ReClipRegenBody(BaseModel):
     video_id: str
     # Edited motion/Kling prompt. Empty/None = a fresh take on the same prompt.
     prompt: str | None = None
+    # Scene the clip belongs to (optional but sent by the UI, 2026-07-16).
+    # Lets the endpoint recover from a STALE video_id: every retry mints a
+    # fresh video_id (retry_one_video replaces the row in place), so a run
+    # card rendered before a "Ta om misslyckade" carries dead ids — the ↻
+    # then 404:ed ("clip not found for this character") even though the clip
+    # obviously exists. With scene_id we re-resolve the character's CURRENT
+    # clip for that scene instead of refusing.
+    scene_id: str | None = None
 
 
 @app.post("/api/reengineer/{re_id}/regen_clip")
@@ -6485,13 +6493,33 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
     if job is None:
         raise HTTPException(409, "underlying job disappeared")
     jc = (job.characters or {}).get(body.char_id)
-    if jc is None or not any(v.video_id == body.video_id for v in jc.videos):
+    if jc is None:
         raise HTTPException(404, "clip not found for this character")
+    video_id = body.video_id
+    if not any(v.video_id == video_id for v in jc.videos):
+        # Stale id — the clip was replaced under the card (each retry mints a
+        # NEW video_id). Re-resolve via the scene the client says it meant:
+        # mirror of app.js reengineerClipFor — the scene's variant for this
+        # character → its current video row.
+        video_id = None
+        if body.scene_id:
+            scene_variants = {im.variant_id for im in jc.images
+                              if im.scene_id == body.scene_id}
+            candidates = [v for v in jc.videos
+                          if v.source_variant_id in scene_variants
+                          and not v.imported]
+            if len(candidates) == 1:
+                video_id = candidates[0].video_id
+        if video_id is None:
+            raise HTTPException(
+                404, "clip not found for this character — klippet har fått "
+                     "ett nytt id (t.ex. efter en retry). Ladda om sidan och "
+                     "försök igen.")
     prompt_override = (body.prompt or "").strip() or None
     _mark_finals_stale(state)
     _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner.retry_one_video,
-                              job_id, body.char_id, body.video_id, prompt_override)
+                              job_id, body.char_id, video_id, prompt_override)
     return _reengineer_view(state, slim=True)
 
 
