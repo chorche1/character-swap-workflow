@@ -1867,7 +1867,7 @@
                                 <button x-show="!['pending','processing'].includes(reClipForVariant(jc, v.variant_id).status) && !reClipForVariant(jc, v.variant_id).imported"
                                         class="text-[9px] text-indigo-500 hover:underline leading-tight"
                                         title="Regenerera klippet med ändrad rörelse-prompt"
-                                        @click.stop="openReClipRegenModal(r, cid, reClipForVariant(jc, v.variant_id), v.scene_id)">✎↻ prompt</button>
+                                        @click.stop="openReClipRegenModal(r, cid, reClipForVariant(jc, v.variant_id), v.scene_id, sc)">✎↻ prompt</button>
                                 <!-- Ersätt med eget importerat klipp (Hugo 2026-06-21).
                                      Label-wrappad dold file-input → funkar per-iteration
                                      utan $refs-krockar i x-for. Inte medan klippet
@@ -4867,6 +4867,44 @@
             movement", "smile less", "look slightly off-camera").
           </p>
         </label>
+
+        <!-- Per-clip video-model + length override (Hugo 2026-07-16). Applies
+             to THIS clip only; "Scen-standard" leaves the scene's shared
+             model/length (all characters) untouched. -->
+        <div class="flex flex-wrap items-end gap-3">
+          <label class="block">
+            <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Videomodell</span>
+            <!-- :value on the select + @change is the working idiom for a model
+                 pick (mirror of the scene-row Modell picker); the length select
+                 below uses per-option :selected because its options are model-
+                 dependent (a :value on THAT select reverts before the x-for
+                 populates — index.html:1689). -->
+            <select :value="regenModal.videoModel"
+                    @change="regenModal.videoModel = $event.target.value; onRegenModelChange()"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+              <option value="" x-text="'Scen-standard (' + (regenModal.curModel || '—') + ')'"></option>
+              <template x-for="m in models.video" :key="'regenm-' + m.slug">
+                <option :value="m.slug" :disabled="!m.available"
+                        x-text="m.label + (m.available ? '' : '  (låst)')"></option>
+              </template>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">Längd</span>
+            <select @change="regenModal.durationSecs = Number($event.target.value)"
+                    class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
+              <option :value="0" :selected="!Number(regenModal.durationSecs)"
+                      x-text="'Scen-standard (' + (regenModal.curSecs || '—') + 's)'"></option>
+              <template x-for="n in videoModelDurationSpec(regenEffModel()).options" :key="'regend-' + n">
+                <option :value="n" :selected="n === Number(regenModal.durationSecs)" x-text="n + 's'"></option>
+              </template>
+            </select>
+          </label>
+        </div>
+        <p class="text-[10px] text-neutral-400 dark:text-neutral-500 -mt-2">
+          Gäller bara det här klippet. "Scen-standard" rör inte scenens gemensamma modell/längd.
+          Valet fastnar på klippet tills du ändrar tillbaka.
+        </p>
       </div>
       <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
         <button class="px-3 py-1.5 text-sm rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"

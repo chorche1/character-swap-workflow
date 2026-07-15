@@ -6028,6 +6028,42 @@ function studio() {
     regenModal: {
       open: false, charId: null, videoId: null, charName: '',
       sceneId: null, prompt: '', hadOverride: false, submitting: false,
+      // Per-clip model + length override (Hugo 2026-07-16). videoModel/
+      // durationSecs empty ('' / 0) = keep the scene/job default (no per-clip
+      // override written); a concrete pick = override JUST this clip. curModel/
+      // curSecs are the clip's resolved scene/job default, shown in the
+      // "Scen-standard (…)" option so the user can revert.
+      videoModel: '', durationSecs: 0, curModel: '', curSecs: 0,
+    },
+
+    // {options, default} duration spec for a video-model slug (mirror of the
+    // per-scene reSceneDurationSpec, but keyed by slug only — used by the
+    // regen-clip modal's length picker).
+    videoModelDurationSpec(slug) {
+      const m = (this.models.video || []).find(x => x.slug === slug);
+      if (m && m.duration_options && m.duration_options.length) {
+        return { options: m.duration_options,
+                 default: m.duration_default || m.duration_options[0] };
+      }
+      return { options: [5], default: 5 };
+    },
+
+    // The model whose length options the regen modal shows: the per-clip pick
+    // if the user chose one, else the clip's current scene/job default.
+    regenEffModel() {
+      return this.regenModal.videoModel || this.regenModal.curModel || 'grok-imagine';
+    },
+
+    // When the modal's model changes, snap the chosen length to a value the new
+    // model accepts (keeps "Scen-standard" = 0 as-is).
+    onRegenModelChange() {
+      const secs = Number(this.regenModal.durationSecs) || 0;
+      if (!secs) return;
+      const opts = this.videoModelDurationSpec(this.regenEffModel()).options;
+      if (!opts.includes(secs)) {
+        this.regenModal.durationSecs =
+          opts.reduce((a, b) => Math.abs(b - secs) < Math.abs(a - secs) ? b : a, opts[0]);
+      }
     },
 
     // Per-SCENE video re-prompt modal (Hugo 2026-06-23): one new motion prompt
@@ -6268,23 +6304,44 @@ function studio() {
       // Pre-fill the prompt with the previous override if any (so iterating
       // on the same video keeps building on what the user last tried),
       // otherwise the effective per-scene prompt the API resolved for us.
+      const job = this.job;
+      const sceneId = this._sceneIdForVideo(charId, vv);
+      const svid = vv.source_variant_id;
+      // Current scene/job default the clip animates under (the "Scen-standard"
+      // option) + any existing per-clip override to prefill the pickers.
+      const curModel = (sceneId && job?.video_models_by_scene?.[sceneId])
+        || job?.video_model || 'grok-imagine';
+      const curSecs = (sceneId && job?.durations_by_scene?.[sceneId])
+        || job?.duration_secs || this.videoModelDurationSpec(curModel).default;
       this.regenModal = {
         open: true,
         charId,
         videoId: vv.video_id,
-        charName: this.job?.characters?.[charId]?.name || charId,
-        sceneId: this._sceneIdForVideo(charId, vv),
+        charName: job?.characters?.[charId]?.name || charId,
+        sceneId,
         prompt: vv.movement_prompt_override || vv.effective_movement_prompt || '',
         hadOverride: !!vv.movement_prompt_override,
         submitting: false,
+        videoModel: (svid && job?.video_models_by_variant?.[svid]) || '',
+        durationSecs: (svid && job?.durations_by_variant?.[svid]) || 0,
+        curModel, curSecs,
       };
     },
 
     // Reengineer: open the SAME regen modal for a per-scene clip, but carry the
     // run so submitRegen posts to the reengineer per-clip endpoint (which marks
     // the final stale) instead of the Swap /retry_video path.
-    openReClipRegenModal(reRun, charId, vv, sceneId) {
-      const jc = reRun?.job?.characters?.[charId];
+    openReClipRegenModal(reRun, charId, vv, sceneId, sc) {
+      const job = reRun?.job;
+      const jc = job?.characters?.[charId];
+      const svid = vv.source_variant_id;
+      // Reengineer resolves the scene's effective model/length from the LIVE
+      // scene entry (reSceneEffModel/reSceneDuration) — the reengineerSaveScene
+      // sync onto job.*_by_scene can lag an unsaved inline edit.
+      const curModel = (sc ? this.reSceneEffModel(reRun, sc) : null)
+        || job?.video_model || 'kling-v3';
+      const curSecs = (sc ? this.reSceneDuration(reRun, sc) : 0)
+        || job?.duration_secs || this.videoModelDurationSpec(curModel).default;
       this.regenModal = {
         open: true,
         charId,
@@ -6295,6 +6352,9 @@ function studio() {
         hadOverride: !!vv.movement_prompt_override,
         submitting: false,
         reRun,
+        videoModel: (svid && job?.video_models_by_variant?.[svid]) || '',
+        durationSecs: (svid && job?.durations_by_variant?.[svid]) || 0,
+        curModel, curSecs,
       };
     },
 
@@ -6375,6 +6435,9 @@ function studio() {
               // mints a new id) by re-resolving the scene's current clip.
               scene_id: this.regenModal.sceneId || null,
               prompt: (this.regenModal.prompt || '').trim() || null,
+              // Per-clip model + length override. '' / 0 = keep scene default.
+              video_model: this.regenModal.videoModel || '',
+              duration_secs: Number(this.regenModal.durationSecs) || 0,
             }),
           });
           if (!rr.ok) { this.notifyError('Regen failed: ' + await rr.text()); return; }
@@ -6388,6 +6451,9 @@ function studio() {
           char_id: this.regenModal.charId,
           video_id: this.regenModal.videoId,
           prompt_override: this.regenModal.prompt,
+          // Per-clip model + length override. '' / 0 = keep scene default.
+          video_model: this.regenModal.videoModel || '',
+          duration_secs: Number(this.regenModal.durationSecs) || 0,
         };
         const r = await fetch('/api/jobs/' + this.job.job_id + '/retry_video', {
           method: 'POST',

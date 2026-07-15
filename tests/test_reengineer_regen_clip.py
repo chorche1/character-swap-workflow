@@ -139,7 +139,7 @@ def test_regen_clip_409_when_run_not_editable(wired):
     assert ei.value.status_code == 409
 
 
-# --- Stale video_id recovery (2026-07-16) ---------------------------------
+# --- Stale video_id recovery (2026-07-16, master 8d1ca56) -----------------
 # Every retry mints a NEW video_id (retry_one_video replaces the row), so a
 # run card rendered before a "Ta om misslyckade" carries dead ids — the ↻
 # used to 404 "clip not found for this character". With scene_id in the body
@@ -197,3 +197,53 @@ def test_regen_clip_exact_id_still_wins_over_scene(wired):
         "re_t", bg,
         api.ReClipRegenBody(char_id="c0", video_id="c0-vid2", scene_id="s1")))
     assert bg.tasks[0].args[1:] == ("j1", "c0", "c0-vid2", None)
+
+
+# --- Per-clip model + length override (2026-07-16) ------------------------
+
+def test_regen_clip_writes_per_clip_model_and_length(wired, monkeypatch):
+    # The regen modal's per-clip model + length ride into the endpoint and
+    # persist on the job (keyed by the clip's source variant) BEFORE the clip
+    # re-submits — the scene's shared model/length is untouched.
+    monkeypatch.setattr(type(api.settings), "has_provider", lambda self, p: True)
+    wired["job"] = _job()
+    wired["states"]["re_t"] = _state("done", finals=True)
+    bg = BackgroundTasks()
+    asyncio.run(api.reengineer_regen_clip(
+        "re_t", bg,
+        api.ReClipRegenBody(char_id="c0", video_id="c0-vid1", prompt="pour",
+                            video_model="seedance-2.0", duration_secs=8)))
+    job = wired["job"]
+    assert job.video_models_by_variant == {"c0-v1": "seedance-2.0"}
+    assert job.durations_by_variant == {"c0-v1": 8}
+    # Still marks the final stale + queues the in-place retry with the prompt.
+    assert wired["states"]["re_t"]["finals_stale"] is True
+    assert bg.tasks[0].args[1:] == ("j1", "c0", "c0-vid1", "pour")
+
+
+def test_regen_clip_clears_per_clip_override(wired, monkeypatch):
+    # "Scen-standard" (empty model + 0 secs) drops any prior per-clip override.
+    monkeypatch.setattr(type(api.settings), "has_provider", lambda self, p: True)
+    job = _job()
+    job.video_models_by_variant = {"c0-v1": "kling-v3"}
+    job.durations_by_variant = {"c0-v1": 12}
+    wired["job"] = job
+    wired["states"]["re_t"] = _state("done", finals=True)
+    asyncio.run(api.reengineer_regen_clip(
+        "re_t", BackgroundTasks(),
+        api.ReClipRegenBody(char_id="c0", video_id="c0-vid1",
+                            video_model="", duration_secs=0)))
+    assert job.video_models_by_variant == {}
+    assert job.durations_by_variant == {}
+
+
+def test_regen_clip_locked_model_422(wired, monkeypatch):
+    monkeypatch.setattr(type(api.settings), "has_provider", lambda self, p: False)
+    wired["job"] = _job()
+    wired["states"]["re_t"] = _state("done", finals=True)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_regen_clip(
+            "re_t", BackgroundTasks(),
+            api.ReClipRegenBody(char_id="c0", video_id="c0-vid1",
+                                video_model="kling-v3")))
+    assert ei.value.status_code == 422

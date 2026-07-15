@@ -361,6 +361,15 @@ class Job(BaseModel):
     # scene overridden to a model without it (Grok / Veo 3) ignores its end pose
     # (the Step-4 UI warns; Reengineer hides the control for that scene).
     video_models_by_scene: dict[str, str] = Field(default_factory=dict)
+    # Per-CLIP video-model override (source_variant_id → model slug). Set from
+    # the "Regenerate this clip" modal (Hugo 2026-07-16) so ONE character's clip
+    # can be re-rendered with a different provider without touching the scene's
+    # shared model (which changes every character). Keyed by the approved image
+    # the clip animates, so the pick sticks to that clip across re-animate /
+    # rebuild. Resolution order in the runner: per-VARIANT → per-scene →
+    # `video_model` → "grok-imagine". Mirrors `durations_by_variant`; old jobs
+    # load empty. Same end-frame caveat as `video_models_by_scene`.
+    video_models_by_variant: dict[str, str] = Field(default_factory=dict)
     # Optional per-scene END-POSE reference (scene_id → uploaded image path).
     # Set on a scene in Step 1. During Step 3 the runner SWAPS each character
     # into the pose (so the end frame features the same person) and hands the

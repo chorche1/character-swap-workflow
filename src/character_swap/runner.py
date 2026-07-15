@@ -1103,16 +1103,32 @@ def _eff_video_model_for_scene(job: Job, scene_id: str | None) -> str:
             or job.video_model or "grok-imagine")
 
 
-def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
-    """Effective video model for one VideoVariant — resolved from the scene of
-    the approved image it animates (VideoVariant stores no model field)."""
-    target = video.source_variant_id or jc.approved_variant_id
-    appr = next((v for v in jc.images if v.variant_id == target), None)
+def _eff_video_model_for_variant(job: Job, jc: JobCharacter,
+                                 src_variant_id: str | None) -> str:
+    """Effective video model for one approved-image slot (a "clip"): the
+    per-CLIP override (regen-clip modal, `video_models_by_variant`) wins, else
+    the scene's per-scene override, else the job default, else grok-imagine.
+    Single resolution point so submit, end-frame gating, salvage re-poll and
+    resume all agree on the provider for a per-clip-overridden clip too."""
+    if src_variant_id:
+        ov = (job.video_models_by_variant or {}).get(src_variant_id)
+        if ov:
+            return ov
+    appr = next((v for v in jc.images if v.variant_id == src_variant_id), None)
     return _eff_video_model_for_scene(job, appr.scene_id if appr else None)
 
 
+def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
+    """Effective video model for one VideoVariant — the per-clip override on the
+    approved image it animates (`source_variant_id`), else that image's scene
+    (VideoVariant stores no model field)."""
+    target = video.source_variant_id or jc.approved_variant_id
+    return _eff_video_model_for_variant(job, jc, target)
+
+
 async def _resolve_end_image(job: Job, jc: JobCharacter,
-                             scene_id: str | None) -> Path | None:
+                             scene_id: str | None,
+                             *, video_model: str | None = None) -> Path | None:
     """Optional per-scene END FRAME (end-frame-capable models only — Kling 3.0,
     Seedance 2.0 and Veo 3.1 Fast; see runner_media.END_FRAME_VIDEO_MODELS).
     Precedence: (1) a VERBATIM per-character upload (a FINISHED end frame the
@@ -1122,9 +1138,15 @@ async def _resolve_end_image(job: Job, jc: JobCharacter,
     surfaced on `end_frame_errors` + an event, never swallowed. Shared by the
     initial batch, "+ N more" AND per-clip retries — the latter two previously
     DROPPED the end frame on regenerated clips (review 2026-06-13), which
-    also broke Reengineer's reanimate path."""
-    if scene_id is None or not runner_media.supports_end_frame(
-            _eff_video_model_for_scene(job, scene_id)):
+    also broke Reengineer's reanimate path.
+
+    `video_model` lets a caller pass the CLIP's effective model (per-clip
+    override, Hugo 2026-07-16) so the end-frame gate matches what actually
+    submits — a clip overridden to a non-end-frame model drops the pose, and a
+    clip overridden TO an end-frame model picks it up, even when the scene
+    default differs. Defaults to the per-scene resolution for back-compat."""
+    eff_model = video_model or _eff_video_model_for_scene(job, scene_id)
+    if scene_id is None or not runner_media.supports_end_frame(eff_model):
         return None
     # (1) A verbatim finished frame the user uploaded for THIS character wins
     #     over the swap-into-pose result (Hugo 2026-07-04). Used exactly as-is.
@@ -1528,7 +1550,9 @@ async def _animate_character(
                     or job.duration_secs)
         # Optional per-scene END FRAME (Kling 3.0 only) — see
         # _resolve_end_image (shared with "+ N more" and per-clip retries).
-        end_image = await _resolve_end_image(job, jc, scene_id)
+        end_image = await _resolve_end_image(
+            job, jc, scene_id,
+            video_model=_eff_video_model_for_variant(job, jc, src_variant_id))
         for _ in range(m_videos):
             vid = _short("vd_")
             v = VideoVariant(
@@ -1608,7 +1632,9 @@ async def generate_more_videos(
                     or job.duration_secs)
         # The scene's end frame rides along on extra takes too (it was
         # silently dropped here before — review 2026-06-13).
-        end_image = await _resolve_end_image(job, jc, scene_id)
+        end_image = await _resolve_end_image(
+            job, jc, scene_id,
+            video_model=_eff_video_model_for_variant(job, jc, src_id))
         for _ in range(n):
             v = VideoVariant(
                 video_id=_short("vd_"),
@@ -1762,8 +1788,12 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
     )
     # The scene's end frame rides along on retried clips too (it was
     # silently dropped here before — review 2026-06-13; this is the path
-    # Reengineer's reanimate uses for every redo).
-    end_image = await _resolve_end_image(job, jc, scene_id)
+    # Reengineer's reanimate uses for every redo). The per-clip model override
+    # (regen-clip modal) gates it too, so a clip re-pointed to a non-end-frame
+    # model drops the pose (and vice-versa).
+    end_image = await _resolve_end_image(
+        job, jc, scene_id,
+        video_model=_eff_video_model_for_variant(job, jc, source_variant_id))
     await _animate_one_video(job, jc, fresh, movement_prompt, duration, end_image)
 
 

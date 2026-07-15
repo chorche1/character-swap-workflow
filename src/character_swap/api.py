@@ -351,6 +351,13 @@ def _job_to_dict(job: Job) -> dict:
         # per-scene / legacy mode.
         "movement_prompts_by_variant": dict(job.movement_prompts_by_variant or {}),
         "durations_by_variant": dict(job.durations_by_variant or {}),
+        # Per-clip model overrides (regen-clip modal) so the modal can prefill
+        # with an existing per-clip pick on reopen (parallel to durations).
+        "video_models_by_variant": dict(job.video_models_by_variant or {}),
+        # Per-scene model/length overrides so the regen-clip modal can resolve a
+        # clip's CURRENT effective model + length to prefill from.
+        "video_models_by_scene": dict(job.video_models_by_scene or {}),
+        "durations_by_scene": dict(job.durations_by_scene or {}),
         # AI Director: opt-in toggle + a small summary parsed from the
         # cached plan so the UI can show a 🎬 badge ("12 tailored prompts").
         # The plan JSON itself stays on the server (too large for the UI).
@@ -2246,6 +2253,53 @@ def _preflight_video_keys(models) -> None:
             settings.require_keys(key_name)
 
 
+def _apply_per_clip_video_override(job, jc, video, *,
+                                   video_model, duration_secs) -> bool:
+    """Write (or clear) the per-CLIP model + length override for a regen
+    (Hugo 2026-07-16). Keyed on the clip's source variant so it sticks to THIS
+    character's clip only — the scene's shared model/length is untouched.
+
+    Semantics per field (so old callers that omit them are a strict no-op):
+      video_model  : None → leave as-is; ""  → clear the per-clip model;
+                     slug → validate the provider key (422 if locked) + set.
+      duration_secs: None → leave as-is; 0   → clear the per-clip length;
+                     >0   → clamp to the clip's EFFECTIVE model's options + set.
+
+    Order matters: the model is written first so the length clamps against the
+    model the clip will actually submit under. Caller persists the job.
+
+    Returns True if either per-clip map actually changed — the caller uses this
+    to FORCE a fresh render (the timeout-salvage fast-path in retry_one_video
+    re-polls the OLD provider job, which would return a clip at the OLD model/
+    length and silently ignore the new pick)."""
+    svid = video.source_variant_id or jc.approved_variant_id
+    if not svid:
+        return False
+    changed = False
+    if video_model is not None:
+        slug = (video_model or "").strip()
+        models = dict(job.video_models_by_variant or {})
+        before = models.get(svid)
+        if slug:
+            _require_video_model_available(slug)   # 422 on unknown/locked
+            models[svid] = slug
+        else:
+            models.pop(svid, None)
+        changed = changed or models.get(svid) != before
+        job.video_models_by_variant = models
+    if duration_secs is not None:
+        durs = dict(job.durations_by_variant or {})
+        before = durs.get(svid)
+        if duration_secs and int(duration_secs) > 0:
+            eff_model = runner._eff_video_model(job, jc, video)
+            durs[svid] = int(round(_clamp_scene_secs(eff_model, float(duration_secs))))
+        else:
+            durs.pop(svid, None)
+        changed = changed or durs.get(svid) != before
+        job.durations_by_variant = durs
+    return changed
+
+
 @app.post("/api/jobs/{job_id}/movement")
 async def set_movement(job_id: str, body: MovementBody,
                        background: BackgroundTasks) -> dict:
@@ -3022,6 +3076,11 @@ class RetryVideoBody(BaseModel):
     # per-scene movement prompt (or any existing override on this video).
     # When set (even to empty string), persists on the new VideoVariant.
     prompt_override: str | None = None
+    # Optional per-CLIP model + length override (the "Regenerate this clip"
+    # modal — Hugo 2026-07-16). None = leave as-is; "" / 0 = clear back to the
+    # scene/job default; slug / secs = set for THIS clip only.
+    video_model: str | None = None
+    duration_secs: int | None = None
 
 
 class GenerateMoreVideosBody(BaseModel):
@@ -3065,13 +3124,9 @@ async def generate_more_videos(job_id: str, body: GenerateMoreVideosBody,
         in_scope = [body.source_variant_id]
     else:
         in_scope = approved
-    # Pre-flight the providers these clips will actually submit under (per-scene
-    # override → job default), not just job.video_model.
-    _models = {
-        runner._eff_video_model_for_scene(
-            job, next((g.scene_id for g in jc.images if g.variant_id == vid), None))
-        for vid in in_scope
-    }
+    # Pre-flight the providers these clips will actually submit under (per-clip
+    # override → per-scene override → job default), not just job.video_model.
+    _models = {runner._eff_video_model_for_variant(job, jc, vid) for vid in in_scope}
     _preflight_video_keys(_models or {job.video_model or "grok-imagine"})
     background.add_task(
         _run_async, runner.generate_more_videos,
@@ -3097,15 +3152,27 @@ async def retry_video(job_id: str, body: RetryVideoBody,
     target = next((v for v in jc.videos if v.video_id == body.video_id), None)
     if target is None:
         raise HTTPException(404, "Video not found on this character")
-    # The clip's key must be set — and for the provider THIS clip resubmits
-    # under (its per-scene override), not just the job default — otherwise the
-    # retry would silently 401 on the worker thread.
-    _preflight_video_keys({runner._eff_video_model(job, jc, target)})
     # Allow retry on FAILED/ERROR (classic) AND DONE (Step 5 regen flow —
     # user wants a different take on a successful clip). Block PROCESSING
-    # because we'd leak a running provider job.
+    # because we'd leak a running provider job — checked BEFORE persisting any
+    # override so a rejected retry never mutates the job.
     if target.status == VideoStatus.PROCESSING:
         raise HTTPException(409, "Video is still processing; wait for it to finish")
+    # Per-clip model + length override from the regen modal — written BEFORE the
+    # preflight so the key check + the new take resolve the chosen provider.
+    changed = _apply_per_clip_video_override(
+        job, jc, target,
+        video_model=body.video_model, duration_secs=body.duration_secs)
+    # A changed model/length must produce a FRESH render at the new setting —
+    # clear the old provider id so retry_one_video's timeout-salvage can't
+    # re-poll and return the OLD take (silently ignoring the new pick).
+    if changed:
+        target.grok_job_id = ""
+    s.update_job(job)
+    # The clip's key must be set — and for the provider THIS clip resubmits
+    # under (its per-clip / per-scene override), not just the job default —
+    # otherwise the retry would silently 401 on the worker thread.
+    _preflight_video_keys({runner._eff_video_model(job, jc, target)})
     background.add_task(
         _run_async, runner.retry_one_video, job_id, body.char_id, body.video_id,
         body.prompt_override,
@@ -6473,6 +6540,11 @@ class ReClipRegenBody(BaseModel):
     # obviously exists. With scene_id we re-resolve the character's CURRENT
     # clip for that scene instead of refusing.
     scene_id: str | None = None
+    # Optional per-CLIP model + length override (the "Regenerate this clip"
+    # modal — Hugo 2026-07-16). None = leave as-is; "" / 0 = clear back to the
+    # scene/job default; slug / secs = set for THIS clip only.
+    video_model: str | None = None
+    duration_secs: int | None = None
 
 
 @app.post("/api/reengineer/{re_id}/regen_clip")
@@ -6515,7 +6587,23 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
                 404, "clip not found for this character — klippet har fått "
                      "ett nytt id (t.ex. efter en retry). Ladda om sidan och "
                      "försök igen.")
+    # Resolve the actual clip object from the (possibly re-resolved) id so the
+    # per-clip override keys the RIGHT source variant — never body.video_id,
+    # which may be the stale id we just re-resolved above.
+    target = next(v for v in jc.videos if v.video_id == video_id)
     prompt_override = (body.prompt or "").strip() or None
+    # Per-clip model + length override from the regen modal — validated (422 on
+    # a locked model) and persisted onto the job before the clip re-submits.
+    changed = _apply_per_clip_video_override(
+        job, jc, target,
+        video_model=body.video_model, duration_secs=body.duration_secs)
+    # A changed model/length forces a FRESH render — clear the old provider id
+    # so retry_one_video's timeout-salvage can't re-poll the OLD take (which
+    # would ignore the new pick). Reengineer's empty-prompt path (prompt_override
+    # None) is exactly where salvage would otherwise fire.
+    if changed:
+        target.grok_job_id = ""
+    store().update_job(job)
     _mark_finals_stale(state)
     _save_reengineer_state(state)
     background_tasks.add_task(_run_async, runner.retry_one_video,
