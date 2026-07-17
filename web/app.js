@@ -183,7 +183,13 @@ function studio() {
       template: 'capcut-bluebox',   // Hugo 2026-06-21: editor-wide standard (was capcut-purple-pill)
       captioning: false,
       autoEditing: false,
-      voiceId: '',
+      // Editor voice-swap default (Hugo 2026-07-17): ON by default, to the
+      // "JEff bridges" ElevenLabs preset. Voice swap runs whenever voiceId is
+      // set (see auto_edit / multi_auto_edit below). Picking a character in the
+      // Editor "Character" dropdown still overrides this to that character's
+      // preset (onEditorCharChange). Clear the dropdown to '— ingen röst —' to
+      // skip voice swap for a render.
+      voiceId: '4J4I0vMcRYqgQRmwxubI',   // ElevenLabs "JEff bridges"
       enableTrim: true,
       enableCaptions: true,
       enableNormalizeWpm: false,      // Hugo's preset: WPM normalize OFF
@@ -269,7 +275,11 @@ function studio() {
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
-        enableVoiceSwap: false,
+        enableVoiceSwap: true,  // Hugo 2026-07-17: voice swap ON by default —
+                                // empty voiceOverride below means it swaps to
+                                // EACH character's library preset voice (a
+                                // preset-less character keeps its own/Kling
+                                // voice — _resolve_compile_voice returns None).
         thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
         minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
         padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
@@ -279,7 +289,9 @@ function studio() {
         voiceOverride: '',
       };
       try {
-        const saved = JSON.parse(localStorage.getItem('compile.settings.v3') || '{}');
+        // v4 (2026-07-17): supersedes v3 so the new voice-swap-ON default lands
+        // even if a stale v3 blob (with the old OFF value) sits in localStorage.
+        const saved = JSON.parse(localStorage.getItem('compile.settings.v4') || '{}');
         const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
         // 2026-06-17: trim base moved -30→-23 / pad 0.03→0.05. Bump a saved
         // value that still holds the OLD default to the new one (idempotent;
@@ -305,7 +317,10 @@ function studio() {
         enableTrim: true,
         enableCaptions: true,
         enableWpmNormalize: false,
-        enableVoiceSwap: false,
+        enableVoiceSwap: true,  // Hugo 2026-07-17: voice swap ON by default —
+                                // empty voiceOverride below means it swaps to
+                                // EACH character's library preset voice (a
+                                // preset-less character keeps its own/Kling voice).
         // Trim-tuning (Hugo 2026-06-17): now exposed in the ⚙ panel + sent to
         // the backend (was hardcoded to the runner preset). -23 base / 0.05 pad.
         thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
@@ -318,9 +333,10 @@ function studio() {
         playbackSpeed: 1.05,            // Hugo 2026-06-21: editor-wide standard (was 1.0)
       };
       try {
-        // v2 (2026-06-16): supersedes v1 so the new bluebox default replaces
-        // any saved 68 from before; older reAsm prefs reset to current.
-        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v3') || '{}');
+        // v4 (2026-07-17): supersedes v3 so the new voice-swap-ON default lands
+        // even if a stale v3 blob (with the old OFF value) sits in localStorage.
+        // (v2 2026-06-16 first brought the bluebox default; older prefs reset.)
+        const saved = JSON.parse(localStorage.getItem('reassemble.settings.v4') || '{}');
         const merged = { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
         // 2026-07-04: caption-size standard 60→56. Bump a saved value still on
         // the OLD default; a deliberately-tuned size (anything ≠ 60) survives.

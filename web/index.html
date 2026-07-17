@@ -2524,11 +2524,16 @@
                   Add ELEVENLABS_API_KEY to .env to swap voice.
                 </div>
               </template>
-              <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+              <!-- Per-option :selected + @change (NOT x-model): the voice list
+                   loads async, so an x-model default (Jeff Bridges) can't bind
+                   to an option that doesn't exist yet at init → the select would
+                   revert to "" while the state stays Jeff (same reversion the
+                   length picker hit). :selected re-evaluates when options land. -->
+              <select x-show="elevenlabsAvailable()" @change="editor.voiceId = $event.target.value"
                       class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
-                <option value="">— keep original voice —</option>
+                <option value="" :selected="!editor.voiceId">— keep original voice —</option>
                 <template x-for="v in elevenlabsVoices" :key="'mc-evc-'+v.voice_id">
-                  <option :value="v.voice_id"
+                  <option :value="v.voice_id" :selected="v.voice_id === editor.voiceId"
                           x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
                 </template>
               </select>
@@ -2835,11 +2840,11 @@
                         (locked) Add <code>ELEVENLABS_API_KEY</code> to .env to enable voice-swap.
                       </div>
                     </template>
-                    <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+                    <select x-show="elevenlabsAvailable()" @change="editor.voiceId = $event.target.value"
                             class="w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
-                      <option value="">— keep original voice —</option>
+                      <option value="" :selected="!editor.voiceId">— keep original voice —</option>
                       <template x-for="v in elevenlabsVoices" :key="'mc-st-evc-'+v.voice_id">
-                        <option :value="v.voice_id"
+                        <option :value="v.voice_id" :selected="v.voice_id === editor.voiceId"
                                 x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
                       </template>
                     </select>
@@ -3317,11 +3322,11 @@
                     </p>
                   </div>
 
-                  <select x-show="elevenlabsAvailable()" x-model="editor.voiceId"
+                  <select x-show="elevenlabsAvailable()" @change="editor.voiceId = $event.target.value"
                           class="w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg">
-                    <option value="">— keep original voice —</option>
+                    <option value="" :selected="!editor.voiceId">— keep original voice —</option>
                     <template x-for="v in elevenlabsVoices" :key="'st-evc-'+v.voice_id">
-                      <option :value="v.voice_id"
+                      <option :value="v.voice_id" :selected="v.voice_id === editor.voiceId"
                               x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
                     </template>
                   </select>

@@ -1277,7 +1277,12 @@ ASSEMBLE_DEFAULTS: dict = {
     # Kling room tone. Default OFF; max_gap tunable in the ⚙ panel.
     "enable_gap_trim": False,
     "gap_max_secs": 0.35,
-    "enable_voice_swap": False,
+    # Voice swap ON by default (Hugo 2026-07-17) so an AUTO-assembled Reengineer
+    # final (assembled without the ⚙ panel ever being opened) swaps to each
+    # character's library preset voice. voice_override=None → per-character
+    # preset; a preset-less character keeps its own/Kling voice
+    # (_resolve_compile_voice returns None).
+    "enable_voice_swap": True,
     "voice_override": None,
     # Global playback speed (the Editor tab's Speed control): pitch-preserving,
     # captions stay in sync. 1.0 = off. Hugo 2026-06-21: 1.05 editor-wide standard.
