@@ -641,7 +641,12 @@
           </div>
         </template>
 
-        <div class="flex justify-end">
+        <div class="flex justify-between items-center gap-3">
+          <label class="text-sm flex items-center gap-1.5 cursor-pointer"
+                 title="När alla klipp har lyckats: bygg ihop slutvideorna (Steg 6) automatiskt och ladda upp dem till Google Drive — inga manuella klick. Bocka ur för att göra Steg 6 + Drive själv.">
+            <input type="checkbox" x-model="autoCompilePush" class="rounded" />
+            🔁 Bygg ihop + Drive automatiskt
+          </label>
           <button class="px-4 py-3 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   :disabled="!canSubmitMovement()"
                   :title="!videoModelAvailable() ? videoModelLockedReason() : ''"
@@ -1342,6 +1347,11 @@
             <input type="checkbox" x-model="swapFromImages.skipQc" class="rounded" />
             🚫 Hoppa över QC
           </label>
+          <label class="text-sm flex items-center gap-1.5 cursor-pointer"
+                 title="När alla klipp har lyckats: bygg ihop slutvideorna automatiskt och ladda upp dem till Google Drive — inga manuella klick. Bocka ur för att göra det själv.">
+            <input type="checkbox" x-model="swapFromImages.autoDrivePush" class="rounded" />
+            🔁 Bygg ihop + Drive automatiskt
+          </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!swapFromImages.rows.length || swapFromImages.charIds.length === 0 || swapFromImages.submitting"
                   @click="submitSwapFromImages()"
@@ -1500,6 +1510,11 @@
                  title="Hoppa över kvalitetskontrollen för den här körningen: ingen bild-QC och ingen video-QC, inga auto-omförsök. Snabbare och billigare, men inga defekter fångas automatiskt.">
             <input type="checkbox" x-model="reengineerGen.skipQc" class="rounded" />
             🚫 Hoppa över QC
+          </label>
+          <label class="text-sm flex items-center gap-1.5 cursor-pointer"
+                 title="När alla klipp har lyckats och finalerna byggts ihop: ladda upp dem till Google Drive automatiskt — inga manuella klick. Bocka ur för att göra det själv.">
+            <input type="checkbox" x-model="reengineerGen.autoDrivePush" class="rounded" />
+            🔁 Ladda upp till Drive automatiskt
           </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!reengineerGen.file || reengineerGen.charIds.length === 0 || reengineerGen.submitting"

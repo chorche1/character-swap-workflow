@@ -97,6 +97,7 @@ function studio() {
       backgroundUrl: '',             // object URL for the thumbnail
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       skipQc: false,                 // 🚫 per-run QC opt-out (image + video)
+      autoDrivePush: true,           // 🔁 auto-push finals to Drive after assemble (Hugo 2026-07-19)
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -116,6 +117,7 @@ function studio() {
       backgroundUrl: '',
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       skipQc: false,                  // 🚫 per-run QC opt-out (image + video)
+      autoDrivePush: true,            // 🔁 auto-push finals to Drive after assemble (Hugo 2026-07-19)
       sourceOverrides: {},            // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -456,6 +458,10 @@ function studio() {
     // durationByScene (cleared on form-reset, not persisted to the job), sent
     // as `video_models_by_scene` on submit. Lets one job mix providers.
     swapVideoModelsByScene: {},
+    // 🔁 Auto-finalize (Hugo 2026-07-19): when every clip of this job succeeds,
+    // auto-compile the Step-6 finals + push them to Drive. The checkbox by the
+    // "generate videos" button; sent as `auto_compile_push` on submitMovement.
+    autoCompilePush: true,
     editingVariant: null,    // {char_id, variant_id}
     editPrompt: '',
     editingTitle: false,
@@ -1127,6 +1133,7 @@ function studio() {
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('skip_qc', g.skipQc ? 'true' : 'false');
+        fd.append('auto_drive_push', g.autoDrivePush ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
@@ -1280,6 +1287,7 @@ function studio() {
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('skip_qc', g.skipQc ? 'true' : 'false');
+        fd.append('auto_drive_push', g.autoDrivePush ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('background_source', g.backgroundSource || 'character');
@@ -5904,6 +5912,7 @@ function studio() {
           video_models_by_scene: modelsByScene,
           videos_per_character: this.videosPerChar,
           video_model: this.swapVideoModel || 'kling-v3',
+          auto_compile_push: !!this.autoCompilePush,
         }),
       });
       if (!r.ok) { this.notifyError('Movement submit failed: ' + await r.text()); return; }

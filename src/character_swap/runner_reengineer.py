@@ -1246,8 +1246,20 @@ async def assemble(re_id: str) -> None:
     except Exception as e:
         _log.exception("reengineer %s assemble failed", re_id)
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
+        return
     finally:
         _ASSEMBLING.discard(re_id)
+
+    # Auto-push finals to Drive (Hugo 2026-07-19) — runs AFTER the _ASSEMBLING
+    # guard is cleared so the manual drive-push refusal ("bygget pågår") never
+    # trips on our own upload. No-op unless the run opted in AND landed `done`
+    # (push_reengineer_finals re-checks the fresh state). Defensive: an upload
+    # failure must not turn a successful build into a failed run.
+    try:
+        from character_swap import auto_finalize
+        await auto_finalize.push_reengineer_finals(re_id)
+    except Exception:
+        _log.exception("reengineer %s auto drive-push failed", re_id)
 
 
 # Editor finishing defaults — mirrors Swap Step 6 EXCEPT voice swap + WPM

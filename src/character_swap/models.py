@@ -427,6 +427,14 @@ class Job(BaseModel):
     # CompileVideosBody shape; surfaced in _job_to_dict for the frontend to
     # rehydrate the panel per job. None = never compiled → use the global default.
     compile_settings: dict | None = None
+    # Auto-finalize (Hugo 2026-07-19): after the video phase finishes with EVERY
+    # approved character's clips successful, automatically run the Step-6 compile
+    # AND push each final to Drive — no manual "Compile" / "⬆ Drive" clicks. A
+    # per-job escape hatch (the checkbox by "generate videos"); default ON. Only
+    # the classic Swap job flow reads this — reengineer-backed jobs use the
+    # run-state `auto_drive_push` flag instead (their finals are built by the
+    # assemble path, not compile_videos).
+    auto_compile_push: bool = True
     # Per-job Repurpose settings (2026-06-27): the editor settings last used for
     # the mirror-flipped "Repurpose" variant, kept separate from compile_settings
     # so repurposing with different settings doesn't clobber the compile preset.

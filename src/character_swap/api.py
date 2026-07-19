@@ -2194,6 +2194,11 @@ class MovementBody(BaseModel):
     # we re-validate against the registry server-side to defend against
     # hand-crafted requests.
     duration_secs: int | None = Field(default=None, ge=1, le=120)
+    # Auto-finalize (Hugo 2026-07-19): when the video phase finishes with every
+    # approved character's clips successful, automatically run the Step-6
+    # compile AND push each final to Drive. The checkbox by "generate videos";
+    # default ON. Persisted to Job.auto_compile_push at submit.
+    auto_compile_push: bool = True
 
 
 # Pre-check map for video providers — refuses to start a job if the user
@@ -2434,6 +2439,9 @@ async def set_movement(job_id: str, body: MovementBody,
     job.enriched_movement_prompts = {}
     job.enriched_movement_prompt = None
     job.videos_per_character = body.videos_per_character
+    # Auto-finalize opt-in (default ON) — read here so the checkbox by
+    # "generate videos" governs the whole compile+push chain for this job.
+    job.auto_compile_push = bool(body.auto_compile_push)
     job.video_model = body.video_model or "grok-imagine"
     # Validate duration against the chosen model's registry options.
     # Unknown / out-of-range values silently fall back to the model's
@@ -5187,6 +5195,9 @@ async def reengineer_create(
     # Per-run QC opt-out (Hugo 2026-06-28): True → skip BOTH image (swap) QC and
     # video clip-QC (and their auto-retries) for this whole run. Default False.
     skip_qc: bool = Form(False),
+    # Auto-finalize (Hugo 2026-07-19): after assemble builds the finals, push
+    # them to Drive automatically. Default ON; the checkbox on the upload form.
+    auto_drive_push: bool = Form(True),
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
@@ -5289,6 +5300,7 @@ async def reengineer_create(
         "language": language,
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "skip_qc": bool(skip_qc),
+        "auto_drive_push": bool(auto_drive_push),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,
@@ -5340,6 +5352,7 @@ async def reengineer_from_images(
     auto_mode: bool = Form(False),
     use_director: bool = Form(False),        # UI presets this ON; API stays opt-in (billed)
     skip_qc: bool = Form(False),             # per-run QC opt-out (image + video)
+    auto_drive_push: bool = Form(True),      # auto-push finals to Drive after assemble (Hugo 2026-07-19)
     background_file: UploadFile | None = File(None),
     background_source: str = Form("character"),
     character_source_image_ids: str = Form(""),
@@ -5541,6 +5554,7 @@ async def reengineer_from_images(
         "outfit_text": outfit_text.strip(),
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "skip_qc": bool(skip_qc),
+        "auto_drive_push": bool(auto_drive_push),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,
@@ -7162,22 +7176,15 @@ async def editor_drive_export_bootstrap() -> dict:
 # its own version history). Failures are LOUD: 409 when write auth is missing
 # (the UI offers the bootstrap), 502 with the real reason on upload errors.
 
-DRIVE_ROOT_FOLDER = "Character Swap"
+# These live in the framework-agnostic `drive_push` module (2026-07-19) so the
+# HTTP endpoints here AND the background auto-finalize chain push with the SAME
+# folder layout + filename convention. Aliased to the historical private names
+# so the endpoints below read unchanged.
+from character_swap import drive_push as _drive_push_mod
 
-
-def _drive_safe_name(name: str) -> str:
-    return (name or "").replace("/", "_").replace("\\", "_").strip() or "video"
-
-
-def _drive_final_name(char_name: str, base: str, variant: str,
-                      run_id: str) -> str:
-    """Drive filename for a per-character final, CHARACTER NAME FIRST (Hugo
-    2026-07-03 — so the folder listing sorts by character). `base` = job/run
-    title; `run_id` keeps different runs' finals distinct and, together with
-    the persisted file_id, is the overwrite key. Single- and batch-push paths
-    share this so the two never drift apart."""
-    suffix = " — repurpose" if variant == "repurpose" else ""
-    return f"{char_name} — {base}{suffix} [{run_id}].mp4"
+DRIVE_ROOT_FOLDER = _drive_push_mod.DRIVE_ROOT_FOLDER
+_drive_safe_name = _drive_push_mod.drive_safe_name
+_drive_final_name = _drive_push_mod.drive_final_name
 
 
 def _exc_detail(exc: BaseException) -> str:
@@ -7233,34 +7240,15 @@ async def _drive_push_file(source: Path, subfolders: list[str],
     old and new bytes on Drive with an ok:True receipt. The snapshot pins
     the bytes that existed when the user clicked push."""
     from character_swap.clients import google_drive
-    if not source.is_file():
-        raise HTTPException(404, f"Video file not found: {source.name}")
-    fd, tmp_name = tempfile.mkstemp(prefix="drive-push-",
-                                    suffix=source.suffix or ".mp4")
-    os.close(fd)
-    snapshot = Path(tmp_name)
     try:
-        await asyncio.to_thread(shutil.copyfile, source, snapshot)
-        folder_id = await asyncio.to_thread(
-            google_drive.ensure_folder_path,
-            [DRIVE_ROOT_FOLDER, *subfolders])
-        result = await asyncio.to_thread(
-            lambda: google_drive.upload_or_replace(
-                snapshot, drive_filename=filename, folder_id=folder_id,
-                file_id=prior_file_id))
+        return await _drive_push_mod.push_file_core(
+            source, subfolders, filename, prior_file_id=prior_file_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e)) from e
     except google_drive.DriveNotAuthorized as e:
         raise HTTPException(409, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(502, str(e)) from e
-    finally:
-        snapshot.unlink(missing_ok=True)
-    return {
-        "ok": True,
-        "file_id": result.get("id"),
-        "url": result.get("webViewLink"),
-        "name": result.get("name"),
-        "at": datetime.utcnow().isoformat() + "Z",
-    }
 
 
 class DrivePushBody(BaseModel):

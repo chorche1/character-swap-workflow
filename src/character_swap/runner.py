@@ -1936,6 +1936,20 @@ async def run_video_synthesis(job_id: str) -> None:
         *[_animate_character(job, jc, m, prompt_for_scene) for jc in targets]
     )
 
+    # Auto-finalize (Hugo 2026-07-19): when EVERY approved character's clips
+    # succeeded, automatically compile the Step-6 finals + push them to Drive —
+    # no manual clicks. Reengineer-backed jobs are EXCLUDED here: their video
+    # phase is watched by runner_reengineer, which builds finals via the
+    # assemble path (not compile_videos) and auto-pushes there instead. The
+    # chain is defensive (its own gate + try/except) so it never breaks the
+    # video phase; guarded here too so a from_reengineer run skips it entirely.
+    if not job.from_reengineer:
+        try:
+            from character_swap import auto_finalize
+            await auto_finalize.finalize_swap_job(job_id)
+        except Exception:
+            logger.exception("auto-finalize %s failed after video phase", job_id)
+
 
 def _first_scene_id(job: Job) -> str | None:
     """The job's primary (first) scene_id. Multi-scene jobs use
