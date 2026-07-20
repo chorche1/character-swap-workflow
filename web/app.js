@@ -350,9 +350,38 @@ function studio() {
     // --- Repurpose (mirror-flip finals + new edit settings) ---
     // One shared modal for BOTH the Reengineer finals panel and Swap Step-6.
     // `repurposeSettings` (camelCase, same field set as the ⚙ panels) is seeded
-    // on open from the run/job's editor settings; mirroring is ALWAYS applied.
+    // on open from the repurpose PRESET below (Hugo 2026-07-19) — the fixed
+    // default for EVERY repurpose (Editor + Swap + Reengineer) — plus the
+    // per-kind VOICE, plus a prior repurpose of the same run (which wins).
+    // Mirroring is ALWAYS applied.
     repurposeModal: { open: false, kind: '', id: '', busy: false },
     repurposeSettings: {},
+    // Hugo's repurpose preset (2026-07-19): the NON-VOICE defaults every
+    // repurpose modal opens with, regardless of what the source run was built
+    // with. Voice is deliberately NOT here — it's layered per kind in
+    // openRepurposeModal (Editor keeps the reel's own voice / Jeff Bridges;
+    // Swap + Reengineer keep each character's preset voice, Hugo 2026-07-19).
+    // localStorage-backed like the ⚙ panels so a future "save as default" fits.
+    _repurposeDefault: (() => {
+      const defaults = {
+        template: 'capcut-bluebox',
+        captionSize: 54,        // Hugo 2026-07-19 (was 56)
+        enableTrim: true,
+        enableCaptions: true,
+        enableWpmNormalize: false,
+        thresholdDb: -24,
+        minSilenceSecs: 0.4,
+        padSecs: 0.12,          // Hugo 2026-07-19 (was 0.1)
+        enableGapTrim: false,
+        gapMaxSecs: 0.35,
+        targetWpm: 190,
+        playbackSpeed: 1.0,     // Hugo 2026-07-19 (was 1.05)
+      };
+      try {
+        const saved = JSON.parse(localStorage.getItem('repurpose.settings.v1') || '{}');
+        return { ...defaults, ...(saved && typeof saved === 'object' ? saved : {}) };
+      } catch (_) { return defaults; }
+    })(),
     pipelineRunning: false,         // true while the 🚀 Run-full-pipeline orchestrator is running
     // --- Visual scrubbing timeline state (kept at top level for Alpine
     // x-show / x-bind brevity in markup; logically belongs to the caption
@@ -1987,27 +2016,23 @@ function studio() {
     // job's current editor settings (so the user just tweaks). `kind` is
     // 'reengineer' (pass the run) or 'swap' (uses the active job).
     openRepurposeModal(kind, run) {
+      // Hugo's fixed repurpose preset (2026-07-19) is the NON-VOICE base for
+      // EVERY kind — the modal opens with it regardless of what the source run
+      // was built with. On top of it: the per-kind VOICE (Editor keeps the
+      // reel's own voice / Jeff Bridges; Swap + Reengineer keep each
+      // character's preset voice), then a PRIOR repurpose of this exact run
+      // (so re-doing keeps its settings — wins last).
+      const preset = { ...this._repurposeDefault };
       let seed;
       if (kind === 'editor') {
-        // Saved multi-clip reel: seed from the reel's own settings (and the
-        // last repurpose settings if it's been repurposed before).
         const es = (run.editor && run.editor.settings) || {};
         const rs = (run.editor && run.editor.repurpose_settings) || {};
         seed = {
-          template: es.template || 'capcut-bluebox',
-          captionSize: (es.overrides && es.overrides.size) || 56,
-          enableTrim: es.enable_trim !== false,
-          enableCaptions: es.enable_captions !== false,
-          enableWpmNormalize: !!es.enable_wpm_normalize,
-          targetWpm: es.target_wpm || 190,
-          enableGapTrim: !!es.enable_gap_trim,
-          gapMaxSecs: es.gap_max_secs || 0.35,
-          playbackSpeed: es.playback_speed || 1.0,
-          thresholdDb: es.threshold_db ?? -24,
-          minSilenceSecs: es.min_silence_secs || 0.4,
-          padSecs: es.pad_secs ?? 0.1,
+          // Editor reels have no character presets — the voice is the reel's
+          // own (Jeff Bridges by default since 2026-07-17).
           enableVoiceSwap: !!(es.voice_id),
           voiceOverride: es.voice_id || '',
+          ...preset,
           ...this._mapStoredToReAsm(rs),
         };
         this.repurposeModal = { open: true, kind: 'editor',
@@ -2016,14 +2041,20 @@ function studio() {
         return;
       }
       if (kind === 'reengineer') {
-        seed = { ...this.reAsmFor(run),
+        // Keep the run's per-character preset voice; everything else = preset.
+        const base = this.reAsmFor(run);
+        seed = { enableVoiceSwap: base.enableVoiceSwap,
+                 voiceOverride: base.voiceOverride || '',
+                 ...preset,
                  ...this._mapStoredToReAsm(run.repurpose_settings) };
         this.repurposeModal = { open: true, kind: 'reengineer',
                                 id: run.re_id, busy: false };
       } else {
-        // Swap Step-6 compile settings have no caption-size / speed → seed them.
-        seed = { captionSize: 56, playbackSpeed: 1.0,
-                 ...this.compileFor(this.job),
+        // Keep the job's per-character preset voice; everything else = preset.
+        const base = this.compileFor(this.job);
+        seed = { enableVoiceSwap: base.enableVoiceSwap,
+                 voiceOverride: base.voiceOverride || '',
+                 ...preset,
                  ...this._mapStoredToReAsm(this.job && this.job.repurpose_settings) };
         this.repurposeModal = { open: true, kind: 'swap',
                                 id: this.job && this.job.job_id, busy: false };
