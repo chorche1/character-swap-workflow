@@ -3874,6 +3874,10 @@ function studio() {
         this.notifyMilestone('Multi-clip auto-edit done',
           `${data.n_clips} clips${unmatched ? ` (${unmatched} unmatched)` : ''} · ${data.captions?.n_words} words captioned`,
           { kind: 'done', tag: 'editor-multi-auto-edit' });
+        if (data.voice_swap?.skipped) {
+          this.notifyError('⚠ Röstbytet hoppades över — reeln har originalrösterna. '
+            + (data.voice_swap.error || ''));
+        }
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }
@@ -3914,10 +3918,14 @@ function studio() {
         this.editorHistory = [{ ...data, kind: 'auto', ts: Date.now() }, ...this.editorHistory];
         const parts = [];
         if (data.trim) parts.push(`trimmed ${data.trim.saved_secs}s`);
-        if (data.voice_swap) parts.push(`voice swapped`);
+        if (data.voice_swap && !data.voice_swap.skipped) parts.push(`voice swapped`);
         if (data.captions) parts.push(`${data.captions.n_words} words captioned`);
         this.notifyMilestone('Auto-edit pipeline done', parts.join(' · '),
           { kind: 'done', tag: 'editor-auto-edit' });
+        if (data.voice_swap?.skipped) {
+          this.notifyError('⚠ Röstbytet hoppades över — videon har originalrösten. '
+            + (data.voice_swap.error || ''));
+        }
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }

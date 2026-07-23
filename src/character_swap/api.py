@@ -4057,10 +4057,15 @@ async def editor_auto_edit(
             current = swapped
             swap_summary = {"voice_id": voice_id, "audio_path": str(new_audio)}
             tmp_audio_in.unlink(missing_ok=True)
-        except NotImplementedError as e:
-            raise HTTPException(501, f"ElevenLabs wiring pending: {e}")
         except Exception as e:
-            raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
+            # Skip LOUDLY and keep rendering (same contract as multi_auto_edit
+            # + the Step-6 compile / Reengineer assemble, Hugo 2026-07-24):
+            # the video ships with its original voice, the reason is logged
+            # and rides back to the UI on `voice_swap.skipped`.
+            logger.warning("%s: voice swap skipped: %s: %s",
+                           edit_id, type(e).__name__, e)
+            swap_summary = {"voice_id": voice_id, "skipped": True,
+                            "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
     # Step 3a: transcribe (required if captions, wpm-normalize, OR word-gap
     # trim is on)
@@ -4376,10 +4381,16 @@ async def editor_multi_auto_edit(
             current = swapped
             swap_summary = {"voice_id": voice_id}
             tmp_audio_in.unlink(missing_ok=True)
-        except NotImplementedError as e:
-            raise HTTPException(501, f"ElevenLabs wiring pending: {e}")
         except Exception as e:
-            raise HTTPException(500, f"Voice swap failed: {type(e).__name__}: {e}")
+            # Voice swap is the most fragile step (network / quota / bad
+            # audio). Skip it LOUDLY and keep rendering — same contract as the
+            # Step-6 compile + Reengineer assemble (Hugo 2026-07-24): the reel
+            # ships with its original voices, the reason is logged and rides
+            # back to the UI on `voice_swap.skipped`.
+            logger.warning("%s: voice swap skipped: %s: %s",
+                           edit_id, type(e).__name__, e)
+            swap_summary = {"voice_id": voice_id, "skipped": True,
+                            "error": f"{type(e).__name__}: {str(e)[:300]}"}
 
     # 6.25. WORD-GAP TRIM (opt-in, replaces level interior trim). Needs a
     # transcript of the stitched video; the caption block below re-transcribes
