@@ -182,6 +182,17 @@ class Settings(BaseSettings):
     # unbounded lavfi source) and must be killed + failed loudly rather than
     # hang the pipeline and grow the output file until the disk fills.
     ffmpeg_timeout_secs: int = Field(default=3600, validation_alias="FFMPEG_TIMEOUT_SECS")
+    # Automatic black-bar removal in the final builds (Hugo 2026-07-24):
+    # every clip entering a final is cropdetect-scanned and minimally
+    # crop-zoomed to the target aspect so neither model-baked letterboxing
+    # nor the pipeline's own scale+pad leaves black bars. The cap is the
+    # maximum fraction of the frame (per axis) the fix may crop away —
+    # beyond it the clip keeps today's padded behavior (protects against
+    # cropdetect misreading a dark scene and against wildly off-aspect
+    # imports). BLACKBAR_FIX=0 disables the whole mechanism.
+    blackbar_fix: bool = Field(default=True, validation_alias="BLACKBAR_FIX")
+    blackbar_max_crop_frac: float = Field(
+        default=0.05, validation_alias="BLACKBAR_MAX_CROP_FRAC")
     # Remotion caption-render quality. Remotion's defaults (CRF 23-ish for
     # h264 + JPEG-80 frame captures) were the last lossy hop — measured
     # ~3.2 Mbps finals. JPEG 100 + CRF 16 makes the caption pass nearly

@@ -19,6 +19,7 @@ ffmpeg binary comes from `imageio_ffmpeg` so users don't need a system install.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -32,6 +33,8 @@ import imageio_ffmpeg
 from character_swap.call_log import record
 from character_swap.clients import openai_image  # reuse _client() for OpenAI auth
 from character_swap.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _ffprobe() -> str | None:
@@ -2053,6 +2056,169 @@ def _target_resolution(aspect_ratio: str) -> tuple[int, int]:
     }.get(a, (1080, 1920))
 
 
+def _probe_dims(input_path: Path) -> tuple[int, int] | None:
+    """Width/height of the first video stream, or None when probing fails."""
+    probe = _ffprobe()
+    if not probe:
+        return None
+    try:
+        proc = subprocess.run(
+            [probe, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=p=0", str(input_path)],
+            capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            return None
+        w_s, h_s = proc.stdout.strip().split(",")[:2]
+        w, h = int(w_s), int(h_s)
+        return (w, h) if w > 0 and h > 0 else None
+    except (ValueError, OSError):
+        return None
+
+
+_CROPDETECT_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")
+
+
+def detect_content_box(input_path: Path) -> tuple[int, int, int, int] | None:
+    """Real content rectangle (w, h, x, y) of a clip via ffmpeg cropdetect
+    over (up to) the first 60 s — every frame is evaluated (decode dominates
+    the cost; no fps prefilter, which would starve cropdetect's default
+    skip=2 warmup on short clips). With reset=0 cropdetect accumulates the
+    maximum content area seen, so the LAST printed crop is the union box
+    across all frames — a region only counts as a bar if it is black in
+    EVERY frame (fade-from-black intros therefore never shrink the box;
+    later bright frames expand it back). Returns None on any failure — the
+    black-bar fix never blocks a build."""
+    try:
+        out = _run([
+            _ffmpeg(), "-hide_banner", "-i", str(input_path),
+            "-t", "60",
+            "-vf", "cropdetect=limit=24:round=2:reset=0",
+            "-f", "null", "-",
+        ], timeout_secs=120)
+    except RuntimeError:
+        return None
+    last: re.Match | None = None
+    for last in _CROPDETECT_RE.finditer(out):
+        pass
+    if last is None:
+        return None
+    w, h, x, y = (int(g) for g in last.groups())
+    if w <= 0 or h <= 0:
+        return None
+    return (w, h, x, y)
+
+
+def compute_bar_crop(
+    src_w: int, src_h: int, box: tuple[int, int, int, int],
+    *, aspect_ratio: str = "9:16", max_crop_frac: float = 0.05,
+) -> tuple[int, int, int, int] | None:
+    """The minimal crop window (w, h, x, y) that eliminates black bars:
+    the LARGEST target-aspect rectangle that fits inside the detected
+    content box, centered within it (pure geometry — unit-testable).
+
+    Returns None when no crop is needed (window == full frame) OR when
+    eliminating the bars would crop more than `max_crop_frac` of the frame
+    on either axis (Hugo's 5% cap, 2026-07-24) — the caller then keeps
+    today's scale+pad behavior for that clip."""
+    if src_w <= 0 or src_h <= 0:
+        return None
+    bw, bh, bx, by = box
+    # Clamp the content box into the frame (cropdetect output is trusted
+    # but must never produce an out-of-frame crop).
+    bx = max(0, min(bx, src_w))
+    by = max(0, min(by, src_h))
+    bw = max(0, min(bw, src_w - bx))
+    bh = max(0, min(bh, src_h - by))
+    if bw <= 0 or bh <= 0:
+        return None
+    # Largest target-aspect window inside the content box. Even dims
+    # (yuv420p): floor the leading axis, derive the other from the target
+    # aspect (nearest-even) so the drift stays ≤1px — the post-crop scale
+    # uses cover+crop, so that drift can never reintroduce a bar.
+    tw, th = _target_resolution(aspect_ratio)
+    win_w = min(float(bw), bh * tw / th)
+    w = max(2, int(win_w) // 2 * 2)
+    h = max(2, min(bh // 2 * 2, round(w * th / tw / 2) * 2))
+    if w >= src_w and h >= src_h:
+        return None                     # clean clip, on-aspect — no-op
+    if (src_w - w) / src_w > max_crop_frac or (src_h - h) / src_h > max_crop_frac:
+        return None                     # cap: would zoom too far — keep pad
+    # Center the window within the content box; even offsets, clamped.
+    x = bx + (bw - w) // 2
+    y = by + (bh - h) // 2
+    x = max(0, min(x // 2 * 2, src_w - w))
+    y = max(0, min(y // 2 * 2, src_h - h))
+    return (w, h, x, y)
+
+
+def bar_crop_for_clip(
+    input_path: Path, aspect_ratio: str = "9:16",
+) -> tuple[int, int, int, int] | None:
+    """Probe + detect + geometry for one clip. None ⇒ leave the clip on
+    today's scale+pad path (clean clip, disabled fix, cap exceeded, or any
+    probe/detect failure — this helper never raises)."""
+    if not settings.blackbar_fix:
+        return None
+    try:
+        dims = _probe_dims(input_path)
+        if not dims:
+            return None
+        box = detect_content_box(input_path)
+        if not box:
+            return None
+        crop = compute_bar_crop(
+            dims[0], dims[1], box, aspect_ratio=aspect_ratio,
+            max_crop_frac=settings.blackbar_max_crop_frac)
+        if crop:
+            logger.info("black-bar fix: %s %dx%d → crop=%d:%d:%d:%d",
+                        input_path.name, dims[0], dims[1], *crop)
+        elif box[0] < dims[0] or box[1] < dims[1]:
+            logger.info(
+                "black-bar fix: %s has bars (content %dx%d of %dx%d) but "
+                "eliminating them exceeds the %.0f%% cap — keeping as-is",
+                input_path.name, box[0], box[1], dims[0], dims[1],
+                settings.blackbar_max_crop_frac * 100)
+        return crop
+    except Exception:
+        logger.warning("black-bar detection failed for %s — skipping",
+                       input_path, exc_info=True)
+        return None
+
+
+def _canvas_vf(crop: tuple[int, int, int, int] | None,
+               target_w: int, target_h: int) -> str:
+    """Per-input normalize-to-canvas video filter snippet. With a bar crop:
+    cut the bars away, then scale-to-COVER + center-crop so the even-rounded
+    crop's ≤1px aspect drift can never reintroduce a pad bar. Without one:
+    the legacy scale-to-fit + pad (letterbox/pillarbox) behavior."""
+    if crop:
+        w, h, x, y = crop
+        return (f"crop={w}:{h}:{x}:{y},"
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h}")
+    return (f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2")
+
+
+def crop_video(input_path: Path, output_path: Path,
+               crop: tuple[int, int, int, int], *,
+               job_id: str | None = None) -> Path:
+    """Re-encode a clip with the given crop window (audio copied through).
+    Used by the Editor single-clip pipeline, which never scales to a canvas
+    — baked-in bars there need their own (conditional) encode."""
+    w, h, x, y = crop
+    cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+           "-vf", f"crop={w}:{h}:{x}:{y}", *_enc_v()]
+    if _has_audio_stream(input_path):
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-an"]
+    cmd += [str(output_path)]
+    _run(cmd)
+    return output_path
+
+
 def concat_videos(video_paths: list[Path], output_path: Path,
                   *, aspect_ratio: str = "9:16") -> Path:
     """Concatenate N videos into one. Re-encodes (rather than concat demuxer)
@@ -2076,10 +2242,18 @@ def concat_videos(video_paths: list[Path], output_path: Path,
     any_audio = any(has_audio_flags)
     all_audio = all(has_audio_flags)
 
+    # Per-clip black-bar removal (Hugo 2026-07-24): minimal crop-zoom to the
+    # target aspect for clips carrying baked-in bars / off-aspect frames.
+    # None ⇒ that clip keeps the legacy scale+pad path.
+    bar_crops = [bar_crop_for_clip(p, aspect_ratio) for p in video_paths]
+
     if len(video_paths) == 1:
         # Just copy through; preserve or drop audio based on the single input.
-        cmd = [_ffmpeg(), "-y", "-i", str(video_paths[0]),
-               *_enc_v()]
+        cmd = [_ffmpeg(), "-y", "-i", str(video_paths[0])]
+        if bar_crops[0]:
+            w, h, x, y = bar_crops[0]
+            cmd += ["-vf", f"crop={w}:{h}:{x}:{y}"]
+        cmd += [*_enc_v()]
         if has_audio_flags[0]:
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
@@ -2108,8 +2282,8 @@ def concat_videos(video_paths: list[Path], output_path: Path,
     parts: list[str] = []
     for i in range(len(video_paths)):
         parts.append(
-            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v{i}]"
+            f"[{i}:v]{_canvas_vf(bar_crops[i], target_w, target_h)},"
+            f"setsar=1,fps=30,format=yuv420p[v{i}]"
         )
         if any_audio:
             # Pick the audio source for this clip: real audio from the clip
@@ -2204,6 +2378,13 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                           or settings.adaptive_silence_threshold):
             measured = [_measure_clip_loudness(p) if has_audio else None
                         for p, has_audio in zip(video_paths, has_audio_flags)]
+
+        # ---- per-clip black-bar crop (analysis only; Hugo 2026-07-24) -----
+        # Minimal crop-zoom to the target aspect for clips carrying baked-in
+        # bars / off-aspect frames; None ⇒ that clip keeps the legacy
+        # scale+pad path. Detection never raises (bar_crop_for_clip).
+        bar_crops = [bar_crop_for_clip(p, aspect_ratio) for p in video_paths]
+        entry["bar_crops"] = sum(1 for c in bar_crops if c)
 
         # ---- analysis only (no encodes): keep-ranges per clip -------------
         # One silencedetect pass per clip at d=0.05 catches both the onset
@@ -2345,8 +2526,7 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                 vlab, alab = f"v{i}_{j}", f"a{i}_{j}"
                 parts.append(
                     f"[{i}:v]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS,"
-                    f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-                    f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                    f"{_canvas_vf(bar_crops[i], target_w, target_h)},"
                     f"setsar=1,fps={fps_target:g},format=yuv420p[{vlab}]"
                 )
                 if any_audio:

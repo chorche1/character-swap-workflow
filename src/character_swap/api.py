@@ -4016,6 +4016,23 @@ async def editor_auto_edit(
     except (RuntimeError, ValueError):
         pass
 
+    # Step 0b: automatic black-bar removal (Hugo 2026-07-24). The single-clip
+    # path never scales to a canvas, so bars baked into the upload would
+    # survive to the final — if detection finds bars removable within the
+    # BLACKBAR_MAX_CROP_FRAC cap, minimally crop-zoom them away (one extra
+    # encode, only when bars are actually found). Failure → keep the clip.
+    try:
+        bar_crop = await asyncio.to_thread(
+            video_edit.bar_crop_for_clip, current, settings.video_aspect_ratio)
+        if bar_crop:
+            cropped = edit_dir / "00b-crop.mp4"
+            await asyncio.to_thread(
+                video_edit.crop_video, current, cropped, bar_crop,
+                job_id=edit_id)
+            current = cropped
+    except (RuntimeError, ValueError):
+        pass
+
     # Step 1: trim silences (optional — interior pauses). In word-gap mode the
     # level interior trim is REPLACED by the gap trim (Step 3a.5), so skip it.
     trim_summary: dict | None = None
