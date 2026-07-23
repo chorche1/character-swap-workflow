@@ -92,6 +92,13 @@ def test_degenerate_box_is_noop():
     assert video_edit.compute_bar_crop(0, 0, (100, 100, 0, 0)) is None
 
 
+def test_hairline_noise_box_hits_dead_band():
+    """A ≤2px-per-side 'bar' is cropdetect/encode noise on a clean clip —
+    not worth an extra encode generation (dead-band < 4px per axis)."""
+    assert video_edit.compute_bar_crop(
+        1080, 1920, (1078, 1918, 2, 2)) is None
+
+
 # --------------------------------------------------- filter-graph shape (fast)
 
 def test_concat_prepends_crop_and_covers_canvas(tmp_path, monkeypatch):
@@ -149,6 +156,59 @@ def test_kill_switch_disables_detection(tmp_path, monkeypatch):
 def test_detection_failure_never_raises(tmp_path):
     """Nonexistent file → probe fails → None (the fix never blocks)."""
     assert video_edit.bar_crop_for_clip(tmp_path / "missing.mp4") is None
+
+
+# ------------------------------------------- Editor single-clip flows (fast)
+
+def test_maybe_crop_black_bars_helper(tmp_path, monkeypatch):
+    """The shared Editor Step-0b helper: crop found → cropped path; no crop
+    or any failure → the input passes through untouched."""
+    import asyncio
+    from character_swap import api
+
+    src = tmp_path / "src.mp4"
+
+    monkeypatch.setattr(video_edit, "bar_crop_for_clip",
+                        lambda p, ar="9:16": (706, 1256, 6, 12))
+    called: dict = {}
+
+    def fake_crop(inp, outp, crop, *, job_id=None):
+        called["crop"] = crop
+        return outp
+
+    monkeypatch.setattr(video_edit, "crop_video", fake_crop)
+    out = asyncio.run(api._maybe_crop_black_bars(src, tmp_path, "ed_test"))
+    assert out == tmp_path / "00b-crop.mp4"
+    assert called["crop"] == (706, 1256, 6, 12)
+
+    # No bars → passthrough, no encode.
+    monkeypatch.setattr(video_edit, "bar_crop_for_clip",
+                        lambda p, ar="9:16": None)
+    assert asyncio.run(
+        api._maybe_crop_black_bars(src, tmp_path, "ed_test")) == src
+
+    # Encode failure → passthrough (never blocks a render).
+    monkeypatch.setattr(video_edit, "bar_crop_for_clip",
+                        lambda p, ar="9:16": (706, 1256, 6, 12))
+
+    def boom(*a, **k):
+        raise RuntimeError("ffmpeg died")
+
+    monkeypatch.setattr(video_edit, "crop_video", boom)
+    assert asyncio.run(
+        api._maybe_crop_black_bars(src, tmp_path, "ed_test")) == src
+
+
+def test_all_single_clip_editor_endpoints_run_step_0b():
+    """auto_edit AND the sibling one-shot trim_silences / captions endpoints
+    (all producing pushable finals that never scale to a canvas) must run
+    the shared bar-removal step."""
+    import inspect
+    from character_swap import api
+
+    for fn in (api.editor_auto_edit, api.editor_trim_silences,
+               api.editor_captions):
+        assert "_maybe_crop_black_bars" in inspect.getsource(fn), fn.__name__
 
 
 # ------------------------------------------------- real ffmpeg (integration)

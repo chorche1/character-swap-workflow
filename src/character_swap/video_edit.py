@@ -2140,8 +2140,14 @@ def compute_bar_crop(
     win_w = min(float(bw), bh * tw / th)
     w = max(2, int(win_w) // 2 * 2)
     h = max(2, min(bh // 2 * 2, round(w * th / tw / 2) * 2))
-    if w >= src_w and h >= src_h:
-        return None                     # clean clip, on-aspect — no-op
+    if src_w - w < 6 and src_h - h < 6:
+        # Dead-band: a couple-px-per-side "bar" is cropdetect round=2 /
+        # encode-noise territory on a clean clip (and the target-aspect
+        # coupling inflates the other axis' delta by ~16/9, so noise on one
+        # axis shows as ~2x on the other) — after the canvas scale it would
+        # be invisible anyway, not worth an extra encode generation on the
+        # single-clip Editor path. Includes the exact no-op case.
+        return None
     if (src_w - w) / src_w > max_crop_frac or (src_h - h) / src_h > max_crop_frac:
         return None                     # cap: would zoom too far — keep pad
     # Center the window within the content box; even offsets, clamped.
@@ -2204,18 +2210,23 @@ def _canvas_vf(crop: tuple[int, int, int, int] | None,
 def crop_video(input_path: Path, output_path: Path,
                crop: tuple[int, int, int, int], *,
                job_id: str | None = None) -> Path:
-    """Re-encode a clip with the given crop window (audio copied through).
-    Used by the Editor single-clip pipeline, which never scales to a canvas
-    — baked-in bars there need their own (conditional) encode."""
+    """Re-encode a clip with the given crop window (audio copied through,
+    like hflip_video — the soundtrack stays bit-identical for Whisper).
+    Used by the Editor single-clip flows, which never scale to a canvas —
+    baked-in bars there need their own (conditional) encode."""
     w, h, x, y = crop
-    cmd = [_ffmpeg(), "-y", "-i", str(input_path),
-           "-vf", f"crop={w}:{h}:{x}:{y}", *_enc_v()]
-    if _has_audio_stream(input_path):
-        cmd += ["-c:a", "copy"]
-    else:
-        cmd += ["-an"]
-    cmd += [str(output_path)]
-    _run(cmd)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with record(phase="editor_blackbar_crop", model="ffmpeg-crop",
+                character="editor", job_id=job_id) as entry:
+        entry["crop"] = f"{w}:{h}:{x}:{y}"
+        cmd = [_ffmpeg(), "-y", "-i", str(input_path),
+               "-vf", f"crop={w}:{h}:{x}:{y}", *_enc_v()]
+        if _has_audio_stream(input_path):
+            cmd += ["-c:a", "copy"]
+        else:
+            cmd += ["-an"]
+        cmd += [str(output_path)]
+        _run(cmd)
     return output_path
 
 

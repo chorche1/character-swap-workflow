@@ -3869,6 +3869,29 @@ async def editor_templates() -> list[dict]:
     return out
 
 
+async def _maybe_crop_black_bars(current: Path, edit_dir: Path,
+                                 edit_id: str) -> Path:
+    """Step 0b of every single-clip Editor flow (Hugo 2026-07-24): these
+    paths never scale to a canvas, so bars baked into the upload would
+    survive to the final. If detection finds bars removable within the
+    BLACKBAR_MAX_CROP_FRAC cap, minimally crop-zoom them away (one extra
+    encode, only when bars are actually found). Any failure or no-bars →
+    the clip passes through untouched (never blocks a render)."""
+    from character_swap import video_edit
+    try:
+        bar_crop = await asyncio.to_thread(
+            video_edit.bar_crop_for_clip, current, settings.video_aspect_ratio)
+        if bar_crop:
+            cropped = edit_dir / "00b-crop.mp4"
+            await asyncio.to_thread(
+                video_edit.crop_video, current, cropped, bar_crop,
+                job_id=edit_id)
+            return cropped
+    except (RuntimeError, ValueError):
+        pass
+    return current
+
+
 @app.post("/api/editor/trim_silences")
 async def editor_trim_silences(
     background: BackgroundTasks,
@@ -3890,11 +3913,12 @@ async def editor_trim_silences(
     if not data:
         raise HTTPException(400, "Empty upload")
     src.write_bytes(data)
+    current = await _maybe_crop_black_bars(src, edit_dir, edit_id)
     out_path = edit_dir / "trimmed.mp4"
     try:
         summary = await asyncio.to_thread(
             video_edit.trim_silences,
-            src, out_path,
+            current, out_path,
             threshold_db=threshold_db,
             min_silence_secs=min_silence_secs,
             pad_secs=pad_secs,
@@ -3939,13 +3963,14 @@ async def editor_captions(
             raise HTTPException(400, "overrides must be valid JSON")
 
     style = video_edit.style_from_params(template, overrides_dict)
+    current = await _maybe_crop_black_bars(src, edit_dir, edit_id)
     try:
-        words = await asyncio.to_thread(video_edit.transcribe_words, src, job_id=edit_id)
+        words = await asyncio.to_thread(video_edit.transcribe_words, current, job_id=edit_id)
         if not words:
             raise HTTPException(422, "No speech detected — nothing to caption")
         summary = await asyncio.to_thread(
             video_edit.render_captions,
-            src, out_path,
+            current, out_path,
             words=words, style=style, job_id=edit_id,
         )
     except RuntimeError as e:
@@ -4016,22 +4041,9 @@ async def editor_auto_edit(
     except (RuntimeError, ValueError):
         pass
 
-    # Step 0b: automatic black-bar removal (Hugo 2026-07-24). The single-clip
-    # path never scales to a canvas, so bars baked into the upload would
-    # survive to the final — if detection finds bars removable within the
-    # BLACKBAR_MAX_CROP_FRAC cap, minimally crop-zoom them away (one extra
-    # encode, only when bars are actually found). Failure → keep the clip.
-    try:
-        bar_crop = await asyncio.to_thread(
-            video_edit.bar_crop_for_clip, current, settings.video_aspect_ratio)
-        if bar_crop:
-            cropped = edit_dir / "00b-crop.mp4"
-            await asyncio.to_thread(
-                video_edit.crop_video, current, cropped, bar_crop,
-                job_id=edit_id)
-            current = cropped
-    except (RuntimeError, ValueError):
-        pass
+    # Step 0b: automatic black-bar removal (Hugo 2026-07-24) — shared with
+    # the sibling one-shot trim_silences / captions endpoints.
+    current = await _maybe_crop_black_bars(current, edit_dir, edit_id)
 
     # Step 1: trim silences (optional — interior pauses). In word-gap mode the
     # level interior trim is REPLACED by the gap trim (Step 3a.5), so skip it.
