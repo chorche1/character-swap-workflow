@@ -401,7 +401,10 @@ def test_assemble_clips_drops_pre_onset_click_sliver(tmp_path, monkeypatch):
         for i, a in enumerate(cmd):
             if a == "-filter_complex":
                 captured["fc"] = cmd[i + 1]
-        Path(cmd[-1]).write_bytes(b"mp4")
+        # The loudnorm analysis pass ends in "-" (ffmpeg's stdout sink), not an
+        # output path — writing it would drop a junk file named "-" in the cwd.
+        if cmd[-1] != "-":
+            Path(cmd[-1]).write_bytes(b"mp4")
         return ""
     monkeypatch.setattr(video_edit, "_run", fake_run)
 
