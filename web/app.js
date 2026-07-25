@@ -4069,6 +4069,9 @@ function studio() {
             this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
             const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
             if (!b.ok) throw new Error(await errOf(b));
+            // Refresh health so the Editor's export modal un-disables its
+            // button (and drops the authorize nag) without a page reload.
+            await this.loadHealth?.();
             r = await post();
           } else {
             throw new Error(detail);
@@ -4135,6 +4138,7 @@ function studio() {
             this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
             const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
             if (!b.ok) throw new Error(await errOf(b));
+            await this.loadHealth?.();
             r = await post();
           } else {
             throw new Error(detail);   // e.g. "no finished videos" / "bygget pågår"
@@ -4195,24 +4199,42 @@ function studio() {
       const name = (this.driveExport.filename || '').trim();
       if (!name) return;
       this.driveExport.uploading = true;
+      const post = () => fetch(`/api/editor/${editId}/drive_export`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: name }),
+      });
+      const errOf = async (r) => {
+        const j = await r.json().catch(() => ({}));
+        return j.detail || j.error || `HTTP ${r.status}`;
+      };
       try {
-        const r = await fetch(`/api/editor/${editId}/drive_export`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: name }),
-        });
-        if (!r.ok) {
-          const txt = await r.text();
-          this.notifyError('Drive upload failed: ' + txt);
-          return;
+        let r = await post();
+        // Same self-heal the ⬆ Drive buttons have (drivePush/drivePushAll):
+        // a revoked or unrefreshable write token surfaces as 409, so run the
+        // one-time OAuth and retry once. Without this the user dead-ended on a
+        // raw error toast — and with health.drive_write_ready stale-true the
+        // "click here to authorize" link was hidden, leaving no way back.
+        if (r.status === 409) {
+          const detail = await errOf(r.clone ? r.clone() : r);
+          if (/authoriz|credentials/i.test(detail)) {
+            this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
+            const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
+            if (!b.ok) throw new Error(await errOf(b));
+            await this.loadHealth?.();
+            r = await post();
+          } else {
+            throw new Error(detail);
+          }
         }
+        if (!r.ok) throw new Error(await errOf(r));
         const data = await r.json();
         this.driveExport.lastUrl = data.url || '';
         this.driveExport.open = false;
         this.notifyMilestone('Uploaded to Drive', data.name || name,
           { kind: 'done', tag: `drive-export-${editId}` });
       } catch (e) {
-        this.notifyError('Upload error: ' + e);
+        this.notifyError('Drive upload failed: ' + (e.message || e));
       } finally {
         this.driveExport.uploading = false;
       }

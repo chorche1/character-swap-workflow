@@ -24,6 +24,7 @@ from __future__ import annotations
 import io
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -154,15 +155,65 @@ def status() -> dict[str, Any]:
     }
 
 
+# --- Verified write auth (2026-07-26) --------------------------------------
+# `ready` used to mean "the token FILE is on disk", so a REVOKED refresh token
+# (Google answers `invalid_grant: Token has been expired or revoked`) still
+# reported ready=True. The Editor hides its "click here to authorize" link on
+# ready=True, so a dead token left the user with a failing upload and no way
+# back. `ready` now means "credentials that actually load and refresh".
+#
+# The verdict is cached: /api/health is AWAITED by the frontend's init(), so a
+# per-call network round-trip (or a hung one) would stall app startup — the
+# same class of bug as the /api/costs stall on 2026-06-23. A live token needs
+# no network at all (it only refreshes once its access token expires); a dead
+# one is re-checked at most once per TTL.
+_WRITE_AUTH_TTL_SECS = 300.0
+_write_auth_cache: tuple[float, bool] | None = None
+_write_auth_lock = threading.Lock()
+
+
+def invalidate_write_auth_cache() -> None:
+    """Drop the cached verdict so the next `write_status()` re-checks. Called
+    after the bootstrap flow — a freshly granted token must show up as ready
+    immediately, not after the TTL."""
+    global _write_auth_cache
+    with _write_auth_lock:
+        _write_auth_cache = None
+
+
+def write_auth_usable(*, max_age_secs: float = _WRITE_AUTH_TTL_SECS) -> bool:
+    """True when the drive.file token loads AND is valid (or refreshes).
+    Never launches the consent flow (interactive=False) and never raises —
+    any failure means "not authorized", which is what the caller acts on."""
+    global _write_auth_cache
+    with _write_auth_lock:
+        cached = _write_auth_cache
+    if cached is not None and (time.monotonic() - cached[0]) < max_age_secs:
+        return cached[1]
+    try:
+        ok = _load_credentials(
+            scopes=DRIVE_FILE_SCOPE,
+            token_file=_write_token_path(),
+            interactive=False,
+        ) is not None
+    except Exception:
+        ok = False
+    with _write_auth_lock:
+        _write_auth_cache = (time.monotonic(), ok)
+    return ok
+
+
 def write_status() -> dict[str, Any]:
     """Same shape as `status` but for the drive.file (upload) token. Drives
     the Editor UI's 'Export to Drive — authorize first' nag."""
     creds_path = _credentials_path()
     write_token = _write_token_path()
+    present = creds_path.exists() and write_token.exists()
     return {
         "credentials_present": creds_path.exists(),
         "token_present": write_token.exists(),
-        "ready": creds_path.exists() and write_token.exists(),
+        # VERIFIED, not merely present — see the note above.
+        "ready": present and write_auth_usable(),
     }
 
 
@@ -209,7 +260,12 @@ def upload_file(source: Path, *,
 def bootstrap_write_oauth() -> dict[str, Any]:
     """Force the drive.file OAuth flow even when called non-interactively.
     Returns a status dict suitable for the UI."""
+    # Both sides matter: clearing BEFORE stops a cached "dead token" verdict
+    # from short-circuiting anything the flow consults, and clearing AFTER
+    # makes the write_status() below reflect the token we just minted.
+    invalidate_write_auth_cache()
     svc = _write_service()
+    invalidate_write_auth_cache()
     return {
         "ok": svc is not None,
         **write_status(),
