@@ -2516,7 +2516,11 @@ def match_clips_by_transcript(clip_transcripts: list[str], script: str) -> list[
         match = matcher.find_longest_match(0, len(norm_script), 0, len(norm_t))
         # Score = how much of the clip transcript was found, capped at 1.
         score = match.size / max(1, len(norm_t))
-        unmatched = match.size < 12 or score < 0.15
+        # Clips shorter than 12 chars (e.g. a single word like "lime") can
+        # never produce a 12-char match — for those, require the WHOLE
+        # transcript to appear in the script instead.
+        min_size = min(12, len(norm_t))
+        unmatched = match.size < min_size or score < 0.15
         placements.append({
             "idx": i,
             "position": match.a if not unmatched else len(norm_script) + 1 + i,
