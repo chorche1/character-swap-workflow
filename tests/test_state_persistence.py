@@ -73,6 +73,37 @@ def test_sqlite_character_voice_id_cleared_to_none(sqlite_db_path):
     assert loaded.voice_provider is None
 
 
+def test_sqlite_character_telegram_chat_id_round_trip(sqlite_db_path):
+    """Same class of bug as voice_id, found 2026-07-28: the field lived only on
+    the pydantic model — the characters table had no column for it, so a
+    channel set in the library vanished on the next restart and every auto-send
+    reported "Telegram-kanal saknas"."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    s1.add_character(CharacterAsset(char_id="c1", name="Chang", filename="x.png"))
+    ch = s1.get_character("c1")
+    ch.telegram_chat_id = "-1001234567890"
+    s1.update_character(ch)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert s2.get_character("c1").telegram_chat_id == "-1001234567890"
+
+
+def test_sqlite_character_telegram_chat_id_cleared_to_none(sqlite_db_path):
+    """Clearing the channel in the library must persist as NULL, not resurrect
+    the old id on restart."""
+    s1 = _fresh_sqlite(sqlite_db_path)
+    s1.add_character(CharacterAsset(
+        char_id="c1", name="Chang", filename="x.png",
+        telegram_chat_id="-1001234567890",
+    ))
+    ch = s1.get_character("c1")
+    ch.telegram_chat_id = None
+    s1.update_character(ch)
+
+    s2 = _fresh_sqlite(sqlite_db_path)
+    assert s2.get_character("c1").telegram_chat_id is None
+
+
 def test_sqlite_character_rename_round_trip(sqlite_db_path):
     s1 = _fresh_sqlite(sqlite_db_path)
     s1.add_character(CharacterAsset(char_id="c1", name="Old", filename="x.png"))
