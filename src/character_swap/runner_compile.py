@@ -896,6 +896,35 @@ async def _compile_one_character(
                     voice_id=effective_voice_id,
                     voice_applied=result.voice_applied,
                     warning=combined_warning)
+        if slot is _REPURPOSE_SLOT:
+            # Repurpose is an independently requested final, so ship it as
+            # soon as this character's copy is ready. The original final is
+            # sent by the all-clips-success auto-finalize chain.
+            try:
+                from character_swap import telegram_delivery
+                if char_asset is None or not char_asset.telegram_chat_id:
+                    raise RuntimeError(
+                        f"Telegram-kanal saknas för {jc.name or char_id}")
+                receipt = await telegram_delivery.send_character_final(
+                    compiled_final,
+                    chat_id=char_asset.telegram_chat_id,
+                    char_name=jc.name or char_id,
+                    base=job.title or "swap",
+                    variant="repurpose",
+                    run_id=job_id,
+                )
+                fresh = s.get_job(job_id)
+                if fresh is not None and char_id in fresh.characters:
+                    fresh.characters[char_id].telegram_sends["repurpose"] = receipt
+                    s.update_job(fresh)
+            except Exception as exc:  # noqa: BLE001 — keep the valid final
+                logger.warning("%s/%s repurpose Telegram send failed: %s: %s",
+                               job_id, char_id, type(exc).__name__, exc)
+                push.notify(
+                    "Telegram misslyckades",
+                    f"{jc.name}: repurpose klar men inte skickad — "
+                    f"{str(exc)[:160]}",
+                    priority=5, tags=["rotating_light"])
     except Exception as e:
         _persist_jc(job, jc, **{
             slot.status_field: "failed",
@@ -1126,5 +1155,29 @@ async def repurpose_editor_job(
 
     _set_repurpose(status="done", edit_id=new_edit_id,
                    video_path=str(result.final), error=None)
+    # Standalone Editor repurposes use the Editor Telegram identity/channel,
+    # exactly like their original Single/Multi-clip reel.
+    try:
+        from character_swap import telegram_delivery
+        receipt = await telegram_delivery.send_editor_final(
+            result.final,
+            base=(gen.prompt or "Editor")[:80],
+            variant="repurpose",
+            edit_id=new_edit_id,
+        )
+        fresh = store().get_generation(gen_id)
+        if fresh is not None:
+            meta = dict(fresh.editor_meta or {})
+            telegram_receipts = dict(meta.get("telegram") or {})
+            telegram_receipts["repurpose"] = receipt
+            meta["telegram"] = telegram_receipts
+            fresh.editor_meta = meta
+            store().update_generation(fresh)
+    except Exception as exc:  # noqa: BLE001 — final remains valid; fail loud
+        logger.warning("repurpose_editor_job %s Telegram send failed: %s: %s",
+                       gen_id, type(exc).__name__, exc)
+        push.notify("Telegram misslyckades",
+                    f"Repurpose klar men kunde inte skickas: {str(exc)[:180]}",
+                    priority=5, tags=["rotating_light"])
     push.notify("Repurpose klar", "Spegelvänd reel byggd",
                 priority=3, tags=["white_check_mark"])

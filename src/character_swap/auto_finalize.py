@@ -1,33 +1,32 @@
-"""Auto-finalize: build final videos + push them to Drive automatically.
+"""Auto-finalize: build final videos + send them to Telegram automatically.
 
 Hugo's directive (2026-07-19): "när jag trycker generate videos och alla videor
-blir lyckade" the finals should build + upload to Drive with NO manual clicks.
+blir lyckade" the finals should build + ship with NO manual clicks.
 Two entry points, one per flow — both gated on a per-run checkbox (default ON):
 
   • `finalize_swap_job(job_id)` — the classic Swap job flow. Called at the end
     of `runner.run_video_synthesis` (non-reengineer jobs only). When EVERY
     approved character's clips are DONE (zero failed) it runs the Step-6
-    `compile_job_videos`, then pushes each finished final to Drive.
+    `compile_job_videos`, then sends each final to its character channel.
 
-  • `push_reengineer_finals(re_id)` — the Reengineer / Swap-from-images flow.
+  • `send_reengineer_finals(re_id)` — the Reengineer / Swap-from-images flow.
     Called after `assemble()` finishes. That flow ALREADY auto-assembles the
-    finals; the only new step is the Drive push once the run lands `done`
+    finals; the only new step is Telegram delivery once the run lands `done`
     (every included character built).
 
 Everything is best-effort + LOUD on failure: a compile failure is already
-surfaced per-character by `runner_compile`; a Drive-auth problem is pushed to
-the phone + a job event (never a silent skip), and the compiled finals are kept
-so the user can run the one-time Drive login and push manually. The chain never
-raises back into the video/assemble phase — the callers wrap it defensively too.
+surfaced per-character by `runner_compile`; missing Telegram configuration or
+delivery errors are pushed to the phone + a job event (never a silent skip),
+and the compiled finals are kept for manual resend. The chain never raises back
+into the video/assemble phase.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import drive_push, events, push, runner_compile
+from character_swap import events, push, runner_compile, telegram_delivery
 from character_swap.models import Job, VideoStatus
 from character_swap.state import store
 
@@ -99,7 +98,7 @@ def _resolve_compile_settings(job: Job) -> dict:
 
 
 async def finalize_swap_job(job_id: str) -> None:
-    """Auto-compile + auto-push for the classic Swap flow. No-op unless the
+    """Auto-compile + auto-send for the classic Swap flow. No-op unless the
     job opted in, isn't reengineer-backed, and every approved character's clips
     succeeded. Safe to call more than once — it won't rebuild a job whose
     finals are already compiled, and it won't race a manual compile in flight."""
@@ -129,90 +128,79 @@ async def finalize_swap_job(job_id: str) -> None:
     except Exception:
         logger.exception("auto-finalize %s: compile failed", job_id)
         # compile_job_videos already marks per-character failures; nothing more
-        # to push, so stop here.
+        # to send, so stop here.
         return
-    await _push_job_finals(job_id)
+    await _send_job_finals(job_id)
 
 
-async def _push_job_finals(job_id: str) -> None:
-    """Push every DONE compiled final of a Swap job to Drive, persisting the
-    receipts onto `JobCharacter.drive_pushes['final']` (so the ⬆ Drive ✓ shows
-    on reload) and reporting the outcome loudly."""
-    from character_swap.clients import google_drive
-
+async def _send_job_finals(job_id: str) -> None:
+    """Send every DONE Swap final to its character-specific Telegram channel."""
     s = store()
     job = s.get_job(job_id)
     if job is None:
         return
-    base = drive_push.drive_safe_name(job.title or "swap")
-    targets: list[tuple[str, Path, str, str | None]] = []
+    base = job.title or "swap"
+    targets: list[tuple[str, Path, str, str]] = []
+    failed: dict[str, str] = {}
     for cid, jc in job.characters.items():
         path = jc.compiled_video_path
         if path and jc.compile_status == "done" and Path(path).is_file():
-            prior = (jc.drive_pushes.get("final") or {}).get("file_id")
-            targets.append((cid, Path(path),
-                            drive_push.drive_safe_name(jc.name or cid), prior))
+            asset = s.get_character(cid)
+            chat_id = (asset.telegram_chat_id if asset else None) or ""
+            if not chat_id:
+                failed[cid] = (
+                    f"Telegram-kanal saknas för {jc.name or cid}. "
+                    "Ange den i karaktärsbiblioteket.")
+                continue
+            targets.append((cid, Path(path), jc.name or cid, chat_id))
     if not targets:
+        await _emit(job_id, "job.auto_telegram_sent",
+                    sent=[], failed=failed)
+        _notify_telegram_result("Slutvideor", 0, len(failed))
         return
 
-    # Pre-flight auth ONCE: if the drive.file token is missing/lost, fail loud
-    # + bail (the finals are compiled + kept — the user runs the one-time ⬆
-    # Drive login and pushes manually). A background task can't do the
-    # interactive OAuth bootstrap the UI's 409 path does.
-    try:
-        await asyncio.to_thread(google_drive.ensure_folder_path,
-                                [drive_push.DRIVE_ROOT_FOLDER])
-    except google_drive.DriveNotAuthorized as e:
-        push.notify("Drive-push hoppad över",
-                    "Finalerna byggdes men Drive är inte auktoriserad — kör "
-                    "engångs-inloggningen (⬆ Drive) och pusha om.",
-                    priority=4, tags=["warning"])
-        await _emit(job_id, "job.auto_drive_skipped", reason=str(e))
-        return
-    except RuntimeError:
-        pass  # transient folder error — let the per-file attempts surface it
-
-    pushed: dict[str, dict] = {}
-    failed: dict[str, str] = {}
-    for cid, path, char_name, prior in targets:
-        filename = drive_push.drive_final_name(char_name, base, "final", job_id)
+    sent: dict[str, dict] = {}
+    for cid, path, char_name, chat_id in targets:
         try:
-            pushed[cid] = await drive_push.push_file_core(
-                path, [char_name], filename, prior_file_id=prior)
+            sent[cid] = await telegram_delivery.send_character_final(
+                path, chat_id=chat_id, char_name=char_name, base=base,
+                variant="final", run_id=job_id)
         except Exception as e:  # noqa: BLE001 — record + keep going
             failed[cid] = f"{type(e).__name__}: {e}"
-            logger.warning("auto-finalize %s: drive push failed for %s: %s",
+            logger.warning("auto-finalize %s: Telegram send failed for %s: %s",
                            job_id, cid, e)
 
-    if pushed:
+    if sent:
         # Reload before save — the compile persisted meanwhile; write only the
         # receipts so we don't clobber concurrent state.
         fresh = s.get_job(job_id)
         if fresh is not None:
-            for cid, receipt in pushed.items():
+            for cid, receipt in sent.items():
                 jc = fresh.characters.get(cid)
                 if jc is not None:
-                    jc.drive_pushes["final"] = receipt
+                    jc.telegram_sends["final"] = receipt
             s.update_job(fresh)
-    await _emit(job_id, "job.auto_drive_pushed",
-                pushed=list(pushed), failed=failed)
-    _notify_drive_result("Slutvideor", len(pushed), len(failed))
+    await _emit(job_id, "job.auto_telegram_sent",
+                sent=list(sent), failed=failed)
+    _notify_telegram_result("Slutvideor", len(sent), len(failed))
 
 
-async def push_reengineer_finals(re_id: str) -> None:
-    """Auto-push a Reengineer run's finished finals to Drive. No-op unless the
-    run opted in AND landed `done` (every included character built) — the
-    assemble step already produced the finals; this only uploads them."""
+async def _send_reengineer_bucket(
+        re_id: str, *, variant: str, require_opt_in: bool) -> None:
+    """Send one Reengineer final bucket to character Telegram channels."""
     from character_swap import reengineer as reengineer_mod
-    from character_swap.clients import google_drive
 
     state = reengineer_mod.load_state(re_id)
-    if not state or not state.get("auto_drive_push"):
+    if not state:
+        return
+    if require_opt_in and not state.get(
+            "auto_telegram_send", state.get("auto_drive_push", False)):
         return
     # Only when the whole run succeeded — mirrors "alla videor blir lyckade".
-    if state.get("status") != "done":
+    if variant == "final" and state.get("status") != "done":
         return
-    finals = state.get("finals") or {}
+    bucket = "finals" if variant == "final" else "repurposed"
+    finals = state.get(bucket) or {}
     ready = {cid: e for cid, e in finals.items()
              if e.get("status") == "done" and e.get("final_path")
              and Path(e["final_path"]).is_file()}
@@ -224,67 +212,71 @@ async def push_reengineer_finals(re_id: str) -> None:
     if not base_src and job_id:
         linked = store().get_job(job_id)
         base_src = linked.title if linked else None
-    base = drive_push.drive_safe_name(base_src or re_id)
-
-    try:
-        await asyncio.to_thread(google_drive.ensure_folder_path,
-                                [drive_push.DRIVE_ROOT_FOLDER])
-    except google_drive.DriveNotAuthorized as e:
-        push.notify("Drive-push hoppad över",
-                    "Reengineer-finalerna byggdes men Drive är inte "
-                    "auktoriserad — kör engångs-inloggningen och pusha om.",
-                    priority=4, tags=["warning"])
-        await _emit(job_id, "job.auto_drive_skipped", reason=str(e))
-        return
-    except RuntimeError:
-        pass
-
-    pushed: dict[str, dict] = {}
+    base = base_src or re_id
+    sent: dict[str, dict] = {}
     failed: dict[str, str] = {}
     for cid, entry in ready.items():
         char = store().get_character(cid)
-        char_name = drive_push.drive_safe_name(char.name if char else cid)
-        filename = drive_push.drive_final_name(char_name, base, "final", re_id)
-        prior = (entry.get("drive") or {}).get("file_id")
+        char_name = char.name if char else cid
+        chat_id = (char.telegram_chat_id if char else None) or ""
+        if not chat_id:
+            failed[cid] = (
+                f"Telegram-kanal saknas för {char_name}. "
+                "Ange den i karaktärsbiblioteket.")
+            continue
         try:
-            pushed[cid] = await drive_push.push_file_core(
-                Path(entry["final_path"]), [char_name], filename,
-                prior_file_id=prior)
+            sent[cid] = await telegram_delivery.send_character_final(
+                Path(entry["final_path"]), chat_id=chat_id,
+                char_name=char_name, base=base, variant=variant, run_id=re_id)
         except Exception as e:  # noqa: BLE001 — record + keep going
             failed[cid] = f"{type(e).__name__}: {e}"
-            logger.warning("auto-finalize %s: reengineer drive push failed for "
+            logger.warning("auto-finalize %s: reengineer Telegram send failed for "
                            "%s: %s", re_id, cid, e)
 
-    if pushed:
-        # Reload before save — an assemble/repurpose/manual push may have landed
+    if sent:
+        # Reload before save — an assemble/repurpose/manual send may have landed
         # during the multi-minute upload; write only the receipts.
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
-            fbucket = fresh.get("finals") or {}
+            fbucket = fresh.get(bucket) or {}
             changed = False
-            for cid, receipt in pushed.items():
+            for cid, receipt in sent.items():
                 if fbucket.get(cid):
-                    fbucket[cid]["drive"] = receipt
+                    fbucket[cid]["telegram"] = receipt
                     changed = True
             if changed:
-                fresh["finals"] = fbucket
+                fresh[bucket] = fbucket
                 reengineer_mod.save_state(fresh)
-    await _emit(job_id, "job.auto_drive_pushed",
-                pushed=list(pushed), failed=failed)
-    _notify_drive_result("Reengineer-finaler", len(pushed), len(failed))
+    await _emit(job_id, "job.auto_telegram_sent",
+                sent=list(sent), failed=failed)
+    label = ("Reengineer-finaler" if variant == "final"
+             else "Reengineer-repurpose")
+    _notify_telegram_result(label, len(sent), len(failed))
 
 
-def _notify_drive_result(label: str, n_ok: int, n_fail: int) -> None:
-    """One phone push summarizing the auto Drive upload. Silent (no-op) when
+async def send_reengineer_finals(re_id: str) -> None:
+    """Auto-send original finals after a fully successful assembly."""
+    await _send_reengineer_bucket(
+        re_id, variant="final", require_opt_in=True)
+
+
+async def send_reengineer_repurposed(re_id: str) -> None:
+    """Send every newly built Reengineer repurpose copy."""
+    await _send_reengineer_bucket(
+        re_id, variant="repurpose", require_opt_in=False)
+
+
+def _notify_telegram_result(label: str, n_ok: int, n_fail: int) -> None:
+    """One phone push summarizing Telegram delivery. Silent (no-op) when
     NTFY_TOPIC isn't configured — `push.notify` handles that."""
     if n_ok and not n_fail:
-        push.notify(f"{label} på Drive", f"{n_ok} uppladdade automatiskt",
+        push.notify(f"{label} på Telegram", f"{n_ok} skickade automatiskt",
                     priority=3, tags=["white_check_mark"])
     elif n_ok and n_fail:
-        push.notify(f"{label} delvis på Drive",
-                    f"{n_ok} uppladdade, {n_fail} misslyckades",
+        push.notify(f"{label} delvis på Telegram",
+                    f"{n_ok} skickade, {n_fail} misslyckades",
                     priority=4, tags=["warning"])
     elif n_fail and not n_ok:
-        push.notify(f"{label}: Drive-push misslyckades",
-                    f"0/{n_fail} uppladdade", priority=5,
+        push.notify(f"{label}: Telegram misslyckades",
+                    f"0/{n_fail} skickade", priority=5,
                     tags=["rotating_light"])

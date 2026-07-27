@@ -1,15 +1,15 @@
 """Auto-finalize (Hugo 2026-07-19): when the video phase finishes with EVERY
 approved character's clips successful, automatically compile the Step-6 finals
-AND push them to Drive — no manual clicks. A per-run checkbox (default ON)
+AND send them to Telegram — no manual clicks. A per-run checkbox (default ON)
 gates it. Two flows:
 
-  • classic Swap  → auto_finalize.finalize_swap_job (compile + push)
-  • Reengineer    → auto_finalize.push_reengineer_finals (push only; assemble
+  • classic Swap  → auto_finalize.finalize_swap_job (compile + send)
+  • Reengineer    → auto_finalize.send_reengineer_finals (send only; assemble
                     already builds the finals)
 
 The gate is strict ("alla videor blir lyckade"): a single failed/pending clip
 holds the chain so a manual retry decides, never shipping a final that dropped
-a scene. Drive-auth loss is loud (phone push) + non-fatal (finals are kept).
+a scene. Telegram failures are loud + non-fatal (finals are kept).
 """
 from __future__ import annotations
 
@@ -18,9 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from character_swap import auto_finalize, drive_push
-from character_swap.clients import google_drive
-from character_swap.models import (Job, JobCharacter, VideoStatus, VideoVariant)
+from character_swap import auto_finalize
+from character_swap.models import Job, JobCharacter, VideoStatus, VideoVariant
 
 
 def _run(coro):
@@ -75,23 +74,19 @@ class _FakeStore:
         return self._chars.get(char_id)
 
 
-def _patch_drive(monkeypatch):
-    """Records folders + every upload; used by both Swap + Reengineer paths."""
-    calls = {"uploads": [], "folders": []}
+def _patch_telegram(monkeypatch):
+    calls = {"sends": []}
 
-    def fake_ensure(names):
-        calls["folders"].append(list(names))
-        return "leaf"
+    async def fake_send(source, *, chat_id, char_name, base, variant, run_id):
+        calls["sends"].append({
+            "file": Path(source), "chat_id": chat_id, "char_name": char_name,
+            "base": base, "variant": variant, "run_id": run_id,
+        })
+        return {"ok": True, "message_id": len(calls["sends"]),
+                "chat_id": chat_id, "file_id": f"tg-{char_name}"}
 
-    def fake_upload(source, *, drive_filename, folder_id, file_id=None):
-        calls["uploads"].append({"file": Path(source),
-                                 "filename": drive_filename,
-                                 "prior_file_id": file_id})
-        return {"id": "d-" + drive_filename, "name": drive_filename,
-                "webViewLink": "https://drive/" + drive_filename}
-
-    monkeypatch.setattr(google_drive, "ensure_folder_path", fake_ensure)
-    monkeypatch.setattr(google_drive, "upload_or_replace", fake_upload)
+    monkeypatch.setattr(
+        auto_finalize.telegram_delivery, "send_character_final", fake_send)
     return calls
 
 
@@ -138,18 +133,18 @@ def test_all_videos_successful_false_when_approved_no_videos(tmp_path):
 
 # ------------------------------------------- finalize_swap_job gating
 
-def _spy_compile_and_push(monkeypatch):
-    seen = {"compiled": None, "pushed": None}
+def _spy_compile_and_send(monkeypatch):
+    seen = {"compiled": None, "sent": None}
 
     async def fake_compile(job_id, **kw):
         seen["compiled"] = (job_id, kw)
 
-    async def fake_push(job_id):
-        seen["pushed"] = job_id
+    async def fake_send(job_id):
+        seen["sent"] = job_id
 
     monkeypatch.setattr(auto_finalize.runner_compile, "compile_job_videos",
                         fake_compile)
-    monkeypatch.setattr(auto_finalize, "_push_job_finals", fake_push)
+    monkeypatch.setattr(auto_finalize, "_send_job_finals", fake_send)
     monkeypatch.setattr(auto_finalize, "_emit", _anoop)
     return seen
 
@@ -160,7 +155,7 @@ def test_finalize_swap_job_compiles_and_pushes_on_all_success(monkeypatch, tmp_p
     ])
     (tmp_path / "a.mp4").write_bytes(b"v")
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job("j1"))
 
@@ -170,7 +165,7 @@ def test_finalize_swap_job_compiles_and_pushes_on_all_success(monkeypatch, tmp_p
     # Uses the frontend defaults (voice swap ON) for a never-compiled job.
     assert kw["enable_voice_swap"] is True
     assert kw["template"] == "capcut-bluebox"
-    assert seen["pushed"] == "j1"
+    assert seen["sent"] == "j1"
 
 
 def test_finalize_swap_job_noop_when_flag_off(monkeypatch, tmp_path):
@@ -179,10 +174,10 @@ def test_finalize_swap_job_noop_when_flag_off(monkeypatch, tmp_path):
     ])
     (tmp_path / "a.mp4").write_bytes(b"v")
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job("j1"))
-    assert seen["compiled"] is None and seen["pushed"] is None
+    assert seen["compiled"] is None and seen["sent"] is None
 
 
 def test_finalize_swap_job_noop_for_reengineer_job(monkeypatch, tmp_path):
@@ -192,10 +187,10 @@ def test_finalize_swap_job_noop_for_reengineer_job(monkeypatch, tmp_path):
     (tmp_path / "a.mp4").write_bytes(b"v")
     assert job.from_reengineer is True
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job(job.job_id))
-    assert seen["compiled"] is None and seen["pushed"] is None
+    assert seen["compiled"] is None and seen["sent"] is None
 
 
 def test_finalize_swap_job_noop_when_a_clip_failed(monkeypatch, tmp_path):
@@ -205,10 +200,10 @@ def test_finalize_swap_job_noop_when_a_clip_failed(monkeypatch, tmp_path):
     ])
     (tmp_path / "a.mp4").write_bytes(b"v")
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job("j1"))
-    assert seen["compiled"] is None and seen["pushed"] is None
+    assert seen["compiled"] is None and seen["sent"] is None
 
 
 def test_finalize_swap_job_idempotent_when_already_compiled(monkeypatch, tmp_path):
@@ -218,7 +213,7 @@ def test_finalize_swap_job_idempotent_when_already_compiled(monkeypatch, tmp_pat
     ])
     (tmp_path / "a.mp4").write_bytes(b"v")
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job("j1"))
     assert seen["compiled"] is None       # not rebuilt on a duplicate trigger
@@ -231,41 +226,47 @@ def test_finalize_swap_job_skips_when_compile_in_flight(monkeypatch, tmp_path):
     ])
     (tmp_path / "a.mp4").write_bytes(b"v")
     monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
-    seen = _spy_compile_and_push(monkeypatch)
+    seen = _spy_compile_and_send(monkeypatch)
 
     _run(auto_finalize.finalize_swap_job("j1"))
     assert seen["compiled"] is None       # don't race a manual compile
 
 
-# ------------------------------------------- _push_job_finals
+# ------------------------------------------- _send_job_finals
 
-def test_push_job_finals_pushes_and_persists(monkeypatch, tmp_path):
-    f1 = tmp_path / "c1.mp4"; f1.write_bytes(b"a")
-    f2 = tmp_path / "c2.mp4"; f2.write_bytes(b"b")
+def test_send_job_finals_routes_and_persists(monkeypatch, tmp_path):
+    f1 = tmp_path / "c1.mp4"
+    f1.write_bytes(b"a")
+    f2 = tmp_path / "c2.mp4"
+    f2.write_bytes(b"b")
     job = _job(tmp_path, chars=[
         _char("c1", "Chang", clips=[("v1", "done")], path=str(f1),
               compile_status="done", compiled_path=str(f1)),
         _char("c2", "Ravi", clips=[("v2", "done")], path=str(f2),
               compile_status="done", compiled_path=str(f2)),
     ])
-    store = _FakeStore(job)
+    class _Asset:
+        def __init__(self, chat_id):
+            self.telegram_chat_id = chat_id
+    store = _FakeStore(job, chars={
+        "c1": _Asset("@chang"), "c2": _Asset("@ravi")})
     monkeypatch.setattr(auto_finalize, "store", lambda: store)
     monkeypatch.setattr(auto_finalize, "_emit", _anoop)
     monkeypatch.setattr(auto_finalize.push, "notify", lambda *a, **k: None)
-    calls = _patch_drive(monkeypatch)
+    calls = _patch_telegram(monkeypatch)
 
-    _run(auto_finalize._push_job_finals("j1"))
+    _run(auto_finalize._send_job_finals("j1"))
 
-    names = sorted(u["filename"] for u in calls["uploads"])
-    assert names == ["Chang — Honey run [j1].mp4", "Ravi — Honey run [j1].mp4"]
-    assert job.characters["c1"].drive_pushes["final"]["file_id"]
-    assert job.characters["c2"].drive_pushes["final"]["file_id"]
-    assert ["Character Swap", "Chang"] in calls["folders"]
+    assert {s["chat_id"] for s in calls["sends"]} == {"@chang", "@ravi"}
+    assert {s["char_name"] for s in calls["sends"]} == {"Chang", "Ravi"}
+    assert job.characters["c1"].telegram_sends["final"]["file_id"]
+    assert job.characters["c2"].telegram_sends["final"]["file_id"]
     assert store.updated                      # receipts persisted
 
 
-def test_push_job_finals_loud_and_bails_when_unauthorized(monkeypatch, tmp_path):
-    f1 = tmp_path / "c1.mp4"; f1.write_bytes(b"a")
+def test_send_job_finals_loud_when_channel_missing(monkeypatch, tmp_path):
+    f1 = tmp_path / "c1.mp4"
+    f1.write_bytes(b"a")
     job = _job(tmp_path, chars=[
         _char("c1", "Chang", clips=[("v1", "done")], path=str(f1),
               compile_status="done", compiled_path=str(f1)),
@@ -273,34 +274,29 @@ def test_push_job_finals_loud_and_bails_when_unauthorized(monkeypatch, tmp_path)
     store = _FakeStore(job)
     monkeypatch.setattr(auto_finalize, "store", lambda: store)
     monkeypatch.setattr(auto_finalize, "_emit", _anoop)
-
-    def raise_unauth(names):
-        raise google_drive.DriveNotAuthorized("authorize first")
-
-    monkeypatch.setattr(google_drive, "ensure_folder_path", raise_unauth)
-    monkeypatch.setattr(google_drive, "upload_or_replace",
-                        lambda *a, **k: pytest.fail("must not upload"))
+    _patch_telegram(monkeypatch)
     notes = []
     monkeypatch.setattr(auto_finalize.push, "notify",
                         lambda *a, **k: notes.append((a, k)))
 
-    _run(auto_finalize._push_job_finals("j1"))
+    _run(auto_finalize._send_job_finals("j1"))
 
     assert notes                              # loud phone push
-    assert "final" not in job.characters["c1"].drive_pushes  # no false receipt
+    assert "final" not in job.characters["c1"].telegram_sends
     assert not store.updated
 
 
-# ------------------------------------------- push_reengineer_finals
+# ------------------------------------------- send_reengineer_finals
 
 def _reengineer_state(tmp_path, *, status="done", auto=True):
-    f1 = tmp_path / "final_c1.mp4"; f1.write_bytes(b"a")
+    f1 = tmp_path / "final_c1.mp4"
+    f1.write_bytes(b"a")
     return {"re_id": "re1", "title": "Reengineer 6 bilder", "status": status,
-            "auto_drive_push": auto,
+            "auto_telegram_send": auto,
             "finals": {"c1": {"status": "done", "final_path": str(f1)}}}
 
 
-def test_push_reengineer_finals_pushes_and_persists(monkeypatch, tmp_path):
+def test_send_reengineer_finals_routes_and_persists(monkeypatch, tmp_path):
     from character_swap import reengineer as reengineer_mod
     state = _reengineer_state(tmp_path)
     saved = []
@@ -311,39 +307,40 @@ def test_push_reengineer_finals_pushes_and_persists(monkeypatch, tmp_path):
 
     class _Char:
         name = "Chang"
+        telegram_chat_id = "@chang"
 
     monkeypatch.setattr(auto_finalize, "store",
                         lambda: _FakeStore(chars={"c1": _Char()}))
     monkeypatch.setattr(auto_finalize, "_emit", _anoop)
     monkeypatch.setattr(auto_finalize.push, "notify", lambda *a, **k: None)
-    calls = _patch_drive(monkeypatch)
+    calls = _patch_telegram(monkeypatch)
 
-    _run(auto_finalize.push_reengineer_finals("re1"))
+    _run(auto_finalize.send_reengineer_finals("re1"))
 
-    assert calls["uploads"][0]["filename"] == "Chang — Reengineer 6 bilder [re1].mp4"
-    assert calls["folders"] == [["Character Swap"], ["Character Swap", "Chang"]]
-    assert state["finals"]["c1"]["drive"]["file_id"]
+    assert calls["sends"][0]["chat_id"] == "@chang"
+    assert calls["sends"][0]["base"] == "Reengineer 6 bilder"
+    assert state["finals"]["c1"]["telegram"]["file_id"]
     assert saved                              # persisted the receipt
 
 
-def test_push_reengineer_finals_noop_when_flag_off(monkeypatch, tmp_path):
+def test_send_reengineer_finals_noop_when_flag_off(monkeypatch, tmp_path):
     from character_swap import reengineer as reengineer_mod
     state = _reengineer_state(tmp_path, auto=False)
     monkeypatch.setattr(reengineer_mod, "load_state", lambda re_id: state)
     monkeypatch.setattr(reengineer_mod, "save_state",
                         lambda st: pytest.fail("must not save"))
-    monkeypatch.setattr(google_drive, "upload_or_replace",
-                        lambda *a, **k: pytest.fail("must not upload"))
-    _run(auto_finalize.push_reengineer_finals("re1"))
+    calls = _patch_telegram(monkeypatch)
+    _run(auto_finalize.send_reengineer_finals("re1"))
+    assert not calls["sends"]
 
 
-def test_push_reengineer_finals_noop_when_partial(monkeypatch, tmp_path):
+def test_send_reengineer_finals_noop_when_partial(monkeypatch, tmp_path):
     from character_swap import reengineer as reengineer_mod
     state = _reengineer_state(tmp_path, status="partial_success")
     monkeypatch.setattr(reengineer_mod, "load_state", lambda re_id: state)
-    monkeypatch.setattr(google_drive, "upload_or_replace",
-                        lambda *a, **k: pytest.fail("must not upload"))
-    _run(auto_finalize.push_reengineer_finals("re1"))
+    calls = _patch_telegram(monkeypatch)
+    _run(auto_finalize.send_reengineer_finals("re1"))
+    assert not calls["sends"]
 
 
 def test_default_compile_settings_match_frontend_seed():

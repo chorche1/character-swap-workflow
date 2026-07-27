@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+.local/
 
 # User-supplied inputs and pipeline artifacts
 characters/*

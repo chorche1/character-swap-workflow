@@ -21,17 +21,31 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from character_swap import call_log, events, push, runner, runner_media
+from character_swap import (
+    call_log,
+    events,
+    push,
+    runner,
+    runner_media,
+    telegram_local_server,
+)
 from character_swap.clients import ProviderNotConfigured
-from character_swap.config import settings
+from character_swap.config import (
+    TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT,
+    TELEGRAM_LOCAL_API_HASH_KEYCHAIN_ACCOUNT,
+    TELEGRAM_LOCAL_API_ID_KEYCHAIN_ACCOUNT,
+    save_keychain_secret,
+    settings,
+)
 from character_swap.models import (
     CharacterAsset,
     CharacterImage,
@@ -414,6 +428,7 @@ def _job_to_dict(job: Job) -> dict:
                 "repurpose_warning": jc.repurpose_warning,
                 # Push-to-Drive receipts, "final" | "repurpose" → {url, at, ...}.
                 "drive_pushes": dict(jc.drive_pushes or {}),
+                "telegram_sends": dict(jc.telegram_sends or {}),
                 "pipeline_status": jc.pipeline_status,
                 "pipeline_error": jc.pipeline_error,
                 "pipeline_drive_link": jc.pipeline_drive_link,
@@ -636,6 +651,7 @@ def _recover_startup_orphans() -> dict[str, int]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_dirs()
+    await asyncio.to_thread(telegram_local_server.start)
     recovered = _recover_startup_orphans()
     if any(recovered.values()):
         logging.getLogger("api").warning(
@@ -648,7 +664,10 @@ async def lifespan(app: FastAPI):
     # forget: watchers run for as long as the runs do.
     from character_swap import runner_reengineer
     runner_reengineer._spawn(runner_reengineer.resume_all(), "reengineer-resume")
-    yield
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(telegram_local_server.stop)
 
 
 app = FastAPI(title="Character Swap Studio", lifespan=lifespan)
@@ -844,6 +863,7 @@ def _char_to_dict(ch: CharacterAsset) -> dict:
         # Spoken-language flag: "es" → all of this character's videos translate
         # their quoted dialogue to Spanish (Hugo 2026-06-26). None = English.
         "language": ch.language,
+        "telegram_chat_id": ch.telegram_chat_id,
         "images": [
             {
                 "image_id": img.image_id,
@@ -1003,6 +1023,8 @@ class RenameCharacterBody(BaseModel):
     voice_provider: str | None = None
     # "es" → mark the character Spanish-speaking; "" / "en" clears it (English).
     language: str | None = None
+    # Numeric "-100…" channel id or public "@channelusername". Empty clears.
+    telegram_chat_id: str | None = None
     # Set which uploaded reference image is the character's primary/preset image
     # (the star in the library, the default swap source). Must be an image_id
     # already on this character.
@@ -1045,6 +1067,8 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
         # Only "es" is a real value; anything else (incl. "" / "en") = default
         # English, stored as None so unflagged characters never change behavior.
         asset.language = "es" if body.language.strip().lower() == "es" else None
+    if body.telegram_chat_id is not None:
+        asset.telegram_chat_id = body.telegram_chat_id.strip() or None
     if body.primary_image_id is not None:
         # Repoint the preset/primary image. The id must be one of this
         # character's own uploaded images. `filename` is kept in lockstep so
@@ -3639,6 +3663,8 @@ def _gen_to_dict(gen: MediaGeneration) -> dict:
             "repurpose_settings": rep.get("settings") or {},
             # Push-to-Drive receipts: {"final": {...}, "repurpose": {...}}.
             "drive": meta.get("drive") or {},
+            # Telegram delivery receipts: latest message per slot.
+            "telegram": meta.get("telegram") or {},
         }
     return out
 
@@ -4187,6 +4213,53 @@ async def editor_auto_edit(
         except RuntimeError as e:
             raise HTTPException(500, f"Caption rendering failed: {e}")
 
+    # Persist Single-clip finals too (Multi-clip already did this). This gives
+    # both Editor modes the same durable Telegram receipt + manual resend card.
+    editor_settings = {
+        "template": template,
+        "voice_id": voice_id or "",
+        "enable_trim": enable_trim,
+        "enable_captions": enable_captions,
+        "enable_wpm_normalize": enable_wpm_normalize,
+        "target_wpm": target_wpm,
+        "enable_gap_trim": enable_gap_trim,
+        "gap_max_secs": gap_max_secs,
+        "threshold_db": threshold_db,
+        "min_silence_secs": min_silence_secs,
+        "pad_secs": pad_secs,
+    }
+    try:
+        gen = MediaGeneration(
+            gen_id=edit_id,
+            kind=GenKind.EDITOR,
+            model="editor-single",
+            prompt=Path(file.filename or "Editor").stem,
+            reference_paths=[str(src)],
+            status=GenStatus.DONE,
+            output_path=str(current),
+            completed_at=datetime.utcnow(),
+            editor_meta={
+                "edit_id": edit_id,
+                "n_clips": 1,
+                "clip_paths": [str(src)],
+                "settings": editor_settings,
+                "repurpose": None,
+            },
+        )
+        store().add_generation(gen)
+    except Exception as persist_err:  # noqa: BLE001
+        logger.warning("auto_edit %s: failed to persist editor record: %s: %s",
+                       edit_id, type(persist_err).__name__, persist_err)
+
+    telegram_info: dict
+    try:
+        telegram_info = await editor_telegram_send(
+            edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
+    except HTTPException as exc:
+        telegram_info = {"ok": False, "error": str(exc.detail)}
+        logger.warning("%s: automatic Telegram delivery failed: %s",
+                       edit_id, exc.detail)
+
     push.notify("Editor: auto-edit klar",
                 f"{cap_info['n_words']} ord · {template}" if cap_info
                 else "video klar", priority=3, tags=["white_check_mark"])
@@ -4200,6 +4273,7 @@ async def editor_auto_edit(
         "wpm_normalize": wpm_info,
         "captions": cap_info,
         "rerender_available": bool(enable_captions),
+        "telegram": telegram_info,
     }
 
 
@@ -4562,6 +4636,15 @@ async def editor_multi_auto_edit(
         logger.warning("multi_auto_edit %s: failed to persist editor record: %s: %s",
                        edit_id, type(persist_err).__name__, persist_err)
 
+    telegram_info: dict
+    try:
+        telegram_info = await editor_telegram_send(
+            edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
+    except HTTPException as exc:
+        telegram_info = {"ok": False, "error": str(exc.detail)}
+        logger.warning("%s: automatic Telegram delivery failed: %s",
+                       edit_id, exc.detail)
+
     push.notify("Editor: multi-clip klar",
                 f"{len(ordered_paths)} klipp · {template}",
                 priority=3, tags=["white_check_mark"])
@@ -4578,6 +4661,7 @@ async def editor_multi_auto_edit(
         "speed": speed_info,
         "captions": cap_info,
         "rerender_available": bool(enable_captions),
+        "telegram": telegram_info,
     }
 
 
@@ -5240,9 +5324,12 @@ async def reengineer_create(
     # Per-run QC opt-out (Hugo 2026-06-28): True → skip BOTH image (swap) QC and
     # video clip-QC (and their auto-retries) for this whole run. Default False.
     skip_qc: bool = Form(False),
-    # Auto-finalize (Hugo 2026-07-19): after assemble builds the finals, push
-    # them to Drive automatically. Default ON; the checkbox on the upload form.
+    # Legacy form alias kept so direct callers/tests and an already-open old UI
+    # still opt into the new Telegram behavior.
     auto_drive_push: bool = Form(True),
+    # After assemble builds every character final, send each one to that
+    # character's Telegram channel. Default ON.
+    auto_telegram_send: bool | None = Form(None),
     # Optional replacement background: applied to EVERY scene's swap image;
     # the character + kept props are relit to match its light.
     background_file: UploadFile | None = File(None),
@@ -5345,7 +5432,9 @@ async def reengineer_create(
         "language": language,
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "skip_qc": bool(skip_qc),
-        "auto_drive_push": bool(auto_drive_push),
+        "auto_telegram_send": bool(
+            auto_drive_push if auto_telegram_send is None
+            else auto_telegram_send),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,
@@ -5397,7 +5486,8 @@ async def reengineer_from_images(
     auto_mode: bool = Form(False),
     use_director: bool = Form(False),        # UI presets this ON; API stays opt-in (billed)
     skip_qc: bool = Form(False),             # per-run QC opt-out (image + video)
-    auto_drive_push: bool = Form(True),      # auto-push finals to Drive after assemble (Hugo 2026-07-19)
+    auto_drive_push: bool = Form(True),      # legacy alias for old clients
+    auto_telegram_send: bool | None = Form(None),
     background_file: UploadFile | None = File(None),
     background_source: str = Form("character"),
     character_source_image_ids: str = Form(""),
@@ -5599,7 +5689,9 @@ async def reengineer_from_images(
         "outfit_text": outfit_text.strip(),
         "use_director": bool(use_director) and bool(settings.anthropic_api_key),
         "skip_qc": bool(skip_qc),
-        "auto_drive_push": bool(auto_drive_push),
+        "auto_telegram_send": bool(
+            auto_drive_push if auto_telegram_send is None
+            else auto_telegram_send),
         "background_path": background_path,
         "background_source": background_source,
         "character_source_image_ids": source_overrides,
@@ -7219,6 +7311,14 @@ async def health() -> dict:
         "remotion_available": _remotion_available(),
         # Phone push (ntfy) — true when NTFY_TOPIC is configured.
         "ntfy_enabled": push.enabled(),
+        "telegram_character_ready": bool(
+            settings.telegram_character_bot_token),
+        "telegram_editor_ready": bool(
+            settings.telegram_editor_bot_token
+            and settings.telegram_editor_chat_id),
+        "telegram_local_api_configured": telegram_local_server.configured(),
+        "telegram_local_api_running": telegram_local_server.running(),
+        "telegram_api_base": settings.telegram_api_base,
         # Drives the Editor's "☁︎ Export to Drive" button — whether the
         # drive.file (write) OAuth token has been issued.
         "drive_write_ready": __import__(
@@ -7657,6 +7757,418 @@ async def editor_drive_export(edit_id: str, body: DriveExportBody) -> dict:
             receipt["persisted"] = False   # upload OK, receipt NOT saved — UI warns
     # Back-compat aliases for the existing modal's response handling.
     return {**receipt, "drive_id": receipt.get("file_id")}
+
+
+# --- Telegram delivery ------------------------------------------------------
+
+def _require_local_request(request: Request) -> None:
+    host = request.client.host if request.client else ""
+    if host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(403, "Den här inställningen är endast tillgänglig lokalt.")
+
+
+@app.get(
+    "/api/settings/telegram_character_token/setup",
+    response_class=HTMLResponse,
+)
+async def telegram_character_token_setup(request: Request) -> HTMLResponse:
+    """Local-only setup form; the token is stored in macOS Keychain."""
+    _require_local_request(request)
+    return HTMLResponse("""
+<!doctype html>
+<html lang="sv">
+<meta charset="utf-8">
+<title>Character Swap – Telegram</title>
+<style>
+body{font:16px system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0}
+form{width:min(480px,90vw);display:grid;gap:14px;background:#1d1d1f;padding:28px;border-radius:18px}
+input,button{font:inherit;padding:12px;border-radius:10px;border:1px solid #555}
+input{background:#0d0d0e;color:#fff}button{background:#5b5bd6;color:#fff;border:0;font-weight:700}
+</style>
+<form method="post">
+  <h2>Character Swap Finals</h2>
+  <p>Klistra in bot-token. Den sparas i macOS Keychain och visas aldrig igen.</p>
+  <input name="token" type="password" autocomplete="off" autofocus required>
+  <button type="submit">Spara säkert</button>
+</form>
+</html>
+""")
+
+
+@app.post(
+    "/api/settings/telegram_character_token/setup",
+    response_class=HTMLResponse,
+)
+async def telegram_character_token_save(
+        request: Request, token: str = Form(...)) -> HTMLResponse:
+    """Validate the bot token, then persist it in macOS Keychain."""
+    _require_local_request(request)
+    clean = token.strip()
+    if not re.fullmatch(r"\d{8,12}:[A-Za-z0-9_-]{30,}", clean):
+        raise HTTPException(400, "Ogiltigt Telegram bot-tokenformat.")
+    import httpx
+    try:
+        response = await asyncio.to_thread(
+            httpx.get,
+            f"https://api.telegram.org/bot{clean}/getMe",
+            timeout=20,
+        )
+        payload = response.json()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            502, f"Telegram-token kunde inte verifieras: {exc}") from exc
+    username = (payload.get("result") or {}).get("username")
+    if not payload.get("ok") or username != "HugoCharacterSwapFinalsBot":
+        raise HTTPException(
+            400, "Token tillhör inte @HugoCharacterSwapFinalsBot.")
+    await asyncio.to_thread(
+        save_keychain_secret,
+        TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT,
+        clean,
+    )
+    settings.telegram_character_bot_token = clean
+    return HTMLResponse("""
+<!doctype html>
+<html lang="sv">
+<meta charset="utf-8">
+<style>body{font:18px system-ui;background:#111;color:#b8f7c5;display:grid;place-items:center;height:100vh}</style>
+<h2>✓ Character Swap-boten är säkert sparad</h2>
+</html>
+""")
+
+
+@app.get(
+    "/api/settings/telegram_local_api/setup",
+    response_class=HTMLResponse,
+)
+async def telegram_local_api_setup(request: Request) -> HTMLResponse:
+    """Local-only form for storing Telegram API credentials in Keychain."""
+    _require_local_request(request)
+    return HTMLResponse("""
+<!doctype html>
+<html lang="sv">
+<meta charset="utf-8">
+<title>Character Swap – lokal Telegram-server</title>
+<style>
+body{font:16px system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0}
+form{width:min(480px,90vw);display:grid;gap:14px;background:#1d1d1f;padding:28px;border-radius:18px}
+input,button{font:inherit;padding:12px;border-radius:10px;border:1px solid #555}
+input{background:#0d0d0e;color:#fff}button{background:#5b5bd6;color:#fff;border:0;font-weight:700}
+</style>
+<form method="post">
+  <h2>Lokal Telegram-server</h2>
+  <p>API-uppgifterna sparas i macOS Keychain och används bara lokalt.</p>
+  <input name="api_id" inputmode="numeric" placeholder="api_id"
+         autocomplete="off" autofocus required>
+  <input name="api_hash" type="password" placeholder="api_hash"
+         autocomplete="off" required>
+  <button type="submit">Spara och starta</button>
+</form>
+</html>
+""")
+
+
+@app.post(
+    "/api/settings/telegram_local_api/setup",
+    response_class=HTMLResponse,
+)
+async def telegram_local_api_save(
+        request: Request,
+        api_id: str = Form(...),
+        api_hash: str = Form(...)) -> HTMLResponse:
+    """Persist local Bot API credentials and start the bundled server."""
+    _require_local_request(request)
+    clean_id = api_id.strip()
+    clean_hash = api_hash.strip().lower()
+    if not re.fullmatch(r"\d{5,12}", clean_id):
+        raise HTTPException(400, "Ogiltigt Telegram api_id.")
+    if not re.fullmatch(r"[a-f0-9]{32}", clean_hash):
+        raise HTTPException(400, "Ogiltigt Telegram api_hash.")
+    await asyncio.to_thread(
+        save_keychain_secret,
+        TELEGRAM_LOCAL_API_ID_KEYCHAIN_ACCOUNT,
+        clean_id,
+    )
+    await asyncio.to_thread(
+        save_keychain_secret,
+        TELEGRAM_LOCAL_API_HASH_KEYCHAIN_ACCOUNT,
+        clean_hash,
+    )
+    started = await asyncio.to_thread(telegram_local_server.start)
+    if not started:
+        raise HTTPException(
+            503,
+            "Uppgifterna sparades, men den lokala Telegram-servern "
+            "kunde inte starta. Se .local/telegram-bot-api.log.",
+        )
+    return HTMLResponse("""
+<!doctype html>
+<html lang="sv">
+<meta charset="utf-8">
+<style>body{font:18px system-ui;background:#111;color:#b8f7c5;display:grid;place-items:center;height:100vh}</style>
+<h2>✓ Lokal Telegram-server kör — original upp till 2000 MB</h2>
+</html>
+""")
+
+
+class TelegramSendBody(BaseModel):
+    variant: str = "final"       # "final" | "repurpose"
+    # Editor receipts attach to the owning saved reel, even when `edit_id`
+    # points at its repurposed child edit.
+    gen_id: str | None = None
+    slot: str = "final"
+
+
+def _require_character_telegram() -> None:
+    if not settings.telegram_character_bot_token:
+        raise HTTPException(
+            409, "TELEGRAM_CHARACTER_BOT_TOKEN saknas i .env.")
+
+
+def _require_editor_telegram() -> None:
+    if not settings.telegram_editor_bot_token:
+        raise HTTPException(
+            409, "TELEGRAM_EDITOR_BOT_TOKEN saknas i .env.")
+    if not settings.telegram_editor_chat_id:
+        raise HTTPException(
+            409, "TELEGRAM_EDITOR_CHAT_ID saknas i .env.")
+
+
+def _character_telegram_target(char_id: str, fallback_name: str) -> tuple[str, str]:
+    asset = store().get_character(char_id)
+    name = asset.name if asset else fallback_name or char_id
+    chat_id = (asset.telegram_chat_id if asset else None) or ""
+    if not chat_id:
+        raise HTTPException(
+            409, f"Telegram-kanal saknas för {name}. "
+                 "Ange kanalens @namn eller -100…-id i karaktärsbiblioteket.")
+    return name, chat_id
+
+
+async def _telegram_character_file(source: Path, *, char_id: str,
+                                   char_name: str, base: str, variant: str,
+                                   run_id: str) -> dict:
+    from character_swap import telegram_delivery
+    _require_character_telegram()
+    name, chat_id = _character_telegram_target(char_id, char_name)
+    try:
+        return await telegram_delivery.send_character_final(
+            source, chat_id=chat_id, char_name=name, base=base,
+            variant=variant, run_id=run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 — preserve Telegram's real reason
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/jobs/{job_id}/characters/{char_id}/telegram_send")
+async def job_char_telegram_send(job_id: str, char_id: str,
+                                 body: TelegramSendBody) -> dict:
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    jc = job.characters.get(char_id)
+    if jc is None:
+        raise HTTPException(404, "Character not in this job")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    path = (jc.compiled_video_path if body.variant == "final"
+            else jc.repurposed_video_path)
+    status = (jc.compile_status if body.variant == "final"
+              else jc.repurpose_status)
+    if not path or status != "done":
+        raise HTTPException(
+            409, "Ingen färdig video att skicka — bygg finalen först.")
+    receipt = await _telegram_character_file(
+        Path(path), char_id=char_id, char_name=jc.name,
+        base=job.title or "swap", variant=body.variant, run_id=job_id)
+    jc.telegram_sends[body.variant] = receipt
+    s.update_job(job)
+    return receipt
+
+
+@app.post("/api/reengineer/{re_id}/chars/{char_id}/telegram_send")
+async def reengineer_char_telegram_send(re_id: str, char_id: str,
+                                        body: TelegramSendBody) -> dict:
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if state is None:
+        raise HTTPException(404, "Run not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    bucket = "finals" if body.variant == "final" else "repurposed"
+    entry = (state.get(bucket) or {}).get(char_id)
+    if not entry or entry.get("status") != "done" or not entry.get("final_path"):
+        raise HTTPException(
+            409, "Ingen färdig video att skicka — bygg finalen först.")
+    building = (
+        state.get("status") == "assembling"
+        or re_id in runner_reengineer._ASSEMBLING
+        if body.variant == "final"
+        else bool(state.get("repurposing"))
+             or re_id in runner_reengineer._REPURPOSING
+    )
+    if building:
+        raise HTTPException(
+            409, "Bygget pågår — vänta tills finalen är klar.")
+    base = state.get("title") or state.get("name")
+    if not base and state.get("job_id"):
+        linked = store().get_job(state["job_id"])
+        base = linked.title if linked else None
+    receipt = await _telegram_character_file(
+        Path(entry["final_path"]), char_id=char_id, char_name=char_id,
+        base=base or re_id, variant=body.variant, run_id=re_id)
+    fresh = reengineer_mod.load_state(re_id)
+    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
+        fresh[bucket][char_id]["telegram"] = receipt
+        reengineer_mod.save_state(fresh)
+    else:
+        receipt["persisted"] = False
+    return receipt
+
+
+@app.post("/api/jobs/{job_id}/telegram_send_all")
+async def job_telegram_send_all(job_id: str, body: TelegramSendBody) -> dict:
+    s = store()
+    job = s.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Job not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _require_character_telegram()
+    targets = []
+    for cid, jc in job.characters.items():
+        path, status = (
+            (jc.compiled_video_path, jc.compile_status)
+            if body.variant == "final"
+            else (jc.repurposed_video_path, jc.repurpose_status))
+        if path and status == "done" and Path(path).is_file():
+            targets.append((cid, jc, Path(path)))
+    if not targets:
+        raise HTTPException(409, "Inga färdiga videor att skicka.")
+
+    async def _one(cid: str, jc: JobCharacter, path: Path):
+        return await _telegram_character_file(
+            path, char_id=cid, char_name=jc.name,
+            base=job.title or "swap", variant=body.variant, run_id=job_id)
+
+    results = await asyncio.gather(
+        *[_one(cid, jc, path) for cid, jc, path in targets],
+        return_exceptions=True)
+    sent, failed, names = {}, {}, {}
+    for (cid, jc, _path), result in zip(targets, results):
+        names[cid] = jc.name or cid
+        if isinstance(result, BaseException):
+            failed[cid] = _exc_detail(result)
+        else:
+            jc.telegram_sends[body.variant] = result
+            sent[cid] = result
+    if sent:
+        s.update_job(job)
+    return {"ok": not failed, "variant": body.variant,
+            "sent": sent, "failed": failed, "names": names}
+
+
+@app.post("/api/reengineer/{re_id}/telegram_send_all")
+async def reengineer_telegram_send_all(
+        re_id: str, body: TelegramSendBody) -> dict:
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    state = reengineer_mod.load_state(re_id)
+    if state is None:
+        raise HTTPException(404, "Run not found")
+    if body.variant not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _require_character_telegram()
+    bucket = "finals" if body.variant == "final" else "repurposed"
+    building = (
+        state.get("status") == "assembling"
+        or re_id in runner_reengineer._ASSEMBLING
+        if body.variant == "final"
+        else bool(state.get("repurposing"))
+             or re_id in runner_reengineer._REPURPOSING
+    )
+    if building:
+        raise HTTPException(409, "Bygget pågår — vänta tills finalerna är klara.")
+    base = state.get("title") or state.get("name")
+    if not base and state.get("job_id"):
+        linked = store().get_job(state["job_id"])
+        base = linked.title if linked else None
+    targets = [
+        (cid, Path(entry["final_path"]))
+        for cid, entry in (state.get(bucket) or {}).items()
+        if entry.get("status") == "done" and entry.get("final_path")
+        and Path(entry["final_path"]).is_file()
+    ]
+    if not targets:
+        raise HTTPException(409, "Inga färdiga videor att skicka.")
+
+    async def _one(cid: str, path: Path):
+        return await _telegram_character_file(
+            path, char_id=cid, char_name=cid, base=base or re_id,
+            variant=body.variant, run_id=re_id)
+
+    results = await asyncio.gather(
+        *[_one(cid, path) for cid, path in targets],
+        return_exceptions=True)
+    sent, failed, names = {}, {}, {}
+    for (cid, _path), result in zip(targets, results):
+        char = store().get_character(cid)
+        names[cid] = char.name if char else cid
+        if isinstance(result, BaseException):
+            failed[cid] = _exc_detail(result)
+        else:
+            sent[cid] = result
+    persisted = True
+    if sent:
+        fresh = reengineer_mod.load_state(re_id)
+        if fresh is not None:
+            for cid, receipt in sent.items():
+                if (fresh.get(bucket) or {}).get(cid):
+                    fresh[bucket][cid]["telegram"] = receipt
+                else:
+                    receipt["persisted"] = False
+                    persisted = False
+            reengineer_mod.save_state(fresh)
+        else:
+            persisted = False
+            for receipt in sent.values():
+                receipt["persisted"] = False
+    return {"ok": not failed, "variant": body.variant, "sent": sent,
+            "failed": failed, "names": names, "persisted": persisted}
+
+
+@app.post("/api/editor/{edit_id}/telegram_send")
+async def editor_telegram_send(edit_id: str,
+                               body: TelegramSendBody) -> dict:
+    from character_swap import telegram_delivery
+    _require_editor_telegram()
+    if body.slot not in ("final", "repurpose"):
+        raise HTTPException(422, f"Unknown slot {body.slot!r}")
+    edit_dir = settings.output_dir / "editor" / edit_id
+    if not edit_dir.is_dir():
+        raise HTTPException(404, f"Edit {edit_id!r} not found")
+    final, _ = _find_editor_videos(edit_dir)
+    if final is None:
+        raise HTTPException(404, f"No rendered video in {edit_id!r}")
+    gen = store().get_generation(body.gen_id) if body.gen_id else None
+    base = (gen.prompt[:80] if gen and gen.prompt else "Editor")
+    try:
+        receipt = await telegram_delivery.send_editor_final(
+            final, base=base, variant=body.slot, edit_id=edit_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, str(exc)) from exc
+    if body.gen_id:
+        if gen is not None:
+            if gen.editor_meta is None:
+                gen.editor_meta = {}
+            gen.editor_meta.setdefault("telegram", {})[body.slot] = receipt
+            store().update_generation(gen)
+        else:
+            receipt["persisted"] = False
+    return receipt
 
 
 @app.exception_handler(404)

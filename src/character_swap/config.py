@@ -1,11 +1,55 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+KEYCHAIN_SERVICE = "Character Swap Studio"
+TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT = "telegram-character-bot-token"
+TELEGRAM_LOCAL_API_ID_KEYCHAIN_ACCOUNT = "telegram-local-api-id"
+TELEGRAM_LOCAL_API_HASH_KEYCHAIN_ACCOUNT = "telegram-local-api-hash"
+
+
+def load_keychain_secret(account: str) -> str:
+    """Read a local macOS Keychain secret without exposing it in process args."""
+    try:
+        result = subprocess.run(
+            [
+                "security", "find-generic-password",
+                "-s", KEYCHAIN_SERVICE,
+                "-a", account,
+                "-w",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def save_keychain_secret(account: str, value: str) -> None:
+    """Store a secret in the user's macOS Keychain."""
+    result = subprocess.run(
+        [
+            "security", "add-generic-password",
+            "-U",
+            "-s", KEYCHAIN_SERVICE,
+            "-a", account,
+            "-w", value,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "macOS Keychain kunde inte spara Telegram-token: "
+            + (result.stderr.strip() or "security command failed"))
 
 
 class Settings(BaseSettings):
@@ -48,6 +92,25 @@ class Settings(BaseSettings):
                                         validation_alias="HIGGSFIELD_SCENE_FIELD")
     elevenlabs_api_key: str = Field(default="", validation_alias="ELEVENLABS_API_KEY") # ElevenLabs voice library + TTS + Voice Changer
     fal_api_key: str = Field(default="", validation_alias="FAL_API_KEY")              # fal.ai (hosts VEED Subtitle Styling — auto-captioning)
+    # Telegram delivery uses TWO bots/identities:
+    #   character bot → each character's own channel (chat id stored on the
+    #                   CharacterAsset in the library)
+    #   editor bot    → one shared channel for standalone Single/Multi-clip
+    #                   Editor finals and their repurposed copies.
+    # Bot API tokens come from @BotFather. A channel destination may be a
+    # numeric "-100…" chat id or a public "@channelusername".
+    telegram_character_bot_token: str = Field(
+        default="", validation_alias="TELEGRAM_CHARACTER_BOT_TOKEN")
+    telegram_editor_bot_token: str = Field(
+        default="", validation_alias="TELEGRAM_EDITOR_BOT_TOKEN")
+    telegram_editor_chat_id: str = Field(
+        default="", validation_alias="TELEGRAM_EDITOR_CHAT_ID")
+    # Official cloud Bot API by default (50 MB upload cap). Point this at a
+    # local telegram-bot-api server to gain its 2 GB upload cap. Finals are
+    # always sent byte-identically as documents; they are never re-encoded.
+    telegram_api_base: str = Field(
+        default="https://api.telegram.org",
+        validation_alias="TELEGRAM_API_BASE")
 
     openai_image_model: str = Field(default="gpt-image-2", validation_alias="OPENAI_IMAGE_MODEL")
     # OpenAI image `quality`: "low" | "medium" | "high" | "auto". Defaults to
@@ -394,3 +457,6 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if not settings.telegram_character_bot_token:
+    settings.telegram_character_bot_token = load_keychain_secret(
+        TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT)

@@ -66,6 +66,11 @@ class CharacterAsset(BaseModel):
     # Spanish + the Spanish accent clause is enforced (Hugo 2026-06-26). None/
     # "en" = default English (no change). Additive to the per-run 🗣 picker.
     language: str | None = None
+    # Telegram destination dedicated to this character's Swap/Animate/
+    # Reengineer finals. Accepts a numeric channel chat id ("-100…") or a
+    # public channel username ("@…"). The shared character bot must be an
+    # administrator in the channel.
+    telegram_chat_id: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def resolve_source_filename(self, image_id: str | None = None) -> str:
@@ -274,6 +279,11 @@ class JobCharacter(BaseModel):
     # the same Drive file (same filename in the character's folder — Drive
     # keeps version history), so the receipt just refreshes in place.
     drive_pushes: dict[str, dict] = Field(default_factory=dict)
+    # Telegram delivery receipts, keyed "final" | "repurpose". Unlike Drive,
+    # a manual resend creates a new Telegram message; the latest message
+    # receipt replaces this pointer while earlier messages remain in channel
+    # history.
+    telegram_sends: dict[str, dict] = Field(default_factory=dict)
     # Phase 4 (Full pipeline) per-character status. The "🚀 Run full pipeline"
     # button in Step 6 chains: compile-no-captions → package zip into a temp
     # dir → spawn `python automate.py` (Resolve render → Drive upload) → wait

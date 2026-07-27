@@ -643,9 +643,9 @@
 
         <div class="flex justify-between items-center gap-3">
           <label class="text-sm flex items-center gap-1.5 cursor-pointer"
-                 title="När alla klipp har lyckats: bygg ihop slutvideorna (Steg 6) automatiskt och ladda upp dem till Google Drive — inga manuella klick. Bocka ur för att göra Steg 6 + Drive själv.">
+                 title="När alla klipp har lyckats: bygg ihop alla karaktärsfinaler automatiskt och skicka dem till respektive Telegram-kanal.">
             <input type="checkbox" x-model="autoCompilePush" class="rounded" />
-            🔁 Bygg ihop + Drive automatiskt
+            🔁 Bygg ihop + skicka till Telegram automatiskt
           </label>
           <button class="px-4 py-3 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
                   :disabled="!canSubmitMovement()"
@@ -957,17 +957,16 @@
         </button>
       </div>
 
-      <!-- Push ALL finished finals to Drive at once (Hugo 2026-07-03) — shown
-           once ≥2 characters have a compiled final, so you don't click the
-           per-video ⬆ Drive button character by character. -->
-      <div x-show="driveSwapReadyCount('final') >= 2" class="mt-3">
+      <!-- Send ALL finished finals to Telegram at once — shown once ≥2
+           characters have a compiled final. -->
+      <div x-show="telegramSwapReadyCount('final') >= 2" class="mt-3">
         <button class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
-                :disabled="driveAllBusy(job.job_id, 'final')"
-                title="Ladda upp ALLA färdiga finalvideor i den här körningen till Google Drive → Character Swap/<karaktär>/ (skriver över samma filer vid om-push)"
-                @click="drivePushAll(`/api/jobs/${job.job_id}/drive_push_all`, job.job_id, 'final')">
-          <span x-show="!driveAllBusy(job.job_id, 'final')"
-                x-text="`⬆ Pusha alla till Drive (${driveSwapReadyCount('final')})`"></span>
-          <span x-show="driveAllBusy(job.job_id, 'final')" class="animate-pulse">⏳ laddar upp alla…</span>
+                :disabled="telegramAllBusy(job.job_id, 'final')"
+                title="Skicka ALLA färdiga finalvideor till respektive karaktärs Telegram-kanal"
+                @click="telegramSendAll(`/api/jobs/${job.job_id}/telegram_send_all`, job.job_id, 'final')">
+          <span x-show="!telegramAllBusy(job.job_id, 'final')"
+                x-text="`➤ Skicka alla till Telegram (${telegramSwapReadyCount('final')})`"></span>
+          <span x-show="telegramAllBusy(job.job_id, 'final')" class="animate-pulse">⏳ skickar alla…</span>
         </button>
       </div>
 
@@ -1022,13 +1021,13 @@
                      class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
                   <button x-show="jc.compile_status === 'done' && jc.compiled_video_url"
                           class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                          :disabled="driveBusy(job.job_id+':'+cid+':final')"
-                          title="Ladda upp till Google Drive → Character Swap/<karaktär>/ (skriver över samma fil vid om-push)"
-                          @click="drivePush(`/api/jobs/${job.job_id}/characters/${cid}/drive_push`, job.job_id+':'+cid+':final', {variant: 'final'})"
-                          x-text="driveLabel(job.job_id+':'+cid+':final', jc.drive_pushes?.final)"></button>
-                  <a x-show="driveReceipt(job.job_id+':'+cid+':final', jc.drive_pushes?.final)"
-                     :href="driveReceipt(job.job_id+':'+cid+':final', jc.drive_pushes?.final)?.url" target="_blank"
-                     title="Öppna i Google Drive"
+                          :disabled="telegramBusy(job.job_id+':'+cid+':final')"
+                          title="Skicka till karaktärens Telegram-kanal"
+                          @click="telegramSend(`/api/jobs/${job.job_id}/characters/${cid}/telegram_send`, job.job_id+':'+cid+':final', {variant: 'final'})"
+                          x-text="telegramLabel(job.job_id+':'+cid+':final', jc.telegram_sends?.final)"></button>
+                  <a x-show="telegramReceipt(job.job_id+':'+cid+':final', jc.telegram_sends?.final)?.url"
+                     :href="telegramReceipt(job.job_id+':'+cid+':final', jc.telegram_sends?.final)?.url" target="_blank"
+                     title="Öppna i Telegram"
                      class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                   <a x-show="jc.compile_status === 'done'"
                      :href="`/api/jobs/${job.job_id}/characters/${cid}/export_resolve`"
@@ -1075,14 +1074,14 @@
       <div x-show="Object.values(compilableCharacters()).some(jc => jc.repurpose_status)" class="mt-4">
         <div class="flex items-center justify-between gap-2 mb-2">
           <div class="text-sm font-medium text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (mirrored)</div>
-          <button x-show="driveSwapReadyCount('repurpose') >= 2"
+          <button x-show="telegramSwapReadyCount('repurpose') >= 2"
                   class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
-                  :disabled="driveAllBusy(job.job_id, 'repurpose')"
-                  title="Ladda upp ALLA spegelvända kopior i den här körningen till Google Drive → Character Swap/<karaktär>/"
-                  @click="drivePushAll(`/api/jobs/${job.job_id}/drive_push_all`, job.job_id, 'repurpose')">
-            <span x-show="!driveAllBusy(job.job_id, 'repurpose')"
-                  x-text="`⬆ Pusha alla till Drive (${driveSwapReadyCount('repurpose')})`"></span>
-            <span x-show="driveAllBusy(job.job_id, 'repurpose')" class="animate-pulse">⏳ laddar upp alla…</span>
+                  :disabled="telegramAllBusy(job.job_id, 'repurpose')"
+                  title="Skicka ALLA spegelvända kopior till respektive karaktärs Telegram-kanal"
+                  @click="telegramSendAll(`/api/jobs/${job.job_id}/telegram_send_all`, job.job_id, 'repurpose')">
+            <span x-show="!telegramAllBusy(job.job_id, 'repurpose')"
+                  x-text="`➤ Skicka alla till Telegram (${telegramSwapReadyCount('repurpose')})`"></span>
+            <span x-show="telegramAllBusy(job.job_id, 'repurpose')" class="animate-pulse">⏳ skickar alla…</span>
           </button>
         </div>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -1121,13 +1120,13 @@
                        class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ mp4</a>
                     <button x-show="jc.repurpose_status === 'done' && jc.repurposed_video_url"
                             class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                            :disabled="driveBusy(job.job_id+':'+cid+':repurpose')"
-                            title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/<karaktär>/"
-                            @click="drivePush(`/api/jobs/${job.job_id}/characters/${cid}/drive_push`, job.job_id+':'+cid+':repurpose', {variant: 'repurpose'})"
-                            x-text="driveLabel(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)"></button>
-                    <a x-show="driveReceipt(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)"
-                       :href="driveReceipt(job.job_id+':'+cid+':repurpose', jc.drive_pushes?.repurpose)?.url" target="_blank"
-                       title="Öppna i Google Drive"
+                            :disabled="telegramBusy(job.job_id+':'+cid+':repurpose')"
+                            title="Skicka den spegelvända kopian till karaktärens Telegram-kanal"
+                            @click="telegramSend(`/api/jobs/${job.job_id}/characters/${cid}/telegram_send`, job.job_id+':'+cid+':repurpose', {variant: 'repurpose'})"
+                            x-text="telegramLabel(job.job_id+':'+cid+':repurpose', jc.telegram_sends?.repurpose)"></button>
+                    <a x-show="telegramReceipt(job.job_id+':'+cid+':repurpose', jc.telegram_sends?.repurpose)?.url"
+                       :href="telegramReceipt(job.job_id+':'+cid+':repurpose', jc.telegram_sends?.repurpose)?.url" target="_blank"
+                       title="Öppna i Telegram"
                        class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                     <button x-show="jc.repurpose_status === 'done' && jc.repurpose_edit_id"
                             class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
@@ -1354,9 +1353,9 @@
             🚫 Hoppa över QC
           </label>
           <label class="text-sm flex items-center gap-1.5 cursor-pointer"
-                 title="När alla klipp har lyckats: bygg ihop slutvideorna automatiskt och ladda upp dem till Google Drive — inga manuella klick. Bocka ur för att göra det själv.">
-            <input type="checkbox" x-model="swapFromImages.autoDrivePush" class="rounded" />
-            🔁 Bygg ihop + Drive automatiskt
+                 title="När alla klipp har lyckats: bygg ihop finalerna automatiskt och skicka dem till Telegram.">
+            <input type="checkbox" x-model="swapFromImages.autoTelegramSend" class="rounded" />
+            🔁 Bygg ihop + skicka till Telegram automatiskt
           </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!swapFromImages.rows.length || swapFromImages.charIds.length === 0 || swapFromImages.submitting"
@@ -1518,9 +1517,9 @@
             🚫 Hoppa över QC
           </label>
           <label class="text-sm flex items-center gap-1.5 cursor-pointer"
-                 title="När alla klipp har lyckats och finalerna byggts ihop: ladda upp dem till Google Drive automatiskt — inga manuella klick. Bocka ur för att göra det själv.">
-            <input type="checkbox" x-model="reengineerGen.autoDrivePush" class="rounded" />
-            🔁 Ladda upp till Drive automatiskt
+                 title="När finalerna är ihopbyggda: skicka dem automatiskt till respektive karaktärs Telegram-kanal.">
+            <input type="checkbox" x-model="reengineerGen.autoTelegramSend" class="rounded" />
+            🔁 Skicka till Telegram automatiskt
           </label>
           <button class="ml-auto px-4 py-2 rounded-lg bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 text-sm font-medium disabled:opacity-40"
                   :disabled="!reengineerGen.file || reengineerGen.charIds.length === 0 || reengineerGen.submitting"
@@ -2341,16 +2340,15 @@
             <div class="flex items-center justify-between mb-2">
               <div class="text-sm font-medium">Final videos</div>
               <div class="flex items-center gap-2">
-                <!-- Push ALL finished finals to Drive at once (Hugo 2026-07-03).
-                     Shown once ≥2 finals are done, so you don't push per video. -->
-                <button x-show="driveReReadyCount(r, 'final') >= 2"
+                <!-- Send ALL finished finals to Telegram at once. -->
+                <button x-show="telegramReReadyCount(r, 'final') >= 2"
                         class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
-                        :disabled="driveAllBusy(r.re_id, 'final')"
-                        title="Ladda upp ALLA färdiga finalvideor i den här körningen till Google Drive → Character Swap/<karaktär>/"
-                        @click="drivePushAll(`/api/reengineer/${r.re_id}/drive_push_all`, r.re_id, 'final')">
-                  <span x-show="!driveAllBusy(r.re_id, 'final')"
-                        x-text="`⬆ Pusha alla till Drive (${driveReReadyCount(r, 'final')})`"></span>
-                  <span x-show="driveAllBusy(r.re_id, 'final')" class="animate-pulse">⏳ laddar upp alla…</span>
+                        :disabled="telegramAllBusy(r.re_id, 'final')"
+                        title="Skicka ALLA färdiga finalvideor till respektive karaktärs Telegram-kanal"
+                        @click="telegramSendAll(`/api/reengineer/${r.re_id}/telegram_send_all`, r.re_id, 'final')">
+                  <span x-show="!telegramAllBusy(r.re_id, 'final')"
+                        x-text="`➤ Skicka alla till Telegram (${telegramReReadyCount(r, 'final')})`"></span>
+                  <span x-show="telegramAllBusy(r.re_id, 'final')" class="animate-pulse">⏳ skickar alla…</span>
                 </button>
                 <!-- Repurpose (Hugo 2026-06-27): mirror-flip every final (text stays
                      upright) into a NEW set with its own edit settings — for
@@ -2393,13 +2391,13 @@
                             @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
                     <button x-show="f.final_url && f.status === 'done'"
                             class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                            :disabled="driveBusy(r.re_id+':'+cid+':final')"
-                            title="Ladda upp till Google Drive → Character Swap/<karaktär>/ (skriver över samma fil vid om-push)"
-                            @click="drivePush(`/api/reengineer/${r.re_id}/chars/${cid}/drive_push`, r.re_id+':'+cid+':final', {variant: 'final'})"
-                            x-text="driveLabel(r.re_id+':'+cid+':final', f.drive)"></button>
-                    <a x-show="driveReceipt(r.re_id+':'+cid+':final', f.drive)"
-                       :href="driveReceipt(r.re_id+':'+cid+':final', f.drive)?.url" target="_blank"
-                       title="Öppna i Google Drive"
+                            :disabled="telegramBusy(r.re_id+':'+cid+':final')"
+                            title="Skicka till karaktärens Telegram-kanal"
+                            @click="telegramSend(`/api/reengineer/${r.re_id}/chars/${cid}/telegram_send`, r.re_id+':'+cid+':final', {variant: 'final'})"
+                            x-text="telegramLabel(r.re_id+':'+cid+':final', f.telegram)"></button>
+                    <a x-show="telegramReceipt(r.re_id+':'+cid+':final', f.telegram)?.url"
+                       :href="telegramReceipt(r.re_id+':'+cid+':final', f.telegram)?.url" target="_blank"
+                       title="Öppna i Telegram"
                        class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                   </div>
                 </div>
@@ -2410,14 +2408,14 @@
             <div x-show="Object.keys(r.repurposed || {}).length" class="mt-3">
               <div class="flex items-center justify-between gap-2 mb-2">
                 <div class="text-xs font-medium text-fuchsia-600 dark:text-fuchsia-400">🔁 Repurposed (spegelvänd)</div>
-                <button x-show="driveReReadyCount(r, 'repurpose') >= 2"
+                <button x-show="telegramReReadyCount(r, 'repurpose') >= 2"
                         class="text-xs px-2.5 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950 disabled:opacity-40"
-                        :disabled="driveAllBusy(r.re_id, 'repurpose')"
-                        title="Ladda upp ALLA spegelvända kopior i den här körningen till Google Drive → Character Swap/<karaktär>/"
-                        @click="drivePushAll(`/api/reengineer/${r.re_id}/drive_push_all`, r.re_id, 'repurpose')">
-                  <span x-show="!driveAllBusy(r.re_id, 'repurpose')"
-                        x-text="`⬆ Pusha alla till Drive (${driveReReadyCount(r, 'repurpose')})`"></span>
-                  <span x-show="driveAllBusy(r.re_id, 'repurpose')" class="animate-pulse">⏳ laddar upp alla…</span>
+                        :disabled="telegramAllBusy(r.re_id, 'repurpose')"
+                        title="Skicka ALLA spegelvända kopior till respektive karaktärs Telegram-kanal"
+                        @click="telegramSendAll(`/api/reengineer/${r.re_id}/telegram_send_all`, r.re_id, 'repurpose')">
+                  <span x-show="!telegramAllBusy(r.re_id, 'repurpose')"
+                        x-text="`➤ Skicka alla till Telegram (${telegramReReadyCount(r, 'repurpose')})`"></span>
+                  <span x-show="telegramAllBusy(r.re_id, 'repurpose')" class="animate-pulse">⏳ skickar alla…</span>
                 </button>
               </div>
               <div class="flex gap-4 flex-wrap">
@@ -2437,13 +2435,13 @@
                               @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
                       <button x-show="f.final_url && f.status === 'done'"
                               class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                              :disabled="driveBusy(r.re_id+':'+cid+':repurpose')"
-                              title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/<karaktär>/"
-                              @click="drivePush(`/api/reengineer/${r.re_id}/chars/${cid}/drive_push`, r.re_id+':'+cid+':repurpose', {variant: 'repurpose'})"
-                              x-text="driveLabel(r.re_id+':'+cid+':repurpose', f.drive)"></button>
-                      <a x-show="driveReceipt(r.re_id+':'+cid+':repurpose', f.drive)"
-                         :href="driveReceipt(r.re_id+':'+cid+':repurpose', f.drive)?.url" target="_blank"
-                         title="Öppna i Google Drive"
+                              :disabled="telegramBusy(r.re_id+':'+cid+':repurpose')"
+                              title="Skicka den spegelvända kopian till karaktärens Telegram-kanal"
+                              @click="telegramSend(`/api/reengineer/${r.re_id}/chars/${cid}/telegram_send`, r.re_id+':'+cid+':repurpose', {variant: 'repurpose'})"
+                              x-text="telegramLabel(r.re_id+':'+cid+':repurpose', f.telegram)"></button>
+                      <a x-show="telegramReceipt(r.re_id+':'+cid+':repurpose', f.telegram)?.url"
+                         :href="telegramReceipt(r.re_id+':'+cid+':repurpose', f.telegram)?.url" target="_blank"
+                         title="Öppna i Telegram"
                          class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
                     </div>
                   </div>
@@ -3725,57 +3723,18 @@
                   class="px-3 py-1 rounded bg-violet-600 hover:bg-violet-700 text-white text-xs font-medium"
                   :class="(editor.lastResult?.kind === 'auto' && editor.lastResult?.rerender_available !== false) ? '' : 'ml-auto'"
                   @click="openTimeline()">Trim &amp; split</button>
-          <!-- Drive export: prompts for a filename, uploads the captioned
-               MP4 to the user's Google Drive (drive.file scope — sees only
-               files our app creates). Hugo replaced the Resolve / Phase-4
-               buttons with this since Resolve Free can't drive scripting. -->
           <button x-show="editor.lastResult?.edit_id && editor.lastResult?.output_url"
                   class="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium inline-flex items-center disabled:opacity-50"
-                  :disabled="driveExport?.uploading"
-                  @click="openDriveExport()">
-            <span x-show="!driveExport?.uploading">☁︎ Export to Drive</span>
-            <span x-show="driveExport?.uploading">Uploading…</span>
+                  :disabled="telegramBusy('editor-live:'+editor.lastResult.edit_id+':final')"
+                  @click="telegramSend(`/api/editor/${editor.lastResult.edit_id}/telegram_send`, 'editor-live:'+editor.lastResult.edit_id+':final', {gen_id: editor.lastResult.edit_id, slot: 'final'})"
+                  x-text="telegramLabel('editor-live:'+editor.lastResult.edit_id+':final', editor.lastResult?.telegram?.ok ? editor.lastResult.telegram : null)">
           </button>
-          <a x-show="driveExport?.lastUrl"
-             :href="driveExport?.lastUrl" target="_blank"
+          <a x-show="telegramReceipt('editor-live:'+editor.lastResult?.edit_id+':final', editor.lastResult?.telegram?.ok ? editor.lastResult.telegram : null)?.url"
+             :href="telegramReceipt('editor-live:'+editor.lastResult?.edit_id+':final', editor.lastResult?.telegram?.ok ? editor.lastResult.telegram : null)?.url"
+             target="_blank"
              class="px-3 py-1 rounded bg-emerald-900/40 text-emerald-300 text-xs font-medium inline-flex items-center underline">
-            View on Drive ↗
+            Öppna Telegram ↗
           </a>
-        </div>
-
-        <!-- Drive export filename modal -->
-        <div x-show="driveExport?.open"
-             class="mt-4 pt-4 border-t border-neutral-200 dark:border-neutral-800 space-y-3">
-          <div class="flex items-center justify-between">
-            <h4 class="text-sm font-semibold">Export to Google Drive</h4>
-            <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-xs"
-                    @click="driveExport.open = false">close</button>
-          </div>
-          <p x-show="!health.drive_write_ready"
-             class="text-[11px] text-amber-600 dark:text-amber-400">
-             ⚠️ Drive write access not authorized yet.
-             <a class="underline cursor-pointer" @click="bootstrapDriveWrite()">click here to authorize</a>
-             (one-time browser consent for upload-only scope).
-          </p>
-          <label class="block">
-            <span class="text-xs text-neutral-600 dark:text-neutral-300">Filename</span>
-            <input type="text" x-model="driveExport.filename"
-                   placeholder="my-clip"
-                   class="mt-1 w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500" />
-            <span class="text-[10px] text-neutral-500 dark:text-neutral-500 mt-1 block">
-              `.mp4` will be appended if you don't add an extension. Saves to the root of My Drive.
-            </span>
-          </label>
-          <div class="flex items-center justify-end gap-2">
-            <button class="px-3 py-1.5 rounded text-xs text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800"
-                    @click="driveExport.open = false">Cancel</button>
-            <button class="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-50"
-                    :disabled="!driveExport.filename.trim() || driveExport.uploading || !health.drive_write_ready"
-                    @click="confirmDriveExport()">
-              <span x-show="!driveExport.uploading">↑ Upload</span>
-              <span x-show="driveExport.uploading">Uploading…</span>
-            </button>
-          </div>
         </div>
 
         <!-- Re-render panel — change template/size/position/trim on the existing edit -->
@@ -4222,13 +4181,13 @@
                   <div class="flex items-center gap-2">
                     <a :href="g.output_url" :download="friendlyName(g)" class="text-indigo-600 dark:text-indigo-400 hover:underline">↓ ladda ner</a>
                     <button class="text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                            :disabled="driveBusy('reel:'+g.gen_id+':final')"
-                            title="Ladda upp till Google Drive → Character Swap/Editor/ (skriver över samma fil vid om-push)"
-                            @click="drivePush(`/api/editor/${g.editor.edit_id}/drive_export`, 'reel:'+g.gen_id+':final', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'final'})"
-                            x-text="driveLabel('reel:'+g.gen_id+':final', g.editor?.drive?.final)"></button>
-                    <a x-show="driveReceipt('reel:'+g.gen_id+':final', g.editor?.drive?.final)"
-                       :href="driveReceipt('reel:'+g.gen_id+':final', g.editor?.drive?.final)?.url" target="_blank"
-                       title="Öppna i Google Drive"
+                            :disabled="telegramBusy('reel:'+g.gen_id+':final')"
+                            title="Skicka till Editor-kanalen på Telegram"
+                            @click="telegramSend(`/api/editor/${g.editor.edit_id}/telegram_send`, 'reel:'+g.gen_id+':final', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'final'})"
+                            x-text="telegramLabel('reel:'+g.gen_id+':final', g.editor?.telegram?.final)"></button>
+                    <a x-show="telegramReceipt('reel:'+g.gen_id+':final', g.editor?.telegram?.final)?.url"
+                       :href="telegramReceipt('reel:'+g.gen_id+':final', g.editor?.telegram?.final)?.url" target="_blank"
+                       title="Öppna i Telegram"
                        class="text-emerald-600 dark:text-emerald-400 hover:underline">✓</a>
                   </div>
                 </div>
@@ -4254,13 +4213,13 @@
                           <button class="hover:text-fuchsia-700" title="Repurposa igen" @click="openRepurposeModal('editor', g)">↻</button>
                           <button x-show="g.editor.repurpose_edit_id"
                                   class="text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
-                                  :disabled="driveBusy('reel:'+g.gen_id+':repurpose')"
-                                  title="Ladda upp den spegelvända kopian till Google Drive → Character Swap/Editor/"
-                                  @click="drivePush(`/api/editor/${g.editor.repurpose_edit_id}/drive_export`, 'reel:'+g.gen_id+':repurpose', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` -mirror [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'repurpose'})"
-                                  x-text="driveLabel('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)"></button>
-                          <a x-show="driveReceipt('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)"
-                             :href="driveReceipt('reel:'+g.gen_id+':repurpose', g.editor?.drive?.repurpose)?.url" target="_blank"
-                             title="Öppna i Google Drive"
+                                  :disabled="telegramBusy('reel:'+g.gen_id+':repurpose')"
+                                  title="Skicka den spegelvända kopian till Editor-kanalen på Telegram"
+                                  @click="telegramSend(`/api/editor/${g.editor.repurpose_edit_id}/telegram_send`, 'reel:'+g.gen_id+':repurpose', {filename: friendlyName(g, 'mp4').replace(/\.mp4$/, ` -mirror [${g.gen_id}].mp4`), gen_id: g.gen_id, slot: 'repurpose'})"
+                                  x-text="telegramLabel('reel:'+g.gen_id+':repurpose', g.editor?.telegram?.repurpose)"></button>
+                          <a x-show="telegramReceipt('reel:'+g.gen_id+':repurpose', g.editor?.telegram?.repurpose)?.url"
+                             :href="telegramReceipt('reel:'+g.gen_id+':repurpose', g.editor?.telegram?.repurpose)?.url" target="_blank"
+                             title="Öppna i Telegram"
                              class="text-emerald-600 dark:text-emerald-400 hover:underline">✓</a>
                         </div>
                       </div>
@@ -4371,6 +4330,15 @@
                      :checked="ch.language === 'es'"
                      @change="setCharacterLanguage(ch.char_id, $event.target.checked)" />
               <span>🇪🇸 Talar spanska <span class="text-neutral-400 dark:text-neutral-500">(översätt repliker)</span></span>
+            </label>
+            <label class="block text-[10px] text-neutral-500 dark:text-neutral-400"
+                   @click.stop="">
+              <span>Telegram-kanal för finaler</span>
+              <input type="text"
+                     :value="ch.telegram_chat_id || ''"
+                     placeholder="@kanalnamn eller -100…"
+                     @change="setCharacterTelegram(ch.char_id, $event.target.value)"
+                     class="mt-1 w-full px-2 py-1.5 text-[11px] font-mono border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded focus:outline-none focus:ring-2 focus:ring-sky-500" />
             </label>
             <!-- Uploaded reference images for this character -->
             <div>

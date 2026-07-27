@@ -1278,16 +1278,16 @@ async def assemble(re_id: str) -> None:
     finally:
         _ASSEMBLING.discard(re_id)
 
-    # Auto-push finals to Drive (Hugo 2026-07-19) — runs AFTER the _ASSEMBLING
-    # guard is cleared so the manual drive-push refusal ("bygget pågår") never
-    # trips on our own upload. No-op unless the run opted in AND landed `done`
-    # (push_reengineer_finals re-checks the fresh state). Defensive: an upload
+    # Auto-send finals to Telegram — runs AFTER the _ASSEMBLING guard is
+    # cleared so manual resend cannot overlap the final file rewrite. No-op
+    # unless the run opted in AND landed `done`
+    # (send_reengineer_finals re-checks the fresh state). Defensive: a send
     # failure must not turn a successful build into a failed run.
     try:
         from character_swap import auto_finalize
-        await auto_finalize.push_reengineer_finals(re_id)
+        await auto_finalize.send_reengineer_finals(re_id)
     except Exception:
-        _log.exception("reengineer %s auto drive-push failed", re_id)
+        _log.exception("reengineer %s auto Telegram send failed", re_id)
 
 
 # Editor finishing defaults — mirrors Swap Step 6 EXCEPT voice swap + WPM
@@ -1889,6 +1889,11 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
                            if not _char_is_uninvolved(state, jc)])
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
+    try:
+        from character_swap import auto_finalize
+        await auto_finalize.send_reengineer_repurposed(re_id)
+    except Exception:
+        _log.exception("reengineer %s repurpose Telegram send failed", re_id)
 
 
 # --------------------------------------------------------------------------- edit mode

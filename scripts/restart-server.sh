@@ -18,6 +18,16 @@ LOG="/tmp/character-swap-serve.log"
 UV="$HOME/.local/bin/uv"
 URL="http://127.0.0.1:8000/api/health"
 
+# Filbeskrivartak (2026-07-28). macOS soft-gräns är 256 när servern startas av
+# LaunchAgent vid inloggning. Varje <video> i UI:t öppnar en range-request som
+# håller en fd, och historiken laddar dussintals gamla finals samtidigt — 256
+# tog slut mitt i en Reengineer-assemble och ffmpeg-spawnen dog med
+# "OSError: [Errno 24] Too many open files" (re_782c54749b: alla 4 karaktärer
+# föll, körningen frös på status=assembling). Höjs här så BÅDA startvägarna
+# (LaunchAgent + /restart) ärver taket; hård gräns är unlimited så ingen sudo.
+ulimit -n 8192 2>/dev/null || true
+echo "==> Filbeskrivartak (ulimit -n): $(ulimit -n)"
+
 echo "==> Letar efter körande servrar…"
 PIDS=$(pgrep -f "character-swap serve" 2>/dev/null || true)
 if [ -n "$PIDS" ]; then
@@ -41,7 +51,7 @@ fi
 PORT_PID=$(lsof -ti :8000 2>/dev/null || true)
 [ -n "$PORT_PID" ] && kill -9 $PORT_PID 2>/dev/null || true
 
-echo "==> Startar EN server från $MAIN…"
+echo "==> Startar EN server från ${MAIN}…"
 nohup "$UV" run --directory "$MAIN" character-swap serve --no-open > "$LOG" 2>&1 &
 disown
 

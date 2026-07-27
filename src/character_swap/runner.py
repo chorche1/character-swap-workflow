@@ -2005,10 +2005,10 @@ async def run_video_synthesis(job_id: str) -> None:
     )
 
     # Auto-finalize (Hugo 2026-07-19): when EVERY approved character's clips
-    # succeeded, automatically compile the Step-6 finals + push them to Drive —
+    # succeeded, automatically compile the Step-6 finals + send them to Telegram —
     # no manual clicks. Reengineer-backed jobs are EXCLUDED here: their video
     # phase is watched by runner_reengineer, which builds finals via the
-    # assemble path (not compile_videos) and auto-pushes there instead. The
+    # assemble path (not compile_videos) and auto-sends there instead. The
     # chain is defensive (its own gate + try/except) so it never breaks the
     # video phase; guarded here too so a from_reengineer run skips it entirely.
     if not job.from_reengineer:

@@ -97,7 +97,7 @@ function studio() {
       backgroundUrl: '',             // object URL for the thumbnail
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       skipQc: false,                 // 🚫 per-run QC opt-out (image + video)
-      autoDrivePush: true,           // 🔁 auto-push finals to Drive after assemble (Hugo 2026-07-19)
+      autoTelegramSend: true,           // compile/assemble → Telegram automatically
       sourceOverrides: {},           // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -117,7 +117,7 @@ function studio() {
       backgroundUrl: '',
       backgroundSource: 'character', // 'character' (standard) | 'scene' (opt-out)
       skipQc: false,                  // 🚫 per-run QC opt-out (image + video)
-      autoDrivePush: true,            // 🔁 auto-push finals to Drive after assemble (Hugo 2026-07-19)
+      autoTelegramSend: true,            // compile/assemble → Telegram automatically
       sourceOverrides: {},            // char_id → image_id (outfit/reference pick)
       submitting: false,
     },
@@ -243,20 +243,12 @@ function studio() {
       editedWords: [],
       savingCaptionEdits: false,
     },
-    // Drive-export modal state. Lives at the top level (not nested under
-    // editor.*) so the modal can be opened from either single-clip or
-    // multi-clip render results without juggling per-mode flags.
-    driveExport: {
-      open: false,
-      filename: '',
-      uploading: false,
-      lastUrl: '',
-    },
-    // Push-to-Drive (2026-07-02): transient per-button upload state, keyed
+    // Telegram transient per-button send state, keyed
     // '<owner id>:<char/gen id>:<variant>'. The DURABLE receipt lives on the
-    // entity itself (jc.drive_pushes / finals[cid].drive / g.editor.drive) so
+    // entity itself (jc.telegram_sends / finals[cid].telegram /
+    // g.editor.telegram) so
     // the checkmark survives reloads; this map only carries in-flight state.
-    drivePushState: {},
+    telegramSendState: {},
     // Step 6: per-character compile settings. Shared across all characters
     // in the active job (one set of editor settings → one batch). Voice
     // override blank → each character uses its library preset voice.
@@ -488,7 +480,7 @@ function studio() {
     // as `video_models_by_scene` on submit. Lets one job mix providers.
     swapVideoModelsByScene: {},
     // 🔁 Auto-finalize (Hugo 2026-07-19): when every clip of this job succeeds,
-    // auto-compile the Step-6 finals + push them to Drive. The checkbox by the
+    // auto-compile the Step-6 finals + send them to Telegram. The checkbox by the
     // "generate videos" button; sent as `auto_compile_push` on submitMovement.
     autoCompilePush: true,
     editingVariant: null,    // {char_id, variant_id}
@@ -1176,7 +1168,7 @@ function studio() {
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('skip_qc', g.skipQc ? 'true' : 'false');
-        fd.append('auto_drive_push', g.autoDrivePush ? 'true' : 'false');
+        fd.append('auto_telegram_send', g.autoTelegramSend ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('scene_sensitivity', g.sceneSensitivity);
@@ -1330,7 +1322,7 @@ function studio() {
         fd.append('use_director',
                   (g.useDirector && this.health.anthropic_key) ? 'true' : 'false');
         fd.append('skip_qc', g.skipQc ? 'true' : 'false');
-        fd.append('auto_drive_push', g.autoDrivePush ? 'true' : 'false');
+        fd.append('auto_telegram_send', g.autoTelegramSend ? 'true' : 'false');
         fd.append('outfit_mode', g.outfitMode);
         fd.append('outfit_text', g.outfitText || '');
         fd.append('background_source', g.backgroundSource || 'character');
@@ -3892,6 +3884,10 @@ function studio() {
           this.notifyError('⚠ Röstbytet hoppades över — reeln har originalrösterna. '
             + (data.voice_swap.error || ''));
         }
+        if (data.telegram && data.telegram.ok === false) {
+          this.notifyError('Finalen är klar men Telegram misslyckades: '
+            + (data.telegram.error || 'okänt fel'));
+        }
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }
@@ -3940,9 +3936,14 @@ function studio() {
           this.notifyError('⚠ Röstbytet hoppades över — videon har originalrösten. '
             + (data.voice_swap.error || ''));
         }
+        if (data.telegram && data.telegram.ok === false) {
+          this.notifyError('Finalen är klar men Telegram misslyckades: '
+            + (data.telegram.error || 'okänt fel'));
+        }
         if (this.editor.autoExportResolve && data.edit_id) {
           await this.runEditorPipeline(data.edit_id);
         }
+        this.loadEditorJobs();
       } catch (e) {
         this._submitError('Auto-edit', e);
       } finally {
@@ -4014,43 +4015,23 @@ function studio() {
       }
     },
 
-    // --- Editor → Google Drive upload --------------------------------------
-    // Replacement for the old Resolve / Phase-4 path. Click "☁︎ Export to
-    // Drive" → modal lets you name the file → backend uploads via the
-    // drive.file scope. First time: bootstrap kicks off a browser OAuth
-    // consent for write access.
-    openDriveExport() {
-      if (!this.driveExport) {
-        this.driveExport = { open: false, filename: '', uploading: false, lastUrl: '' };
-      }
-      // Suggest a friendly default filename based on prompt + ISO date,
-      // mirroring how downloads are named elsewhere in the app.
-      const slug = this.friendlyName
-        ? this.friendlyName({ prompt: this.editor.lastResult?.prompt, kind: 'editor' }, 'mp4')
-        : (this.editor.lastResult?.edit_id || 'export') + '.mp4';
-      this.driveExport.filename = slug.replace(/\.mp4$/i, '');
-      this.driveExport.open = true;
-      this.driveExport.lastUrl = '';
+    // ---- Telegram delivery ------------------------------------------------
+    // One-click resend of a finished video. Automatic delivery uses the same
+    // endpoints/helpers; `persisted` is the latest durable message receipt.
+    telegramBusy(key) {
+      return !!(this.telegramSendState[key] && this.telegramSendState[key].uploading);
     },
-
-    // ---- Push-to-Drive (2026-07-02) ---------------------------------------
-    // One-click upload of a finished video. `key` identifies the button;
-    // `persisted` is the entity's durable receipt (if any). A re-push
-    // OVERWRITES the same Drive file (Hugo's choice — Drive keeps versions).
-    driveBusy(key) {
-      return !!(this.drivePushState[key] && this.drivePushState[key].uploading);
-    },
-    driveReceipt(key, persisted) {
-      const st = this.drivePushState[key];
+    telegramReceipt(key, persisted) {
+      const st = this.telegramSendState[key];
       return (st && st.receipt) || persisted || null;
     },
-    driveLabel(key, persisted) {
-      if (this.driveBusy(key)) return '⏳ Drive…';
-      return this.driveReceipt(key, persisted) ? '↻ Drive' : '⬆ Drive';
+    telegramLabel(key, persisted) {
+      if (this.telegramBusy(key)) return '⏳ Telegram…';
+      return this.telegramReceipt(key, persisted) ? '↻ Telegram' : '➤ Telegram';
     },
-    async drivePush(url, key, payload = {}) {
-      if (this.driveBusy(key)) return;
-      this.drivePushState = { ...this.drivePushState, [key]: { uploading: true } };
+    async telegramSend(url, key, payload = {}) {
+      if (this.telegramBusy(key)) return;
+      this.telegramSendState = { ...this.telegramSendState, [key]: { uploading: true } };
       const post = () => fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4061,46 +4042,29 @@ function studio() {
         return j.detail || j.error || `HTTP ${r.status}`;
       };
       try {
-        let r = await post();
-        if (r.status === 409) {
-          const detail = await errOf(r.clone ? r.clone() : r);
-          if (/authoriz|credentials/i.test(detail)) {
-            // One-time drive.file OAuth, then retry the push once.
-            this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
-            const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
-            if (!b.ok) throw new Error(await errOf(b));
-            r = await post();
-          } else {
-            throw new Error(detail);
-          }
-        }
+        const r = await post();
         if (!r.ok) throw new Error(await errOf(r));
         const receipt = await r.json();
-        this.drivePushState = { ...this.drivePushState, [key]: { uploading: false, receipt } };
+        this.telegramSendState = { ...this.telegramSendState, [key]: { uploading: false, receipt } };
         if (receipt.persisted === false) {
-          this.notify('info', 'Uppladdad till Drive ✓ — men kvittot kunde inte sparas, så ✓-markeringen försvinner vid omladdning.');
+          this.notify('info', 'Skickad till Telegram ✓ — men kvittot kunde inte sparas.');
         } else {
-          this.notify('info', 'Uppladdad till Drive ✓');
+          this.notify('info', 'Skickad till Telegram ✓');
         }
         return receipt;
       } catch (e) {
-        this.drivePushState = { ...this.drivePushState, [key]: { uploading: false } };
-        this.notifyError('Drive-push misslyckades: ' + (e.message || e));
+        this.telegramSendState = { ...this.telegramSendState, [key]: { uploading: false } };
+        this.notifyError('Telegram misslyckades: ' + (e.message || e));
         return null;
       }
     },
 
-    // ---- Push ALL finals in a run to Drive (Hugo 2026-07-03) --------------
-    // One click uploads every finished final (or every repurpose) of a run,
-    // instead of clicking the per-video button N times. The batch key drives
-    // the button's own spinner; each returned receipt is fanned out into the
-    // SAME per-character drivePushState keys the individual buttons read, so
-    // every card flips to "✓ öppna" together.
-    driveAllBusy(idPrefix, variant) {
-      return this.driveBusy(idPrefix + ':__all__:' + variant);
+    // One click resends every finished final/repurpose in a run.
+    telegramAllBusy(idPrefix, variant) {
+      return this.telegramBusy(idPrefix + ':__all__:' + variant);
     },
     // Count of ready finals/repurposes in the currently-open Swap job.
-    driveSwapReadyCount(variant) {
+    telegramSwapReadyCount(variant) {
       const chars = this.compilableCharacters();
       return Object.values(chars || {}).filter(jc =>
         variant === 'final'
@@ -4109,14 +4073,14 @@ function studio() {
       ).length;
     },
     // Count of ready finals/repurposes in a Reengineer run object.
-    driveReReadyCount(r, variant) {
+    telegramReReadyCount(r, variant) {
       const m = (variant === 'final' ? r.finals : r.repurposed) || {};
       return Object.values(m).filter(f => f.status === 'done' && f.final_url).length;
     },
-    async drivePushAll(url, idPrefix, variant) {
+    async telegramSendAll(url, idPrefix, variant) {
       const batchKey = idPrefix + ':__all__:' + variant;
-      if (this.driveBusy(batchKey)) return;
-      this.drivePushState = { ...this.drivePushState, [batchKey]: { uploading: true } };
+      if (this.telegramBusy(batchKey)) return;
+      this.telegramSendState = { ...this.telegramSendState, [batchKey]: { uploading: true } };
       const post = () => fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4127,37 +4091,25 @@ function studio() {
         return j.detail || j.error || `HTTP ${r.status}`;
       };
       try {
-        let r = await post();
-        if (r.status === 409) {
-          const detail = await errOf(r.clone ? r.clone() : r);
-          if (/authoriz|credentials/i.test(detail)) {
-            // One-time drive.file OAuth, then retry the whole batch once.
-            this.notify('info', 'Google Drive behöver auktoriseras — godkänn i webbläsarfönstret som öppnas på servern…');
-            const b = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
-            if (!b.ok) throw new Error(await errOf(b));
-            r = await post();
-          } else {
-            throw new Error(detail);   // e.g. "no finished videos" / "bygget pågår"
-          }
-        }
+        const r = await post();
         if (!r.ok) throw new Error(await errOf(r));
         const data = await r.json();
-        const pushed = data.pushed || {};
+        const sent = data.sent || {};
         const failed = data.failed || {};
         // Fan each receipt into the per-character key so its card shows ✓.
-        const patch = { ...this.drivePushState, [batchKey]: { uploading: false } };
-        for (const cid of Object.keys(pushed)) {
-          patch[idPrefix + ':' + cid + ':' + variant] = { uploading: false, receipt: pushed[cid] };
+        const patch = { ...this.telegramSendState, [batchKey]: { uploading: false } };
+        for (const cid of Object.keys(sent)) {
+          patch[idPrefix + ':' + cid + ':' + variant] = { uploading: false, receipt: sent[cid] };
         }
-        this.drivePushState = patch;
-        const nOk = Object.keys(pushed).length;
+        this.telegramSendState = patch;
+        const nOk = Object.keys(sent).length;
         const nFail = Object.keys(failed).length;
         const nameFor = (c) => (data.names && data.names[c]) || c;
         if (nFail) {
-          this.notifyError(`Drive: ${nOk} uppladdade, ${nFail} misslyckades — ` +
+          this.notifyError(`Telegram: ${nOk} skickade, ${nFail} misslyckades — ` +
             Object.entries(failed).map(([c, m]) => `${nameFor(c)}: ${m}`).join('; '));
         } else if (nOk) {
-          this.notify('info', `Laddade upp ${nOk} till Drive ✓`);
+          this.notify('info', `Skickade ${nOk} till Telegram ✓`);
         }
         // Independent of the success/failure toast: warn if any receipt could
         // not be persisted, so the user knows those ✓ marks may vanish on
@@ -4168,53 +4120,9 @@ function studio() {
         }
         return data;
       } catch (e) {
-        this.drivePushState = { ...this.drivePushState, [batchKey]: { uploading: false } };
-        this.notifyError('Drive-push (alla) misslyckades: ' + (e.message || e));
+        this.telegramSendState = { ...this.telegramSendState, [batchKey]: { uploading: false } };
+        this.notifyError('Telegram (alla) misslyckades: ' + (e.message || e));
         return null;
-      }
-    },
-
-    async bootstrapDriveWrite() {
-      try {
-        const r = await fetch('/api/editor/drive_export/bootstrap', { method: 'POST' });
-        if (!r.ok) {
-          this.notifyError('Drive write bootstrap failed: ' + await r.text());
-          return;
-        }
-        await this.loadHealth?.();   // refresh health.drive_write_ready
-        this.notifyMilestone('Drive write authorized', 'You can now upload from Editor.',
-          { kind: 'done', tag: 'drive-write-bootstrap' });
-      } catch (e) {
-        this.notifyError('Bootstrap error: ' + e);
-      }
-    },
-
-    async confirmDriveExport() {
-      const editId = this.editor.lastResult?.edit_id;
-      if (!editId) return;
-      const name = (this.driveExport.filename || '').trim();
-      if (!name) return;
-      this.driveExport.uploading = true;
-      try {
-        const r = await fetch(`/api/editor/${editId}/drive_export`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename: name }),
-        });
-        if (!r.ok) {
-          const txt = await r.text();
-          this.notifyError('Drive upload failed: ' + txt);
-          return;
-        }
-        const data = await r.json();
-        this.driveExport.lastUrl = data.url || '';
-        this.driveExport.open = false;
-        this.notifyMilestone('Uploaded to Drive', data.name || name,
-          { kind: 'done', tag: `drive-export-${editId}` });
-      } catch (e) {
-        this.notifyError('Upload error: ' + e);
-      } finally {
-        this.driveExport.uploading = false;
       }
     },
 
@@ -5478,6 +5386,20 @@ function studio() {
       // Always reload — on failure this also re-syncs the checkbox back to the
       // persisted (unchanged) value so the DOM never lies about the flag state.
       if (!r.ok) this.notifyError('Language update failed: ' + await r.text());
+      await this.loadLibrary();
+    },
+
+    async setCharacterTelegram(charId, chatId) {
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ telegram_chat_id: (chatId || '').trim() }),
+      });
+      if (!r.ok) {
+        this.notifyError('Telegram-kanalen kunde inte sparas: ' + await r.text());
+      } else {
+        this.notify('info', 'Telegram-kanal sparad ✓');
+      }
       await this.loadLibrary();
     },
 
