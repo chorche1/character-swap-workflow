@@ -1428,6 +1428,26 @@ async def _animate_one_video(
     await _emit(job.job_id, "video.ready",
                 char_id=jc.char_id, video_id=video.video_id, path=str(dest))
     _maybe_complete_char(job, jc)
+    await _after_clip_done(job)
+
+
+async def _after_clip_done(job: Job) -> None:
+    """Run after ANY clip lands DONE (generated, salvaged, resumed, imported).
+
+    Self-heal for Reengineer / Swap-from-images runs (Hugo 2026-07-29): a final
+    that FAILED because this clip was missing is rebuilt as soon as its last gap
+    closes, so a retried clip no longer leaves the user with every clip present
+    and no final. No-op for plain Swap jobs (their auto-compile runs at the end
+    of `run_video_synthesis`) and for runs with nothing to heal. Best-effort:
+    a heal failure must never turn a finished clip into a failed one."""
+    if not job.from_reengineer:
+        return
+    try:
+        from character_swap import runner_reengineer     # lazy: import cycle
+        await runner_reengineer.heal_failed_finals(job.job_id)
+    except Exception:
+        logger.exception("job %s: auto-rebuild of failed finals failed",
+                         job.job_id)
 
 
 def _replace_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None:
@@ -1578,6 +1598,7 @@ async def attach_imported_clip(
                 char_id=jc.char_id, video_id=fresh.video_id,
                 path=str(dest), imported=True)
     _maybe_complete_char(job, jc)
+    await _after_clip_done(job)
     return fresh
 
 
@@ -1763,6 +1784,7 @@ async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool
     await _emit(job.job_id, "video.ready", char_id=jc.char_id,
                 video_id=video.video_id, path=str(dest))
     _maybe_complete_char(job, jc)
+    await _after_clip_done(job)
     return True
 
 
@@ -2159,3 +2181,4 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
     await _emit(job.job_id, "video.ready",
                 char_id=jc.char_id, video_id=video.video_id, path=str(dest))
     _maybe_complete_char(job, jc)
+    await _after_clip_done(job)

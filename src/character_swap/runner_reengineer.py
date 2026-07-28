@@ -1098,6 +1098,13 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
             await events.publish(job.job_id, {"kind": "direct.clip.done",
                                               "job_id": job.job_id,
                                               "scene_id": scene_id})
+            # A shared clip is a gap for EVERY character — heal the finals it
+            # blocked, exactly like a per-character clip (see heal_failed_finals).
+            try:
+                await heal_failed_finals(job.job_id)
+            except Exception:
+                _log.exception("reengineer %s: auto-rebuild after direct clip "
+                               "failed", re_id)
             return
         except Exception as e:
             if (_midx + 1 < len(models_to_try)
@@ -1277,10 +1284,14 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
 _ASSEMBLING: set[str] = set()
 
 
-async def assemble(re_id: str) -> None:
+async def assemble(re_id: str, only: set[str] | None = None) -> None:
     """Per character: pick the first DONE clip per scene (in scene order,
     FULL length), concat, then finish through the shared Editor pipeline —
-    the same flow as Swap Step 6 (Hugo 2026-06-12)."""
+    the same flow as Swap Step 6 (Hugo 2026-06-12).
+
+    `only` limits the build to those char_ids and MERGES the result into the
+    run's existing finals (used by `heal_failed_finals` — never rebuild, or
+    re-send, a character whose final is already good)."""
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return
@@ -1289,7 +1300,7 @@ async def assemble(re_id: str) -> None:
         return
     _ASSEMBLING.add(re_id)
     try:
-        await _do_assemble(re_id, state)
+        await _do_assemble(re_id, state, only=only)
     except Exception as e:
         _log.exception("reengineer %s assemble failed", re_id)
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
@@ -1304,7 +1315,7 @@ async def assemble(re_id: str) -> None:
     # failure must not turn a successful build into a failed run.
     try:
         from character_swap import auto_finalize
-        await auto_finalize.send_reengineer_finals(re_id)
+        await auto_finalize.send_reengineer_finals(re_id, only=only)
     except Exception:
         _log.exception("reengineer %s auto Telegram send failed", re_id)
 
@@ -1638,7 +1649,8 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
             "excluded": excluded}
 
 
-async def _do_assemble(re_id: str, state: dict) -> None:
+async def _do_assemble(re_id: str, state: dict,
+                       only: set[str] | None = None) -> None:
     _update(re_id, status="assembling")
     job = store().get_job(state["job_id"])
     if job is None:
@@ -1750,13 +1762,93 @@ async def _do_assemble(re_id: str, state: dict) -> None:
     # run to partial_success (Hugo 2026-06-27 — mirrors the gate's exclusion).
     await asyncio.gather(*[_one_character(cid, jc)
                            for cid, jc in job.characters.items()
-                           if not _char_is_uninvolved(state, jc)])
+                           if not _char_is_uninvolved(state, jc)
+                           and (only is None or cid in only)])
 
+    if only is not None:
+        # Partial (heal) build: keep every final we did NOT rebuild. Re-read
+        # the state so a concurrent write (Telegram receipts, a repurpose)
+        # isn't clobbered by our pre-build snapshot.
+        current = (reengineer.load_state(re_id) or {}).get("finals") or {}
+        finals = {**current, **finals}
     ok = [f for f in finals.values() if f["status"] == "done"]
     status = ("done" if len(ok) == len(finals) and ok
               else "partial_success" if ok else "failed")
-    _update(re_id, status=status, finals=finals, finals_stale=False,
-            completed_at=_now())
+    changes: dict = {"status": status, "finals": finals,
+                     "completed_at": _now()}
+    if only is None:
+        # A full build is by definition up to date. A PARTIAL one says nothing
+        # about the characters it skipped — leave their staleness flag alone.
+        changes["finals_stale"] = False
+    _update(re_id, **changes)
+
+
+# ----------------------------------------------------------------- self-heal
+#
+# Hugo 2026-07-29 (run re_f786da400c): two clips FAILED during the animate
+# phase, so the auto-assemble refused those two characters' finals — correctly,
+# per "never ship a shorter final in silence". The user then retried the clips,
+# they succeeded... and nothing rebuilt the finals. Result: every clip present,
+# two finals missing, and the only way back was knowing to press "▶ Bygg ihop
+# igen". Now the run heals itself: every time a clip lands, a character whose
+# final FAILED is rebuilt as soon as ITS last gap closes. Only failed finals are
+# candidates — a finished final is never rebuilt (no re-billing), and only the
+# healed characters are sent to Telegram.
+
+_HEALING: set[str] = set()
+
+
+def _re_id_for_job(job: Job) -> str | None:
+    """The Reengineer run id behind a `reengineer:<re_id>` job, else None."""
+    origin = job.origin or ""
+    if not origin.startswith("reengineer:"):
+        return None
+    return origin.split(":", 1)[1] or None
+
+
+async def heal_failed_finals(job_id: str) -> None:
+    """Rebuild the finals that failed on a clip which has since landed.
+
+    Called after EVERY clip completes (see `runner._after_clip_done`). A no-op
+    unless the run already built its finals AND some character's final failed
+    AND that character now has a clip for every scene it's approved on. Never
+    raises into the caller — a heal is a bonus, never a blocker."""
+    job = store().get_job(job_id)
+    if job is None:
+        return
+    re_id = _re_id_for_job(job)
+    if not re_id:
+        return
+    if re_id in _ASSEMBLING or re_id in _HEALING:
+        return          # a build is already in flight — it decides the outcome
+    state = reengineer.load_state(re_id)
+    if not state or state.get("job_id") != job_id:
+        return
+    finals = state.get("finals") or {}
+    if not finals:
+        return          # the first build hasn't run yet — the watcher owns it
+    broken: set[str] = set()
+    for cid, jc in job.characters.items():
+        if (finals.get(cid) or {}).get("status") == "done":
+            continue                                  # already good — hands off
+        if _char_is_uninvolved(state, jc):
+            continue                                  # never part of this reel
+        clips, _dialogues, missing, _waitable = _collect_clips(state, jc)
+        if missing or not clips:
+            continue                                  # still incomplete — wait
+        broken.add(cid)
+    if not broken:
+        return
+    _HEALING.add(re_id)
+    try:
+        names = ", ".join(sorted(
+            (job.characters[c].name or c) for c in broken))
+        _log.info("reengineer %s: %d final(s) failed on a clip that has since "
+                  "landed — rebuilding automatically (%s)",
+                  re_id, len(broken), names)
+        await assemble(re_id, only=broken)
+    finally:
+        _HEALING.discard(re_id)
 
 
 # --------------------------------------------------------------------------- repurpose

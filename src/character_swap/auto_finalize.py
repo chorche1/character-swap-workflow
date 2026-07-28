@@ -186,8 +186,13 @@ async def _send_job_finals(job_id: str) -> None:
 
 
 async def _send_reengineer_bucket(
-        re_id: str, *, variant: str, require_opt_in: bool) -> None:
-    """Send one Reengineer final bucket to character Telegram channels."""
+        re_id: str, *, variant: str, require_opt_in: bool,
+        only: set[str] | None = None) -> None:
+    """Send one Reengineer final bucket to character Telegram channels.
+
+    `only` narrows the send to those char_ids — used by the self-heal rebuild
+    (`runner_reengineer.heal_failed_finals`), which rewrites ONE character's
+    final and must not re-deliver everyone else's unchanged file."""
     from character_swap import reengineer as reengineer_mod
 
     state = reengineer_mod.load_state(re_id)
@@ -202,7 +207,8 @@ async def _send_reengineer_bucket(
     bucket = "finals" if variant == "final" else "repurposed"
     finals = state.get(bucket) or {}
     ready = {cid: e for cid, e in finals.items()
-             if e.get("status") == "done" and e.get("final_path")
+             if (only is None or cid in only)
+             and e.get("status") == "done" and e.get("final_path")
              and Path(e["final_path"]).is_file()}
     if not ready:
         return
@@ -254,10 +260,11 @@ async def _send_reengineer_bucket(
     _notify_telegram_result(label, len(sent), len(failed))
 
 
-async def send_reengineer_finals(re_id: str) -> None:
+async def send_reengineer_finals(re_id: str,
+                                 only: set[str] | None = None) -> None:
     """Auto-send original finals after a fully successful assembly."""
     await _send_reengineer_bucket(
-        re_id, variant="final", require_opt_in=True)
+        re_id, variant="final", require_opt_in=True, only=only)
 
 
 async def send_reengineer_repurposed(re_id: str) -> None:

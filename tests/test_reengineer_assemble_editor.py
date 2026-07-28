@@ -500,7 +500,7 @@ def test_assemble_duplicate_guard(monkeypatch):
     the same final_<cid>.mp4 paths)."""
     calls: list[str] = []
 
-    async def fake_do(re_id, state):
+    async def fake_do(re_id, state, only=None):
         calls.append(re_id)
     monkeypatch.setattr(runner_reengineer, "_do_assemble", fake_do)
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
