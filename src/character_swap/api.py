@@ -5782,6 +5782,12 @@ class ReAssembleSettingsBody(BaseModel):
     playback_speed: float | None = Field(default=None, ge=0.5, le=2.0)
     enable_voice_swap: bool | None = None
     voice_override: str | None = None
+    # Limit the build to these characters (Hugo 2026-07-29): rebuild only the
+    # ones that failed / need new captions instead of re-billing Whisper +
+    # Remotion for every character in the run. Empty/None = all of them. NOT a
+    # persisted setting — it's a per-click filter, so _store_assemble_settings
+    # never writes it into the run's `assemble_settings`.
+    char_ids: list[str] | None = None
 
 
 def _store_assemble_settings(state: dict,
@@ -5792,6 +5798,7 @@ def _store_assemble_settings(state: dict,
     if body is None:
         return False
     sent = {k: v for k, v in body.model_dump().items() if v is not None}
+    sent.pop("char_ids", None)          # per-click filter, never a setting
     # voice_override="" means "clear the override" — store it as None.
     if body.voice_override is not None:
         sent["voice_override"] = body.voice_override.strip() or None
@@ -5813,6 +5820,7 @@ def _store_repurpose_settings(state: dict,
     if body is None:
         return False
     sent = {k: v for k, v in body.model_dump().items() if v is not None}
+    sent.pop("char_ids", None)          # per-click filter, never a setting
     if body.voice_override is not None:
         sent["voice_override"] = body.voice_override.strip() or None
     if not sent:
@@ -5962,7 +5970,19 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
     # note on a build whose clips are already fresh (Hugo 2026-06-22).
     if runner_reengineer.clear_resolved_dirty(state, job):
         _save_reengineer_state(state)
+    char_ids = [c for c in (body.char_ids if body else None) or [] if c]
+    unknown = [c for c in char_ids if c not in job.characters]
+    if unknown:
+        raise HTTPException(
+            404, f"Unknown character(s) in this run: {', '.join(unknown)}")
     gaps = runner_reengineer._assembly_gaps(state, job)
+    if char_ids:
+        # A per-character rebuild is blocked only by ITS OWN gaps — another
+        # character's dead clip must not veto the build the user asked for.
+        picked = set(char_ids)
+        gaps = {k: (v if k == "dirty"
+                    else [g for g in v if g.get("char_id") in picked])
+                for k, v in gaps.items()}
     if gaps["hard"] or gaps["pending"]:
         raise HTTPException(409, detail={
             "code": "incomplete_rebuild",
@@ -5973,7 +5993,8 @@ async def reengineer_assemble(re_id: str, background_tasks: BackgroundTasks,
         })
     if _store_assemble_settings(state, body):
         _save_reengineer_state(state)
-    background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id)
+    background_tasks.add_task(_run_async, runner_reengineer.assemble, re_id,
+                              char_ids=char_ids or None)
     # stale_scenes = edited-but-not-reanimated scenes the build uses with their
     # existing (older) clip — surfaced for a soft UI note, never blocks.
     # excluded = never-approved characters skipped from the build (also a soft

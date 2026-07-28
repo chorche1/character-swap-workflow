@@ -65,6 +65,7 @@ from character_swap.models import (
     SceneAsset,
     VariantStatus,
     VideoStatus,
+    VideoVariant,
 )
 from character_swap.state import store
 
@@ -949,6 +950,24 @@ def _spoken_text(entry: dict) -> str:
         (entry.get("speech") or "").strip())
 
 
+def _clip_dialogue(video: VideoVariant, entry: dict) -> str:
+    """The line a CLIP actually speaks — the caption script hint + Whisper bias.
+
+    A 🇪🇸 character's clips are submitted with the dialogue translated to
+    Spanish (`localized_movement_prompt`, Hugo 2026-06-26), so the scene's
+    English `motion_prompt` is the WRONG hint for them: it biases Whisper
+    toward English and, when Whisper can't read a clip at all, the even-timed
+    fallback burns the ENGLISH line over Spanish audio (re_f786da400c/wang:
+    "4 klipp kunde inte läsas av Whisper — byggde captions från den kända
+    repliken" → English captions on Spanish speech). Swap Step-6 already
+    prefers the localized line (runner_compile); this brings the Reengineer
+    assemble path in line. No localization → the scene's own text, unchanged.
+    """
+    localized = video_edit.extract_dialogue(
+        video.localized_movement_prompt or "")
+    return localized or _spoken_text(entry)
+
+
 def _speech_secs(entry: dict) -> float:
     """Seconds Kling needs to comfortably SAY the scene's dialogue.
     No dialogue → 0."""
@@ -1317,10 +1336,15 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
 _ASSEMBLING: set[str] = set()
 
 
-async def assemble(re_id: str) -> None:
+async def assemble(re_id: str, *, char_ids: list[str] | None = None) -> None:
     """Per character: pick the first DONE clip per scene (in scene order,
     FULL length), concat, then finish through the shared Editor pipeline —
-    the same flow as Swap Step 6 (Hugo 2026-06-12)."""
+    the same flow as Swap Step 6 (Hugo 2026-06-12).
+
+    `char_ids` limits the build to those characters (Hugo 2026-07-29 — rebuild
+    the two that failed, not all seven); their finals are merged over the
+    stored bucket so the untouched ones survive. None/empty = every included
+    character, exactly as before."""
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return
@@ -1329,7 +1353,7 @@ async def assemble(re_id: str) -> None:
         return
     _ASSEMBLING.add(re_id)
     try:
-        await _do_assemble(re_id, state)
+        await _do_assemble(re_id, state, char_ids=char_ids)
     except Exception as e:
         _log.exception("reengineer %s assemble failed", re_id)
         _update(re_id, status="failed", error=f"{type(e).__name__}: {e}")
@@ -1449,7 +1473,7 @@ def _collect_clips(
         video = runner.pick_clip_for_variant(jc, vid_variant)
         if video is not None:
             clips.append(Path(video.final_video_path))
-            dialogues.append(_spoken_text(e))
+            dialogues.append(_clip_dialogue(video, e))
             continue
         missing.append(f"scen {e['idx'] + 1}")
         rows = [vv for vv in jc.videos
@@ -1675,7 +1699,8 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
             "excluded": excluded}
 
 
-async def _do_assemble(re_id: str, state: dict) -> None:
+async def _do_assemble(re_id: str, state: dict, *,
+                       char_ids: list[str] | None = None) -> None:
     # Clearing the auto-build refusal marker here (status → assembling also
     # clears its red banner) keeps a stale "byggde inte ihop" note from
     # surviving the build the user finally got.
@@ -1788,15 +1813,30 @@ async def _do_assemble(re_id: str, state: dict) -> None:
     # Skip never-approved characters (no approval on any swap scene): they were
     # added but never used, so they don't get a failed final and don't drag the
     # run to partial_success (Hugo 2026-06-27 — mirrors the gate's exclusion).
+    only = {c for c in (char_ids or []) if c}
     await asyncio.gather(*[_one_character(cid, jc)
                            for cid, jc in job.characters.items()
-                           if not _char_is_uninvolved(state, jc)])
+                           if not _char_is_uninvolved(state, jc)
+                           and (not only or cid in only)])
 
-    ok = [f for f in finals.values() if f["status"] == "done"]
-    status = ("done" if len(ok) == len(finals) and ok
+    # A per-character rebuild must KEEP the finals it didn't touch — `finals`
+    # replaces the whole bucket, so merge onto the freshest stored copy (a
+    # parallel manual send may have written receipts meanwhile).
+    if only:
+        fresh = reengineer.load_state(re_id) or {}
+        merged = dict(fresh.get("finals") or {})
+        merged.update(finals)
+    else:
+        merged = finals
+    ok = [f for f in merged.values() if f.get("status") == "done"]
+    status = ("done" if len(ok) == len(merged) and ok
               else "partial_success" if ok else "failed")
-    _update(re_id, status=status, finals=finals, finals_stale=False,
-            completed_at=_now())
+    changes = {"status": status, "finals": merged, "completed_at": _now()}
+    # Only a FULL build proves nothing is stale — after a partial one the
+    # characters we skipped may still be carrying pre-edit clips.
+    if not only:
+        changes["finals_stale"] = False
+    _update(re_id, **changes)
 
 
 # --------------------------------------------------------------------------- repurpose
