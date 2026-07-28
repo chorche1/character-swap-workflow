@@ -265,6 +265,81 @@ def test_compile_dialogue_falls_back_to_english_when_not_localized(tmp_path):
     assert dialogues == ["hello friends"]
 
 
+# --- Reengineer / Swap assemble reads the clip's localized dialogue too -------
+#
+# Regression (Hugo 2026-07-29): the Reengineer + Swap-from-images assemble path
+# (`_collect_clips`) took every clip's known line from the SCENE's English
+# motion prompt, ignoring the per-character localization the runner had already
+# recorded. Whisper's Spanish read then scored low coverage against that English
+# line, the script fallback kicked in, and the Spanish character's final was
+# captioned with the English script verbatim (run re_f786da400c / ed_746ab53927).
+
+def _es_clip(path, line):
+    from character_swap.models import VideoStatus, VideoVariant
+    return VideoVariant(
+        video_id="vd1", grok_job_id="", status=VideoStatus.DONE,
+        source_variant_id="v1", final_video_path=str(path),
+        localized_movement_prompt=(
+            f'Camina. The person says to the camera: "{line}". The person '
+            'speaks fluent, natural Latin American Spanish with a neutral '
+            'Latin American Spanish accent.'))
+
+
+def _es_state():
+    return {"re_id": "re_es", "job_id": "j_es", "status": "awaiting_assembly",
+            "scenes": [{"idx": 0, "scene_id": "s1", "duration": 2.0,
+                        "motion_prompt": 'He says: "hello friends"',
+                        "speech": "hello friends", "summary": ""}]}
+
+
+def _es_char(videos):
+    from character_swap.models import (
+        CharStatus, GeneratedImage, JobCharacter, VariantStatus)
+    img = GeneratedImage(variant_id="v1", path="/v1.png", prompt="p",
+                         scene_id="s1", status=VariantStatus.READY)
+    return JobCharacter(char_id="cc_es", name="Wang", source_image_path="/c.png",
+                        status=CharStatus.DONE, images=[img], videos=videos,
+                        approved_variant_ids=["v1"])
+
+
+def test_assemble_dialogue_uses_localized_prompt(tmp_path):
+    """A 🇪🇸-flagged character's clip must contribute its SPANISH line, so the
+    Whisper bias hint + the script fallback both speak the clip's language."""
+    from character_swap import runner_reengineer
+    clip = tmp_path / "clip.mp4"; clip.write_bytes(b"v")
+    clips, dialogues, missing, _ = runner_reengineer._collect_clips(
+        _es_state(), _es_char([_es_clip(clip, "hola amigos")]))
+    assert clips == [clip] and missing == []
+    assert dialogues == ["hola amigos"]     # NOT the English "hello friends"
+
+
+def test_assemble_dialogue_falls_back_to_english_when_not_localized(tmp_path):
+    """An unflagged character keeps the scene's English line — unchanged."""
+    from character_swap import runner_reengineer
+    from character_swap.models import VideoStatus, VideoVariant
+    clip = tmp_path / "clip.mp4"; clip.write_bytes(b"v")
+    vid = VideoVariant(video_id="vd1", grok_job_id="", status=VideoStatus.DONE,
+                       source_variant_id="v1", final_video_path=str(clip))
+    _, dialogues, _, _ = runner_reengineer._collect_clips(
+        _es_state(), _es_char([vid]))
+    assert dialogues == ["hello friends"]
+
+
+def test_assemble_localized_without_quote_never_leaks_english(tmp_path):
+    """If a localized prompt carries no extractable says-clause, the line is
+    EMPTY (trust Whisper's own read of the Spanish audio) — never the English
+    scene line, which the caption fallback would burn in verbatim."""
+    from character_swap import runner_reengineer
+    from character_swap.models import VideoStatus, VideoVariant
+    clip = tmp_path / "clip.mp4"; clip.write_bytes(b"v")
+    vid = VideoVariant(video_id="vd1", grok_job_id="", status=VideoStatus.DONE,
+                       source_variant_id="v1", final_video_path=str(clip),
+                       localized_movement_prompt="Camina por la cocina.")
+    _, dialogues, _, _ = runner_reengineer._collect_clips(
+        _es_state(), _es_char([vid]))
+    assert dialogues == [""]
+
+
 # --- SQLite persistence (USE_SQLITE_STATE=1 is the documented default) --------
 
 def test_sqlite_language_round_trip(tmp_path):

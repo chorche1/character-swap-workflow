@@ -943,6 +943,25 @@ def _spoken_text(entry: dict) -> str:
         (entry.get("speech") or "").strip())
 
 
+def _clip_dialogue(entry: dict, video) -> str:
+    """The known spoken line for ONE character's clip of a scene.
+
+    Prefers the clip's ACTUALLY-SUBMITTED prompt (`localized_movement_prompt`
+    — set whenever a 🇪🇸-flagged character's dialogue was translated to
+    Spanish before submit) so captions + the Whisper bias hint match the
+    clip's REAL spoken language; falls back to the scene's own (English)
+    motion prompt for unflagged characters. Mirrors
+    `runner_compile._ordered_scene_videos` (Hugo 2026-07-29: the assemble
+    path still handed Whisper the English line, so a Spanish character's
+    final was captioned in English — the Spanish read scored low coverage
+    against the English line and the script fallback burned it in verbatim).
+    """
+    localized = (getattr(video, "localized_movement_prompt", None) or "").strip()
+    if localized:
+        return video_edit.extract_dialogue(localized)
+    return _spoken_text(entry)
+
+
 def _speech_secs(entry: dict) -> float:
     """Seconds Kling needs to comfortably SAY the scene's dialogue.
     No dialogue → 0."""
@@ -1390,7 +1409,10 @@ def _collect_clips(
         video = runner.pick_clip_for_variant(jc, vid_variant)
         if video is not None:
             clips.append(Path(video.final_video_path))
-            dialogues.append(_spoken_text(e))
+            # This character's OWN clip may speak another language than the
+            # scene's English motion prompt (per-character 🇪🇸 flag) — take the
+            # line from the clip's submitted prompt when it has one.
+            dialogues.append(_clip_dialogue(e, video))
             continue
         missing.append(f"scen {e['idx'] + 1}")
         rows = [vv for vv in jc.videos
