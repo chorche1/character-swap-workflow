@@ -454,10 +454,10 @@ class Job(BaseModel):
     compile_settings: dict | None = None
     # Auto-finalize (Hugo 2026-07-19): after the video phase finishes with EVERY
     # approved character's clips successful, automatically run the Step-6 compile
-    # AND push each final to Drive — no manual "Compile" / "⬆ Drive" clicks. A
+    # AND send each final to Telegram — no manual compile/send clicks. A
     # per-job escape hatch (the checkbox by "generate videos"); default ON. Only
     # the classic Swap job flow reads this — reengineer-backed jobs use the
-    # run-state `auto_drive_push` flag instead (their finals are built by the
+    # run-state `auto_telegram_send` flag instead (their finals are built by the
     # assemble path, not compile_videos).
     auto_compile_push: bool = True
     # Per-job Repurpose settings (2026-06-27): the editor settings last used for

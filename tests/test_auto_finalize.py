@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from character_swap import auto_finalize
+from character_swap import auto_finalize, runner
 from character_swap.models import Job, JobCharacter, VideoStatus, VideoVariant
 
 
@@ -217,6 +217,7 @@ def test_finalize_swap_job_idempotent_when_already_compiled(monkeypatch, tmp_pat
 
     _run(auto_finalize.finalize_swap_job("j1"))
     assert seen["compiled"] is None       # not rebuilt on a duplicate trigger
+    assert seen["sent"] == "j1"           # but repairs a missing Telegram send
 
 
 def test_finalize_swap_job_skips_when_compile_in_flight(monkeypatch, tmp_path):
@@ -230,6 +231,42 @@ def test_finalize_swap_job_skips_when_compile_in_flight(monkeypatch, tmp_path):
 
     _run(auto_finalize.finalize_swap_job("j1"))
     assert seen["compiled"] is None       # don't race a manual compile
+
+
+def test_finalize_swap_job_coalesces_parallel_completion_hooks(
+        monkeypatch, tmp_path):
+    job = _job(tmp_path, chars=[
+        _char("c1", "Chang", clips=[("v1", "done")],
+              path=str(tmp_path / "a.mp4")),
+    ])
+    (tmp_path / "a.mp4").write_bytes(b"v")
+    monkeypatch.setattr(auto_finalize, "store", lambda: _FakeStore(job))
+    monkeypatch.setattr(auto_finalize, "_emit", _anoop)
+    compiled = []
+    sent = []
+
+    async def fake_compile(job_id, **kw):
+        compiled.append(job_id)
+        # Let the competing completion hook run while this one owns the guard.
+        await asyncio.sleep(0.01)
+
+    async def fake_send(job_id):
+        sent.append(job_id)
+
+    monkeypatch.setattr(
+        auto_finalize.runner_compile, "compile_job_videos", fake_compile)
+    monkeypatch.setattr(auto_finalize, "_send_job_finals", fake_send)
+
+    async def trigger_both():
+        await asyncio.gather(
+            auto_finalize.finalize_swap_job("j1"),
+            auto_finalize.finalize_swap_job("j1"),
+        )
+
+    _run(trigger_both())
+
+    assert compiled == ["j1"]
+    assert sent == ["j1"]
 
 
 # ------------------------------------------- _send_job_finals
@@ -284,6 +321,88 @@ def test_send_job_finals_loud_when_channel_missing(monkeypatch, tmp_path):
     assert notes                              # loud phone push
     assert "final" not in job.characters["c1"].telegram_sends
     assert not store.updated
+
+
+def test_send_job_finals_skips_existing_receipt(monkeypatch, tmp_path):
+    f1 = tmp_path / "c1.mp4"
+    f1.write_bytes(b"a")
+    f2 = tmp_path / "c2.mp4"
+    f2.write_bytes(b"b")
+    c1 = _char("c1", "Chang", clips=[("v1", "done")], path=str(f1),
+               compile_status="done", compiled_path=str(f1))
+    c1.telegram_sends["final"] = {"ok": True, "message_id": 7}
+    c2 = _char("c2", "Ravi", clips=[("v2", "done")], path=str(f2),
+               compile_status="done", compiled_path=str(f2))
+    job = _job(tmp_path, chars=[c1, c2])
+
+    class _Asset:
+        telegram_chat_id = "@channel"
+
+    fake_store = _FakeStore(
+        job, chars={"c1": _Asset(), "c2": _Asset()})
+    monkeypatch.setattr(auto_finalize, "store", lambda: fake_store)
+    monkeypatch.setattr(auto_finalize, "_emit", _anoop)
+    monkeypatch.setattr(auto_finalize.push, "notify", lambda *a, **k: None)
+    calls = _patch_telegram(monkeypatch)
+
+    _run(auto_finalize._send_job_finals("j1"))
+
+    assert [send["char_name"] for send in calls["sends"]] == ["Ravi"]
+    assert c1.telegram_sends["final"]["message_id"] == 7
+
+
+# -------------------------------- completion hooks after a retry
+
+def test_retry_one_video_rechecks_auto_finalize(monkeypatch, tmp_path):
+    job = _job(tmp_path, chars=[
+        _char("c1", "Chang", clips=[("v1", "failed")], path=None),
+    ])
+    job.movement_prompt = "wave"
+    monkeypatch.setattr(runner, "store", lambda: _FakeStore(job))
+    monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
+
+    async def fake_end(*a, **k):
+        return None
+
+    async def fake_animate(job_value, jc, video, *a, **k):
+        video.status = VideoStatus.DONE
+
+    finalized = []
+
+    async def fake_finalize(job_id):
+        finalized.append(job_id)
+
+    monkeypatch.setattr(runner, "_resolve_end_image", fake_end)
+    monkeypatch.setattr(runner, "_animate_one_video", fake_animate)
+    monkeypatch.setattr(runner, "_maybe_auto_finalize_job", fake_finalize)
+
+    _run(runner.retry_one_video("j1", "c1", "v1"))
+
+    assert finalized == ["j1"]
+
+
+def test_retry_timeout_salvage_rechecks_auto_finalize(monkeypatch, tmp_path):
+    job = _job(tmp_path, chars=[
+        _char("c1", "Chang", clips=[("v1", "failed")], path=None),
+    ])
+    job.movement_prompt = "wave"
+    job.characters["c1"].videos[0].error = "provider timed out"
+    monkeypatch.setattr(runner, "store", lambda: _FakeStore(job))
+
+    async def fake_salvage(*a, **k):
+        return True
+
+    finalized = []
+
+    async def fake_finalize(job_id):
+        finalized.append(job_id)
+
+    monkeypatch.setattr(runner, "_salvage_timed_out_video", fake_salvage)
+    monkeypatch.setattr(runner, "_maybe_auto_finalize_job", fake_finalize)
+
+    _run(runner.retry_one_video("j1", "c1", "v1"))
+
+    assert finalized == ["j1"]
 
 
 # ------------------------------------------- send_reengineer_finals

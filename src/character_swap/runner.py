@@ -1578,6 +1578,7 @@ async def attach_imported_clip(
                 char_id=jc.char_id, video_id=fresh.video_id,
                 path=str(dest), imported=True)
     _maybe_complete_char(job, jc)
+    await _maybe_auto_finalize_job(job.job_id)
     return fresh
 
 
@@ -1719,6 +1720,7 @@ async def generate_more_videos(
         *[_animate_one_video(job, jc, v, mp, dur, end_img)
           for v, mp, dur, end_img in placeholders]
     )
+    await _maybe_auto_finalize_job(job_id)
 
 
 async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool:
@@ -1807,6 +1809,7 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
             and "timed out" in (old.error or "").lower()
             and prompt_override is None):
         if await _salvage_timed_out_video(job, jc, idx):
+            await _maybe_auto_finalize_job(job_id)
             return
 
     # Inherit an existing override if the caller didn't supply a new one. This
@@ -1863,6 +1866,25 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
         job, jc, scene_id,
         video_model=_eff_video_model_for_variant(job, jc, source_variant_id))
     await _animate_one_video(job, jc, fresh, movement_prompt, duration, end_image)
+    await _maybe_auto_finalize_job(job_id)
+
+
+async def _maybe_auto_finalize_job(job_id: str) -> None:
+    """Run the classic-Swap completion gate after any operation that can
+    finish the last missing clip.
+
+    Reengineer-backed jobs deliberately stay on their own watcher/assemble
+    path. The helper is best-effort: a Telegram or Editor failure must never
+    retroactively turn a successfully generated clip into a failed clip.
+    """
+    job = store().get_job(job_id)
+    if job is None or job.from_reengineer:
+        return
+    try:
+        from character_swap import auto_finalize
+        await auto_finalize.finalize_swap_job(job_id)
+    except Exception:
+        logger.exception("auto-finalize %s failed after clip completion", job_id)
 
 
 async def run_video_synthesis(job_id: str) -> None:
@@ -2005,18 +2027,9 @@ async def run_video_synthesis(job_id: str) -> None:
     )
 
     # Auto-finalize (Hugo 2026-07-19): when EVERY approved character's clips
-    # succeeded, automatically compile the Step-6 finals + send them to Telegram —
-    # no manual clicks. Reengineer-backed jobs are EXCLUDED here: their video
-    # phase is watched by runner_reengineer, which builds finals via the
-    # assemble path (not compile_videos) and auto-sends there instead. The
-    # chain is defensive (its own gate + try/except) so it never breaks the
-    # video phase; guarded here too so a from_reengineer run skips it entirely.
-    if not job.from_reengineer:
-        try:
-            from character_swap import auto_finalize
-            await auto_finalize.finalize_swap_job(job_id)
-        except Exception:
-            logger.exception("auto-finalize %s failed after video phase", job_id)
+    # succeeded, automatically compile the Step-6 finals + send them to
+    # Telegram — no manual clicks.
+    await _maybe_auto_finalize_job(job_id)
 
 
 def _first_scene_id(job: Job) -> str | None:
@@ -2159,3 +2172,4 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
     await _emit(job.job_id, "video.ready",
                 char_id=jc.char_id, video_id=video.video_id, path=str(dest))
     _maybe_complete_char(job, jc)
+    await _maybe_auto_finalize_job(job.job_id)

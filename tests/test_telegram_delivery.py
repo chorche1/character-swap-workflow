@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -197,3 +198,49 @@ def test_character_patch_roundtrips_telegram_channel(monkeypatch, tmp_path):
         "c1", api.RenameCharacterBody(telegram_chat_id="@new_channel")))
     assert asset.telegram_chat_id == "@new_channel"
     assert out["telegram_chat_id"] == "@new_channel"
+
+
+def test_editor_endpoint_uses_shared_editor_channel_and_persists(
+        monkeypatch, tmp_path):
+    edit_id = "ed_editor"
+    edit_dir = tmp_path / "editor" / edit_id
+    edit_dir.mkdir(parents=True)
+    final = edit_dir / "04-final.mp4"
+    final.write_bytes(b"lossless editor bytes")
+    generation = SimpleNamespace(
+        prompt="Multiclip script", editor_meta={})
+
+    class _EditorStore:
+        def __init__(self):
+            self.updated = []
+
+        def get_generation(self, gen_id):
+            return generation if gen_id == edit_id else None
+
+        def update_generation(self, gen):
+            self.updated.append(gen)
+
+    fake_store = _EditorStore()
+    monkeypatch.setattr(api, "store", lambda: fake_store)
+    monkeypatch.setattr(settings, "output_dir", tmp_path)
+    monkeypatch.setattr(settings, "telegram_editor_bot_token", "token-B")
+    monkeypatch.setattr(
+        settings, "telegram_editor_chat_id", "-1004389149468")
+    seen = {}
+
+    async def fake_send(path, **kwargs):
+        seen.update(path=Path(path), **kwargs)
+        return {"ok": True, "account": "editor", "message_id": 11}
+
+    monkeypatch.setattr(
+        telegram_delivery, "send_editor_final", fake_send)
+
+    receipt = _run(api.editor_telegram_send(
+        edit_id, api.TelegramSendBody(gen_id=edit_id, slot="final")))
+
+    assert seen["path"] == final
+    assert seen["base"] == "Multiclip script"
+    assert seen["variant"] == "final"
+    assert receipt["account"] == "editor"
+    assert generation.editor_meta["telegram"]["final"]["message_id"] == 11
+    assert fake_store.updated

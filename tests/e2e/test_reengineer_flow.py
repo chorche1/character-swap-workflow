@@ -145,9 +145,11 @@ def test_reengineer_from_images_full_flow(client, ledger):
     assert r.status_code == 200, r.text
     assert r.json()["ok"] is True
 
-    st = _wait_run(client, re_id,
-                   lambda s: s.get("status") == "awaiting_assembly",
-                   desc="video phase → awaiting_assembly (clip-review gate)")
+    # Swap-from-images auto-assembles as soon as every clip is ready. The
+    # earlier image-approval gate still applies; only the final build/send
+    # requires no extra click.
+    st = _wait_run(client, re_id, lambda s: s.get("status") == "done",
+                   desc="video phase → automatic assemble → done")
 
     # Per-scene fake Kling submits: locked model, per-row durations, audio on,
     # and the gate-approved motion prompt text reached the provider verbatim.
@@ -167,20 +169,12 @@ def test_reengineer_from_images_full_flow(client, ledger):
     for w in ledger.video_waits:
         assert Path(w["dest"]).exists()
 
-    # ---- assemble → per-character final --------------------------------------
-    r = client.post(f"/api/reengineer/{re_id}/assemble")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["ok"] is True
-    assert body["stale_scenes"] == []
-    assert body["excluded"] == [], (
-        "the (approved) character must never land in the excluded bucket")
-
-    st = _wait_run(client, re_id, lambda s: s.get("status") == "done",
-                   desc="assemble → done")
+    # ---- automatic assemble → per-character final ---------------------------
     assert st["status"] == "done"
     assert st.get("error") is None
     assert st.get("finals_stale") is False
+    assert st.get("excluded", []) == [], (
+        "the (approved) character must never land in the excluded bucket")
 
     finals = st["finals"]
     assert set(finals.keys()) == {cid}, "exactly one final, nobody excluded"

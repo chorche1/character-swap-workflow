@@ -32,6 +32,12 @@ from character_swap.state import store
 
 logger = logging.getLogger(__name__)
 
+# Process-local guard for the completion hooks in ``runner``. Several clip
+# tasks can notice "everything is done" almost simultaneously; only one of
+# them may compile/send a given job. The check+add happens before the first
+# await, so it is atomic within the server's asyncio event loop.
+_FINALIZING: set[str] = set()
+
 
 # Mirrors the frontend Step-6 seed (web/app.js `_compileDefault`, incl. Hugo
 # 2026-07-17 voice-swap-ON) so an AUTO compile produces the same result a
@@ -108,29 +114,39 @@ async def finalize_swap_job(job_id: str) -> None:
         return
     if not _all_videos_successful(job):
         return
-    # Don't collide with a manual compile the user kicked off, and don't rebuild
-    # if we've already finalized (idempotent on a duplicate trigger).
-    compilable = [jc for jc in job.characters.values()
-                  if runner_compile._eligible_for_compile(jc)]
-    if not compilable:
+    if job_id in _FINALIZING:
         return
-    if any(jc.compile_status == "compiling" for jc in compilable):
-        return
-    if all(jc.compile_status == "done" for jc in compilable):
-        return
-
-    logger.info("auto-finalize %s: all clips DONE — compiling %d character(s)",
-                job_id, len(compilable))
-    await _emit(job_id, "job.auto_finalize_started", n=len(compilable))
+    _FINALIZING.add(job_id)
     try:
-        await runner_compile.compile_job_videos(
-            job_id, **_resolve_compile_settings(job))
-    except Exception:
-        logger.exception("auto-finalize %s: compile failed", job_id)
-        # compile_job_videos already marks per-character failures; nothing more
-        # to send, so stop here.
-        return
-    await _send_job_finals(job_id)
+        # Don't collide with a manual compile the user kicked off, and don't
+        # rebuild if we've already finalized (idempotent duplicate trigger).
+        compilable = [jc for jc in job.characters.values()
+                      if runner_compile._eligible_for_compile(jc)]
+        if not compilable:
+            return
+        if any(jc.compile_status == "compiling" for jc in compilable):
+            return
+        if all(jc.compile_status == "done" for jc in compilable):
+            # A previous compile may have finished while Telegram was
+            # unavailable (or the channel had not been connected yet). Do not
+            # rebuild the final; retry only destinations lacking a receipt.
+            await _send_job_finals(job_id)
+            return
+
+        logger.info("auto-finalize %s: all clips DONE — compiling %d character(s)",
+                    job_id, len(compilable))
+        await _emit(job_id, "job.auto_finalize_started", n=len(compilable))
+        try:
+            await runner_compile.compile_job_videos(
+                job_id, **_resolve_compile_settings(job))
+        except Exception:
+            logger.exception("auto-finalize %s: compile failed", job_id)
+            # compile_job_videos already marks per-character failures; nothing
+            # more to send, so stop here.
+            return
+        await _send_job_finals(job_id)
+    finally:
+        _FINALIZING.discard(job_id)
 
 
 async def _send_job_finals(job_id: str) -> None:
@@ -143,6 +159,11 @@ async def _send_job_finals(job_id: str) -> None:
     targets: list[tuple[str, Path, str, str]] = []
     failed: dict[str, str] = {}
     for cid, jc in job.characters.items():
+        # A duplicate completion trigger (parallel retries/resume tasks) must
+        # never create duplicate Telegram messages. Manual resend endpoints
+        # remain intentionally non-idempotent.
+        if (jc.telegram_sends or {}).get("final", {}).get("ok"):
+            continue
         path = jc.compiled_video_path
         if path and jc.compile_status == "done" and Path(path).is_file():
             asset = s.get_character(cid)
@@ -154,6 +175,11 @@ async def _send_job_finals(job_id: str) -> None:
                 continue
             targets.append((cid, Path(path), jc.name or cid, chat_id))
     if not targets:
+        # All destinations already have successful receipts: this was a
+        # harmless duplicate completion hook, so do not emit another "sent"
+        # event or phone notification.
+        if not failed:
+            return
         await _emit(job_id, "job.auto_telegram_sent",
                     sent=[], failed=failed)
         _notify_telegram_result("Slutvideor", 0, len(failed))

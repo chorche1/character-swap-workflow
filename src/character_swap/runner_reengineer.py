@@ -1238,7 +1238,16 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
             _update(re_id, status="failed", error="video phase timed out")
             return
     state = reengineer.load_state(re_id) or {}
-    if state.get("auto_mode"):
+    auto_telegram = state.get(
+        "auto_telegram_send", state.get("auto_drive_push", False))
+    # Image-sourced runs ARE the Swap tab. Hugo wants their finals assembled
+    # as soon as the clips finish even when he kept the earlier image-approval
+    # gate. `auto_mode` still controls whether those earlier gates are skipped;
+    # `auto_telegram_send` controls the post-video assemble+delivery chain.
+    # Video-sourced Reengineer runs keep their explicit clip-review gate unless
+    # the user selected fully automatic mode.
+    if state.get("auto_mode") or (
+            state.get("from_images") and auto_telegram):
         await assemble(re_id)
     else:
         # Clip-review gate (Hugo 2026-06-12): without ⚡ fully automatic the

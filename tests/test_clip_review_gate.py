@@ -1,9 +1,9 @@
-"""Clip-review gate (Hugo 2026-06-12): without ⚡ fully automatic, the run
-STOPS after the video phase at status `awaiting_assembly` — every Kling clip
-is reviewable/redoable per scene and the ⚙ Editor settings are adjustable —
-and only the explicit ▶ Bygg ihop click runs the final build. auto_mode=True
-keeps the old auto-assemble. The gate is a user state: crash-resume leaves
-it alone, and the edit/redo endpoints accept it.
+"""Clip-review gate (Hugo 2026-06-12): video-sourced Reengineer runs without
+⚡ fully automatic STOP after the video phase at status `awaiting_assembly`.
+Image-sourced Swap runs with automatic Telegram delivery assemble immediately
+once every clip is ready, even when the earlier image gate was kept. The gate
+is a user state: crash-resume leaves it alone, and the edit/redo endpoints
+accept it.
 """
 from __future__ import annotations
 
@@ -36,7 +36,8 @@ def _job_with_done_video() -> Job:
                characters={"cA": jc}, origin="reengineer:re_t")
 
 
-def _wire_watch(monkeypatch, *, auto_mode: bool):
+def _wire_watch(monkeypatch, *, auto_mode: bool, from_images: bool = False,
+                auto_telegram_send: bool = True):
     from types import SimpleNamespace
     job = _job_with_done_video()
     monkeypatch.setattr(runner_reengineer, "store",
@@ -44,7 +45,10 @@ def _wire_watch(monkeypatch, *, auto_mode: bool):
     monkeypatch.setattr(runner_reengineer, "_POLL_SECS", 0.01)
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
                         lambda re_id: {"re_id": re_id, "job_id": "j1",
-                                       "auto_mode": auto_mode})
+                                       "auto_mode": auto_mode,
+                                       "from_images": from_images,
+                                       "auto_telegram_send":
+                                           auto_telegram_send})
     updates: list[dict] = []
     monkeypatch.setattr(runner_reengineer, "_update",
                         lambda re_id, **kw: updates.append(kw))
@@ -68,6 +72,24 @@ def test_video_phase_auto_assembles_with_auto_mode(monkeypatch):
     asyncio.run(runner_reengineer._watch_video_phase("re_t", "j1"))
     assert assembled == ["re_t"]
     assert not any(u.get("status") == "awaiting_assembly" for u in updates)
+
+
+def test_swap_from_images_auto_assembles_when_telegram_is_enabled(monkeypatch):
+    updates, assembled = _wire_watch(
+        monkeypatch, auto_mode=False, from_images=True,
+        auto_telegram_send=True)
+    asyncio.run(runner_reengineer._watch_video_phase("re_t", "j1"))
+    assert assembled == ["re_t"]
+    assert not any(u.get("status") == "awaiting_assembly" for u in updates)
+
+
+def test_swap_from_images_can_still_opt_out_of_auto_delivery(monkeypatch):
+    updates, assembled = _wire_watch(
+        monkeypatch, auto_mode=False, from_images=True,
+        auto_telegram_send=False)
+    asyncio.run(runner_reengineer._watch_video_phase("re_t", "j1"))
+    assert assembled == []
+    assert updates and updates[-1]["status"] == "awaiting_assembly"
 
 
 def test_resume_leaves_clip_review_gate_alone(monkeypatch):
