@@ -142,6 +142,12 @@ def _push_status(state: dict, status: str) -> None:
     if not spec:
         return
     title, tags, priority = spec
+    # The ⚡ auto-build refused because a clip failed / is missing — that lands
+    # on the SAME awaiting_assembly status but is bad news, not a ready-to-build
+    # gate. Say so, and loudly (Hugo 2026-07-29).
+    blocked = status == "awaiting_assembly" and state.get("auto_assemble_blocked")
+    if blocked:
+        title, tags, priority = "Bygger inte ihop – klipp saknas", ["warning"], 4
     n_scenes = len(state.get("scenes") or [])
     name = state.get("name") or state.get("title") or state.get("re_id") or ""
     parts = []
@@ -149,7 +155,7 @@ def _push_status(state: dict, status: str) -> None:
         parts.append(str(name))
     if n_scenes:
         parts.append(f"{n_scenes} scener")
-    if status == "failed" and state.get("error"):
+    if (status == "failed" or blocked) and state.get("error"):
         parts.append(str(state["error"])[:200])
     push.notify(title, " · ".join(parts), priority=priority, tags=tags)
 
@@ -1223,6 +1229,37 @@ def _swap_videos_done(job: Job) -> bool:
     return True if not swap else _videos_terminal(job)
 
 
+def _auto_assemble_blockers(re_id: str, job_id: str) -> list[dict]:
+    """Every reason the ⚡ auto-build must NOT run yet (Hugo 2026-07-29:
+    "det ska bara byggas ihop automatiskt när alla klipp för alla karaktärer
+    är färdigt genererade").
+
+    Reuses `_assembly_gaps` so the auto gate and the manual "Bygg ihop igen"
+    gate apply the SAME per-(char, scene) inclusion rules — a character that
+    was never approved is `excluded` (soft, skipped by the build itself) and a
+    merely `dirty` scene never blocks (Hugo 2026-06-24). Only `hard` (clip
+    failed/missing, image never approved) and `pending` (clip still rendering)
+    count. Empty list ⇒ every included clip is DONE ⇒ safe to build."""
+    state = reengineer.load_state(re_id) or {}
+    job = store().get_job(job_id)
+    if job is None:
+        return [{"name": "", "label": "", "reason": "underlying job disappeared"}]
+    gaps = _assembly_gaps(state, job)
+    return list(gaps.get("hard") or []) + list(gaps.get("pending") or [])
+
+
+def _auto_assemble_block_message(blocked: list[dict]) -> str:
+    """The red banner + phone-push text: names the first few (scene,
+    character) pairs so the fix is obvious without opening every card."""
+    shown = ", ".join(
+        f"{b.get('label') or 'scen ?'} ({b.get('name') or b.get('char_id') or '?'}): "
+        f"{b.get('reason') or 'klippet är inte klart'}"
+        for b in blocked[:4])
+    more = f" +{len(blocked) - 4} till" if len(blocked) > 4 else ""
+    return ("Byggde INTE ihop automatiskt — alla klipp är inte klara: "
+            f"{shown}{more}. Ta om klippet/klippen och tryck ▶ Bygg ihop.")
+
+
 async def _watch_video_phase(re_id: str, job_id: str, *,
                              direct_tasks: list = ()) -> None:
     deadline = asyncio.get_event_loop().time() + _VIDEO_PHASE_TIMEOUT_SECS
@@ -1238,14 +1275,25 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
             _update(re_id, status="failed", error="video phase timed out")
             return
     state = reengineer.load_state(re_id) or {}
-    if state.get("auto_mode"):
-        await assemble(re_id)
-    else:
+    if not state.get("auto_mode"):
         # Clip-review gate (Hugo 2026-06-12): without ⚡ fully automatic the
         # run STOPS here so every Kling clip can be inspected — and redone
         # per scene — and the ⚙ Editor settings tweaked, BEFORE the final
         # build. The user continues with ▶ Bygg ihop.
         _update(re_id, status="awaiting_assembly")
+        return
+    # ⚡ auto: build ONLY when every character's every clip actually SUCCEEDED
+    # (Hugo 2026-07-29). The loop above waits for TERMINAL clips — done OR
+    # failed — so a single failed clip used to trigger the auto-build anyway
+    # and the character failed loudly inside it. Park at the manual gate with
+    # the reason instead; the user retakes the clip and presses ▶ Bygg ihop.
+    blocked = _auto_assemble_blockers(re_id, job_id)
+    if blocked:
+        _update(re_id, status="awaiting_assembly",
+                error=_auto_assemble_block_message(blocked),
+                auto_assemble_blocked=blocked)
+        return
+    await assemble(re_id)
 
 
 # --------------------------------------------------------------------------- phase 3: assemble
@@ -1617,7 +1665,10 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
 
 
 async def _do_assemble(re_id: str, state: dict) -> None:
-    _update(re_id, status="assembling")
+    # Clearing the auto-build refusal marker here (status → assembling also
+    # clears its red banner) keeps a stale "byggde inte ihop" note from
+    # surviving the build the user finally got.
+    _update(re_id, status="assembling", auto_assemble_blocked=None)
     job = store().get_job(state["job_id"])
     if job is None:
         raise RuntimeError("underlying job disappeared")
