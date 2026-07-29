@@ -6402,9 +6402,16 @@ function studio() {
             body: JSON.stringify({ prompt }),
           });
         if (!r.ok) { this.notifyError('Regenerering misslyckades: ' + await r.text()); return; }
-        this._spliceReengineerView(await r.json());
+        const view = await r.json();
+        this._spliceReengineerView(view);
         this.sceneRegenModal.open = false;
-        this.notifyInfo('Regenererar scenens videor med den nya prompten — bygg ihop igen när det är klart.');
+        // Klippen körs parallellt (en per karaktär) och märks "🎬 renderar…"
+        // direkt — säg hur många så det syns att alla faktiskt startade.
+        const n = view.reprompt_queued || 0;
+        this.notifyInfo(
+          (n ? `Regenererar ${n} klipp parallellt med den nya prompten` :
+               'Regenererar scenens videor med den nya prompten')
+          + ' — bygg ihop igen när de är klara.');
         this._startReengineerPolling();
       } finally {
         m.submitting = false;

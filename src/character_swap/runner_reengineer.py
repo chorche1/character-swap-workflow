@@ -1537,6 +1537,110 @@ def _scene_redo_targets(job: Job, scene_id: str, *, char_id: str | None = None
     return retry, generate
 
 
+def mark_scene_clips_queued(job: Job, retry: list[tuple[str, str]],
+                            generate: list[tuple[str, str]]) -> None:
+    """Flip every clip a scene re-prompt is ABOUT to redo to PENDING (+ its
+    character to ANIMATING) synchronously, before the fan-out runs.
+
+    Without this the endpoint's response — and the run card it splices in —
+    still showed each character's OLD finished clip, so a re-prompt of a
+    7-character scene looked like "nothing happened" (Hugo 2026-07-29: the
+    stale clips are byte-identical to what was there before, and the only
+    per-clip progress marker the UI has is the `pending`/`processing`
+    "🎬 renderar…" badge). Marking here makes every affected character show
+    that badge the instant the button returns.
+
+    Restart-safe: a PENDING clip with no provider id is flipped to FAILED with
+    a loud "interrupted (server restart)" by `runner.resume_pending`, and
+    `reprompt_scene_clips` does the same for one that never reached a submit —
+    never a spinner that hangs forever."""
+    for cid, video_id in retry:
+        jc = (job.characters or {}).get(cid)
+        if jc is None:
+            continue
+        clip = next((v for v in jc.videos if v.video_id == video_id), None)
+        if clip is None:
+            continue
+        clip.status = VideoStatus.PENDING
+        clip.error = None
+        runner._persist(job, jc, status=CharStatus.ANIMATING)
+    for cid, _variant_id in generate:
+        jc = (job.characters or {}).get(cid)
+        if jc is not None:
+            runner._persist(job, jc, status=CharStatus.ANIMATING)
+
+
+async def reprompt_scene_clips(job_id: str, retry: list[tuple[str, str]],
+                               generate: list[tuple[str, str]],
+                               prompt: str) -> None:
+    """Regenerate ONE scene's clips for EVERY character IN PARALLEL, carrying
+    `prompt` as a per-clip override.
+
+    Hugo 2026-07-29: the reprompt endpoint used to schedule one
+    `background_tasks.add_task` per clip — and Starlette awaits background
+    tasks SEQUENTIALLY, so a 7-character scene rendered one clip at a time
+    (~6 min each ≈ 40 min instead of ~6), with the not-yet-started characters
+    still showing yesterday's clip the whole time. Every other animation path
+    (`run_video_synthesis`, `reanimate`, `retry_failed_videos`) fans out with
+    `asyncio.gather`; this one now does too.
+
+    `return_exceptions=True`: one clip blowing up must never abandon its
+    siblings (each clip's own failure is already persisted on its row and
+    rendered as "✕ klippet misslyckades")."""
+    if not retry and not generate:
+        return
+    # Resolve the (char, source_variant) identity of every retry target NOW —
+    # `retry_one_video` replaces the row with a fresh video_id, so the stuck
+    # check below can't look them up by video_id afterwards.
+    job = store().get_job(job_id)
+    queued: list[tuple[str, str]] = []
+    for cid, video_id in retry:
+        jc = (job.characters or {}).get(cid) if job else None
+        clip = next((v for v in (jc.videos if jc else [])
+                     if v.video_id == video_id), None)
+        if clip is not None and clip.source_variant_id:
+            queued.append((cid, clip.source_variant_id))
+    queued += [(cid, varid) for cid, varid in generate]
+
+    tasks = [runner.retry_one_video(job_id, cid, video_id, prompt)
+             for cid, video_id in retry]
+    tasks += [runner.generate_more_videos(job_id, cid, 1,
+                                          source_variant_id=varid,
+                                          prompt_override=prompt)
+              for cid, varid in generate]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for (cid, _src), res in zip(retry + generate, results):
+        if isinstance(res, BaseException):
+            _log.warning("reprompt_scene_clips %s/%s failed: %s",
+                         job_id, cid, res)
+    _fail_unsubmitted_clips(job_id, queued)
+
+
+def _fail_unsubmitted_clips(job_id: str, queued: list[tuple[str, str]]) -> None:
+    """Close out any clip left PENDING with no provider job after the fan-out.
+
+    `retry_one_video` / `generate_more_videos` return early on a few guards
+    (job/char gone, approval withdrawn mid-flight). The queue marker set by
+    `mark_scene_clips_queued` would then spin forever — fail it loudly instead
+    so the ↻ retry applies (refuse loudly over silent partial)."""
+    job = store().get_job(job_id)
+    if job is None:
+        return
+    for cid, src_variant_id in queued:
+        jc = (job.characters or {}).get(cid)
+        if jc is None:
+            continue
+        for clip in jc.videos:
+            if (clip.source_variant_id == src_variant_id
+                    and clip.status == VideoStatus.PENDING
+                    and not clip.grok_job_id):
+                clip.status = VideoStatus.FAILED
+                clip.error = ("klippet skickades aldrig till videomodellen — "
+                              "ta om det (↻)")
+                runner._persist(job, jc)
+                runner._maybe_complete_char(job, jc)
+
+
 def _parse_dirty_at(raw: object) -> datetime | None:
     """Parse a scene's `dirty_at` stamp (`utcnow().isoformat() + "Z"`) back to a
     naive-UTC datetime, matching VideoVariant.submitted_at. Bad/missing → None."""

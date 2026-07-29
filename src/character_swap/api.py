@@ -6658,8 +6658,16 @@ async def reengineer_reprompt_scene_videos(
     — so a scene can be regenerated WHILE another scene of the same run is still
     rendering. The scene's `dirty` flag auto-clears once its clips are redone
     (clear_resolved_dirty, the same mechanism the per-clip redo relies on).
-    Approved swap images are reused; no image is regenerated."""
-    from character_swap import runner, runner_reengineer
+    Approved swap images are reused; no image is regenerated.
+
+    The fan-out is ONE background task that gathers every clip (Hugo
+    2026-07-29). It used to add one background task PER clip, and Starlette
+    awaits background tasks SEQUENTIALLY — so a 7-character scene regenerated
+    one clip at a time (~40 min instead of ~6) while every not-yet-started
+    character kept showing its old clip, making the button look like it did
+    nothing. The clips are ALSO marked queued before the response so the run
+    card immediately shows "🎬 renderar…" on every affected character."""
+    from character_swap import runner_reengineer
     state = _editable_reengineer_state(
         re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
     entry = _reengineer_entry(state, idx)
@@ -6688,15 +6696,15 @@ async def reengineer_reprompt_scene_videos(
         runner_reengineer._sync_movement_from_state(job, state, [idx])
     _mark_finals_stale(state)
     _save_reengineer_state(state)
-    for cid, video_id in retry:
-        background_tasks.add_task(_run_async, runner.retry_one_video,
-                                  job.job_id, cid, video_id, prompt)
-    for cid, variant_id in generate:
-        background_tasks.add_task(_run_async, runner.generate_more_videos,
-                                  job.job_id, cid, 1,
-                                  source_variant_id=variant_id,
-                                  prompt_override=prompt)
-    return _reengineer_view(state, slim=True)
+    # Queue marker first (so the returned view already shows every affected
+    # clip as rendering), then ONE task that regenerates them all in parallel.
+    runner_reengineer.mark_scene_clips_queued(job, retry, generate)
+    background_tasks.add_task(_run_async,
+                              runner_reengineer.reprompt_scene_clips,
+                              job.job_id, retry, generate, prompt)
+    view = _reengineer_view(state, slim=True)
+    view["reprompt_queued"] = len(retry) + len(generate)
+    return view
 
 
 class ReClipRegenBody(BaseModel):
