@@ -74,6 +74,8 @@ def _call(files, motion, lengths, **kw):
         bg, files=files,
         motion_prompts=json.dumps(motion), lengths=json.dumps(lengths),
         direct=kw.get("direct", "[]"),
+        seq_rows=kw.get("seq_rows", "[]"),
+        file_rows=kw.get("file_rows", "[]"),
         end_frame_files=kw.get("end_frame_files", []),
         end_frame_idx=kw.get("end_frame_idx", "[]"),
         character_ids=kw.get("character_ids", json.dumps(["cA"])),

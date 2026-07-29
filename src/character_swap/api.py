@@ -506,6 +506,9 @@ def _job_to_dict(job: Job) -> dict:
                         # note when that fallback cost the clip its end pose.
                         "fallback_model": vv.fallback_model,
                         "fallback_dropped_end_frame": vv.fallback_dropped_end_frame,
+                        # Pasted in from a saved sequence (Hugo 2026-07-29) →
+                        # ♻️ chip + "kostade 0 kr" in the gate cost preview.
+                        "reused_from_sequence": vv.reused_from_sequence,
                         "download_name": _video_download_name(jc, vv),
                         # Per-video override + the fallback per-scene prompt,
                         # so the Step 5 regen modal can pre-fill correctly
@@ -5298,6 +5301,102 @@ def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- saved sequences
+# Save a hand-picked subset of a finished run's scenes — frame + prompt + the
+# APPROVED image and FINISHED clip per character — and paste them into a future
+# run at zero generation cost (Hugo 2026-07-29). See sequences.py.
+
+class SequenceSaveBody(BaseModel):
+    re_id: str
+    scene_idxs: list[int]
+    name: str
+
+
+class SequenceRenameBody(BaseModel):
+    name: str
+
+
+class SequencePasteBody(BaseModel):
+    seq_id: str
+    scene_keys: list[str] = []       # empty = every scene of the sequence
+    position: int = -1               # -1 = append
+
+
+def _sequence_view(seq) -> dict:
+    """The saved sequence as the frontend renders it (thumbnails + coverage)."""
+    return {
+        "seq_id": seq.seq_id,
+        "name": seq.name,
+        "created_at": seq.created_at.isoformat() + "Z",
+        "source_re_id": seq.source_re_id,
+        "n_scenes": len(seq.scenes),
+        "chars": [{"char_id": cid, "name": name}
+                  for cid, name in seq.chars.items()],
+        "scenes": [
+            {
+                "key": sc.key,
+                "order": sc.order,
+                "summary": sc.summary,
+                "motion_prompt": sc.motion_prompt,
+                "speech": sc.speech,
+                "duration": sc.duration,
+                "kling_secs": sc.kling_secs,
+                "video_model": sc.video_model,
+                "is_direct": sc.is_direct,
+                "frame_url": _file_url(Path(sc.frame_path)) if sc.frame_path else None,
+                # Which characters this scene costs nothing for. A direct scene
+                # has ONE shared clip, so it covers everyone.
+                "char_ids": sorted(sc.clips),
+                "n_clips": 1 if sc.is_direct else len(sc.clips),
+            }
+            for sc in seq.scenes
+        ],
+    }
+
+
+@app.get("/api/sequences")
+async def sequences_list() -> list[dict]:
+    from character_swap import sequences
+    return [_sequence_view(s) for s in sequences.list_all()]
+
+
+@app.post("/api/sequences")
+async def sequence_save(body: SequenceSaveBody) -> dict:
+    """Snapshot the chosen scenes of a run into a named, reusable sequence."""
+    from character_swap import reengineer as reengineer_mod, sequences
+    state = reengineer_mod.load_state(body.re_id)
+    if state is None:
+        raise HTTPException(404, "run not found")
+    job = store().get_job(state["job_id"]) if state.get("job_id") else None
+    try:
+        seq, notes = await asyncio.to_thread(
+            sequences.save_from_run, state, job, body.scene_idxs, body.name)
+    except sequences.SequenceError as e:
+        # Refuse loudly and name what to fix — never save a sequence that would
+        # silently contribute nothing to a future run.
+        raise HTTPException(409, str(e))
+    return {"ok": True, "sequence": _sequence_view(seq), "notes": notes}
+
+
+@app.patch("/api/sequences/{seq_id}")
+async def sequence_rename(seq_id: str, body: SequenceRenameBody) -> dict:
+    from character_swap import sequences
+    seq = sequences.rename(seq_id, body.name)
+    if seq is None:
+        raise HTTPException(404, "sequence not found")
+    return _sequence_view(seq)
+
+
+@app.delete("/api/sequences/{seq_id}")
+async def sequence_delete(seq_id: str) -> dict:
+    """Delete the sequence + its files. Runs that already pasted it keep
+    working — the paste hard-links into the job's own output dir."""
+    from character_swap import sequences
+    if not sequences.delete(seq_id):
+        raise HTTPException(404, "sequence not found")
+    return {"ok": True}
+
+
 @app.post("/api/reengineer")
 async def reengineer_create(
     background_tasks: BackgroundTasks,
@@ -5470,13 +5569,57 @@ def _register_scene_duplicate(src_scene_id: str, data: bytes,
     return new_sid, dest
 
 
+async def _pasted_scene_entry(re_id: str, idx: int, seq, sc,
+                              seen_scene_ids: set[str]) -> tuple[dict, Path]:
+    """Build the run-state entry for one row pasted from a saved sequence.
+
+    Registers the saved frame into the scene library (content-addressed, so it
+    resolves onto the SAME scene_id the source run used — or a `__dup` id when
+    the run already has that frame), and for a 📌 direct scene stages the saved
+    shared clip into the run dir so the run owns its own copy.
+    """
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import sequences
+
+    frame = Path(sc.frame_path)
+    if not frame.exists():
+        raise HTTPException(
+            409, f"Sekvensen \"{seq.name}\" saknar scenbilden på disk "
+                 f"(rad {idx + 1}) — den kan ha rensats bort.")
+    scene_id, reg_path = runner_reengineer._register_frame_as_scene(frame)
+    if scene_id in seen_scene_ids:
+        # Same frame already used by another row in THIS run — mint a distinct
+        # id, exactly like the upload path, or the two rows collapse into one
+        # scene and the second row's clip is silently lost.
+        scene_id, reg_path = _register_scene_duplicate(
+            scene_id, frame.read_bytes(), sc.summary or f"Scen {idx + 1}")
+    seen_scene_ids.add(scene_id)
+
+    entry = sequences.scene_entry_from_saved(seq, sc, idx)
+    entry["scene_id"] = scene_id
+    if sc.is_direct:
+        if not (sc.direct_clip_path and Path(sc.direct_clip_path).exists()):
+            raise HTTPException(
+                409, f"Sekvensen \"{seq.name}\" saknar det delade klippet för "
+                     f"rad {idx + 1}.")
+        entry["direct_image_path"] = str(reg_path)
+        # Own copy under the run dir (the path _render_direct_clip would use),
+        # so deleting the sequence later can't break this run's assemble.
+        entry["shared_clip_path"] = str(await asyncio.to_thread(
+            sequences.link_or_copy, sc.direct_clip_path,
+            reengineer_mod.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"))
+    return entry, Path(reg_path)
+
+
 @app.post("/api/reengineer/from_images")
 async def reengineer_from_images(
     background_tasks: BackgroundTasks,
-    files: list[UploadFile] = File(...),     # one scene image per scene, in order
-    motion_prompts: str = Form(...),         # JSON array of strings (one per file)
-    lengths: str = Form(...),                # JSON array of seconds (one per file)
+    files: list[UploadFile] = File([]),      # one scene image per UPLOADED row, in order
+    motion_prompts: str = Form(...),         # JSON array of strings (one per row)
+    lengths: str = Form(...),                # JSON array of seconds (one per row)
     direct: str = Form("[]"),                # JSON array of bools — "no swap" scenes
+    seq_rows: str = Form("[]"),              # JSON array over ALL rows: null | {seq_id, scene_key}
+    file_rows: str = Form("[]"),             # JSON array of row indices ‖ files
     end_frame_files: list[UploadFile] = File([]),  # optional end pose per scene (sparse)
     end_frame_idx: str = Form("[]"),         # JSON array of row indices ‖ end_frame_files
     character_ids: str = Form(...),          # JSON array of char ids
@@ -5531,11 +5674,70 @@ async def reengineer_from_images(
         except json.JSONDecodeError:
             raise HTTPException(400, "character_source_image_ids must be a JSON dict")
 
-    # --- validate the per-scene image list + parallel prompt/length arrays --
-    if not files:
+    # --- rows: uploaded images and/or scenes pasted from a saved sequence ---
+    # A pasted row (Hugo 2026-07-29) has no upload — its frame, prompt, length
+    # and finished clips come from the sequence. So the parallel arrays are
+    # indexed over ROWS, and `file_rows` says which row each upload belongs to.
+    # Back-compat: no `seq_rows` → every row is an upload, exactly as before.
+    from character_swap import sequences
+
+    try:
+        seq_row_list = json.loads(seq_rows) if seq_rows.strip() else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "seq_rows must be a JSON array")
+    if not isinstance(seq_row_list, list):
+        raise HTTPException(400, "seq_rows must be a JSON array")
+    if not seq_row_list:
+        seq_row_list = [None] * len(files)
+    n_rows = len(seq_row_list)
+    if not n_rows:
         raise HTTPException(400, "Upload at least one scene image")
-    if len(files) > _MAX_SEQUENCE_IMAGES:
+    if n_rows > _MAX_SEQUENCE_IMAGES:
         raise HTTPException(400, f"Too many images (max {_MAX_SEQUENCE_IMAGES})")
+
+    upload_rows = [i for i, r in enumerate(seq_row_list) if r is None]
+    try:
+        file_row_list = json.loads(file_rows) if file_rows.strip() else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "file_rows must be a JSON array of ints")
+    if not isinstance(file_row_list, list):
+        raise HTTPException(400, "file_rows must be a JSON array")
+    if not file_row_list:
+        # Files arrive in row order — the unambiguous default.
+        file_row_list = list(upload_rows)
+    try:
+        file_row_list = [int(i) for i in file_row_list]
+    except (TypeError, ValueError):
+        raise HTTPException(400, "file_row entries must be ints")
+    if len(file_row_list) != len(files):
+        raise HTTPException(400, "file_rows must match the number of files")
+    if sorted(file_row_list) != upload_rows:
+        raise HTTPException(
+            400, "file_rows must cover exactly the rows without a saved scene")
+    if not upload_rows and not any(seq_row_list):
+        raise HTTPException(400, "Upload at least one scene image")
+
+    # Resolve every pasted row up front so a stale/deleted sequence fails the
+    # request instead of silently dropping a scene from the run.
+    seq_cache: dict[str, object] = {}
+    pasted: dict[int, tuple] = {}            # row idx → (SavedSequence, SequenceScene)
+    for i, ref in enumerate(seq_row_list):
+        if ref is None:
+            continue
+        if not isinstance(ref, dict):
+            raise HTTPException(400, "seq_rows entries must be null or objects")
+        sid_, key_ = ref.get("seq_id"), ref.get("scene_key")
+        if not sid_ or not key_:
+            raise HTTPException(400, "seq_rows entries need seq_id + scene_key")
+        if sid_ not in seq_cache:
+            seq_cache[sid_] = sequences.load(sid_)
+        seq_obj = seq_cache[sid_]
+        scene_obj = seq_obj.scene(key_) if seq_obj else None
+        if seq_obj is None or scene_obj is None:
+            raise HTTPException(
+                404, f"Den sparade sekvensen finns inte längre (rad {i + 1}).")
+        pasted[i] = (seq_obj, scene_obj)
+
     try:
         motion_list = json.loads(motion_prompts)
         length_list = json.loads(lengths)
@@ -5543,7 +5745,7 @@ async def reengineer_from_images(
         raise HTTPException(400, "motion_prompts and lengths must be JSON arrays")
     if not isinstance(motion_list, list) or not isinstance(length_list, list):
         raise HTTPException(400, "motion_prompts and lengths must be JSON arrays")
-    if len(motion_list) != len(files) or len(length_list) != len(files):
+    if len(motion_list) != n_rows or len(length_list) != n_rows:
         raise HTTPException(400, "motion_prompts and lengths must match the number of images")
     try:
         direct_list = json.loads(direct) if direct.strip() else []
@@ -5551,10 +5753,10 @@ async def reengineer_from_images(
         raise HTTPException(400, "direct must be a JSON array of booleans")
     if not isinstance(direct_list, list):
         raise HTTPException(400, "direct must be a JSON array")
-    if direct_list and len(direct_list) != len(files):
+    if direct_list and len(direct_list) != n_rows:
         raise HTTPException(400, "direct must match the number of images")
     if not direct_list:
-        direct_list = [False] * len(files)
+        direct_list = [False] * n_rows
 
     # Optional END FRAME (slutpose) per scene, uploaded at creation so the
     # end-frame swap generates in the SAME swap phase as the start frames
@@ -5569,7 +5771,7 @@ async def reengineer_from_images(
         raise HTTPException(400, "end_frame_idx must be a JSON array")
     if len(end_idx_list) != len(end_frame_files):
         raise HTTPException(400, "end_frame_idx must match the number of end_frame_files")
-    if len(end_frame_files) > len(files):
+    if len(end_frame_files) > n_rows:
         raise HTTPException(400, "more end frames than scenes")
     seen_ef: set[int] = set()
     norm_end_idx: list[int] = []
@@ -5578,10 +5780,16 @@ async def reengineer_from_images(
             i = int(raw)
         except (TypeError, ValueError):
             raise HTTPException(400, "end_frame_idx entries must be ints")
-        if i < 0 or i >= len(files):
+        if i < 0 or i >= n_rows:
             raise HTTPException(400, f"end_frame_idx {i} out of range")
         if i in seen_ef:
             raise HTTPException(400, f"duplicate end_frame_idx {i}")
+        if i in pasted:
+            # A pasted scene's clip is ALREADY rendered — an end pose could
+            # never be honored, so refuse instead of accepting it silently.
+            raise HTTPException(
+                400, f"Rad {i + 1} kommer från en sparad sekvens — klippet är "
+                     "redan renderat och kan inte få en ny slutpose.")
         seen_ef.add(i)
         norm_end_idx.append(i)
 
@@ -5604,9 +5812,17 @@ async def reengineer_from_images(
             await _save_upload(upload, ef_path)           # read-cap + empty-check + atomic write
             end_frame_paths_by_idx[row_idx] = str(ef_path)
 
+    uploads_by_row = {row: up for up, row in zip(files, file_row_list)}
+
     scene_entries: list[dict] = []
     seen_scene_ids: set[str] = set()
-    for idx, upload in enumerate(files):
+    for idx in range(n_rows):
+        if idx in pasted:
+            pasted_entry, _reg = await _pasted_scene_entry(
+                re_id, idx, *pasted[idx], seen_scene_ids)
+            scene_entries.append(pasted_entry)
+            continue
+        upload = uploads_by_row[idx]
         ext = _safe_ext(upload.filename or "")          # image-only; 400 on bad ext
         data = await _read_capped(upload)
         if not data:
@@ -5680,7 +5896,7 @@ async def reengineer_from_images(
         "error": None,
         # No source_path — this run was built from images, not a video.
         "from_images": True,
-        "source_name": f"{len(files)} bilder",
+        "source_name": f"{n_rows} bilder",
         "character_ids": char_ids,
         "image_model": image_model,
         "video_model": "kling-v3",          # locked
@@ -6360,6 +6576,97 @@ async def reengineer_add_scene(
     return _reengineer_view(state, slim=True)
 
 
+@app.post("/api/reengineer/{re_id}/scenes/from_sequence")
+async def reengineer_paste_sequence(
+    re_id: str, body: SequencePasteBody, background_tasks: BackgroundTasks,
+) -> dict:
+    """Paste scenes from a saved sequence into an EXISTING run (edit mode).
+
+    Characters the sequence covers get their finished image + clip attached
+    directly (zero cost, already approved). Characters it doesn't cover
+    generate a swap image and land in the normal approval gate before their
+    clip renders (Hugo 2026-07-29)."""
+    from character_swap import runner_reengineer, sequences
+    state = _editable_reengineer_state(re_id)
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    seq = sequences.load(body.seq_id)
+    if seq is None:
+        raise HTTPException(404, "sequence not found")
+    keys = body.scene_keys or [sc.key for sc in seq.scenes]
+    picked = []
+    for k in keys:
+        sc = seq.scene(k)
+        if sc is None:
+            raise HTTPException(404, f"scene {k} not in sequence")
+        picked.append(sc)
+    if not picked:
+        raise HTTPException(400, "Bocka i minst en scen")
+
+    entries = state.get("scenes") or []
+    if len(entries) + len(picked) > _MAX_SEQUENCE_IMAGES:
+        raise HTTPException(400, f"Too many scenes (max {_MAX_SEQUENCE_IMAGES})")
+    seen_ids = {e.get("scene_id") for e in entries if e.get("scene_id")}
+
+    # Build every entry BEFORE mutating state — a missing sequence file must
+    # fail the whole paste, not leave half the scenes inserted.
+    built: list[tuple[dict, Path, object]] = []
+    for i, sc in enumerate(picked):
+        entry, reg_path = await _pasted_scene_entry(
+            re_id, len(entries) + i, seq, sc, seen_ids)
+        entry["dirty"] = False
+        built.append((entry, reg_path, sc))
+
+    # The awaits above take a moment — re-read so a concurrent state write
+    # (e.g. a prior add's Whisper prefill) isn't clobbered by our snapshot.
+    state = _reload_reengineer_state_after_await(re_id)
+    entries = state.get("scenes") or []
+    pos = body.position if 0 <= body.position <= len(entries) else len(entries)
+    char_ids = list(job.characters)
+    to_generate: list[str] = []
+    for offset, (entry, reg_path, sc) in enumerate(built):
+        sid = entry["scene_id"]
+        entries.insert(pos + offset, entry)
+        if sid not in (job.scene_ids or []):
+            job.scene_ids = list(job.scene_ids or [job.scene_id]) + [sid]
+            job.scene_image_paths = (list(job.scene_image_paths
+                                          or [job.scene_image_path])
+                                     + [str(reg_path)])
+        if sc.is_direct:
+            if sid not in (job.direct_scene_ids or []):
+                job.direct_scene_ids = list(job.direct_scene_ids or []) + [sid]
+            continue
+        covered = sequences.reused_map_for_scene(seq, sc, char_ids)
+        if covered:
+            job.reused_clips = dict(job.reused_clips or {})
+            job.reused_clips[sid] = covered
+        if len(covered) < len(char_ids):
+            to_generate.append(sid)
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    _mark_finals_stale(state)
+    _save_reengineer_state(state)
+
+    # Attach the reused clips now so the response already shows them, then
+    # generate swap images only for the characters the sequence doesn't cover.
+    for entry, _reg, sc in built:
+        if not sc.is_direct:
+            runner_reengineer.materialize_pasted_scene(job, entry["scene_id"])
+    for sid in to_generate:
+        background_tasks.add_task(_run_async,
+                                  runner_reengineer.generate_pasted_scene,
+                                  re_id, sid)
+    return _reengineer_view(state, slim=True)
+
+
 def _refuse_shared_direct_scene(state: dict, idx: int, sid: str) -> None:
     """409 when another state.scenes entry (list index ≠ `idx`) shares `sid`.
     Marking a scene "direkt bild" drops EVERY variant whose v.scene_id == sid
@@ -6611,6 +6918,42 @@ class ReRedoBody(BaseModel):
     char_id: str | None = None
 
 
+def _refuse_fully_reused_scene(state: dict, idx: int,
+                               char_id: str | None = None) -> None:
+    """409 when a redo would touch nothing because the scene's clips were all
+    PASTED IN from a saved sequence (Hugo 2026-07-29).
+
+    `_scene_redo_targets` skips imported clips, so such a redo is a silent
+    no-op — the user clicks ↻ and nothing ever happens. Say so instead."""
+    from character_swap import runner_reengineer
+    entry = (state.get("scenes") or [])[idx]
+    if entry.get("reused_direct"):
+        raise HTTPException(
+            409, "Scenen är inklistrad från en sparad sekvens — klippet är "
+                 "redan renderat. Ta bort scenen och lägg till den som ny om "
+                 "du vill generera om den.")
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        return
+    sid = entry.get("scene_id")
+    reused = any(
+        vv.reused_from_sequence
+        for cid, jc in (job.characters or {}).items()
+        if not char_id or cid == char_id
+        for vv in jc.videos
+        if vv.source_variant_id == runner_reengineer._approved_variant_for(jc, sid)
+    )
+    if not reused:
+        return
+    retry, generate = runner_reengineer._scene_redo_targets(
+        job, sid, char_id=char_id)
+    if not retry and not generate:
+        raise HTTPException(
+            409, "Alla klipp i scenen är inklistrade från en sparad sekvens — "
+                 "de är redan renderade. Ta bort scenen och lägg till den som "
+                 "ny om du vill generera om den.")
+
+
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/redo")
 async def reengineer_redo_scene(re_id: str, idx: int,
                                 background_tasks: BackgroundTasks,
@@ -6633,6 +6976,7 @@ async def reengineer_redo_scene(re_id: str, idx: int,
     if re_id in runner_reengineer._ANIMATING:
         raise HTTPException(409, "animation already running for this run")
     char_id = body.char_id if body else None
+    _refuse_fully_reused_scene(state, idx, char_id)
     background_tasks.add_task(_run_async, runner_reengineer.reanimate,
                               re_id, [idx], char_id=char_id,
                               clear_dirty=(char_id is None))
@@ -6674,6 +7018,9 @@ async def reengineer_reprompt_scene_videos(
     if job is None:
         raise HTTPException(409, "underlying job disappeared")
     sid = entry["scene_id"]
+    # Pasted from a saved sequence → say so explicitly instead of the generic
+    # "inga klipp att regenerera" below.
+    _refuse_fully_reused_scene(state, idx)
     retry, generate = runner_reengineer._scene_redo_targets(job, sid)
     if not retry and not generate:
         raise HTTPException(

@@ -82,6 +82,14 @@ Quality is double-gated: (1) automatic vision-QC — every generated swap IMAGE 
 
 **End frame staged AT the Swap upload step (2026-06-23, Hugo's directive).** On the Swap tab ("animera dina referensbilder", `POST /api/reengineer/from_images`) each scene row now has an optional "🎯 End frame" upload (hidden for `📌 ingen swap`/direct rows) so the end pose can be attached BEFORE the first image gen — the end-frame swap then generates in the same swap phase as the start frames (via `_kick_char`'s existing end-frame block), eliminating the post-gate second wait. The sparse files ride as `end_frame_files` + a parallel `end_frame_idx` row-index array; the endpoint saves them under `<run_dir>/end_frames/` and attaches `end_frame_path` per scene_entry (persisted in state → resume-safe); `runner_reengineer._create_job_and_swap` lifts them onto `Job.end_frames_by_scene` over `uniq_ids` (direct scenes excluded; on a duplicate START image first-wins — distinct end frames per duplicate still need the post-gate "duplicate scene" flow). The post-gate ↻/⇪/✕ controls keep working unchanged on a pre-staged frame. Locked by `test_reengineer_from_images.py` (end_frame staging + direct exclusion + validation 400s + `end_frames_by_scene` population).
 
+**SAVED SEQUENCES — reuse finished scenes + clips in a future run (2026-07-29, Hugo's directive).** The expensive part of a Swap run is the swap IMAGE + the video CLIP per (character × scene). When Hugo wants his characters to say/do the SAME thing again in a later video, a **saved sequence** lets him reuse what was already rendered instead of paying twice. On a finished run card (`awaiting_assembly` / `done` / `partial_success`) "💾 Spara sekvens" opens an inline scene picker — he ticks the scenes worth reusing, names it, and `POST /api/sequences {re_id, scene_idxs, name}` snapshots each one: the scene frame, its motion prompt / duration / kling_secs / video_model, and per character the APPROVED image + the FINISHED clip (a 📌 direct scene stores its ONE shared clip instead). Files are **hard-linked** (`os.link`, `shutil.copy2` fallback) into `output/sequences/<seq_id>/{scenes,images,clips}/` — zero extra disk, but the sequence owns its own directory entries so deleting the source run or job never breaks it. New module `sequences.py` mirrors `reengineer.py` (disk-JSON `sequence.json` per sequence, `load`/`save`/`list_all`/`delete`/`rename`) — no `AppState`/`db.py` schema change. `save_from_run` REFUSES LOUDLY (409, naming the scene) when a picked scene has no finished clip at all, and rolls the whole directory back rather than leaving a half-written sequence; a character merely lacking its own clip in an otherwise fine scene is skipped and reported in `notes`.
+
+**Pasting** works in two places (both, per Hugo): the Swap upload form ("📎 Sparad sekvens" → modal → the chosen scenes become read-only `kind:'sequence'` rows with a green "♻️ återanvänt klipp · 0 kr" badge, reorderable/removable like normal rows) and edit mode on an existing run ("+ Sparad sekvens" → `POST /api/reengineer/{re_id}/scenes/from_sequence {seq_id, scene_keys, position}`). At upload the rows ride as `seq_rows` (JSON array over ALL rows: `null` = an upload, else `{seq_id, scene_key}`) plus `file_rows` (row indices ‖ `files`) — every other parallel array is indexed over ROWS, and omitting `seq_rows` keeps the old 1:1 file↔row mapping exactly (back-compat). The saved prompt/length WIN over anything the client sends for a pasted row (the clip is already rendered), and an `end_frame_idx` pointing at a pasted row is a 400 (an end pose could never be honored).
+
+**The reuse mechanism leans entirely on existing "imported clip" semantics**: `Job.reused_clips: dict[scene_id → char_id → payload]` is built by `runner_reengineer._resolve_reused_clips`, and `runner._kick_char` — for a (char, scene) it covers — generates NOTHING and instead calls `_materialize_reused_slot` to write a READY + pre-APPROVED `GeneratedImage` and a DONE `VideoVariant(imported=True, reused_from_sequence="<seq_id>:<key>")`, hard-linked into the new job's own dir. Everything downstream then works unchanged: `_approved_variant_for` → `pick_clip_for_variant` (already prefers `imported`) → `_collect_clips` → `_do_assemble` → finals → Telegram, and `_scene_redo_targets` already skips imported clips. Only **two** places had to learn about it: `runner._animate_character` skips approved variants whose DONE clip carries `reused_from_sequence` (deliberately narrow — a genuinely user-imported clip keeps today's behavior; without this the first "▶ Animera" would re-bill every reused clip), and `_do_animate` no longer clears `shared_clip_path` / re-renders a pasted direct scene (`reused_direct: True`). A character with no approved slots left settles instead of hanging (`_kick_char` → AWAITING_APPROVAL, `_animate_character` → `_maybe_complete_char`).
+
+**A character the sequence does NOT cover generates as usual and must be approved in the gate** (Hugo's explicit requirement) — `generate_pasted_scene` runs `regen_scene_variants` only for the uncovered characters, so mixed reels (old + new characters) work. Missing sequence files never produce a silent hole: `_materialize_reused_slot` returns False and the slot generates instead, and a deleted sequence is skipped with a warning. Redo/reprompt on a fully-reused scene would be a silent no-op (`_scene_redo_targets` filters imported), so `api._refuse_fully_reused_scene` returns **409** naming the reason. UI extras: ♻️ chips on reused clips in both clip strips, a "♻️ sparad sekvens" scene badge, a gate-cost line counting reused clips, and a collapsible "🎞 Sparade sekvenser" library (rename / delete / paste) at the bottom of the Swap form. Endpoints: `GET/POST /api/sequences`, `PATCH/DELETE /api/sequences/{seq_id}`, `POST /api/reengineer/{re_id}/scenes/from_sequence`. Locked by `test_saved_sequences.py` (35 cases; verified live end-to-end: paste → animate → assemble → final with **zero** provider calls).
+
 **Per-character VERBATIM end-frame upload (2026-07-04, Hugo's directive).** Alongside the shared swap-into-pose mechanism above, each character can be handed its OWN finished end frame — used EXACTLY as-is (no swap, no QC). Stored on new field `JobCharacter.end_frame_uploads: dict[scene_id → path]`; `runner._resolve_end_image` prefers it OVER the swapped `end_frame_paths` (precedence: verbatim upload → swapped frame → swap-now-from-pose → none), so a hand-provided frame wins while characters without an upload still swap into the shared pose. Endpoints: `POST/DELETE /api/jobs/{job_id}/characters/{char_id}/scenes/{scene_id}/end_frame_upload` (multipart `file`; saved verbatim to `output/<job>/<char>/endframe_upload_<scene>.<ext>`), same `from_reengineer`-only movement-lock relaxation as the shared endpoints. Serialized as `characters[].end_frame_upload_urls`. UI: the post-gate end-frame block now ALWAYS shows a per-character row (even with no shared pose) — each character has an "⬆ egen" upload + "✕" clear, the displayed thumb prefers the green-bordered verbatim upload over the indigo swapped one. The shared "🎯 End frame (swappa alla)" + ↻/⇪/✕ controls stay (relabeled "Gemensam slutpose"); the two mechanisms are independent (clearing the shared pose leaves per-char uploads untouched, and vice-versa). Carried on scene duplicate, re-keyed on "byt scenbild" re-point. Locked by `test_char_end_frame_upload.py`.
 
 **Reengineer Kling auto length = ceil + 1 (2026-06-13, Hugo's directive — supersedes 06-12 plain ceil).** AUTO Kling clip length is the ORIGINAL scene clip's length rounded UP to the SECOND-next whole second ("6,4 s original → 8 s Kling"), clamped [3, 15] — one breath of margin, never the old speech-fitted extension. Manual `kling_secs` override still wins exactly as typed. `runner_reengineer._kling_duration` + the app.js `klingDuration` mirror (sync-pinned by `test_kling_duration_js_mirror_in_sync`).
@@ -354,6 +362,17 @@ src/character_swap/
                          gets REMOTION_CONCURRENCY=4 browser tabs, the cache is
                          re-checked after queueing, and queue_wait_secs is logged
                          separately from latency_ms.
+├── sequences.py       — SAVED SEQUENCES (2026-07-29): the pure store behind "spara
+                         scener + klipp och klistra in dem i en framtida körning".
+                         Disk-JSON per sequence (`output/sequences/<seq_id>/
+                         sequence.json` + scenes/images/clips), mirroring
+                         reengineer.py — no DB schema change. `save_from_run`
+                         snapshots the picked scenes (hard-link, copy fallback) and
+                         refuses loudly on a scene with no finished clip;
+                         `reused_map_for_scene` / `scene_entry_from_saved` feed the
+                         paste path. Orchestration lives in runner.py (_kick_char)
+                         + runner_reengineer.py (_resolve_reused_clips,
+                         materialize_pasted_scene, generate_pasted_scene).
 ├── runner_compile.py  — Step 6: per-character compile. `compile_job_videos()` fans
                          out across every approved character via asyncio.gather; each
                          character concatenates its per-scene DONE videos (in
@@ -472,6 +491,12 @@ output/<job_id>/compiled/<char_id>.mp4
                       editor pipeline). Each compile also produces a parallel copy
                       under `output/editor/<edit_id>/04-final.mp4` so the result is
                       re-renderable from the Editor tab.
+output/sequences/<seq_id>/
+                    — SAVED SEQUENCES: sequence.json + scenes/<key>.png +
+                      images/<key>__<char_id>.png + clips/<key>__<char_id>.mp4
+                      (+ clips/<key>__direct.mp4 for a 📌 no-swap scene). Files are
+                      hard-linked from the source run, so deleting that run or job
+                      never breaks the sequence.
 output/cache/remotion/<sha>.mp4
                     — SHA-256-keyed Remotion render cache
 web/static/remotion-preview.js
@@ -718,6 +743,19 @@ POST   /api/editor/rerender                    body: edit_id, template, override
 GET    /api/editor/templates                   (each row carries `engine: 'ass' | 'remotion'` +
                                                 `composition_id` for remotion entries:
                                                 SubmagicPro / SubmagicPop / MrBeastBold / CapCutGlow)
+
+GET    /api/sequences                          saved sequences (scenes + coverage + thumbs)
+POST   /api/sequences                          body: {re_id, scene_idxs, name} — snapshot the
+                                                picked scenes' frames + approved images +
+                                                finished clips. 409 (naming the scene) when a
+                                                picked scene has no finished clip.
+PATCH  /api/sequences/{seq_id}                 body: {name} — rename
+DELETE /api/sequences/{seq_id}                 delete the sequence + its files (runs that
+                                                already pasted it are unaffected)
+POST   /api/reengineer/{re_id}/scenes/from_sequence
+                                               body: {seq_id, scene_keys?, position?} — paste
+                                                finished scenes into a run in edit mode
+POST   /api/reengineer/from_images             (+ seq_rows / file_rows — see Saved sequences)
 
 POST   /api/jobs/{job_id}/compile_videos       Step 6: per-character compile. Body:
                                                 template? overrides? enable_trim? enable_captions?

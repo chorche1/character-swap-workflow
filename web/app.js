@@ -106,7 +106,12 @@ function studio() {
     // sets its Kling length. POSTs /api/reengineer/from_images and reuses the
     // Reengineer run-card (gate → animate → assemble → edit mode) downstream.
     swapFromImages: {
-      rows: [],                       // [{uid, file, name, previewUrl, motion_prompt, length, direct, endFrameFile, endFrameUrl}]
+      // [{uid, kind, file, name, previewUrl, motion_prompt, length, direct,
+      //   endFrameFile, endFrameUrl}] — kind 'upload' (default) or 'sequence'.
+      // A 'sequence' row has no file: it carries {seqId, sceneKey, seqName,
+      // frameUrl, charIds, isDirect} and its clip is already rendered, so its
+      // prompt/length/end-frame controls are read-only.
+      rows: [],
       charIds: [],
       imageModel: 'gpt2-id-swap',
       autoMode: false,
@@ -123,6 +128,13 @@ function studio() {
     },
     swapPickerChar: null,             // char_id whose reference-image popover is open
     _swapRowSeq: 0,
+    // Saved sequences (Hugo 2026-07-29): finished scenes + clips, reusable in a
+    // future run at zero generation cost. `seqSave` drives the "💾 Spara
+    // sekvens" picker on a run card; `seqPicker` drives the paste modal
+    // (target 'form' = the Swap upload form, or a re_id = edit mode).
+    sequences: [],
+    seqSave: null,                    // {reId, name, idxs:[], saving}
+    seqPicker: null,                  // {target, seqId, keys:[], submitting}
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
@@ -535,6 +547,8 @@ function studio() {
       this._resumeEditorRepurposePolling();
       await this.loadSwapDefaults();
       this.loadReengineerHistory();
+      // Saved sequences library (fire-and-forget — never block init()).
+      this.loadSequences();
       // Reengineer swap-engine pick is a sticky preset (Hugo 2026-06-11:
       // gpt2-id-swap is his GPT engine of choice — make it survive reloads).
       this.$watch('reengineerGen.imageModel',
@@ -1203,6 +1217,7 @@ function studio() {
         if (!file.type || !file.type.startsWith('image/')) continue;
         this.swapFromImages.rows.push({
           uid: ++this._swapRowSeq,
+          kind: 'upload',
           file, name: file.name,
           previewUrl: URL.createObjectURL(file),
           motion_prompt: '', length: 5, direct: false,
@@ -1302,7 +1317,20 @@ function studio() {
       g.submitting = true;
       try {
         const fd = new FormData();
-        for (const row of g.rows) fd.append('files', row.file);
+        // Rows can be uploads OR scenes pasted from a saved sequence. The
+        // parallel arrays below are indexed over ALL rows; `file_rows` maps
+        // each uploaded file back to its row so the server can interleave them.
+        const fileRows = [];
+        g.rows.forEach((row, i) => {
+          if (row.kind === 'sequence') return;
+          fd.append('files', row.file);
+          fileRows.push(i);
+        });
+        fd.append('file_rows', JSON.stringify(fileRows));
+        fd.append('seq_rows', JSON.stringify(g.rows.map(r => (
+          r.kind === 'sequence'
+            ? { seq_id: r.seqId, scene_key: r.sceneKey }
+            : null))));
         fd.append('motion_prompts', JSON.stringify(g.rows.map(r => r.motion_prompt || '')));
         fd.append('lengths', JSON.stringify(g.rows.map(r => Number(r.length) || 0)));
         fd.append('direct', JSON.stringify(g.rows.map(r => !!r.direct)));
@@ -1310,7 +1338,9 @@ function studio() {
         // row indices. Direct rows can't carry one (the UI hides the control).
         const endIdx = [];
         g.rows.forEach((row, i) => {
-          if (row.endFrameFile && !row.direct) {
+          // A pasted row's clip is already rendered — it can never honor an
+          // end pose (the server refuses one), so never send it.
+          if (row.endFrameFile && !row.direct && row.kind !== 'sequence') {
             fd.append('end_frame_files', row.endFrameFile);
             endIdx.push(i);
           }
@@ -1351,6 +1381,195 @@ function studio() {
       } finally {
         g.submitting = false;
       }
+    },
+
+    // ---- Saved sequences --------------------------------------------------
+    // Save a hand-picked set of a finished run's scenes (frame + prompt + the
+    // approved image and finished clip per character) and paste them into a
+    // future run at zero generation cost (Hugo 2026-07-29).
+
+    async loadSequences() {
+      try {
+        const r = await fetch('/api/sequences');
+        if (r.ok) this.sequences = await r.json();
+      } catch (_e) { /* library is optional — never block the page */ }
+    },
+
+    // --- saving ---
+    openSeqSave(run) {
+      this.seqSave = {
+        reId: run.re_id,
+        name: (run.source_name ? run.source_name + ' — ' : '') +
+              new Date().toISOString().slice(0, 10),
+        idxs: (run.scenes || []).map(sc => sc.idx),   // preselect everything
+        saving: false,
+      };
+    },
+
+    closeSeqSave() { this.seqSave = null; },
+
+    toggleSeqSaveScene(idx) {
+      if (!this.seqSave) return;
+      const i = this.seqSave.idxs.indexOf(idx);
+      if (i >= 0) this.seqSave.idxs.splice(i, 1);
+      else this.seqSave.idxs.push(idx);
+    },
+
+    seqSaveChecked(idx) {
+      return !!this.seqSave && this.seqSave.idxs.includes(idx);
+    },
+
+    async saveSequence() {
+      const s = this.seqSave;
+      if (!s || s.saving) return;
+      if (!s.idxs.length) { this.notifyError('Bocka i minst en scen'); return; }
+      if (!s.name.trim()) { this.notifyError('Ge sekvensen ett namn'); return; }
+      s.saving = true;
+      try {
+        const r = await fetch('/api/sequences', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ re_id: s.reId, scene_idxs: s.idxs, name: s.name.trim() }),
+        });
+        if (!r.ok) {
+          // The server refuses loudly (409) and names the scene to fix.
+          this.notifyError('Kunde inte spara sekvensen: ' + await r.text());
+          return;
+        }
+        const out = await r.json();
+        this.sequences = [out.sequence, ...this.sequences.filter(
+          x => x.seq_id !== out.sequence.seq_id)];
+        const skipped = (out.notes || []).length
+          ? ` (${out.notes.length} hoppades över)` : '';
+        this.notifyInfo(`Sekvensen "${out.sequence.name}" sparad — `
+          + `${out.sequence.n_scenes} scen(er)${skipped}`);
+        if ((out.notes || []).length) console.warn('sekvens:', out.notes);
+        this.seqSave = null;
+      } catch (e) {
+        this._submitError('Spara sekvens', e);
+      } finally {
+        if (this.seqSave) this.seqSave.saving = false;
+      }
+    },
+
+    async renameSequence(seq) {
+      const name = prompt('Nytt namn på sekvensen', seq.name);
+      if (name === null || !name.trim() || name.trim() === seq.name) return;
+      const r = await fetch(`/api/sequences/${seq.seq_id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim() }),
+      });
+      if (!r.ok) { this.notifyError('Kunde inte döpa om: ' + await r.text()); return; }
+      const updated = await r.json();
+      this.sequences = this.sequences.map(
+        x => (x.seq_id === updated.seq_id ? updated : x));
+    },
+
+    async deleteSequence(seq) {
+      if (!confirm(`Ta bort sekvensen "${seq.name}"?\n\n`
+        + 'Körningar som redan använt den påverkas inte.')) return;
+      const r = await fetch(`/api/sequences/${seq.seq_id}`, { method: 'DELETE' });
+      if (!r.ok) { this.notifyError('Kunde inte ta bort: ' + await r.text()); return; }
+      this.sequences = this.sequences.filter(x => x.seq_id !== seq.seq_id);
+    },
+
+    // --- pasting ---
+    // target: 'form' (the Swap upload form) or a re_id (edit mode).
+    openSeqPicker(target) {
+      if (!this.sequences.length) this.loadSequences();
+      this.seqPicker = { target, seqId: null, keys: [], submitting: false };
+    },
+
+    closeSeqPicker() { this.seqPicker = null; },
+
+    pickSeq(seqId) {
+      if (!this.seqPicker) return;
+      const seq = this.sequences.find(s => s.seq_id === seqId);
+      this.seqPicker.seqId = seqId;
+      // Preselect every scene — the common case is "paste the whole thing".
+      this.seqPicker.keys = seq ? seq.scenes.map(sc => sc.key) : [];
+    },
+
+    seqPickerSeq() {
+      return this.seqPicker
+        ? this.sequences.find(s => s.seq_id === this.seqPicker.seqId) : null;
+    },
+
+    toggleSeqPickerScene(key) {
+      if (!this.seqPicker) return;
+      const i = this.seqPicker.keys.indexOf(key);
+      if (i >= 0) this.seqPicker.keys.splice(i, 1);
+      else this.seqPicker.keys.push(key);
+    },
+
+    // Characters of the sequence that this scene has a finished clip for,
+    // vs the ones the current run would have to generate (and approve).
+    seqSceneCoverText(sc, charIds) {
+      if (sc.is_direct) return 'delat klipp — gäller alla';
+      const covered = (sc.char_ids || []);
+      if (!charIds || !charIds.length) return `${covered.length} karaktär(er)`;
+      const hit = charIds.filter(c => covered.includes(c)).length;
+      const miss = charIds.length - hit;
+      return miss
+        ? `${hit} återanvänds · ${miss} genereras (kräver godkännande)`
+        : `${hit} återanvänds · 0 kr`;
+    },
+
+    async confirmSeqPaste() {
+      const p = this.seqPicker;
+      if (!p || p.submitting) return;
+      const seq = this.seqPickerSeq();
+      if (!seq) { this.notifyError('Välj en sekvens'); return; }
+      if (!p.keys.length) { this.notifyError('Bocka i minst en scen'); return; }
+      const picked = seq.scenes.filter(sc => p.keys.includes(sc.key));
+      if (p.target === 'form') {
+        for (const sc of picked) {
+          this.swapFromImages.rows.push({
+            uid: ++this._swapRowSeq,
+            kind: 'sequence',
+            seqId: seq.seq_id, sceneKey: sc.key, seqName: seq.name,
+            frameUrl: sc.frame_url, name: sc.summary || 'Sparad scen',
+            charIds: sc.char_ids || [],
+            motion_prompt: sc.motion_prompt || '',
+            length: sc.kling_secs || Math.round(sc.duration || 5) || 5,
+            direct: !!sc.is_direct,
+            file: null, previewUrl: '', endFrameFile: null, endFrameUrl: '',
+          });
+        }
+        this.notifyInfo(`${picked.length} scen(er) från "${seq.name}" tillagda `
+          + '— klippen återanvänds utan kostnad');
+        this.seqPicker = null;
+        return;
+      }
+      // Edit mode: paste into an existing run.
+      p.submitting = true;
+      try {
+        const run = this.reengineerHistory.find(r => r.re_id === p.target);
+        if (run) await this._flushReSceneDrafts(run);   // paste renumbers idx
+        const r = await fetch(`/api/reengineer/${p.target}/scenes/from_sequence`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ seq_id: seq.seq_id, scene_keys: p.keys, position: -1 }),
+        });
+        if (!r.ok) { this.notifyError('Kunde inte klistra in: ' + await r.text()); return; }
+        this._spliceReengineerView(await r.json());
+        this.notifyInfo(`${picked.length} scen(er) inklistrade — färdiga klipp `
+          + 'återanvänds, nya karaktärer hamnar i godkännandegrinden');
+        this.seqPicker = null;
+      } catch (e) {
+        this._submitError('Klistra in sekvens', e);
+      } finally {
+        if (this.seqPicker) this.seqPicker.submitting = false;
+      }
+    },
+
+    // How many of a run's clips came from a saved sequence (gate cost preview).
+    reReusedClipCount(run) {
+      const chars = run?.job?.characters || {};
+      let n = 0;
+      for (const jc of Object.values(chars)) {
+        for (const v of (jc.videos || [])) if (v.reused_from_sequence) n++;
+      }
+      for (const sc of (run?.scenes || [])) if (sc.reused_direct) n++;
+      return n;
     },
 
     async loadReengineerHistory() {

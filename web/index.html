@@ -1179,21 +1179,62 @@
                  @change="addSwapImages($event.target.files); $event.target.value=''" />
         </div>
 
+        <!-- 📎 Paste a SAVED SEQUENCE (Hugo 2026-07-29): färdiga scener med
+             klipp läggs in som rader — karaktärer som redan finns i sekvensen
+             återanvänder sina klipp gratis, nya karaktärer genereras och måste
+             godkännas i grinden som vanligt. -->
+        <div class="flex items-center gap-2 text-xs">
+          <button @click="openSeqPicker('form')"
+                  class="px-2.5 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+                  title="Klistra in färdiga scener + klipp från en sparad sekvens — kostar inga genereringskrediter.">
+            📎 Sparad sekvens
+          </button>
+          <span class="text-neutral-400 dark:text-neutral-500"
+                x-text="sequences.length ? sequences.length + ' sparade sekvenser' : 'inga sparade sekvenser än'"></span>
+        </div>
+
         <!-- per-scene rows: thumbnail + motion/dialogue prompt + Kling length -->
         <div x-show="swapFromImages.rows.length" class="space-y-3">
           <template x-for="(row, idx) in swapFromImages.rows" :key="row.uid">
             <div class="flex gap-3 items-start border border-neutral-200 dark:border-neutral-800 rounded-xl p-3">
               <div class="shrink-0 relative">
-                <img :src="row.previewUrl" class="w-20 aspect-[9/16] object-cover rounded-lg" />
+                <img :src="row.kind === 'sequence' ? row.frameUrl : row.previewUrl"
+                     class="w-20 aspect-[9/16] object-cover rounded-lg"
+                     :class="row.kind === 'sequence' ? 'ring-2 ring-emerald-400' : ''" />
                 <div class="absolute top-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded-full"
                      x-text="'scen ' + (idx + 1)"></div>
               </div>
               <div class="flex-1 space-y-2">
-                <textarea rows="3"
+                <!-- A pasted row's clip is ALREADY rendered — its prompt and
+                     length describe what was generated, so they're read-only. -->
+                <div x-show="row.kind === 'sequence'"
+                     class="flex items-center gap-2 text-[11px] flex-wrap">
+                  <span class="px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 font-medium"
+                        title="Klippet är redan renderat — kostar inga genereringskrediter.">♻️ återanvänt klipp · 0 kr</span>
+                  <span class="text-neutral-400 dark:text-neutral-500"
+                        x-text="'från « ' + row.seqName + ' »'"></span>
+                  <span class="text-neutral-400 dark:text-neutral-500"
+                        x-text="seqSceneCoverText({is_direct: row.direct, char_ids: row.charIds}, swapFromImages.charIds)"></span>
+                </div>
+                <textarea x-show="row.kind !== 'sequence'" rows="3"
                           placeholder='Rörelse + replik, t.ex. She says enthusiastically to the camera: "Try this today."'
                           x-model="row.motion_prompt"
                           class="w-full px-2 py-1.5 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950"></textarea>
-                <div class="flex items-center gap-3 text-sm flex-wrap">
+                <p x-show="row.kind === 'sequence'"
+                   class="text-xs text-neutral-500 dark:text-neutral-400 italic whitespace-pre-wrap"
+                   x-text="row.motion_prompt || '(ingen prompt sparad)'"></p>
+                <div x-show="row.kind === 'sequence'" class="flex items-center gap-3 text-xs">
+                  <span class="text-neutral-400 dark:text-neutral-500"
+                        x-text="row.length + 's · redan renderad'"></span>
+                  <span class="flex-1"></span>
+                  <button @click="moveSwapImageRow(idx, -1)" :disabled="idx === 0"
+                          class="px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30" title="Flytta upp">↑</button>
+                  <button @click="moveSwapImageRow(idx, 1)" :disabled="idx === swapFromImages.rows.length - 1"
+                          class="px-2 py-1 rounded hover:bg-neutral-200 dark:hover:bg-neutral-800 disabled:opacity-30" title="Flytta ner">↓</button>
+                  <button @click="removeSwapImageRow(idx)"
+                          class="px-2 py-1 rounded text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950" title="Ta bort">✕</button>
+                </div>
+                <div x-show="row.kind !== 'sequence'" class="flex items-center gap-3 text-sm flex-wrap">
                   <!-- ONE Kling clip-length MENU (Hugo 2026-06-21): pick the
                        clip length sent to Kling (3–15 s) from a dropdown instead
                        of typing it. -->
@@ -1362,6 +1403,37 @@
                   @click="submitSwapFromImages()"
                   x-text="swapFromImages.submitting ? 'Laddar upp…' : '▶ Skapa'"></button>
         </div>
+
+        <!-- 🎞 Saved-sequence library: rename / delete. Collapsed by default —
+             the everyday entry point is the 📎 button above the scene rows. -->
+        <details x-show="sequences.length" class="border-t border-neutral-100 dark:border-neutral-900 pt-3">
+          <summary class="text-xs text-neutral-500 dark:text-neutral-400 cursor-pointer select-none">
+            🎞 Sparade sekvenser <span x-text="'(' + sequences.length + ')'"></span>
+          </summary>
+          <div class="mt-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            <template x-for="s in sequences" :key="'seqlib-' + s.seq_id">
+              <div class="border border-neutral-200 dark:border-neutral-800 rounded-xl p-2 space-y-1.5 bg-white dark:bg-neutral-900">
+                <div class="flex items-center gap-1">
+                  <span class="text-xs font-medium truncate flex-1" x-text="s.name"></span>
+                  <button class="text-[11px] text-neutral-400 hover:text-indigo-500"
+                          title="Döp om" @click="renameSequence(s)">✎</button>
+                  <button class="text-[11px] text-neutral-400 hover:text-rose-500"
+                          title="Ta bort sekvensen" @click="deleteSequence(s)">✕</button>
+                </div>
+                <div class="flex gap-1 overflow-x-auto">
+                  <template x-for="sc in s.scenes" :key="'seqlibsc-' + s.seq_id + '-' + sc.key">
+                    <img :src="sc.frame_url" class="w-8 aspect-[9/16] object-cover rounded shrink-0"
+                         :title="(sc.summary || '') + ' — ' + (sc.motion_prompt || '')" />
+                  </template>
+                </div>
+                <div class="text-[10px] text-neutral-400 dark:text-neutral-500 truncate"
+                     x-text="s.n_scenes + ' scen(er) · ' + s.chars.map(c => c.name).join(', ')"></div>
+                <button class="w-full text-[11px] px-2 py-1 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+                        @click="openSeqPicker('form'); pickSeq(s.seq_id)">📎 Klistra in</button>
+              </div>
+            </template>
+          </div>
+        </details>
       </div>
 
       <!-- REENGINEER entry: from a source VIDEO — only on the Reengineer tab. -->
@@ -1575,10 +1647,50 @@
                              reCanRetryFailed(r) ? '' : 'ml-auto']"
                     title="Redigera körningen: ändra prompter, gör om/lägg till/ta bort scener, bygg ihop igen"
                     @click="toggleReengineerEdit(r)">✎ Redigera</button>
+            <!-- 💾 Save a hand-picked set of this run's finished scenes + clips
+                 as a reusable sequence (Hugo 2026-07-29). -->
+            <button class="text-sm px-2 py-1 rounded text-emerald-600 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+                    x-show="['awaiting_assembly','done','partial_success'].includes(r.status)"
+                    title="Spara valda scener (bild + prompt + färdiga klipp per karaktär) så du kan klistra in dem i en framtida körning utan att betala för genereringen igen"
+                    @click="openSeqSave(r)">💾 Spara sekvens</button>
             <button class="text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950 rounded px-2 py-1 text-sm"
                     :class="(reEditable(r) || reCanRetryFailed(r)) ? '' : 'ml-auto'"
                     @click="deleteReengineer(r)">✕</button>
           </div>
+
+          <!-- Scene picker for "💾 Spara sekvens" — inline so the thumbnails
+               above stay visible while choosing. -->
+          <template x-if="seqSave && seqSave.reId === r.re_id">
+            <div class="rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50/50 dark:bg-emerald-950/30 p-3 space-y-2">
+              <div class="text-xs font-medium text-emerald-800 dark:text-emerald-300">
+                💾 Spara som sekvens — bocka i scenerna du vill kunna återanvända
+              </div>
+              <div class="flex gap-2 flex-wrap">
+                <template x-for="sc in (r.scenes || [])" :key="'seqsave-' + r.re_id + '-' + sc.idx">
+                  <button @click="toggleSeqSaveScene(sc.idx)"
+                          class="relative rounded-lg overflow-hidden border-2"
+                          :class="seqSaveChecked(sc.idx) ? 'border-emerald-500' : 'border-transparent opacity-50'"
+                          :title="'Scen ' + (sc.idx + 1) + ' — ' + (sc.summary || '')">
+                    <img :src="sc.frame_url" class="w-14 aspect-[9/16] object-cover" />
+                    <span x-show="seqSaveChecked(sc.idx)"
+                          class="absolute top-0.5 right-0.5 bg-emerald-500 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center">✓</span>
+                    <span class="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-[9px] text-center"
+                          x-text="sc.idx + 1"></span>
+                  </button>
+                </template>
+              </div>
+              <div class="flex items-center gap-2 flex-wrap">
+                <input type="text" x-model="seqSave.name" placeholder="Namn på sekvensen"
+                       class="flex-1 min-w-48 px-2 py-1.5 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950" />
+                <button class="px-3 py-1.5 text-sm rounded-lg bg-emerald-600 text-white disabled:opacity-40"
+                        :disabled="seqSave.saving || !seqSave.idxs.length"
+                        @click="saveSequence()"
+                        x-text="seqSave.saving ? 'Sparar…' : 'Spara (' + seqSave.idxs.length + ')'"></button>
+                <button class="px-2 py-1.5 text-sm rounded-lg text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                        @click="closeSeqSave()">Avbryt</button>
+              </div>
+            </div>
+          </template>
           <div x-show="r.error" class="text-xs px-3 py-2 rounded bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300"
                x-text="r.error"></div>
 
@@ -1599,6 +1711,10 @@
                     <span x-show="['image','video','duplicate'].includes(sc.source)"
                           class="text-[9px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 shrink-0"
                           x-text="sc.source === 'duplicate' ? '⧉ kopia' : '+ egen'"></span>
+                    <span x-show="sc.reused_from"
+                          class="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300 shrink-0 cursor-help"
+                          :title="'Inklistrad från den sparade sekvensen « ' + (sc.reused_from?.name || '') + ' » — de färdiga klippen återanvänds utan kostnad'"
+                          >♻️ sparad sekvens</span>
                     <span x-show="sc.transcribing" class="text-[9px] text-neutral-400 shrink-0">transkriberar…</span>
                     <!-- edit-mode toolbar: move / duplicate / delete -->
                     <div x-show="reEdit[r.re_id]" class="ml-auto flex gap-0.5 text-xs shrink-0">
@@ -1910,6 +2026,12 @@
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).qc_status === 'failed'"
                                    class="text-[8px] text-rose-400 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'QC: ' + ((reClipForVariant(jc, v.variant_id) || {}).qc_reason || 'klippet säger något annat än repliken')">⚠ QC: säger annat än repliken</div>
+                              <!-- Pasted in from a saved sequence (Hugo
+                                   2026-07-29): already rendered, costs nothing,
+                                   and re-animate/redo leave it alone. -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).reused_from_sequence"
+                                   class="text-[8px] text-emerald-600 dark:text-emerald-400 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'Återanvänt klipp från en sparad sekvens — kostade inga genereringskrediter och renderas inte om'">♻️ återanvänt klipp</div>
                               <!-- NSFW/content-policy fallback (Hugo 2026-07-14):
                                    the chosen model refused this clip, so it was
                                    re-rendered on grok-imagine-1.5. -->
@@ -2102,7 +2224,13 @@
                         <span x-show="!reengineerClipFor(r, sc, cid)?.variant"
                               class="text-neutral-400 cursor-help"
                               title="Ingen godkänd bild för den här scenen — godkänn en först">—</span>
+                        <!-- Pasted from a saved sequence: already rendered, and
+                             a redo would be a no-op (the server refuses it). -->
+                        <span x-show="reengineerClipFor(r, sc, cid)?.video?.reused_from_sequence"
+                              class="text-emerald-600 dark:text-emerald-400 cursor-help"
+                              title="Återanvänt klipp från en sparad sekvens — redan renderat, kostade 0 kr och görs inte om">♻️</span>
                         <button x-show="reengineerClipFor(r, sc, cid)?.variant
+                                        && !reengineerClipFor(r, sc, cid)?.video?.reused_from_sequence
                                         && !['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
                                 class="text-indigo-500 hover:underline"
                                 :title="'Ny tagning av ' + jc.name + 's klipp för den här scenen'"
@@ -2121,6 +2249,10 @@
                 <input type="file" accept="image/*,video/*" class="hidden"
                        @change="reengineerAddSceneFile(r, $event.target.files[0]); $event.target.value=''" />
               </label>
+              <!-- 📎 Paste finished scenes + clips from a saved sequence. -->
+              <button class="px-3 py-1.5 rounded-lg border border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950"
+                      title="Klistra in färdiga scener + klipp från en sparad sekvens. Karaktärer som redan finns i sekvensen kostar inget; nya karaktärer genereras och måste godkännas."
+                      @click="openSeqPicker(r.re_id)">+ Sparad sekvens</button>
               <template x-if="reAdd[r.re_id]">
                 <div class="flex items-center gap-2 flex-wrap">
                   <span class="text-neutral-400" x-text="reAdd[r.re_id].name"></span>
@@ -2333,6 +2465,11 @@
             <div x-show="reGateCoverage(r).missing.length"
                  class="px-3 py-2 rounded bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300"
                  x-text="'⚠ Hoppas över (ingen godkänd bild): ' + reGateCoverage(r).missing.join(', ')"></div>
+            <!-- Clips pasted from a saved sequence never re-render — spell out
+                 how much of the run is already paid for. -->
+            <div x-show="reReusedClipCount(r) > 0"
+                 class="text-emerald-700 dark:text-emerald-400"
+                 x-text="'♻️ ' + reReusedClipCount(r) + ' klipp återanvänds från sparade sekvenser (0 kr, renderas inte om)'"></div>
           </div>
 
           <!-- finals -->
@@ -4548,6 +4685,87 @@
           <span x-show="!submittingProject">Create project</span>
           <span x-show="submittingProject">Creating…</span>
         </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 📎 Paste a saved sequence (Hugo 2026-07-29). Target is either the Swap
+       upload form ('form') or an existing run's re_id (edit mode). -->
+  <div x-show="seqPicker" x-cloak
+       @click="closeSeqPicker()"
+       @keydown.window.escape="if (seqPicker) closeSeqPicker()"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-2xl max-h-[85vh] flex flex-col">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold">📎 Klistra in sparad sekvens</div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            Färdiga scener med klipp. Karaktärer som redan finns i sekvensen
+            återanvänder sina klipp gratis — nya karaktärer genereras och måste
+            godkännas i grinden som vanligt.
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"
+                @click="closeSeqPicker()">✕</button>
+      </div>
+      <div class="p-5 space-y-4 overflow-y-auto">
+        <template x-if="!sequences.length">
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            Inga sparade sekvenser än. Öppna en färdig körning och klicka
+            <span class="font-medium">💾 Spara sekvens</span> för att skapa en.
+          </div>
+        </template>
+        <div x-show="sequences.length" class="space-y-1.5">
+          <template x-for="s in sequences" :key="'seqpick-' + s.seq_id">
+            <button @click="pickSeq(s.seq_id)"
+                    class="w-full text-left px-3 py-2 rounded-lg border flex items-center gap-2"
+                    :class="seqPicker && seqPicker.seqId === s.seq_id
+                              ? 'border-emerald-500 ring-2 ring-emerald-200 dark:ring-emerald-900'
+                              : 'border-neutral-200 dark:border-neutral-800 hover:border-emerald-300'">
+              <span class="text-sm font-medium truncate" x-text="s.name"></span>
+              <span class="text-[11px] text-neutral-400 dark:text-neutral-500 shrink-0"
+                    x-text="s.n_scenes + ' scen(er) · ' + s.chars.map(c => c.name).join(', ')"></span>
+            </button>
+          </template>
+        </div>
+        <template x-if="seqPickerSeq()">
+          <div class="space-y-2">
+            <div class="text-xs uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
+              Scener att klistra in
+              <span class="normal-case text-neutral-400"
+                    x-text="'(' + seqPicker.keys.length + ' valda)'"></span>
+            </div>
+            <div class="space-y-1.5">
+              <template x-for="sc in seqPickerSeq().scenes" :key="'seqsc-' + sc.key">
+                <button @click="toggleSeqPickerScene(sc.key)"
+                        class="w-full flex items-center gap-3 px-2 py-1.5 rounded-lg border text-left"
+                        :class="seqPicker.keys.includes(sc.key)
+                                  ? 'border-emerald-500 bg-emerald-50/50 dark:bg-emerald-950/30'
+                                  : 'border-neutral-200 dark:border-neutral-800 opacity-60'">
+                  <img :src="sc.frame_url" class="w-10 aspect-[9/16] object-cover rounded shrink-0" />
+                  <span class="min-w-0 flex-1">
+                    <span class="block text-xs font-medium truncate" x-text="sc.summary || sc.key"></span>
+                    <span class="block text-[11px] text-neutral-500 dark:text-neutral-400 truncate"
+                          x-text="sc.motion_prompt || '(ingen prompt)'"></span>
+                    <span class="block text-[10px] text-emerald-700 dark:text-emerald-400"
+                          x-text="seqSceneCoverText(sc, seqPicker.target === 'form' ? swapFromImages.charIds : null)"></span>
+                  </span>
+                  <span x-show="seqPicker.keys.includes(sc.key)"
+                        class="text-emerald-500 text-sm shrink-0">✓</span>
+                </button>
+              </template>
+            </div>
+          </div>
+        </template>
+      </div>
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="text-sm text-neutral-500 dark:text-neutral-400 hover:underline px-2 py-1"
+                @click="closeSeqPicker()">Avbryt</button>
+        <button class="text-sm px-4 py-2 rounded-lg bg-emerald-600 text-white font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!seqPicker || !seqPicker.seqId || !seqPicker.keys.length || seqPicker.submitting"
+                @click="confirmSeqPaste()"
+                x-text="seqPicker && seqPicker.submitting ? 'Klistrar in…' : 'Klistra in'"></button>
       </div>
     </div>
   </div>

@@ -214,6 +214,13 @@ class VideoVariant(BaseModel):
     # end pose beats no clip, but the loss must never be silent). Surfaced as an
     # explicit "slutposen tappades" note next to the ⇄ chip.
     fallback_dropped_end_frame: bool = False
+    # Set when this clip was PASTED IN from a saved sequence (Hugo 2026-07-29)
+    # instead of rendered: `"<seq_id>:<scene_key>"`. The clip is also
+    # `imported=True` (so re-animation / redo leave it alone and assembly
+    # prefers it), but this narrower marker is what stops the FIRST animate
+    # from re-rendering it — a genuinely user-imported clip keeps today's
+    # behavior. Also drives the ♻️ chip in the clip strips.
+    reused_from_sequence: str | None = None
 
 
 class JobCharacter(BaseModel):
@@ -403,6 +410,14 @@ class Job(BaseModel):
     # duplicated scene can carry a DIFFERENT end pose (same start, different
     # end → different clip). Models without end-frame support ignore it.
     end_frames_by_scene: dict[str, str] = Field(default_factory=dict)
+    # Scenes PASTED IN from a saved sequence (Hugo 2026-07-29): scene_id →
+    # char_id → {image_path, clip_path, prompt, localized_movement_prompt,
+    # seq_id, scene_key}. `_kick_char` reads this and, instead of generating,
+    # materializes the stored swap image as a READY+approved GeneratedImage and
+    # the stored clip as a DONE `imported` VideoVariant — so the (char, scene)
+    # costs nothing. Characters WITHOUT an entry for a pasted scene generate +
+    # go through the normal approval gate.
+    reused_clips: dict[str, dict[str, dict]] = Field(default_factory=dict)
     compacted: bool = False                  # set true after `compact` strips non-approved files
     # Prompt enrichment for the swap flow: when True, the user's custom
     # `prompt` AND the `movement_prompt` are expanded through GPT-4o before

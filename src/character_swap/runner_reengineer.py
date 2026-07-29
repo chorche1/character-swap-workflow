@@ -537,6 +537,41 @@ async def _analyze(re_id: str, state: dict, source: Path,
     return scene_entries
 
 
+def _resolve_reused_clips(scene_entries: list[dict],
+                          char_ids: list[str]) -> dict[str, dict[str, dict]]:
+    """`Job.reused_clips` for every scene entry pasted from a saved sequence.
+
+    Returns `scene_id → char_id → payload` covering only the characters of THIS
+    run that the sequence actually stored a finished image+clip for. Direct
+    ("ingen swap") scenes carry their shared clip on the entry itself and never
+    appear here. A sequence that has since been deleted is skipped with a
+    warning — those scenes then generate normally rather than failing the run.
+    """
+    from character_swap import sequences
+
+    out: dict[str, dict[str, dict]] = {}
+    cache: dict[str, sequences.SavedSequence | None] = {}
+    for e in scene_entries:
+        ref = e.get("reused_from")
+        sid = e.get("scene_id")
+        if not ref or not sid or e.get("is_direct"):
+            continue
+        seq_id = ref.get("seq_id")
+        if seq_id not in cache:
+            cache[seq_id] = sequences.load(seq_id) if seq_id else None
+        seq = cache.get(seq_id)
+        sc = seq.scene(ref.get("scene_key") or "") if seq else None
+        if seq is None or sc is None:
+            _log.warning("reengineer: saved sequence %s/%s is gone — scene %s "
+                         "will generate normally",
+                         seq_id, ref.get("scene_key"), sid)
+            continue
+        covered = sequences.reused_map_for_scene(seq, sc, char_ids)
+        if covered:
+            out[sid] = covered
+    return out
+
+
 async def _create_job_and_swap(re_id: str, state: dict,
                                scene_entries: list[dict], job_id: str) -> None:
 
@@ -587,6 +622,13 @@ async def _create_job_and_swap(re_id: str, state: dict,
     direct_map = {e["scene_id"]: bool(e.get("is_direct")) for e in scene_entries}
     direct_ids = [sid for sid in uniq_ids if direct_map.get(sid)]
     swap_ids = [sid for sid in uniq_ids if not direct_map.get(sid)]
+
+    # Scenes PASTED IN from a saved sequence (Hugo 2026-07-29): resolve which
+    # of THIS run's characters already have a finished image+clip for them.
+    # `_kick_char` materializes those slots instead of generating; characters
+    # the sequence doesn't cover generate normally and land in the approval
+    # gate. Built after the scene_ids are final (incl. any `__dup` minting).
+    reused_clips = _resolve_reused_clips(scene_entries, list(chars))
 
     # Optional per-scene END FRAME (slutpose) staged at upload (Hugo 2026-06-23):
     # carry it onto Job.end_frames_by_scene so _kick_char swaps every character
@@ -676,6 +718,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         extra_reference_path=background_path,
         background_source=background_source,
         end_frames_by_scene=end_frames_by_scene,
+        reused_clips=reused_clips,
         video_model=state.get("video_model") or "kling-v3",
         video_audio=True,
         outfit_mode=state.get("outfit_mode") or "scene",
@@ -1181,14 +1224,18 @@ async def _do_animate(re_id: str, state: dict) -> None:
     current = reengineer.load_state(re_id) or state
     for e in current.get("scenes") or []:
         e.pop("dirty", None)
-        if e.get("is_direct"):       # full (re)animate re-renders the shared clip
+        # A direct scene PASTED IN from a saved sequence already owns its
+        # shared clip — clearing it here would re-render (and re-bill) exactly
+        # the clip the user saved to avoid paying for twice.
+        if e.get("is_direct") and not e.get("reused_direct"):
             e["shared_clip_path"] = None
             e.pop("direct_error", None)
     _update(re_id, status="animating", scenes=current.get("scenes") or [])
 
     # ONE shared Kling clip per direct scene (no swap), reused by all characters.
     direct_tasks = [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
-                    for e in (current.get("scenes") or []) if e.get("is_direct")]
+                    for e in (current.get("scenes") or [])
+                    if e.get("is_direct") and not e.get("reused_direct")]
     # Per-character clips only when there are swap scenes (skip for all-direct).
     swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
     video_task = (asyncio.create_task(runner.run_video_synthesis(job.job_id))
@@ -2120,6 +2167,53 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
     await asyncio.gather(*[
         runner.regen_scene_variants(job.job_id, cid, scene_id, sem=sem)
         for cid in job.characters
+    ])
+
+
+def materialize_pasted_scene(job: Job, scene_id: str) -> list[str]:
+    """Fill in every (character, `scene_id`) slot the pasted sequence covers.
+
+    Used by the edit-mode paste, where no `_kick_char` runs: the reused image +
+    clip are added directly as approved/done rows. Returns the char_ids that
+    were NOT covered — they still need normal generation + approval. The job is
+    persisted here so the endpoint's response already shows the reused clips.
+    """
+    per_char = (job.reused_clips or {}).get(scene_id) or {}
+    uncovered: list[str] = []
+    changed = False
+    for cid, jc in (job.characters or {}).items():
+        payload = per_char.get(cid)
+        if payload and runner._materialize_reused_slot(job, jc, scene_id, payload):
+            changed = True
+            continue
+        uncovered.append(cid)
+    if changed:
+        job.updated_at = datetime.utcnow()
+        store().update_job(job)
+    return uncovered
+
+
+async def generate_pasted_scene(re_id: str, scene_id: str) -> None:
+    """Background half of '+ Sparad sekvens': generate swap images ONLY for the
+    characters the sequence doesn't cover (Hugo 2026-07-29 — a character that
+    wasn't in the saved sequence must still be approved in the gate before its
+    clip renders). Characters with a reused clip were already materialized by
+    `materialize_pasted_scene` and generate nothing."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    job = store().get_job(state["job_id"])
+    if job is None:
+        return
+    covered = set((job.reused_clips or {}).get(scene_id) or {})
+    targets = [cid for cid in job.characters if cid not in covered]
+    if not targets:
+        return
+    sem = asyncio.Semaphore(
+        runner._image_concurrency_for_model(runner._swap_image_model(job)))
+    await asyncio.gather(*[
+        runner.regen_scene_variants(job.job_id, cid, scene_id, sem=sem)
+        for cid in targets
     ])
 
 

@@ -625,6 +625,69 @@ def _parse_director_plan(job: Job):
         return None
 
 
+def _materialize_reused_slot(job: Job, jc: JobCharacter, scene_id: str,
+                             reuse: dict) -> bool:
+    """Fill one (char, scene) slot from a saved sequence instead of generating.
+
+    Writes the two ordinary rows the rest of the pipeline already understands:
+    a READY + APPROVED `GeneratedImage` and a DONE `VideoVariant` marked
+    `imported` (so redo/re-animate leave it alone and `pick_clip_for_variant`
+    prefers it) plus `reused_from_sequence` (so the FIRST animate skips it too).
+
+    The files are hard-linked into this job's own output dir, so the run keeps
+    working if the sequence is later deleted. Returns False when the stored
+    files are gone — the caller then generates the slot normally rather than
+    leaving a silent hole in the final.
+    """
+    from character_swap import sequences
+
+    img_src = Path(reuse.get("image_path") or "")
+    clip_src = Path(reuse.get("clip_path") or "")
+    if not (img_src.exists() and clip_src.exists()):
+        return False
+
+    variant_id = _short("v_")
+    video_id = _short("vd_")
+    out_dir = _output_dir(job.job_id, jc.char_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        img_dest = sequences.link_or_copy(
+            img_src, out_dir / f"variant_{variant_id}.png")
+        clip_dest = sequences.link_or_copy(
+            clip_src,
+            out_dir / f"reused_{video_id}_{secrets.token_hex(2)}"
+                      f"{clip_src.suffix.lower() or '.mp4'}")
+    except OSError:
+        logger.exception("job %s: could not stage reused files for %s/%s",
+                         job.job_id, jc.char_id, scene_id)
+        return False
+
+    tag = f"{reuse.get('seq_id') or ''}:{reuse.get('scene_key') or ''}"
+    jc.images.append(GeneratedImage(
+        variant_id=variant_id,
+        path=str(img_dest),
+        prompt=reuse.get("prompt") or "",
+        scene_id=scene_id,
+        status=VariantStatus.READY,
+        imported=True,
+    ))
+    # Pre-approved: the user already picked this image in the source run, and
+    # the clip that goes with it is the one they saved.
+    jc.approved_variant_ids.append(variant_id)
+    jc.videos.append(VideoVariant(
+        video_id=video_id,
+        grok_job_id="",
+        status=VideoStatus.DONE,
+        source_variant_id=variant_id,
+        final_video_path=str(clip_dest),
+        completed_at=datetime.utcnow(),
+        localized_movement_prompt=reuse.get("localized_movement_prompt"),
+        imported=True,
+        reused_from_sequence=tag,
+    ))
+    return True
+
+
 async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore) -> None:
     """Reset a character and start N fresh variants per scene.
 
@@ -673,10 +736,29 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
     # reused for every character (handled in runner_reengineer animate/assemble).
     direct_scenes = set(job.direct_scene_ids or [])
 
+    # Scenes PASTED IN from a saved sequence (Hugo 2026-07-29): this character
+    # already has a finished image + clip for them, so they generate NOTHING.
+    # Materialized below as ordinary approved-image + done-clip rows.
+    reused_by_scene = {
+        sid: entry for sid, per_char in (job.reused_clips or {}).items()
+        if (entry := (per_char or {}).get(jc.char_id))
+    }
+    n_reused = 0
+
     placeholders: list[GeneratedImage] = []
     for sid in scene_ids:
         if sid in direct_scenes:
             continue
+        reuse = reused_by_scene.get(sid)
+        if reuse is not None:
+            if _materialize_reused_slot(job, jc, sid, reuse):
+                n_reused += 1
+                continue
+            # Files vanished (sequence deleted mid-flight) — fall through and
+            # generate this slot normally rather than shipping a silent gap.
+            logger.warning(
+                "job %s char %s scene %s: reused clip missing on disk — "
+                "generating instead", job.job_id, jc.char_id, sid)
         # Pull this (char, scene)'s ordered per-variant prompts from the
         # Director cache, if present. Indexed by variant_index in plan; we
         # consume them in order. Missing entries fall back.
@@ -697,10 +779,16 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
             )
             placeholders.append(v)
             jc.images.append(v)
+    if n_reused and not placeholders:
+        # Every scene of this character came from a saved sequence — nothing to
+        # generate. Without this the char would sit at QUEUED forever (nothing
+        # else advances its status) while its variants are already READY.
+        jc.status = CharStatus.AWAITING_APPROVAL
     _persist(job, jc)
     await _emit(job.job_id, "char.queued", char_id=jc.char_id,
                 images_per_character=n,
                 n_scenes=len(scene_ids),
+                n_reused=n_reused,
                 director_applied=bool(director_plan))
 
     await asyncio.gather(
@@ -1611,6 +1699,15 @@ async def _animate_character(
 
     placeholders: list[tuple[VideoVariant, str, int | None, Path | None]] = []
     for src_variant_id in approved_ids:
+        if any(vv.source_variant_id == src_variant_id
+               and vv.reused_from_sequence
+               and vv.status == VideoStatus.DONE
+               for vv in jc.videos):
+            # Pasted in from a saved sequence — the clip is already finished.
+            # Re-rendering it here would bill the exact clip the user saved to
+            # avoid paying for twice. (Deliberately narrow: a user-IMPORTED
+            # clip without this marker keeps today's behavior.)
+            continue
         variant = next((iv for iv in jc.images if iv.variant_id == src_variant_id), None)
         scene_id = variant.scene_id if variant else None
         prompt = by_variant.get(src_variant_id) or prompt_for_scene(scene_id)
@@ -1632,6 +1729,12 @@ async def _animate_character(
             )
             jc.videos.append(v)
             placeholders.append((v, prompt, duration, end_image))
+    if not placeholders:
+        # Every approved slot was pasted in from a saved sequence — there is
+        # nothing to render. Settle the character now, or it would sit at
+        # ANIMATING forever with finished clips.
+        _maybe_complete_char(job, jc)
+        return
     _persist(job, jc)
 
     await asyncio.gather(

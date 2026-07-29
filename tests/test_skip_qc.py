@@ -116,6 +116,7 @@ def _create_from_images(skip_qc):
         bg, files=files,
         motion_prompts=json.dumps(['She says: "Try this."']),
         lengths=json.dumps([5]), direct="[]",
+        seq_rows="[]", file_rows="[]",
         end_frame_files=[], end_frame_idx="[]",
         character_ids=json.dumps(["cA"]), image_model="gpt2-id-swap",
         outfit_mode="scene", outfit_text="", auto_mode=False,
