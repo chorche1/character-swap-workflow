@@ -54,8 +54,36 @@ _ACCOUNT_BLOCK_SECS = 600.0
 _account_block: dict = {"until": 0.0, "reason": ""}
 
 
+def error_detail(e: Exception) -> str:
+    """`str(e)` PLUS the HTTP response body, which is where fal puts the real
+    reason.
+
+    httpx's `HTTPStatusError` message is only the status + URL — e.g.
+    `Client error '403 Forbidden' for url '…/storage/auth/token…'` — while the
+    body carries the actionable part:
+    `{"detail":"User is locked. Reason: Exhausted balance. Top up your balance
+    at fal.ai/dashboard/billing"}`.
+
+    Hugo 2026-07-29: a locked fal account (balance −$69.86) therefore looked
+    like a bare 403 to BOTH `_is_account_error` (so the circuit breaker never
+    tripped and every retry re-burned an upload) and the clip's error chip in
+    the UI (so the run showed a cryptic URL instead of "top up fal"). Every
+    fal client's error path funnels through here."""
+    msg = str(e)
+    resp = getattr(e, "response", None)
+    body = ""
+    if resp is not None:
+        try:
+            body = (resp.text or "").strip()
+        except Exception:            # unread stream / decode error — ignore
+            body = ""
+    if body and body[:120] not in msg:
+        msg = f"{msg} | {body[:400]}"
+    return msg
+
+
 def _is_account_error(e: Exception) -> bool:
-    s = str(e).lower()
+    s = error_detail(e).lower()
     return any(m in s for m in _ACCOUNT_ERROR_MARKERS)
 
 
@@ -70,7 +98,7 @@ def _check_account_block() -> None:
 
 def _trip_account_block(e: Exception) -> None:
     _account_block["until"] = time.monotonic() + _ACCOUNT_BLOCK_SECS
-    _account_block["reason"] = str(e)[:300]
+    _account_block["reason"] = error_detail(e)[:300]
 
 
 def _endpoint() -> str:
@@ -141,8 +169,8 @@ def submit_image_to_video(
             if _is_account_error(e):
                 _trip_account_block(e)
                 raise FalAccountError(
-                    f"fal account cannot accept work: {e}") from e
-            raise RuntimeError(f"fal.upload_file failed: {e}") from e
+                    f"fal account cannot accept work: {error_detail(e)}") from e
+            raise RuntimeError(f"fal.upload_file failed: {error_detail(e)}") from e
         payload["upload_url"] = start_url
 
         arguments = {
@@ -163,7 +191,7 @@ def submit_image_to_video(
             try:
                 end_url = fal.upload_file(str(end_image))
             except Exception as e:
-                raise RuntimeError(f"fal.upload_file (end frame) failed: {e}") from e
+                raise RuntimeError(f"fal.upload_file (end frame) failed: {error_detail(e)}") from e
             arguments["end_image_url"] = end_url
             payload["end_upload_url"] = end_url
         try:
@@ -172,8 +200,8 @@ def submit_image_to_video(
             if _is_account_error(e):
                 _trip_account_block(e)
                 raise FalAccountError(
-                    f"fal account cannot accept work: {e}") from e
-            raise RuntimeError(f"fal {_endpoint()} submit failed: {e}") from e
+                    f"fal account cannot accept work: {error_detail(e)}") from e
+            raise RuntimeError(f"fal {_endpoint()} submit failed: {error_detail(e)}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id
         return request_id

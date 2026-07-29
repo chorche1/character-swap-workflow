@@ -48,6 +48,7 @@ from character_swap.clients.fal_kling import (
     _check_account_block,
     _is_account_error,
     _trip_account_block,
+    error_detail,
 )
 from character_swap.config import settings
 
@@ -146,8 +147,8 @@ def submit_image_to_video(
             if _is_account_error(e):
                 _trip_account_block(e)
                 raise FalAccountError(
-                    f"fal account cannot accept work: {e}") from e
-            raise RuntimeError(f"fal.upload_file failed: {e}") from e
+                    f"fal account cannot accept work: {error_detail(e)}") from e
+            raise RuntimeError(f"fal.upload_file failed: {error_detail(e)}") from e
         payload["upload_url"] = start_url
 
         arguments = {
@@ -162,7 +163,7 @@ def submit_image_to_video(
             try:
                 end_url = fal.upload_file(str(end_image))
             except Exception as e:
-                raise RuntimeError(f"fal.upload_file (end frame) failed: {e}") from e
+                raise RuntimeError(f"fal.upload_file (end frame) failed: {error_detail(e)}") from e
             arguments["end_image_url"] = end_url
             payload["end_upload_url"] = end_url
         try:
@@ -171,8 +172,8 @@ def submit_image_to_video(
             if _is_account_error(e):
                 _trip_account_block(e)
                 raise FalAccountError(
-                    f"fal account cannot accept work: {e}") from e
-            raise RuntimeError(f"fal {_endpoint()} submit failed: {e}") from e
+                    f"fal account cannot accept work: {error_detail(e)}") from e
+            raise RuntimeError(f"fal {_endpoint()} submit failed: {error_detail(e)}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id
         return request_id

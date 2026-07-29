@@ -96,6 +96,74 @@ def test_account_error_on_upload_also_trips(monkeypatch, tmp_path):
     assert len(uploads) == 1
 
 
+# --- the reason lives in the HTTP BODY, not str(e) (Hugo 2026-07-29) ---------
+
+
+def _locked_403() -> Exception:
+    """The real shape of a locked-account fal error: httpx's message is ONLY
+    status + URL; the actionable reason is in the response body."""
+    import httpx
+    req = httpx.Request(
+        "POST", "https://rest.fal.ai/storage/auth/token?storage_type=fal-cdn-v3")
+    resp = httpx.Response(403, request=req, json={
+        "detail": "User is locked. Reason: Exhausted balance. "
+                  "Top up your balance at fal.ai/dashboard/billing"})
+    return httpx.HTTPStatusError(
+        "Client error '403 Forbidden' for url "
+        "'https://rest.fal.ai/storage/auth/token?storage_type=fal-cdn-v3'",
+        request=req, response=resp)
+
+
+def test_locked_account_403_is_classified_from_the_response_body(
+        monkeypatch, tmp_path):
+    """THE FIX: a locked fal account (balance -$69.86, 2026-07-29) reached the
+    runner as a bare '403 Forbidden' — so the circuit breaker never tripped and
+    every ↻ re-burned an upload, while the UI showed a cryptic URL instead of
+    "top up fal"."""
+    exc = _locked_403()
+    assert "exhausted balance" not in str(exc).lower()   # invisible before
+    assert fal_kling._is_account_error(exc)              # visible now
+
+    uploads, _ = _wire(monkeypatch, upload_error=exc)
+    with pytest.raises(fal_kling.FalAccountError) as ei:
+        _submit(tmp_path)
+    # The clip's error chip now names the cause + the fix.
+    assert "Exhausted balance" in str(ei.value)
+    assert "fal.ai/dashboard/billing" in str(ei.value)
+    # ...and the breaker trips, so siblings fail fast without another upload.
+    with pytest.raises(fal_kling.FalAccountError, match="paused"):
+        _submit(tmp_path)
+    assert len(uploads) == 1
+    assert "Exhausted balance" in fal_kling._account_block["reason"]
+
+
+def test_error_detail_is_safe_on_plain_and_bodyless_errors():
+    assert fal_kling.error_detail(RuntimeError("boom")) == "boom"
+    assert not fal_kling._is_account_error(RuntimeError("connection reset"))
+
+    class _Unread:                       # httpx raises on .text before read
+        @property
+        def text(self):
+            raise RuntimeError("ResponseNotRead")
+    exc = RuntimeError("stream broke")
+    exc.response = _Unread()             # type: ignore[attr-defined]
+    assert fal_kling.error_detail(exc) == "stream broke"
+
+
+def test_every_fal_client_shares_the_body_aware_classifier():
+    """fal_grok / fal_veo / fal_seedance / fal_veed all funnel their error
+    paths through the same helper — a locked account must read the same on
+    whichever model a clip happened to run."""
+    from character_swap.clients import (
+        fal_grok, fal_seedance, fal_veed, fal_veo,
+    )
+    exc = _locked_403()
+    for mod in (fal_grok, fal_veo, fal_seedance):
+        assert mod._is_account_error(exc), mod.__name__
+        assert mod.error_detail is fal_kling.error_detail, mod.__name__
+    assert fal_veed.error_detail is fal_kling.error_detail
+
+
 # --- transient-error retries on download (backlog #34) -----------------------
 
 

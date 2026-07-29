@@ -39,6 +39,7 @@ import httpx
 
 from character_swap import call_log
 from character_swap.clients import ProviderNotConfigured
+from character_swap.clients.fal_kling import error_detail
 from character_swap.config import settings
 
 
@@ -122,7 +123,7 @@ def render_captions(
         try:
             video_url = fal.upload_file(str(input_video))
         except Exception as e:
-            raise RuntimeError(f"fal.upload_file failed: {e}") from e
+            raise RuntimeError(f"fal.upload_file failed: {error_detail(e)}") from e
         payload["upload_url"] = video_url
 
         # 2. Submit job and block until result is ready.
@@ -151,7 +152,7 @@ def render_captions(
             handler = fal.submit(ENDPOINT, arguments=arguments)
             result = handler.get()
         except Exception as e:
-            raise RuntimeError(f"fal {ENDPOINT} failed: {e}") from e
+            raise RuntimeError(f"fal {ENDPOINT} failed: {error_detail(e)}") from e
 
         # 3. Download the rendered MP4 from the returned CDN URL.
         video = result.get("video") if isinstance(result, dict) else None
