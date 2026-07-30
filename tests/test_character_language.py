@@ -138,15 +138,35 @@ def test_localize_skips_inline_spanish_attribution(monkeypatch):
 
 
 def test_localize_no_dialogue_leaves_prompt_untouched(monkeypatch):
-    """A purely-visual clip (no says-clause) is left COMPLETELY untouched — no
-    translation, and no Spanish-accent / no-music / pronunciation directive
-    injected into a silent shot that never carried an accent clause."""
+    """A purely-visual clip (no says-clause, NO speech directive at all) is left
+    COMPLETELY untouched — no translation, and no Spanish-accent / no-music /
+    pronunciation directive injected into a genuinely silent shot."""
     _stub_translate(monkeypatch, _boom)
     p = "She walks toward the window, slow dolly-in."
     assert reengineer.localize_motion_prompt(p, "es") == p
-    # Even a silent clip that DID carry the EN accent clause is left alone.
-    p2 = reengineer.with_accent("He slices a kiwi.", "en")
-    assert reengineer.localize_motion_prompt(p2, "es") == p2
+
+
+def test_localize_swaps_the_language_when_the_clip_orders_english(monkeypatch):
+    """A prompt carrying the EN accent clause but no quoted line is NOT silent.
+
+    This test used to assert the opposite ("even a silent clip that DID carry
+    the EN accent clause is left alone") on the assumption that no dialogue
+    meant no speech. Hugo's run j_4655f5f235 disproved it: three scenes reached
+    Kling with an empty motion prompt plus `The person speaks fluent American
+    English…`, and Kling IMPROVISED speech from that clause — both 🇪🇸
+    characters' clips transcribe as English ("This is pure salt. Dissolve it in
+    water.", language=english). The early return skipped the accent swap, so
+    the flag was silently ignored.
+
+    Nothing to translate, but the language order still has to flip."""
+    _stub_translate(monkeypatch, _boom)     # must NOT call the translator
+    p = reengineer.with_accent("He slices a kiwi.", "en")
+
+    out = reengineer.localize_motion_prompt(p, "es")
+
+    assert "American English" not in out
+    assert reengineer._ES_LOCALIZED_MARKER in out.lower()
+    assert "He slices a kiwi." in out       # the visual direction survives
 
 
 def test_localize_strips_standalone_en_clause_with_dialogue(monkeypatch):

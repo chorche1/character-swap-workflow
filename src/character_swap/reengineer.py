@@ -31,7 +31,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from character_swap.config import settings
-from character_swap.video_edit import DIALOGUE_RE, Word, _probe_duration
+from character_swap.video_edit import (
+    DIALOGUE_RE,
+    Word,
+    _probe_duration,
+    dialogue_matches,
+)
 
 # Scene-detection knobs. UGC reference videos cut between SIMILAR-looking
 # shots (same person, same room — only the grip/pose/prop changes), which
@@ -617,6 +622,53 @@ def with_accent(prompt: str, language: str = "en") -> str:
 _INLINE_EN_ACCENT_RE = re.compile(
     r"(?i)\s+(?:with|in)\s+an?\s+(?:\w+\s+){0,2}?American(?:\s+English)?\s+accent")
 
+# An explicit ORDER to speak English — the Director's own AUDIO phrasing,
+# "Deep, clear male voice speaking English with a thick Texas accent". Neither
+# marker above catches it: it is not the standalone clause, and its accent is
+# "Texas", not "American". Left standing NEXT TO a translated Spanish line it
+# is the strongest, closest instruction in the prompt, so Kling follows it and
+# the clip speaks English anyway (Hugo 2026-07-31). The optional trailing
+# `with a … accent` is consumed with it so no orphan English-region accent
+# survives the swap.
+_EN_SPEECH_ORDER_RE = re.compile(
+    r"(?i)\b(?:speaks?|speaking|spoken)\s+(?:fluent\s+|natural\s+)*English\b"
+    r"(?:\s+with\s+an?\s+(?:[\w-]+\s+){0,3}?accent)?")
+_ES_SPEECH_ORDER = "speaking in neutral Latin American Spanish"
+
+
+def _has_english_speech_directive(prompt: str) -> bool:
+    """True when a prompt TELLS the model to speak English, even though it
+    carries no quoted dialogue we could translate.
+
+    Such a prompt is not a silent clip: Kling improvises speech from it, in the
+    language it was told to use. For an 🇪🇸-flagged character that directive is
+    exactly wrong, so the language swap must happen anyway (Hugo 2026-07-31)."""
+    text = prompt or ""
+    return bool(ACCENT_CLAUSE["en"][0] in text
+                or _INLINE_EN_ACCENT_RE.search(text)
+                or _EN_SPEECH_ORDER_RE.search(text))
+
+
+def _force_spanish_speech(text: str) -> str:
+    """Remove EVERY English-language order and guarantee a Spanish one.
+
+    One helper for both localize paths (dialogue translated / nothing to
+    translate) so a prompt shape can never come out with the dialogue in
+    Spanish but the language order still in English. Strips the standalone
+    clause + the inline American-accent attribution, flips an explicit
+    "speaking English…" order in place, then falls back to appending the
+    standalone Spanish clause when nothing inline established the language."""
+    out = text.replace(ACCENT_CLAUSE["en"][0], "")
+    out = _INLINE_EN_ACCENT_RE.sub("", out)
+    out = _EN_SPEECH_ORDER_RE.sub(_ES_SPEECH_ORDER, out)
+    # with_accent's keyword guard can be falsely suppressed by an incidental
+    # scene word ("Spanish-tiled kitchen"), so the marker check below is the
+    # hard guarantee.
+    out = with_accent(out, "es")
+    if _ES_LOCALIZED_MARKER not in out.lower():
+        out = out.rstrip() + ACCENT_CLAUSE["es"][0]
+    return out
+
 # The marker that a prompt is ALREADY a full-"es" run: every run-level shape (the
 # analyst's "in neutral Latin American Spanish" attribution AND the standalone ES
 # accent clause) contains this exact phrase, while natural English dialogue or
@@ -684,11 +736,26 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         return cached
 
     # Localize ONLY a clip that actually carries spoken dialogue — a silent /
-    # visual-only clip is left completely untouched.
-    matches = list(DIALOGUE_RE.finditer(prompt))
+    # visual-only clip is left completely untouched. `dialogue_matches` is the
+    # SHARED extractor (says-clause → labeled line → speech verb), so every
+    # prompt shape the captions can read is a shape we can translate.
+    matches = dialogue_matches(prompt)
     phrases = [m.group(1).strip() for m in matches]
     if not any(phrases):
-        return prompt
+        # No quoted line to translate — but "no line" is NOT the same as
+        # "silent". A prompt that still ORDERS English ("The person speaks
+        # fluent American English…", "with a thick Texas accent") makes Kling
+        # improvise English speech for a character flagged 🇪🇸 (Hugo
+        # 2026-07-31: two characters shipped English clips this way, silently,
+        # because the early return skipped the accent swap too). Swap the
+        # language directive even with nothing to translate; a genuinely
+        # silent prompt carries no such directive and is still returned
+        # untouched.
+        if not _has_english_speech_directive(prompt):
+            return prompt
+        es_only = _force_spanish_speech(prompt)
+        _LOCALIZE_CACHE[(lang, prompt)] = es_only
+        return es_only
 
     translated = translate_dialogue(phrases, re_id=job_id)
     if translated is None:
@@ -707,15 +774,10 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         s, e = m.span(1)
         es_prompt = es_prompt[:s] + es + es_prompt[e:]
 
-    # Strip EVERY English-accent marker (standalone sentence + inline attribution)
-    # then enforce the Spanish accent. with_accent's keyword guard can be falsely
-    # suppressed by an incidental scene word ("Spanish-tiled kitchen"), so make
-    # the ES accent clause a HARD guarantee afterwards.
-    es_prompt = es_prompt.replace(ACCENT_CLAUSE["en"][0], "")
-    es_prompt = _INLINE_EN_ACCENT_RE.sub("", es_prompt)
-    es_prompt = with_accent(es_prompt, "es")
-    if _ES_LOCALIZED_MARKER not in es_prompt.lower():
-        es_prompt = es_prompt.rstrip() + ACCENT_CLAUSE["es"][0]
+    # Strip EVERY English-language order (standalone clause, inline American
+    # accent, and an explicit "speaking English…" order sitting right next to
+    # the line we just translated) and enforce the Spanish one.
+    es_prompt = _force_spanish_speech(es_prompt)
 
     if len(_LOCALIZE_CACHE) >= _LOCALIZE_CACHE_MAX:
         _LOCALIZE_CACHE.clear()

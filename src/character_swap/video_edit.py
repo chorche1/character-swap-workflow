@@ -1820,6 +1820,36 @@ _LABELED_DIALOGUE_RE = re.compile(
     r'\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]',
     re.IGNORECASE)
 
+# Speech introduced by a VERB OTHER than `says`, with no `Dialogue:` label to
+# anchor on — the structured Director prompt's own AUDIO section:
+#   `AUDIO — Deep, clear male voice speaking English with a thick Texas accent
+#    enthusiastically: "Did you know that you can cleanse your body …"`
+# Neither of the two patterns above sees that line (no `says`, and the label
+# before the colon is a voice DESCRIPTION, not the word "Dialogue"), so the
+# prompt read as a SILENT clip.
+#
+# Hugo 2026-07-31: that is how two 🇪🇸-flagged characters shipped English
+# clips. `localize_motion_prompt` translates the quoted dialogue it can FIND
+# and returns the prompt untouched when it finds none — so an unparsed line
+# meant the AUDIO block's "voice speaking English with a thick Texas accent"
+# went to Kling verbatim, and the character spoke English. Same silent-hole
+# class as the 06-30 `AUDIO — … Dialogue:` miss.
+#
+# The colon before the quote is the guard that keeps props out: `bottle labeled
+# "Heinz White Vinegar"` has no speech verb, and `Voice: male, American accent`
+# has no quote. Bare `voice` is deliberately NOT a verb here — only `voice-over`
+# — because "Voice:" alone precedes descriptions far more often than speech.
+# Mirrored in app.js klingSpeechSecs; the JS-mirror sync test pins it.
+_SPOKEN_VERB_DIALOGUE_RE = re.compile(
+    r'\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|'
+    r'announces|declares|proclaims)\b[^"“”]{0,160}?:\s*["“]([^"”]+)["”]',
+    re.IGNORECASE)
+
+# Ordered most→least specific. The FIRST pattern that finds anything wins, so a
+# prompt carrying an explicit says-clause never double-counts an AUDIO block.
+_DIALOGUE_PATTERNS = (DIALOGUE_RE, _LABELED_DIALOGUE_RE,
+                      _SPOKEN_VERB_DIALOGUE_RE)
+
 # Stage directions written INSIDE the dialogue quotes — `"This is store-bought
 # honey (while he points at the jar), and this is raw honey"` — are NOT spoken;
 # they tell the character what to DO. They were leaking into burned captions via
@@ -1845,14 +1875,27 @@ def extract_dialogue(text: str) -> str:
 
     Prefers the analyst's canonical says-clause(s) (`… says …: "…"`); when none
     is present, falls back to a LABELED line from a structured Director prompt
-    (`AUDIO — … Dialogue: "…"`, `Voice-over: "…"`). Parenthetical stage
+    (`AUDIO — … Dialogue: "…"`, `Voice-over: "…"`), then to a speech VERB with
+    no label (`AUDIO — … voice speaking English …: "…"`). Parenthetical stage
     directions inside the quotes are stripped — they're never spoken, so they
     must never reach captions / the bias hint / the QC check."""
-    parts = [t.strip() for t in DIALOGUE_RE.findall(text or "") if t.strip()]
-    if not parts:
-        parts = [t.strip() for t in _LABELED_DIALOGUE_RE.findall(text or "")
-                 if t.strip()]
+    parts = [m.group(1).strip() for m in dialogue_matches(text)]
     return _strip_stage_directions(" ".join(parts).strip())
+
+
+def dialogue_matches(text: str) -> list[re.Match]:
+    """Every spoken span in a motion prompt, as MATCH objects (group 1 = the
+    line) so callers that must rewrite the dialogue in place — Spanish
+    localization — share the exact extraction the readers use.
+
+    `extract_dialogue` is the text-only view of this; both must stay on the
+    same patterns or a prompt shape gets localized but not captioned, or vice
+    versa (Hugo 2026-07-31)."""
+    for rx in _DIALOGUE_PATTERNS:
+        found = [m for m in rx.finditer(text or "") if (m.group(1) or "").strip()]
+        if found:
+            return found
+    return []
 
 
 def remap_words_through_keeps(

@@ -2346,6 +2346,14 @@ function studio() {
         const lm = [...prompt.matchAll(/\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]/gi)];
         saysSpoken = lm.map(x => x[1]).join(' ').trim();
       }
+      if (!saysSpoken) {
+        // Mirror of video_edit._SPOKEN_VERB_DIALOGUE_RE — the Director's AUDIO
+        // block introduces the line with a speech VERB plus a voice
+        // DESCRIPTION instead of a label (`… voice speaking English …: "…"`).
+        // The colon before the quote is what keeps quoted props out.
+        const vm = [...prompt.matchAll(/\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|announces|declares|proclaims)\b[^"“”]{0,160}?:\s*["“]([^"”]+)["”]/gi)];
+        saysSpoken = vm.map(x => x[1]).join(' ').trim();
+      }
       const spoken = (saysSpoken || String(sc.speech || '').trim());
       const words = spoken ? spoken.split(/\s+/).length : 0;
       return words ? words / 2.2 + 1.0 : 0;

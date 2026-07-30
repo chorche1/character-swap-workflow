@@ -653,6 +653,12 @@ def test_kling_duration_js_mirror_in_sync():
     label_frag = r'(?:dialogue|spoken\s+line|voice-?over)\s*:\s*'
     assert label_frag in hint, "JS labeled-dialogue regex drifted"
     assert label_frag in _ve._LABELED_DIALOGUE_RE.pattern
+    # …and the speech-VERB fallback (`AUDIO — … voice speaking English …: "…"`),
+    # the shape that shipped English clips for 🇪🇸 characters (Hugo 07-31).
+    verb_frag = (r'\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|'
+                 r'announces|declares|proclaims)\b')
+    assert verb_frag in hint, "JS speech-verb dialogue regex drifted"
+    assert verb_frag in _ve._SPOKEN_VERB_DIALOGUE_RE.pattern
 
 
 def test_speech_secs_parses_descriptor_attribution():
