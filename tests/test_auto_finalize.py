@@ -369,7 +369,7 @@ def test_retry_one_video_rechecks_auto_finalize(monkeypatch, tmp_path):
 
     finalized = []
 
-    async def fake_finalize(job_id):
+    async def fake_finalize(job_id, char_id=None):
         finalized.append(job_id)
 
     monkeypatch.setattr(runner, "_resolve_end_image", fake_end)
@@ -394,7 +394,7 @@ def test_retry_timeout_salvage_rechecks_auto_finalize(monkeypatch, tmp_path):
 
     finalized = []
 
-    async def fake_finalize(job_id):
+    async def fake_finalize(job_id, char_id=None):
         finalized.append(job_id)
 
     monkeypatch.setattr(runner, "_salvage_timed_out_video", fake_salvage)

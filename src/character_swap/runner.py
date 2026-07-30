@@ -1578,7 +1578,7 @@ async def attach_imported_clip(
                 char_id=jc.char_id, video_id=fresh.video_id,
                 path=str(dest), imported=True)
     _maybe_complete_char(job, jc)
-    await _maybe_auto_finalize_job(job.job_id)
+    await _maybe_auto_finalize_job(job.job_id, jc.char_id)
     return fresh
 
 
@@ -1720,7 +1720,7 @@ async def generate_more_videos(
         *[_animate_one_video(job, jc, v, mp, dur, end_img)
           for v, mp, dur, end_img in placeholders]
     )
-    await _maybe_auto_finalize_job(job_id)
+    await _maybe_auto_finalize_job(job_id, char_id)
 
 
 async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool:
@@ -1809,7 +1809,7 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
             and "timed out" in (old.error or "").lower()
             and prompt_override is None):
         if await _salvage_timed_out_video(job, jc, idx):
-            await _maybe_auto_finalize_job(job_id)
+            await _maybe_auto_finalize_job(job_id, char_id)
             return
 
     # Inherit an existing override if the caller didn't supply a new one. This
@@ -1866,19 +1866,38 @@ async def retry_one_video(job_id: str, char_id: str, video_id: str,
         job, jc, scene_id,
         video_model=_eff_video_model_for_variant(job, jc, source_variant_id))
     await _animate_one_video(job, jc, fresh, movement_prompt, duration, end_image)
-    await _maybe_auto_finalize_job(job_id)
+    await _maybe_auto_finalize_job(job_id, char_id)
 
 
-async def _maybe_auto_finalize_job(job_id: str) -> None:
-    """Run the classic-Swap completion gate after any operation that can
-    finish the last missing clip.
+async def _maybe_auto_finalize_job(job_id: str,
+                                   char_id: str | None = None) -> None:
+    """Run the completion gate after any operation that can finish the last
+    missing clip.
 
-    Reengineer-backed jobs deliberately stay on their own watcher/assemble
-    path. The helper is best-effort: a Telegram or Editor failure must never
+    Reengineer-backed jobs have their OWN assemble path, but that path is a
+    one-shot watcher (`_watch_video_phase`) that already returned when it
+    parked the run at `awaiting_assembly` — so a later ↻ retry landed the
+    missing clip and then nothing happened (Hugo 2026-07-31: the whole point
+    of ticking "Bygg ihop + skicka till Telegram automatiskt" is not having to
+    come back). They now re-enter their own gate here instead of dropping out.
+
+    `char_id` is the character whose clip just landed, when the caller knows
+    it — it scopes a rebuild on an already-finished run to that character.
+
+    The helper is best-effort: a Telegram or Editor failure must never
     retroactively turn a successfully generated clip into a failed clip.
     """
     job = store().get_job(job_id)
-    if job is None or job.from_reengineer:
+    if job is None:
+        return
+    if job.from_reengineer:
+        try:
+            from character_swap import runner_reengineer
+            await runner_reengineer.maybe_auto_assemble_after_clip(
+                job, char_id=char_id)
+        except Exception:
+            logger.exception(
+                "auto-assemble %s failed after clip completion", job_id)
         return
     try:
         from character_swap import auto_finalize
@@ -2172,4 +2191,4 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
     await _emit(job.job_id, "video.ready",
                 char_id=jc.char_id, video_id=video.video_id, path=str(dest))
     _maybe_complete_char(job, jc)
-    await _maybe_auto_finalize_job(job.job_id)
+    await _maybe_auto_finalize_job(job.job_id, jc.char_id)

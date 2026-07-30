@@ -1294,16 +1294,13 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
             _update(re_id, status="failed", error="video phase timed out")
             return
     state = reengineer.load_state(re_id) or {}
-    auto_telegram = state.get(
-        "auto_telegram_send", state.get("auto_drive_push", False))
     # Image-sourced runs ARE the Swap tab. Hugo wants their finals assembled
     # as soon as the clips finish even when he kept the earlier image-approval
     # gate. `auto_mode` still controls whether those earlier gates are skipped;
     # `auto_telegram_send` controls the post-video assemble+delivery chain.
     # Video-sourced Reengineer runs keep their explicit clip-review gate unless
     # the user selected fully automatic mode.
-    if not (state.get("auto_mode")
-            or (state.get("from_images") and auto_telegram)):
+    if not _auto_chain_opted_in(state):
         # Clip-review gate (Hugo 2026-06-12): without ⚡ fully automatic the
         # run STOPS here so every Kling clip can be inspected — and redone
         # per scene — and the ⚙ Editor settings tweaked, BEFORE the final
@@ -1324,6 +1321,92 @@ async def _watch_video_phase(re_id: str, job_id: str, *,
                 auto_assemble_blocked=blocked)
         return
     await assemble(re_id)
+
+
+def _auto_chain_opted_in(state: dict) -> bool:
+    """The two triggers that mean "build (and deliver) without asking me":
+    ⚡ fully-automatic, or an image-sourced Swap-tab run that ticked
+    "Bygg ihop + skicka till Telegram automatiskt". Single source of truth
+    for `_watch_video_phase` and the post-retry re-entry below, so a run can
+    never auto-build through one door but not the other."""
+    return bool(state.get("auto_mode")
+                or (state.get("from_images")
+                    and state.get("auto_telegram_send",
+                                  state.get("auto_drive_push", False))))
+
+
+# Statuses a late clip may re-open the build from. Deliberately excludes the
+# in-flight ones ("swapping"/"animating"/"assembling"/"analyzing"), which have
+# their own watcher, and "reanimating", whose ▶ Animera om ändrade path is
+# specified to finish WITHOUT assembling.
+_AUTO_REASSEMBLE_STATES = {"awaiting_assembly", "done",
+                           "partial_success", "failed"}
+
+
+def _chars_needing_rebuild(state: dict, job: Job,
+                           changed_char_id: str | None) -> list[str]:
+    """Which characters an auto-rebuild has to (re)build: everyone without a
+    usable final on disk, plus the one whose clip just landed.
+
+    On a run parked at `awaiting_assembly` that is every involved character —
+    the normal first build. On a run that already shipped, it is just the
+    character whose clip changed, so redoing one clip neither re-bills Whisper
+    for the other six nor reposts their unchanged finals (Hugo 2026-07-31)."""
+    finals = state.get("finals") or {}
+    need: set[str] = set()
+    for cid, jc in job.characters.items():
+        if _char_is_uninvolved(state, jc):
+            continue
+        entry = finals.get(cid) or {}
+        path = entry.get("final_path")
+        if (entry.get("status") != "done" or not path
+                or not Path(path).is_file()):
+            need.add(cid)
+    jc = job.characters.get(changed_char_id or "")
+    if jc is not None and not _char_is_uninvolved(state, jc):
+        need.add(jc.char_id)
+    return sorted(need)
+
+
+async def maybe_auto_assemble_after_clip(job: Job,
+                                         char_id: str | None = None) -> None:
+    """Re-enter the auto-build gate after a clip lands OUTSIDE the original
+    video phase — the ↻ retry buttons, an imported clip, a timeout salvage.
+
+    `_watch_video_phase` is a one-shot watcher: when it found a dead clip it
+    parked the run at `awaiting_assembly` and returned. Retaking the clip
+    therefore fixed the gap but started nothing, and a run that had opted into
+    "bygg ihop + skicka automatiskt" still sat there waiting for a click
+    (Hugo 2026-07-31). This re-runs the SAME gate the watcher would have.
+
+    Opt-in is preserved exactly: a run that kept its manual clip-review gate
+    is never built behind the user's back."""
+    re_id = (job.origin or "").split("reengineer:", 1)[-1]
+    if not job.origin or not job.origin.startswith("reengineer:") or not re_id:
+        return
+    state = reengineer.load_state(re_id)
+    if not state or not _auto_chain_opted_in(state):
+        return
+    if state.get("status") not in _AUTO_REASSEMBLE_STATES:
+        return
+    if re_id in _ASSEMBLING:
+        return
+    blocked = _auto_assemble_blockers(re_id, job.job_id)
+    if blocked:
+        # Keep the banner honest as retries land one by one — but only on the
+        # gate itself. A finished run must not be downgraded to
+        # `awaiting_assembly` just because one clip is briefly re-rendering.
+        if state.get("status") == "awaiting_assembly":
+            _update(re_id, status="awaiting_assembly",
+                    error=_auto_assemble_block_message(blocked),
+                    auto_assemble_blocked=blocked)
+        return
+    char_ids = _chars_needing_rebuild(state, job, char_id)
+    if not char_ids:
+        return
+    _log.info("reengineer %s: clip landed post-gate — auto-building %d "
+              "character(s)", re_id, len(char_ids))
+    await assemble(re_id, char_ids=char_ids)
 
 
 # --------------------------------------------------------------------------- phase 3: assemble
@@ -1368,7 +1451,7 @@ async def assemble(re_id: str, *, char_ids: list[str] | None = None) -> None:
     # failure must not turn a successful build into a failed run.
     try:
         from character_swap import auto_finalize
-        await auto_finalize.send_reengineer_finals(re_id)
+        await auto_finalize.send_reengineer_finals(re_id, char_ids=char_ids)
     except Exception:
         _log.exception("reengineer %s auto Telegram send failed", re_id)
 

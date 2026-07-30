@@ -212,8 +212,14 @@ async def _send_job_finals(job_id: str) -> None:
 
 
 async def _send_reengineer_bucket(
-        re_id: str, *, variant: str, require_opt_in: bool) -> None:
-    """Send one Reengineer final bucket to character Telegram channels."""
+        re_id: str, *, variant: str, require_opt_in: bool,
+        char_ids: list[str] | None = None) -> None:
+    """Send one Reengineer final bucket to character Telegram channels.
+
+    `char_ids` narrows the send to those characters: a per-character rebuild
+    must not repost the finals it never touched to their channels (Hugo
+    2026-07-31, when redoing one clip on a finished run started rebuilding +
+    delivering automatically). None = the whole bucket, as before."""
     from character_swap import reengineer as reengineer_mod
 
     state = reengineer_mod.load_state(re_id)
@@ -227,9 +233,11 @@ async def _send_reengineer_bucket(
         return
     bucket = "finals" if variant == "final" else "repurposed"
     finals = state.get(bucket) or {}
+    only = {c for c in (char_ids or []) if c}
     ready = {cid: e for cid, e in finals.items()
              if e.get("status") == "done" and e.get("final_path")
-             and Path(e["final_path"]).is_file()}
+             and Path(e["final_path"]).is_file()
+             and (not only or cid in only)}
     if not ready:
         return
 
@@ -280,10 +288,12 @@ async def _send_reengineer_bucket(
     _notify_telegram_result(label, len(sent), len(failed))
 
 
-async def send_reengineer_finals(re_id: str) -> None:
-    """Auto-send original finals after a fully successful assembly."""
+async def send_reengineer_finals(re_id: str,
+                                 char_ids: list[str] | None = None) -> None:
+    """Auto-send original finals after a fully successful assembly. `char_ids`
+    mirrors the build's own scope — only what was (re)built gets delivered."""
     await _send_reengineer_bucket(
-        re_id, variant="final", require_opt_in=True)
+        re_id, variant="final", require_opt_in=True, char_ids=char_ids)
 
 
 async def send_reengineer_repurposed(re_id: str) -> None:
