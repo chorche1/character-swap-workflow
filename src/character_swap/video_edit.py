@@ -24,6 +24,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -35,6 +36,28 @@ from character_swap.clients import openai_image  # reuse _client() for OpenAI au
 from character_swap.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Process-wide gate on simultaneous multi-input concat encodes (2026-07-31,
+# diagnosed after "ffmpeg uses 17GB" reports). `assemble_clips` /
+# `concat_videos` build ONE ffmpeg command with every source clip as a
+# separate `-i` feeding a single `filter_complex` concat — ffmpeg decodes
+# ALL inputs concurrently but the concat filter only drains them in order,
+# so undrained frames queue up in memory. Measured on this machine: a 24-clip
+# 1080x1920 concat peaks ~4.4GB RSS, and the peak keeps climbing for as long
+# as decode outruns encode (a slow CRF/preset never lets the buffer drain).
+# Step-6 compile and Reengineer assemble fan out one of these per character
+# via asyncio.gather with NO cap, so N characters compiling at once multiply
+# the peak by N — this is what produced the ~17GB-per-process readings.
+# Same lazy-singleton pattern as remotion_render.py's REMOTION_MAX_CONCURRENT_RENDERS gate.
+_assemble_gate: threading.BoundedSemaphore | None = None
+
+
+def _assemble_concurrency_gate() -> threading.BoundedSemaphore:
+    global _assemble_gate
+    if _assemble_gate is None:
+        _assemble_gate = threading.BoundedSemaphore(
+            max(1, settings.assemble_concurrency))
+    return _assemble_gate
 
 
 def _ffprobe() -> str | None:
@@ -2383,7 +2406,8 @@ def concat_videos(video_paths: list[Path], output_path: Path,
         cmd += [*_enc_v(),
                 "-an"]
     cmd += [str(output_path)]
-    _run(cmd)
+    with _assemble_concurrency_gate():
+        _run(cmd)
     return output_path
 
 
@@ -2613,7 +2637,8 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
         else:
             cmd += [*_enc_v(), "-an"]
         cmd += [str(output_path)]
-        _run(cmd)
+        with _assemble_concurrency_gate():
+            _run(cmd)
 
         out_duration = _probe_duration(output_path)
         entry["duration"] = round(out_duration, 2)

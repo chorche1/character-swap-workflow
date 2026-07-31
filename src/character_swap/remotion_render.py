@@ -55,6 +55,23 @@ def _render_gate() -> threading.BoundedSemaphore:
         return _gate
 
 
+# Floor per render. Remotion renders frames roughly sequentially per tab, so
+# the working set is small — this only needs to cover in-flight frames, not
+# the whole video. 512MB ≈ 80 decoded 1080x1920 frames.
+_MIN_OFFTHREAD_CACHE_BYTES = 512 * 1024**2
+
+
+def _offthread_cache_budget() -> int:
+    """Each render's share of the process-wide OffthreadVideo cache budget.
+
+    Divided by the gate size so the TOTAL across concurrent renders stays at
+    `remotion_offthread_cache_bytes` — Remotion's own default would instead
+    give EVERY render half the machine's memory (see the config comment)."""
+    gate = max(1, settings.remotion_max_concurrent_renders)
+    return max(_MIN_OFFTHREAD_CACHE_BYTES,
+               settings.remotion_offthread_cache_bytes // gate)
+
+
 # Path to the Remotion project. Resolved relative to the repo root via the
 # settings.project_root anchor (set in config.py).
 def _remotion_dir() -> Path:
@@ -319,6 +336,13 @@ def _render_locked(
                 # is too tight for a cold OffthreadVideo seek in the long
                 # concat videos Step-6 compile produces.
                 f"--timeout={max(30_000, settings.remotion_timeout_ms)}",
+                # HARD cap on the compositor's decoded-frame cache. Without
+                # it Remotion defaults to "half of system memory" measured
+                # per render process at its own start, so concurrent renders
+                # of a full-length reel each grew to ~20GB and OOM-killed the
+                # machine (2026-07-31). Never affects OUTPUT — deliberately
+                # excluded from the cache key in _hash_render_inputs.
+                f"--offthreadvideo-cache-size-in-bytes={_offthread_cache_budget()}",
                 # Encode quality (2026-06-12): Remotion's defaults (h264 CRF
                 # ~23-equivalent + JPEG-80 frame captures) were the last lossy
                 # hop in the chain — measured ~3.2 Mbps 1080x1920 finals.

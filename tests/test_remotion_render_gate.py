@@ -375,3 +375,60 @@ def test_cache_rechecked_after_waiting_for_gate(render_env, monkeypatch):
         inp, out, composition_id="CapCutPurplePill", props=props, words=WORDS)
     assert summary["cached"] is True
     assert out.read_bytes() == b"sibling render output"
+
+
+def test_render_cmd_caps_offthread_video_cache(render_env, monkeypatch):
+    """The OffthreadVideo frame cache must carry an EXPLICIT byte cap.
+
+    2026-07-31 OOM: Remotion's default for this option is null = "half of
+    system memory", read per render process at ITS OWN start. Four
+    concurrent renders of a ~110s 1080x1920 reel therefore each grew a
+    decoded-frame cache toward ~20GB (3330 frames x 6.2MB, which fits under
+    "half of 64GB" so nothing ever evicted) — 64GB RAM exhausted, 65GB swap,
+    all four compositors SIGKILLed. The total budget is split across the
+    gate so the ceiling holds no matter how many renders fan out.
+    """
+    monkeypatch.setattr(settings, "remotion_offthread_cache_bytes", 8 * 1024**3)
+    monkeypatch.setattr(settings, "remotion_max_concurrent_renders", 4)
+    captured: list[list[str]] = []
+
+    def fake_render(cmd, timeout):
+        captured.append(cmd)
+        return _ok_render(cmd, timeout)
+
+    _install_popen(monkeypatch, fake_render)
+    inp = _make_input(render_env, "in.mp4")
+    remotion_render.render_remotion(
+        inp, render_env / "out.mp4", composition_id="CapCutBlueBox",
+        props={}, words=WORDS)
+
+    (cmd,) = captured
+    flag = next(
+        (a for a in cmd if a.startswith("--offthreadvideo-cache-size-in-bytes=")),
+        None)
+    assert flag is not None, "render must cap the OffthreadVideo cache"
+    per_render = int(flag.split("=", 1)[1])
+    # Each render gets its share; total across the gate stays at the budget.
+    assert per_render == (8 * 1024**3) // 4
+    assert per_render * settings.remotion_max_concurrent_renders <= 8 * 1024**3
+
+
+def test_offthread_cache_budget_scales_with_gate_and_has_a_floor():
+    """Budget splits across the gate, but never below a workable floor."""
+    from character_swap.config import settings as s
+
+    orig_total = s.remotion_offthread_cache_bytes
+    orig_gate = s.remotion_max_concurrent_renders
+    try:
+        s.remotion_offthread_cache_bytes = 8 * 1024**3
+        s.remotion_max_concurrent_renders = 2
+        assert remotion_render._offthread_cache_budget() == 4 * 1024**3
+        s.remotion_max_concurrent_renders = 8
+        assert remotion_render._offthread_cache_budget() == 1024**3
+        # A tiny total (or a huge gate) must not starve a render to 0 bytes.
+        s.remotion_offthread_cache_bytes = 1024**2
+        assert (remotion_render._offthread_cache_budget()
+                == remotion_render._MIN_OFFTHREAD_CACHE_BYTES)
+    finally:
+        s.remotion_offthread_cache_bytes = orig_total
+        s.remotion_max_concurrent_renders = orig_gate

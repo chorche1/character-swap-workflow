@@ -152,6 +152,20 @@ class Settings(BaseSettings):
         default=2, validation_alias="REMOTION_MAX_CONCURRENT_RENDERS")
     remotion_concurrency: int = Field(default=4, validation_alias="REMOTION_CONCURRENCY")
     remotion_timeout_ms: int = Field(default=120_000, validation_alias="REMOTION_TIMEOUT_MS")
+    # TOTAL OffthreadVideo frame-cache budget across ALL concurrent renders
+    # (2026-07-31, after an OOM crash: 64GB RAM exhausted + 65GB swap).
+    # Remotion's default for --offthreadvideo-cache-size-in-bytes is null =
+    # "half of system memory", read PER RENDER PROCESS at ITS OWN start —
+    # so N concurrent renders each budget ~half the machine (4 renders on a
+    # 64GB box = ~100GB of intent). The cache holds DECODED frames
+    # (1080x1920 RGB = 6.2MB each), so cost scales with the source video's
+    # LENGTH: a 110s reel is 3330 frames ≈ 20GB, which fits under "half the
+    # memory" and therefore never evicts. Short clips never hit this (a 10s
+    # clip is ~1.9GB), which is why it only bit on full-length reels.
+    # remotion_render.py divides this total by the concurrency gate to get
+    # each render's share, so the ceiling holds regardless of fan-out.
+    remotion_offthread_cache_bytes: int = Field(
+        default=8 * 1024**3, validation_alias="REMOTION_OFFTHREAD_CACHE_BYTES")
     # Whole-subprocess backstop (backlog #11, 2026-06-12): without it a hung
     # headless Chrome held 1 of the 2 gate slots FOREVER. 30 min is ~4x the
     # worst measured contended render (430s) — generous, but finite.
@@ -245,6 +259,15 @@ class Settings(BaseSettings):
     # unbounded lavfi source) and must be killed + failed loudly rather than
     # hang the pipeline and grow the output file until the disk fills.
     ffmpeg_timeout_secs: int = Field(default=3600, validation_alias="FFMPEG_TIMEOUT_SECS")
+    # Process-wide cap on simultaneous multi-input concat encodes
+    # (`assemble_clips` / `concat_videos` in video_edit.py — 2026-07-31,
+    # diagnosed from "ffmpeg uses 17GB" reports). Each concat decodes every
+    # source clip concurrently into ONE filter_complex; a multi-character
+    # Step-6 compile or Reengineer assemble fans one of these out PER
+    # CHARACTER via asyncio.gather with no cap, so N characters compiling
+    # at once multiplied a single build's ~4-5GB peak by N. Same pattern as
+    # REMOTION_MAX_CONCURRENT_RENDERS below.
+    assemble_concurrency: int = Field(default=2, validation_alias="ASSEMBLE_CONCURRENCY")
     # Automatic black-bar removal in the final builds (Hugo 2026-07-24):
     # every clip entering a final is cropdetect-scanned and minimally
     # crop-zoomed to the target aspect so neither model-baked letterboxing
