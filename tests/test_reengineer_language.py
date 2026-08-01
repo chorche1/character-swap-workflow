@@ -88,7 +88,7 @@ def test_analyst_no_spanish_directive_for_en(monkeypatch, tmp_path):
 
 def test_spanishize_plans_translates_dialogue(monkeypatch):
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, re_id=None: ["añade bicarbonato"])
+                        lambda lines, language="es", re_id=None: ["añade bicarbonato"])
     plans = reengineer.fallback_plans(
         [(0.0, 2.0)], [Word("add", 0.1, 0.4), Word("soda", 0.4, 0.8)])
     out = reengineer.spanishize_plans(plans, re_id="re_t")
@@ -100,7 +100,7 @@ def test_spanishize_plans_translates_dialogue(monkeypatch):
 
 def test_spanishize_plans_keeps_english_on_translate_failure(monkeypatch):
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, re_id=None: None)
+                        lambda lines, language="es", re_id=None: None)
     plans = reengineer.fallback_plans([(0.0, 2.0)], [Word("add", 0.1, 0.4)])
     out = reengineer.spanishize_plans(plans, re_id="re_t")
     assert out == plans                          # unchanged — never half-done

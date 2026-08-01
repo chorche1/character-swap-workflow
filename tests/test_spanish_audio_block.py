@@ -50,7 +50,7 @@ ACCENT_ONLY = (" The person speaks fluent American English with a natural "
 def no_billing(monkeypatch):
     """Translation is stubbed — these tests pin plumbing, not GPT output."""
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, re_id=None: ["ES::" + l for l in lines])
+                        lambda lines, language="es", re_id=None: ["ES::" + l for l in lines])
     monkeypatch.setattr(reengineer, "_LOCALIZE_CACHE", {})
 
 
@@ -137,7 +137,7 @@ def test_already_spanish_prompt_is_not_retranslated(no_billing):
 def test_translation_failure_still_fails_the_clip_loudly(monkeypatch):
     """Refuse loudly over silent partial — unchanged for the new shape too."""
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, re_id=None: None)
+                        lambda lines, language="es", re_id=None: None)
     monkeypatch.setattr(reengineer, "_LOCALIZE_CACHE", {})
 
     with pytest.raises(reengineer.LocalizationError):

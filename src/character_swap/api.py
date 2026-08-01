@@ -860,8 +860,9 @@ def _char_to_dict(ch: CharacterAsset) -> dict:
         # the Swap Step 6 compile feature.
         "voice_id": ch.voice_id,
         "voice_provider": ch.voice_provider,
-        # Spoken-language flag: "es" → all of this character's videos translate
-        # their quoted dialogue to Spanish (Hugo 2026-06-26). None = English.
+        # Spoken-language flag ("es" | "de"): all of this character's videos
+        # translate their quoted dialogue to that language (Hugo 2026-06-26 /
+        # 2026-08-02). None = English.
         "language": ch.language,
         "telegram_chat_id": ch.telegram_chat_id,
         "images": [
@@ -1021,7 +1022,8 @@ class RenameCharacterBody(BaseModel):
     name: str | None = None
     voice_id: str | None = None
     voice_provider: str | None = None
-    # "es" → mark the character Spanish-speaking; "" / "en" clears it (English).
+    # Spoken language of this character's videos: any code in
+    # reengineer.SPOKEN_LANGUAGES ("es" | "de"); "" / "en" clears it (English).
     language: str | None = None
     # Numeric "-100…" channel id or public "@channelusername". Empty clears.
     telegram_chat_id: str | None = None
@@ -1064,9 +1066,20 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
         # Allow swapping provider without changing voice_id (rare).
         asset.voice_provider = body.voice_provider.strip() or None
     if body.language is not None:
-        # Only "es" is a real value; anything else (incl. "" / "en") = default
-        # English, stored as None so unflagged characters never change behavior.
-        asset.language = "es" if body.language.strip().lower() == "es" else None
+        # "" / "en" = default English, stored as None so unflagged characters
+        # never change behavior. Any other code must be one the localizer
+        # actually knows — a typo'd flag would otherwise look set in the UI and
+        # silently ship English clips (Hugo: refuse loudly).
+        from character_swap import reengineer as reengineer_mod
+        new_lang = body.language.strip().lower()
+        if new_lang in ("", "en"):
+            asset.language = None
+        elif new_lang in reengineer_mod.SPOKEN_LANGUAGES:
+            asset.language = new_lang
+        else:
+            known = " | ".join(["en", *reengineer_mod.SPOKEN_LANGUAGES])
+            raise HTTPException(
+                400, f"Unknown language '{body.language}' ({known})")
     if body.telegram_chat_id is not None:
         asset.telegram_chat_id = body.telegram_chat_id.strip() or None
     if body.primary_image_id is not None:

@@ -450,7 +450,7 @@ def test_animate_localizes_for_flagged_character(monkeypatch, tmp_path):
     store().add_character(CharacterAsset(
         char_id="cA_es_flag", name="A", filename="cA.png", language="es"))
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, *, re_id=None: ["¡Hola amigos!"])
+                        lambda lines, *, language="es", re_id=None: ["¡Hola amigos!"])
     p = ('He waves. The person says to the camera with an American accent: '
          '"Hello friends."')
     submits, qc_seen = _animate_capture(monkeypatch, tmp_path, p,
@@ -462,6 +462,60 @@ def test_animate_localizes_for_flagged_character(monkeypatch, tmp_path):
     assert "Latin American Spanish accent" in mp
     assert "american accent" not in mp.lower()        # inline EN accent stripped
     assert qc_seen and qc_seen[0] == mp                # QC saw the SAME prompt
+
+
+def test_animate_localizes_for_german_character(monkeypatch, tmp_path):
+    """Same chokepoint, other language (Hugo 2026-08-02): a 🇩🇪-flagged
+    character's clip is translated at submit time and the SAME German prompt
+    reaches submit_video AND video_qc."""
+    store().add_character(CharacterAsset(
+        char_id="cA_de_flag", name="A", filename="cA.png", language="de"))
+    seen_lang = []
+    monkeypatch.setattr(
+        reengineer, "translate_dialogue",
+        lambda lines, *, language="es", re_id=None: (
+            seen_lang.append(language), ["Hallo Freunde!"])[1])
+    p = ('He waves. The person says to the camera with an American accent: '
+         '"Hello friends."')
+    submits, qc_seen = _animate_capture(monkeypatch, tmp_path, p,
+                                        char_id="cA_de_flag")
+
+    assert seen_lang == ["de"]
+    assert len(submits) == 1
+    mp = submits[0]["movement_prompt"]
+    assert "Hallo Freunde!" in mp and "Hello friends." not in mp
+    assert "standard German (Hochdeutsch)" in mp
+    assert "american accent" not in mp.lower()        # inline EN accent stripped
+    assert qc_seen and qc_seen[0] == mp                # QC saw the SAME prompt
+
+
+def test_animate_fails_the_clip_loudly_when_german_translation_fails(
+        monkeypatch, tmp_path):
+    """Translation failure for a flagged character must ERROR the clip with the
+    language named — never ship an English take under a 🇩🇪 flag."""
+    from character_swap.models import VideoStatus, VideoVariant
+    store().add_character(CharacterAsset(
+        char_id="cA_de_fail", name="A", filename="cA.png", language="de"))
+    monkeypatch.setattr(reengineer, "translate_dialogue",
+                        lambda lines, *, language="es", re_id=None: None)
+    job, jc, v_img = _job_one_variant(tmp_path)
+    jc.char_id = "cA_de_fail"; job.characters = {"cA_de_fail": jc}
+    v_img.status = VariantStatus.READY
+    jc.approved_variant_ids = ["v1"]; jc.approved_variant_id = "v1"
+    Path(v_img.path).write_bytes(b"img")
+    video = VideoVariant(video_id="vd1", grok_job_id="",
+                         status=VideoStatus.PENDING, source_variant_id="v1")
+    jc.videos = [video]
+    _stub_runner_persistence(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
+    monkeypatch.setattr(runner.pipeline, "submit_video",
+                        lambda **kw: (_ for _ in ()).throw(
+                            AssertionError("must not submit a failed localization")))
+    asyncio.run(runner._animate_one_video(
+        job, jc, video, 'He waves. The person says: "Hello friends."'))
+    assert video.status == VideoStatus.ERROR
+    assert "German localization failed" in (video.error or "")
 
 
 def test_animate_passes_through_for_unflagged_character(monkeypatch, tmp_path):
@@ -495,7 +549,7 @@ def test_animate_keeps_spanish_through_qc_retry(monkeypatch, tmp_path):
     store().add_character(CharacterAsset(
         char_id="cA_retry_es", name="A", filename="cA.png", language="es"))
     monkeypatch.setattr(reengineer, "translate_dialogue",
-                        lambda lines, *, re_id=None: ["¡Hola amigos!"])
+                        lambda lines, *, language="es", re_id=None: ["¡Hola amigos!"])
     _stub_runner_persistence(monkeypatch, tmp_path)
     monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
     monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)

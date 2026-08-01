@@ -515,12 +515,20 @@ def fallback_plans(spans: list[tuple[float, float]], words: list[Word]) -> list[
     return out
 
 
-def translate_dialogue(lines: list[str], *,
+def translate_dialogue(lines: list[str], *, language: str = "es",
                        re_id: str | None = None) -> list[str] | None:
-    """Translate each line to neutral Latin American Spanish (one GPT-4o call).
+    """Translate each line to `language` (one GPT-4o call). Target defaults to
+    Spanish — the first language this path ever had — and any code in
+    `SPOKEN_LANGUAGES` is accepted (German added 2026-08-02).
+
     Returns a list aligned 1:1 with `lines`, or None on any failure — the
     caller then leaves the English text in place (visible + editable at the
     gate, never silently shipped as final). Empty strings pass through."""
+    spec = SPOKEN_LANGUAGES.get((language or "es").strip().lower())
+    if spec is None:
+        logger.warning("reengineer translate (%s): unknown target language %r",
+                       re_id, language)
+        return None
     idx = [i for i, ln in enumerate(lines) if ln.strip()]
     if not idx:
         return list(lines)
@@ -531,16 +539,9 @@ def translate_dialogue(lines: list[str], *,
         from character_swap.call_log import record
         from character_swap.clients import openai_image
         client = openai_image._client()
-        system = (
-            "You translate short spoken lines from a video script into "
-            "natural, idiomatic NEUTRAL LATIN AMERICAN Spanish (the kind used "
-            "in widely-distributed social content — no country-specific slang, "
-            "no Spain 'vosotros'/'th' seseo). Convey meaning and tone, not a "
-            "word-for-word translation. Spell numbers and units as Spanish "
-            "words. Return STRICT JSON: the SAME keys you were given, each "
-            "mapped to its Spanish translation. No extra keys, no commentary.")
+        system = spec.translate_system
         with record(phase="reengineer_translate", model="gpt-4o",
-                    character="es", job_id=re_id):
+                    character=spec.code, job_id=re_id):
             resp = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[{"role": "system", "content": system},
@@ -573,18 +574,94 @@ def spanish_speech_clause(spoken_es: str) -> str:
             f'"{spoken_es}"')
 
 
+# --- Per-character spoken languages (canonical registry) ----------------------
+# A library character can be flagged with a spoken language: "es" (Hugo
+# 2026-06-26) and "de" (Hugo 2026-08-02). EVERYTHING the localizer needs per
+# language lives in ONE row here — accent clause, the "already in this
+# language" marker, the inline attribution the analyst-style says-clause uses,
+# and the translator's own system prompt — so adding a language is a data
+# change plus its UI option, never a new branch in every helper.
+#
+# English is the implicit default and deliberately has NO row: it is what a
+# prompt already is. Its accent clause lives in ACCENT_CLAUSE below (the
+# run-level 🗣 picker still speaks in en/es terms; German is per-character
+# only, Hugo 2026-08-02).
+@dataclass(frozen=True)
+class SpokenLanguage:
+    code: str             # "es"
+    name_en: str          # "Spanish" — operator-facing error text
+    accent_clause: str    # standalone Kling clause (leading space, ends ".")
+    accent_key: str       # lowercase word = "this clause is already present"
+    marker: str           # lowercase phrase = "prompt is already in this lang"
+    attribution: str      # inline: '…says to the camera <attribution>: "…"'
+    translate_system: str  # GPT-4o system prompt for translate_dialogue
+
+    @property
+    def speech_order(self) -> str:
+        """Replacement for an explicit "speaking English…" order in a prompt."""
+        return f"speaking {self.attribution}"
+
+
+GERMAN_SPEECH_ATTRIBUTION = "in standard German"
+
+SPOKEN_LANGUAGES: dict[str, SpokenLanguage] = {
+    "es": SpokenLanguage(
+        code="es",
+        name_en="Spanish",
+        accent_clause=(" The person speaks fluent, natural Latin American "
+                       "Spanish with a neutral Latin American Spanish accent."),
+        accent_key="spanish",
+        # Substring-matching the bare "latin american spanish" was too broad —
+        # a dialogue line "...authentic Latin American Spanish cuisine" would
+        # falsely skip translation.
+        marker="neutral latin american spanish",
+        attribution=SPANISH_SPEECH_ATTRIBUTION,
+        translate_system=(
+            "You translate short spoken lines from a video script into "
+            "natural, idiomatic NEUTRAL LATIN AMERICAN Spanish (the kind used "
+            "in widely-distributed social content — no country-specific slang, "
+            "no Spain 'vosotros'/'th' seseo). Convey meaning and tone, not a "
+            "word-for-word translation. Spell numbers and units as Spanish "
+            "words. Return STRICT JSON: the SAME keys you were given, each "
+            "mapped to its Spanish translation. No extra keys, no commentary."),
+    ),
+    "de": SpokenLanguage(
+        code="de",
+        name_en="German",
+        accent_clause=(" The person speaks fluent, natural standard German "
+                       "(Hochdeutsch) with a neutral German accent."),
+        accent_key="german",
+        # "standard german" appears in both this clause and the attribution,
+        # and (unlike a bare "german") never in a natural German dialogue line.
+        marker="standard german",
+        attribution=GERMAN_SPEECH_ATTRIBUTION,
+        translate_system=(
+            "You translate short spoken lines from a video script into "
+            "natural, idiomatic STANDARD GERMAN (Hochdeutsch) — the neutral "
+            "register used in widely-distributed social content: no regional "
+            "dialect (no Bavarian, Swiss or Austrian markers), no heavy slang. "
+            "Address the viewer with the informal 'du'. Convey meaning and "
+            "tone, not a word-for-word translation. Spell numbers and units as "
+            "German words. Return STRICT JSON: the SAME keys you were given, "
+            "each mapped to its German translation. No extra keys, no "
+            "commentary."),
+    ),
+}
+
+
 # --- Per-language Kling speech clause (canonical home) ------------------------
 # runner_reengineer aliases these as `_ACCENT_CLAUSE` / `_with_accent` for
 # back-compat. Per-language accent clause + the keyword that marks "already
-# covered" so the clause is never doubled. Spanish (Hugo 2026-06-20) only
-# changes WHICH accent is enforced — the dialogue itself is written in Spanish
+# covered" so the clause is never doubled. A non-English language only changes
+# WHICH accent is enforced — the dialogue itself is written in that language
 # upstream (analyst / fallback translation, or per-character
-# `localize_motion_prompt`). Mirrored in app.js klingSuffix().
+# `localize_motion_prompt`). The en/es rows are mirrored in app.js
+# klingSuffix() (the run-level picker's two languages).
 ACCENT_CLAUSE: dict[str, tuple[str, str]] = {
     "en": (" The person speaks fluent American English with a natural "
            "American accent.", "american"),
-    "es": (" The person speaks fluent, natural Latin American Spanish with a "
-           "neutral Latin American Spanish accent.", "spanish"),
+    **{code: (spec.accent_clause, spec.accent_key)
+       for code, spec in SPOKEN_LANGUAGES.items()},
 }
 
 
@@ -633,7 +710,20 @@ _INLINE_EN_ACCENT_RE = re.compile(
 _EN_SPEECH_ORDER_RE = re.compile(
     r"(?i)\b(?:speaks?|speaking|spoken)\s+(?:fluent\s+|natural\s+)*English\b"
     r"(?:\s+with\s+an?\s+(?:[\w-]+\s+){0,3}?accent)?")
-_ES_SPEECH_ORDER = "speaking in neutral Latin American Spanish"
+
+# The inline attribution of ANOTHER registered language ("...says to the camera
+# in neutral Latin American Spanish:"). Reachable when the run-level 🗣 picker
+# localized the whole run to Spanish and a character is flagged for a different
+# language — the dialogue gets re-translated, so the old attribution must go
+# with it or the prompt orders two languages at once.
+_ATTRIBUTION_RES: dict[str, re.Pattern[str]] = {
+    code: re.compile(r"(?i)\s*\b(?:speaking\s+)?" + re.escape(spec.attribution))
+    for code, spec in SPOKEN_LANGUAGES.items()
+}
+
+# The marker that a prompt is ALREADY a full-"es" run. Kept as the historical
+# name; the canonical value lives on the registry row.
+_ES_LOCALIZED_MARKER = SPOKEN_LANGUAGES["es"].marker
 
 
 def _has_english_speech_directive(prompt: str) -> bool:
@@ -641,41 +731,53 @@ def _has_english_speech_directive(prompt: str) -> bool:
     carries no quoted dialogue we could translate.
 
     Such a prompt is not a silent clip: Kling improvises speech from it, in the
-    language it was told to use. For an 🇪🇸-flagged character that directive is
-    exactly wrong, so the language swap must happen anyway (Hugo 2026-07-31)."""
+    language it was told to use. For an 🇪🇸/🇩🇪-flagged character that directive
+    is exactly wrong, so the language swap must happen anyway (Hugo
+    2026-07-31)."""
     text = prompt or ""
     return bool(ACCENT_CLAUSE["en"][0] in text
                 or _INLINE_EN_ACCENT_RE.search(text)
                 or _EN_SPEECH_ORDER_RE.search(text))
 
 
-def _force_spanish_speech(text: str) -> str:
-    """Remove EVERY English-language order and guarantee a Spanish one.
+def _has_foreign_speech_directive(prompt: str, language: str) -> bool:
+    """True when a dialogue-less prompt still ORDERS a language that is not
+    `language` — English (above) or another registered language's clause. Only
+    such a prompt gets rewritten; a genuinely silent one is left untouched."""
+    text = prompt or ""
+    if _has_english_speech_directive(text):
+        return True
+    low = text.lower()
+    return any(spec.marker in low
+               for code, spec in SPOKEN_LANGUAGES.items() if code != language)
+
+
+def _force_language_speech(text: str, language: str) -> str:
+    """Remove EVERY other language's order and guarantee `language`'s.
 
     One helper for both localize paths (dialogue translated / nothing to
-    translate) so a prompt shape can never come out with the dialogue in
-    Spanish but the language order still in English. Strips the standalone
-    clause + the inline American-accent attribution, flips an explicit
+    translate) so a prompt shape can never come out with the dialogue in the
+    target language but the language order still in English. Strips the
+    standalone English clause + the inline American-accent attribution + any
+    OTHER registered language's clause/attribution, flips an explicit
     "speaking English…" order in place, then falls back to appending the
-    standalone Spanish clause when nothing inline established the language."""
+    target's standalone clause when nothing inline established the language."""
+    spec = SPOKEN_LANGUAGES[language]
     out = text.replace(ACCENT_CLAUSE["en"][0], "")
+    for code, other in SPOKEN_LANGUAGES.items():
+        if code == language:
+            continue
+        out = out.replace(other.accent_clause, "")
+        out = _ATTRIBUTION_RES[code].sub("", out)
     out = _INLINE_EN_ACCENT_RE.sub("", out)
-    out = _EN_SPEECH_ORDER_RE.sub(_ES_SPEECH_ORDER, out)
+    out = _EN_SPEECH_ORDER_RE.sub(spec.speech_order, out)
     # with_accent's keyword guard can be falsely suppressed by an incidental
-    # scene word ("Spanish-tiled kitchen"), so the marker check below is the
-    # hard guarantee.
-    out = with_accent(out, "es")
-    if _ES_LOCALIZED_MARKER not in out.lower():
-        out = out.rstrip() + ACCENT_CLAUSE["es"][0]
+    # scene word ("Spanish-tiled kitchen", "German Shepherd"), so the marker
+    # check below is the hard guarantee.
+    out = with_accent(out, language)
+    if spec.marker not in out.lower():
+        out = out.rstrip() + spec.accent_clause
     return out
-
-# The marker that a prompt is ALREADY a full-"es" run: every run-level shape (the
-# analyst's "in neutral Latin American Spanish" attribution AND the standalone ES
-# accent clause) contains this exact phrase, while natural English dialogue or
-# scene text almost never does. Substring-matching the bare "latin american
-# spanish" was too broad — a dialogue line "...authentic Latin American Spanish
-# cuisine" would falsely skip translation.
-_ES_LOCALIZED_MARKER = "neutral latin american spanish"
 
 # Memoize localized prompts so SERIAL re-renders (per-clip retries / crash
 # resumes / a later job reusing the same scene prompt) skip a redundant GPT-4o
@@ -688,11 +790,20 @@ _LOCALIZE_CACHE_MAX = 1024
 _LOCALIZE_CACHE: dict[tuple[str, str], str] = {}
 
 
+def _cache_localized(lang: str, prompt: str, localized: str) -> str:
+    """Memoize one localized prompt, honoring the cache bound on EVERY write."""
+    if len(_LOCALIZE_CACHE) >= _LOCALIZE_CACHE_MAX:
+        _LOCALIZE_CACHE.clear()
+    _LOCALIZE_CACHE[(lang, prompt)] = localized
+    return localized
+
+
 class LocalizationError(Exception):
-    """Raised when a clip's dialogue MUST be translated (an 🇪🇸-flagged character
-    with spoken dialogue) but the translation failed. The runner fails the clip
-    loudly (Hugo 2026-06-27 — "refuse loudly over silent partial") rather than
-    silently shipping an English clip for a character marked Spanish."""
+    """Raised when a clip's dialogue MUST be translated (an 🇪🇸/🇩🇪-flagged
+    character with spoken dialogue) but the translation failed. The runner fails
+    the clip loudly (Hugo 2026-06-27 — "refuse loudly over silent partial")
+    rather than silently shipping an English clip for a character marked with
+    another spoken language."""
 
 
 def _strip_quotes(text: str) -> str:
@@ -705,31 +816,33 @@ def _strip_quotes(text: str) -> str:
 def localize_motion_prompt(prompt: str, language: str | None, *,
                            job_id: str | None = None) -> str:
     """Localize ONE clip's motion prompt for a per-CHARACTER spoken language
-    (Hugo 2026-06-26). Currently only "es" (neutral Latin American Spanish)
-    differs from the default.
+    (Hugo 2026-06-26; "es" = neutral Latin American Spanish, "de" = standard
+    German since 2026-08-02 — see SPOKEN_LANGUAGES).
 
-    For "es" AND only when the clip carries spoken dialogue: translate the quoted
-    dialogue (each says-clause phrase) to Spanish IN PLACE — the English framing /
-    camera / action stays English — swap any English accent clause for the
-    Spanish one, and HARD-guarantee the Spanish accent clause. A purely-visual
-    clip (no says-clause) is returned UNCHANGED — we never inject a speech /
-    accent / no-music directive into a silent shot. Returns the prompt UNCHANGED
-    for None/"en".
+    For a registered language AND only when the clip carries spoken dialogue:
+    translate the quoted dialogue (each says-clause phrase) IN PLACE — the
+    English framing / camera / action stays English — swap any other language's
+    accent clause for this one, and HARD-guarantee that accent clause. A
+    purely-visual clip (no says-clause) is returned UNCHANGED — we never inject
+    a speech / accent / no-music directive into a silent shot. Returns the
+    prompt UNCHANGED for None/"en"/any unregistered code.
 
-    Additive to the per-run 🗣 picker: if the prompt is already a full "es" run
-    (it already carries the Spanish accent marker), it is returned unchanged so
-    the user-approved Spanish text is never re-translated.
+    Additive to the per-run 🗣 picker: if the prompt is already in the target
+    language (it already carries that accent marker), it is returned unchanged
+    so user-approved text is never re-translated.
 
     Fail LOUD: if the clip HAS dialogue but translation fails, raises
     LocalizationError so the runner fails the clip (Hugo 2026-06-27) instead of
-    silently shipping English for a Spanish-flagged character. A clip with no
-    dialogue, an already-"es" prompt, or language None/"en" returns unchanged
-    (not a failure — nothing to translate)."""
+    silently shipping English for a flagged character. A clip with no dialogue,
+    an already-localized prompt, or language None/"en" returns unchanged (not a
+    failure — nothing to translate)."""
     lang = (language or "en").strip().lower()
-    if lang != "es" or not (prompt or "").strip():
+    spec = SPOKEN_LANGUAGES.get(lang)
+    if spec is None or not (prompt or "").strip():
         return prompt
-    # Already a full-"es" run (run-level picker localized it upstream).
-    if _ES_LOCALIZED_MARKER in prompt.lower():
+    # Already in the target language (run-level picker localized it upstream,
+    # or this exact prompt came back through a redo).
+    if spec.marker in prompt.lower():
         return prompt
     cached = _LOCALIZE_CACHE.get((lang, prompt))
     if cached is not None:
@@ -745,44 +858,40 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         # No quoted line to translate — but "no line" is NOT the same as
         # "silent". A prompt that still ORDERS English ("The person speaks
         # fluent American English…", "with a thick Texas accent") makes Kling
-        # improvise English speech for a character flagged 🇪🇸 (Hugo
+        # improvise English speech for a character flagged 🇪🇸/🇩🇪 (Hugo
         # 2026-07-31: two characters shipped English clips this way, silently,
         # because the early return skipped the accent swap too). Swap the
         # language directive even with nothing to translate; a genuinely
         # silent prompt carries no such directive and is still returned
         # untouched.
-        if not _has_english_speech_directive(prompt):
+        if not _has_foreign_speech_directive(prompt, lang):
             return prompt
-        es_only = _force_spanish_speech(prompt)
-        _LOCALIZE_CACHE[(lang, prompt)] = es_only
-        return es_only
+        return _cache_localized(lang, prompt,
+                                _force_language_speech(prompt, lang))
 
-    translated = translate_dialogue(phrases, re_id=job_id)
+    translated = translate_dialogue(phrases, language=lang, re_id=job_id)
     if translated is None:
         logger.warning("localize_motion_prompt (%s): dialogue translation "
                        "failed; failing the clip loudly", job_id)
         raise LocalizationError(
-            "could not translate the dialogue to Spanish")
+            f"could not translate the dialogue to {spec.name_en}")
 
     # Replace each captured dialogue span in REVERSE so earlier spans keep their
     # offsets while later ones are substituted (quotes stripped from each).
-    es_prompt = prompt
-    for m, es in reversed(list(zip(matches, translated))):
-        es = _strip_quotes((es or "").strip())
-        if not es:
+    localized = prompt
+    for m, line in reversed(list(zip(matches, translated))):
+        line = _strip_quotes((line or "").strip())
+        if not line:
             continue
         s, e = m.span(1)
-        es_prompt = es_prompt[:s] + es + es_prompt[e:]
+        localized = localized[:s] + line + localized[e:]
 
-    # Strip EVERY English-language order (standalone clause, inline American
-    # accent, and an explicit "speaking English…" order sitting right next to
-    # the line we just translated) and enforce the Spanish one.
-    es_prompt = _force_spanish_speech(es_prompt)
-
-    if len(_LOCALIZE_CACHE) >= _LOCALIZE_CACHE_MAX:
-        _LOCALIZE_CACHE.clear()
-    _LOCALIZE_CACHE[(lang, prompt)] = es_prompt
-    return es_prompt
+    # Strip EVERY foreign language order (standalone clause, inline American
+    # accent, another language's attribution, and an explicit "speaking
+    # English…" order sitting right next to the line we just translated) and
+    # enforce the target one.
+    localized = _force_language_speech(localized, lang)
+    return _cache_localized(lang, prompt, localized)
 
 
 def spanishize_plans(plans: list[ScenePlan], *,

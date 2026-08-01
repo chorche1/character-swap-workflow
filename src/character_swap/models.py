@@ -63,8 +63,10 @@ class CharacterAsset(BaseModel):
     voice_provider: str | None = None  # "elevenlabs" (default when voice_id set)
     # Spoken language for this character's videos. "es" → every motion/video
     # prompt's quoted dialogue is auto-translated to neutral Latin American
-    # Spanish + the Spanish accent clause is enforced (Hugo 2026-06-26). None/
-    # "en" = default English (no change). Additive to the per-run 🗣 picker.
+    # Spanish + the Spanish accent clause is enforced (Hugo 2026-06-26); "de" →
+    # the same in standard German (Hugo 2026-08-02). The registry of supported
+    # codes is `reengineer.SPOKEN_LANGUAGES`. None/"en" = default English (no
+    # change). Additive to the per-run 🗣 picker.
     language: str | None = None
     # Telegram destination dedicated to this character's Swap/Animate/
     # Reengineer finals. Accepts a numeric channel chat id ("-100…") or a

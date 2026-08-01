@@ -1261,7 +1261,9 @@
                         @click="toggleSwapChar(ch.char_id)">
                   <img :src="swapCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
                   <span x-text="ch.name"></span>
-                  <span x-show="ch.language === 'es'" class="text-xs" title="Spansktalande — repliken inom citationstecken översätts till spanska i den här karaktärens videor">🇪🇸</span>
+                  <span x-show="charLanguageFlag(ch.language)" class="text-xs"
+                        x-text="charLanguageFlag(ch.language)"
+                        :title="charLanguageTitle(ch.language)"></span>
                   <span x-show="swapFromImages.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
                 </button>
                 <button x-show="(ch.images || []).length > 1 && swapFromImages.charIds.includes(ch.char_id)"
@@ -1399,7 +1401,9 @@
                         @click="toggleReengineerChar(ch.char_id)">
                   <img :src="reengineerCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
                   <span x-text="ch.name"></span>
-                  <span x-show="ch.language === 'es'" class="text-xs" title="Spanish-speaking — this character's dialogue is auto-translated to Spanish">🇪🇸</span>
+                  <span x-show="charLanguageFlag(ch.language)" class="text-xs"
+                        x-text="charLanguageFlag(ch.language)"
+                        :title="charLanguageTitle(ch.language)"></span>
                   <span x-show="reengineerGen.charIds.includes(ch.char_id)" class="text-indigo-600 dark:text-indigo-400">✓</span>
                 </button>
                 <!-- Reference-image pick: which gallery image (= outfit) this
@@ -4321,15 +4325,20 @@
                   x-text="expandedCharId === ch.char_id ? '▾' : '▸'"></span>
           </div>
           <div x-show="expandedCharId === ch.char_id" class="pl-2 pr-1 py-1 space-y-2">
-            <!-- Spoken-language flag: 🇪🇸 → every video this character makes has
-                 its quoted dialogue auto-translated to neutral LatAm Spanish. -->
-            <label class="flex items-center gap-1.5 text-[11px] text-neutral-600 dark:text-neutral-300 cursor-pointer select-none"
+            <!-- Spoken language: allt utom engelska gör att repliken inom
+                 citationstecken översätts automatiskt i ALLA videor den här
+                 karaktären är med i (Hugo 2026-06-26 spanska, 2026-08-02 tyska). -->
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-600 dark:text-neutral-300 select-none"
                    @click.stop=""
-                   title="När den är på översätts repliken inom citationstecken automatiskt till spanska i ALLA videor för den här karaktären. Vanliga karaktärer behåller den engelska prompten.">
-              <input type="checkbox" class="accent-rose-500"
-                     :checked="ch.language === 'es'"
-                     @change="setCharacterLanguage(ch.char_id, $event.target.checked)" />
-              <span>🇪🇸 Talar spanska <span class="text-neutral-400 dark:text-neutral-500">(översätt repliker)</span></span>
+                   title="Karaktärens talspråk. Allt utom engelska översätter repliken inom citationstecken automatiskt i ALLA videor för den här karaktären — övrig prompt (kamera, rörelse) förblir engelsk.">
+              <span>🗣 Talar</span>
+              <select class="flex-1 px-1.5 py-1 text-[11px] border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded focus:outline-none focus:ring-2 focus:ring-sky-500"
+                      :value="ch.language || 'en'"
+                      @change="setCharacterLanguage(ch.char_id, $event.target.value)">
+                <option value="en">🇬🇧 Engelska (standard)</option>
+                <option value="es">🇪🇸 Spanska (latinamerikansk)</option>
+                <option value="de">🇩🇪 Tyska (Hochdeutsch)</option>
+              </select>
             </label>
             <label class="block text-[10px] text-neutral-500 dark:text-neutral-400"
                    @click.stop="">

@@ -1180,9 +1180,10 @@ async def _resolve_end_image(job: Job, jc: JobCharacter,
 
 
 def _character_language(char_id: str) -> str | None:
-    """The library character's persistent spoken-language flag ("es" or None).
-    Live lookup (vs a job snapshot) so toggling a character's 🇪🇸 flag takes
-    effect on the next animate without re-creating the job."""
+    """The library character's persistent spoken-language flag ("es", "de" or
+    None — see reengineer.SPOKEN_LANGUAGES). Live lookup (vs a job snapshot) so
+    changing a character's 🗣 language takes effect on the next animate without
+    re-creating the job."""
     ch = store().get_character(char_id)
     return ch.language if ch else None
 
@@ -1252,30 +1253,32 @@ async def _animate_one_video(
     video_qc_on = _video_qc_on(job)
     max_attempts = 1 + (max(0, settings.video_qc_max_retries)
                         if video_qc_on else 0)
-    # Per-character spoken language (Hugo 2026-06-26): a 🇪🇸-flagged character
-    # always speaks Spanish — translate THIS clip's quoted dialogue + enforce
-    # the Spanish accent. No-op for English/unflagged characters and for a
-    # full-"es" run (already localized upstream). Done BEFORE prompt_text so the
-    # video-QC expected dialogue (derived from the submitted prompt) and the
-    # QC-retry base both match the Spanish audio.
-    if _character_language(jc.char_id) == "es":
+    # Per-character spoken language (Hugo 2026-06-26 Spanish, 2026-08-02
+    # German): a 🇪🇸/🇩🇪-flagged character always speaks that language —
+    # translate THIS clip's quoted dialogue + enforce its accent. No-op for
+    # English/unflagged characters and for a run already localized upstream.
+    # Done BEFORE prompt_text so the video-QC expected dialogue (derived from
+    # the submitted prompt) and the QC-retry base both match the real audio.
+    char_lang = _character_language(jc.char_id)
+    lang_spec = reengineer.SPOKEN_LANGUAGES.get(char_lang or "")
+    if lang_spec is not None:
         try:
             localized = await asyncio.to_thread(
-                reengineer.localize_motion_prompt, movement_prompt, "es",
-                job_id=job.job_id)
+                reengineer.localize_motion_prompt, movement_prompt,
+                lang_spec.code, job_id=job.job_id)
         except reengineer.LocalizationError as e:
-            # Fail LOUD (Hugo 2026-06-27): a Spanish-flagged character must not
+            # Fail LOUD (Hugo 2026-06-27): a language-flagged character must not
             # silently ship an English clip when translation fails — fail the
             # clip with a clear message so the user can retry/reword.
             video.status = VideoStatus.ERROR
-            video.error = f"Spanish localization failed: {e}"
+            video.error = f"{lang_spec.name_en} localization failed: {e}"
             _replace_video(job, jc, video)
             await _emit(job.job_id, "video.failed", char_id=jc.char_id,
                         video_id=video.video_id, error=video.error)
             _maybe_complete_char(job, jc)
             return
         if localized != movement_prompt:
-            # Record the actually-submitted (Spanish) prompt so Step-6 compile
+            # Record the actually-submitted (localized) prompt so Step-6 compile
             # derives this clip's captions + Whisper bias from its real spoken
             # language, not the English job-level prompt.
             video.localized_movement_prompt = localized

@@ -37,7 +37,7 @@ def _stub_translate(monkeypatch, fn):
 
 def test_localize_es_translates_quote_and_adds_spanish_accent(monkeypatch):
     _stub_translate(monkeypatch,
-                    lambda lines, *, re_id=None: ["¡Pruébalo esta noche!"])
+                    lambda lines, *, language="es", re_id=None: ["¡Pruébalo esta noche!"])
     p = 'She pours oil. The person says to the camera: "Try this tonight."'
     out = reengineer.localize_motion_prompt(p, "es", job_id="j")
     # Quoted dialogue is replaced in place; English framing is untouched.
@@ -77,7 +77,7 @@ def test_localize_raises_when_translation_fails(monkeypatch):
     """A clip WITH dialogue whose translation fails raises LocalizationError so
     the runner fails the clip LOUDLY (Hugo 2026-06-27) — never silently ships an
     English clip for a Spanish-flagged character."""
-    _stub_translate(monkeypatch, lambda lines, *, re_id=None: None)
+    _stub_translate(monkeypatch, lambda lines, *, language="es", re_id=None: None)
     p = 'He nods. The person says: "Buy it now."'
     with pytest.raises(reengineer.LocalizationError):
         reengineer.localize_motion_prompt(p, "es", job_id="j")
@@ -87,7 +87,7 @@ def test_localize_raises_when_translation_fails(monkeypatch):
 
 def test_localize_reverse_span_keeps_two_clauses_intact(monkeypatch):
     _stub_translate(monkeypatch,
-                    lambda lines, *, re_id=None: [f"<<{x}>>" for x in lines])
+                    lambda lines, *, language="es", re_id=None: [f"<<{x}>>" for x in lines])
     p = ('He pours. The person says: "first" and then '
          'the person says: "second".')
     out = reengineer.localize_motion_prompt(p, "es")
@@ -99,7 +99,7 @@ def test_localize_reverse_span_keeps_two_clauses_intact(monkeypatch):
 def test_localize_caches_by_prompt(monkeypatch):
     calls = {"n": 0}
 
-    def _count(lines, *, re_id=None):
+    def _count(lines, *, language="es", re_id=None):
         calls["n"] += 1
         return [x.upper() for x in lines]
     _stub_translate(monkeypatch, _count)
@@ -114,7 +114,7 @@ def test_localize_strips_inline_american_accent(monkeypatch):
     """The analyst (and the English fallback) write the accent INLINE inside the
     says-clause — `...says ... with an American accent: "<x>"`. The ES localizer
     must strip that, or Kling gets a contradictory accent next to Spanish."""
-    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["¡Hola amigos!"])
+    _stub_translate(monkeypatch, lambda lines, *, language="es", re_id=None: ["¡Hola amigos!"])
     p = ('He waves. The person says enthusiastically to the camera with an '
          'American accent: "Hello friends."')
     out = reengineer.localize_motion_prompt(p, "es", job_id="j")
@@ -172,7 +172,7 @@ def test_localize_swaps_the_language_when_the_clip_orders_english(monkeypatch):
 def test_localize_strips_standalone_en_clause_with_dialogue(monkeypatch):
     """When the clip HAS dialogue, a pre-existing standalone EN accent clause is
     replaced by the Spanish one (non-vacuous: the input genuinely contains it)."""
-    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["¡Cómpralo ya!"])
+    _stub_translate(monkeypatch, lambda lines, *, language="es", re_id=None: ["¡Cómpralo ya!"])
     p = reengineer.with_accent('He nods. The person says: "Buy now."', "en")
     assert reengineer.ACCENT_CLAUSE["en"][0] in p          # input really has it
     out = reengineer.localize_motion_prompt(p, "es")
@@ -187,7 +187,7 @@ def test_localize_guard_does_not_overmatch_dialogue(monkeypatch):
     'Latin American Spanish' must STILL be translated — the guard keys off the
     full 'neutral latin american spanish' marker, not the bare phrase."""
     _stub_translate(monkeypatch,
-                    lambda lines, *, re_id=None: ["Servimos comida auténtica."])
+                    lambda lines, *, language="es", re_id=None: ["Servimos comida auténtica."])
     p = ('He gestures at the menu. The person says: '
          '"We serve authentic Latin American Spanish cuisine."')
     out = reengineer.localize_motion_prompt(p, "es")
@@ -202,7 +202,7 @@ def test_localize_sanitizes_quotes_in_translation(monkeypatch):
     spoken line (video_qc reads the same prompt with the same regex)."""
     from character_swap.video_edit import extract_dialogue
     _stub_translate(monkeypatch,
-                    lambda lines, *, re_id=None: ['Él dijo "hola" fuerte'])
+                    lambda lines, *, language="es", re_id=None: ['Él dijo "hola" fuerte'])
     p = 'He waves. The person says: "He said hi loudly."'
     out = reengineer.localize_motion_prompt(p, "es")
     spoken = extract_dialogue(out)
@@ -214,7 +214,7 @@ def test_localize_guarantees_accent_despite_spanish_framing(monkeypatch):
     """If English framing contains the word 'Spanish' (e.g. 'Spanish-tiled'),
     with_accent's keyword guard would skip the accent clause — the localizer
     HARD-guarantees it instead."""
-    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["Hola."])
+    _stub_translate(monkeypatch, lambda lines, *, language="es", re_id=None: ["Hola."])
     p = 'A rustic Spanish-tiled kitchen. The person says: "Hi there."'
     out = reengineer.localize_motion_prompt(p, "es")
     assert "Latin American Spanish accent" in out          # accent guaranteed
@@ -223,7 +223,7 @@ def test_localize_guarantees_accent_despite_spanish_framing(monkeypatch):
 def test_localize_strips_adjectived_inline_accent(monkeypatch):
     """The inline-accent strip tolerates an adjective ('clear/warm/General')
     before 'American accent', not only the canonical 'natural' form."""
-    _stub_translate(monkeypatch, lambda lines, *, re_id=None: ["Hola."])
+    _stub_translate(monkeypatch, lambda lines, *, language="es", re_id=None: ["Hola."])
     p = 'He smiles. The person says with a clear American accent: "Hello."'
     out = reengineer.localize_motion_prompt(p, "es")
     assert "american accent" not in out.lower()

@@ -5381,18 +5381,34 @@ function studio() {
       await this.loadLibrary();
     },
 
-    // Mark a character Spanish-speaking (🇪🇸 toggle on the library card). When
-    // on, every video this character makes has its quoted dialogue auto-
-    // translated to neutral Latin American Spanish (Hugo 2026-06-26). Sends
-    // language="es" or "" (clear); persisted on the CharacterAsset.
-    async setCharacterLanguage(charId, isEs) {
+    // Per-character spoken languages (mirror of reengineer.SPOKEN_LANGUAGES —
+    // adding one here + a server row is the whole change). Anything but 'en'
+    // auto-translates the quoted dialogue in every video that character makes.
+    CHAR_LANGUAGES: {
+      es: { flag: '🇪🇸', label: 'Spansktalande — repliken inom citationstecken översätts till neutral latinamerikansk spanska i den här karaktärens videor' },
+      de: { flag: '🇩🇪', label: 'Tysktalande — repliken inom citationstecken översätts till standardtyska (Hochdeutsch) i den här karaktärens videor' },
+    },
+
+    charLanguageFlag(code) {
+      return (this.CHAR_LANGUAGES[code] || {}).flag || '';
+    },
+
+    charLanguageTitle(code) {
+      return (this.CHAR_LANGUAGES[code] || {}).label || '';
+    },
+
+    // Set a character's spoken language (🗣 picker on the library card). Sends
+    // the language code ('es' | 'de') or 'en' to clear back to English
+    // (Hugo 2026-06-26 spanska, 2026-08-02 tyska); persisted on the
+    // CharacterAsset and read live at animate time.
+    async setCharacterLanguage(charId, lang) {
       const r = await fetch('/api/characters/' + charId, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ language: isEs ? 'es' : '' }),
+        body: JSON.stringify({ language: lang || 'en' }),
       });
-      // Always reload — on failure this also re-syncs the checkbox back to the
-      // persisted (unchanged) value so the DOM never lies about the flag state.
+      // Always reload — on failure this also re-syncs the picker back to the
+      // persisted (unchanged) value so the DOM never lies about the language.
       if (!r.ok) this.notifyError('Language update failed: ' + await r.text());
       await this.loadLibrary();
     },
