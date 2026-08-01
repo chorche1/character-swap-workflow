@@ -1415,9 +1415,19 @@ async def _animate_one_video(
                 video.qc_status = "failed"
                 video.qc_reason = verdict.reason
                 wrong_language = verdict.wrong_language
-                # A wrong-language take buys its own retry even when the fuzzy
-                # speech check is flag-only (max_attempts == 1).
-                lang_retry = verdict.wrong_language and lang_retries_left > 0
+                # ANY missed line on a language-flagged character buys a retry,
+                # even when the fuzzy speech check is flag-only
+                # (max_attempts == 1). Measured on re_b3170d2118: of the 8
+                # German clips that spoke English, only 5 transcribed cleanly
+                # enough to MATCH the English line — the other 3 came back as
+                # mangled English ("Lay a friction knob lock for 10 seconds
+                # under the netting" for "Lege frischen Knoblauch…") and match
+                # neither language. What they have in common is simply not
+                # saying the line, and for a flagged character that is worth
+                # another take. The LOUD failure below stays reserved for the
+                # confident `wrong_language` verdict, so a merely garbled last
+                # take still ships flagged rather than stranding the run.
+                lang_retry = lang_spec is not None and lang_retries_left > 0
                 if lang_retry:
                     lang_retries_left -= 1
                 if attempt < max_attempts or lang_retry:
