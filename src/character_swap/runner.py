@@ -1301,6 +1301,7 @@ async def _animate_one_video(
                         char_id=jc.char_id, video_id=video.video_id)
     char_lang = _character_language(jc.char_id)
     lang_spec = reengineer.SPOKEN_LANGUAGES.get(char_lang or "")
+    original_speech: str | None = None
     if lang_spec is not None:
         try:
             localized = await asyncio.to_thread(
@@ -1322,6 +1323,9 @@ async def _animate_one_video(
             # derives this clip's captions + Whisper bias from its real spoken
             # language, not the English job-level prompt.
             video.localized_movement_prompt = localized
+            # Keep the ENGLISH line: a clip that transcribes back to it spoke
+            # the wrong language (Hugo 2026-08-02 — see video_qc.inspect_clip).
+            original_speech = video_qc.expected_speech(movement_prompt)
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
@@ -1345,12 +1349,22 @@ async def _animate_one_video(
         video_model)
     models_to_try = [video_model] + (
         [fb_model] if video_model != fb_model else [])
+    # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
+    # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
+    # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment
+    # call, so it always gets re-rendered with a hardened prompt — and if the
+    # re-renders don't take, the clip FAILS instead of quietly entering a final.
+    lang_retries_left = (max(0, settings.video_qc_language_max_retries)
+                         if lang_spec is not None else 0)
+    wrong_language = False
     for _model_idx, active_model in enumerate(models_to_try):
         # A fallback take starts from the clean prompt (drop any QC-retry hint
         # appended while the previous model was failing).
         prompt_text = movement_prompt
         try:
-            for attempt in range(1, max_attempts + 1):
+            attempt = 0
+            while True:
+                attempt += 1
                 video.qc_attempts = attempt
                 phase = "submit"
                 provider_job_id = await asyncio.to_thread(
@@ -1386,6 +1400,8 @@ async def _animate_one_video(
                 verdict = (await asyncio.to_thread(
                     video_qc.inspect_clip, dest,
                     movement_prompt=prompt_text, app_job_id=job.job_id,
+                    expected_language=(lang_spec.code if lang_spec else None),
+                    original_speech=original_speech,
                 ) if video_qc_on else None)
                 if verdict is None:
                     video.qc_status = "skipped"
@@ -1394,10 +1410,17 @@ async def _animate_one_video(
                 if verdict.passed:
                     video.qc_status = "passed"
                     video.qc_reason = None
+                    wrong_language = False
                     break
                 video.qc_status = "failed"
                 video.qc_reason = verdict.reason
-                if attempt < max_attempts:
+                wrong_language = verdict.wrong_language
+                # A wrong-language take buys its own retry even when the fuzzy
+                # speech check is flag-only (max_attempts == 1).
+                lang_retry = verdict.wrong_language and lang_retries_left > 0
+                if lang_retry:
+                    lang_retries_left -= 1
+                if attempt < max_attempts or lang_retry:
                     await _emit(job.job_id, "video.qc_retry",
                                 char_id=jc.char_id, video_id=video.video_id,
                                 attempt=attempt, reason=verdict.reason)
@@ -1421,6 +1444,8 @@ async def _animate_one_video(
                         f"control: {hint}" if hint else "")
                     video.status = VideoStatus.PROCESSING
                     _replace_video(job, jc, video)
+                    continue
+                break
         except Exception as e:
             # Retry ONCE on the fallback model when THIS model refused the clip
             # on content-policy grounds AND a fallback model is still queued.
@@ -1463,6 +1488,22 @@ async def _animate_one_video(
             return
         # This model's QC loop finished without raising → the clip is good.
         break
+
+    # A clip that is STILL in the wrong language after every re-render must not
+    # enter a final (Hugo 2026-08-02 — "gör så det problemet aldrig sker igen";
+    # his standing rule is refuse loudly over silent partial). The rendered file
+    # stays on disk and in `qc_rejects`, so the ↻ retry starts from something
+    # visible instead of nothing.
+    if wrong_language and lang_spec is not None:
+        video.status = VideoStatus.ERROR
+        video.error = (f"fel språk efter "
+                       f"{settings.video_qc_language_max_retries + 1} tagningar: "
+                       f"{video.qc_reason or 'klippet talar inte ' + lang_spec.name_en}")
+        _replace_video(job, jc, video)
+        await _emit(job.job_id, "video.failed", char_id=jc.char_id,
+                    video_id=video.video_id, error=video.error)
+        _maybe_complete_char(job, jc)
+        return
 
     video.status = VideoStatus.DONE
     video.completed_at = datetime.utcnow()

@@ -85,6 +85,14 @@ class ClipVerdict:
     passed: bool
     reason: str
     corrective_hint: str
+    # WRONG LANGUAGE (Hugo 2026-08-02): the clip's audio is not in the language
+    # the character is flagged with. Unlike a fuzzy "garbled a word" mismatch —
+    # which Hugo deliberately runs FLAG-ONLY (VIDEO_QC_MAX_RETRIES=0) — this is
+    # an unambiguous, whole-clip defect, so the runner always re-renders it
+    # (`VIDEO_QC_LANGUAGE_MAX_RETRIES`) and fails the clip LOUDLY when the
+    # re-renders don't take. Kept as its own flag rather than sniffing the
+    # reason text.
+    wrong_language: bool = False
 
 
 def expected_speech(prompt: str) -> str:
@@ -122,15 +130,24 @@ def check_speech(video: Path, expected: str, *, app_job_id: str | None = None
     """Whisper-transcribe the clip and compare to the expected dialogue.
     Returns (ok, heard_text, similarity), or None when transcription is
     unavailable (no OpenAI key / API error) — callers skip the check."""
+    got = _transcribe(video, expected, app_job_id=app_job_id)
+    return None if got is None else got[:3]
+
+
+def _transcribe(video: Path, expected: str, *, app_job_id: str | None = None
+                ) -> tuple[bool, str, float, str | None] | None:
+    """One Whisper pass serving BOTH speech checks: (ok, heard, similarity,
+    detected_language). The language ships along for free — `verbose_json`
+    always carried it — so the wrong-language check costs no extra call."""
     from character_swap.config import settings
     if not expected.strip() or not settings.openai_api_key:
         return None
     try:
         from character_swap import video_edit
-        words = video_edit.transcribe_words(video, job_id=app_job_id)
+        words, detected = video_edit.transcribe_detailed(video, job_id=app_job_id)
         heard = " ".join(w.text for w in words)
         sim = speech_similarity(expected, heard)
-        return sim >= settings.video_qc_speech_threshold, heard, sim
+        return (sim >= settings.video_qc_speech_threshold, heard, sim, detected)
     except Exception:
         return None
 
@@ -201,19 +218,60 @@ def check_visual(video: Path, *, app_job_id: str | None = None) -> ClipVerdict |
 
 
 def inspect_clip(video: Path, *, movement_prompt: str,
-                 app_job_id: str | None = None) -> ClipVerdict | None:
-    """Combined clip QC: speech (when dialogue is expected) + visual.
-    None = no check could run (treat as skip)."""
+                 app_job_id: str | None = None,
+                 expected_language: str | None = None,
+                 original_speech: str | None = None) -> ClipVerdict | None:
+    """Combined clip QC: language (when the character is language-flagged) +
+    speech (when dialogue is expected) + visual.
+    None = no check could run (treat as skip).
+
+    `expected_language` + `original_speech` arm the wrong-language check:
+    the character's 🗣 flag and the ENGLISH line the prompt carried before
+    localization. A clip that transcribes back to that English line spoke the
+    wrong language (Hugo 2026-08-02)."""
     from character_swap.config import settings
     if not settings.video_qc_enabled:
         return None
 
     ran_any = False
     expected = expected_speech(movement_prompt)
-    speech = check_speech(video, expected, app_job_id=app_job_id)
+    speech = _transcribe(video, expected, app_job_id=app_job_id)
     if speech is not None:
         ran_any = True
-        ok, heard, sim = speech
+        ok, heard, sim, detected = speech
+        # LANGUAGE FIRST — it outranks the fuzzy word-similarity check. A clip
+        # that says the ORIGINAL ENGLISH line instead of the translated one is
+        # not a "garbled TTS" case (which Hugo runs flag-only); it is unusable,
+        # and reporting it as a similarity miss buried the real cause behind a
+        # 0.00 score (re_b3170d2118: 8 of 10 German clips, every one of them
+        # mislabeled "dialogue mismatch").
+        #
+        # The signal is a MATCH AGAINST THE ENGLISH SOURCE LINE, which we still
+        # have — not Whisper's own `language` field. Measured on the real clips
+        # from that run, that field is unusable here: it reported "english" for
+        # vd_26334d, whose audio is plainly German ("Dieser Punkt unter der
+        # Sutna ist direkt mit dem Lymphsystem…"). Gating on it would have
+        # re-rendered and then FAILED correct German clips — worse than the bug.
+        # Matching the English line cannot go wrong the same way: a clip
+        # speaking German does not transcribe into the English sentence.
+        from character_swap import reengineer
+        spec = reengineer.SPOKEN_LANGUAGES.get((expected_language or "").lower())
+        if spec is not None and (original_speech or "").strip():
+            en_sim = speech_similarity(original_speech, heard)
+            if en_sim >= settings.video_qc_language_threshold and en_sim > sim:
+                return ClipVerdict(
+                    passed=False,
+                    reason=(f"fel språk: klippet talar engelska, inte "
+                            f"{spec.name_en} (matchar originalrepliken "
+                            f"{en_sim:.2f} mot {sim:.2f}) — hörde "
+                            f"“{heard[:100]}”"),
+                    corrective_hint=(
+                        f"CRITICAL: every spoken word must be in "
+                        f"{spec.name_en}. The previous take spoke ENGLISH. Say "
+                        f'exactly, {spec.attribution}: "{expected}" — never in '
+                        f"English."),
+                    wrong_language=True,
+                )
         if not ok:
             return ClipVerdict(
                 passed=False,

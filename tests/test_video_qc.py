@@ -617,12 +617,16 @@ def test_inspect_clip_gating(monkeypatch):
     mismatch fails with the heard text in the reason."""
     monkeypatch.setattr(type(video_qc.__import__('character_swap.config', fromlist=['settings']).settings) if False else type(__import__('character_swap.config', fromlist=['settings']).settings),
                         "video_qc_enabled", property(lambda self: True), raising=False)
-    monkeypatch.setattr(video_qc, "check_speech", lambda *a, **k: None)
+    # `_transcribe` is the ONE Whisper pass inspect_clip runs — it returns
+    # (ok, heard, similarity, detected_language) so the wrong-language check
+    # rides along without a second call. check_speech is the 3-tuple public
+    # view of the same pass.
+    monkeypatch.setattr(video_qc, "_transcribe", lambda *a, **k: None)
     monkeypatch.setattr(video_qc, "check_visual", lambda *a, **k: None)
     assert video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="p") is None
 
-    monkeypatch.setattr(video_qc, "check_speech",
-                        lambda *a, **k: (False, "baking goda", 0.93))
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (False, "baking goda", 0.93, "english"))
     verdict = video_qc.inspect_clip(
         Path("/x.mp4"), movement_prompt='says: "baking soda"')
     assert verdict is not None and not verdict.passed
@@ -643,8 +647,8 @@ def test_inspect_clip_visual_disabled_runs_speech_only(monkeypatch):
     monkeypatch.setattr(video_qc, "check_visual",
                         lambda *a, **k: (visual_calls.append(1),
                                          video_qc.ClipVerdict(False, "extra arm", "fix"))[1])
-    monkeypatch.setattr(video_qc, "check_speech",
-                        lambda *a, **k: (True, "baking soda", 0.99))
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (True, "baking soda", 0.99, "english"))
     verdict = video_qc.inspect_clip(
         Path("/x.mp4"), movement_prompt='says: "baking soda"')
     assert verdict is not None and verdict.passed     # speech ran + passed
@@ -659,7 +663,7 @@ def test_inspect_clip_visual_enabled_still_runs(monkeypatch):
                         property(lambda self: True), raising=False)
     monkeypatch.setattr(type(cfg), "video_qc_visual_enabled",
                         property(lambda self: True), raising=False)
-    monkeypatch.setattr(video_qc, "check_speech", lambda *a, **k: None)
+    monkeypatch.setattr(video_qc, "_transcribe", lambda *a, **k: None)
     monkeypatch.setattr(video_qc, "check_visual",
                         lambda *a, **k: video_qc.ClipVerdict(False, "extra arm", "fix"))
     verdict = video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="no dialogue")

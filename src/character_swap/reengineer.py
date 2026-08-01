@@ -595,7 +595,14 @@ class SpokenLanguage:
     marker: str           # lowercase phrase = "prompt is already in this lang"
     attribution: str      # inline: '…says to the camera <attribution>: "…"'
     translate_system: str  # GPT-4o system prompt for translate_dialogue
-
+    # Explicit "speak ONLY this language" order (leading space, ends "."), and
+    # the lowercase phrase that marks it already present. Third and last layer
+    # of the language guarantee (Hugo 2026-08-02): the standalone accent clause
+    # sits at the END of a long English prompt, and on its own it was not
+    # enough — 8 of 10 🇩🇪 clips in re_b3170d2118 spoke ENGLISH despite carrying
+    # correct German dialogue. See `enforce_language_directives`.
+    speak_only_clause: str
+    speak_only_key: str
     @property
     def speech_order(self) -> str:
         """Replacement for an explicit "speaking English…" order in a prompt."""
@@ -616,6 +623,10 @@ SPOKEN_LANGUAGES: dict[str, SpokenLanguage] = {
         # falsely skip translation.
         marker="neutral latin american spanish",
         attribution=SPANISH_SPEECH_ATTRIBUTION,
+        speak_only_clause=(" The person speaks ONLY Spanish — every spoken "
+                           "word is Spanish. No English is spoken at any "
+                           "point."),
+        speak_only_key="speaks only spanish",
         translate_system=(
             "You translate short spoken lines from a video script into "
             "natural, idiomatic NEUTRAL LATIN AMERICAN Spanish (the kind used "
@@ -635,6 +646,10 @@ SPOKEN_LANGUAGES: dict[str, SpokenLanguage] = {
         # and (unlike a bare "german") never in a natural German dialogue line.
         marker="standard german",
         attribution=GERMAN_SPEECH_ATTRIBUTION,
+        speak_only_clause=(" The person speaks ONLY German — every spoken "
+                           "word is German. No English is spoken at any "
+                           "point."),
+        speak_only_key="speaks only german",
         translate_system=(
             "You translate short spoken lines from a video script into "
             "natural, idiomatic STANDARD GERMAN (Hochdeutsch) — the neutral "
@@ -674,8 +689,23 @@ def with_accent(prompt: str, language: str = "en") -> str:
     there is no API switch, suppression is prompt-level). The pronunciation +
     no-music directives stay English (they are instructions, not speech). Each
     clause is skipped when the prompt already covers it. Mirrored in app.js
-    klingSuffix()."""
+    klingSuffix().
+
+    For a NON-English target the English accent order is rewritten to this
+    language's own attribution FIRST (Hugo 2026-08-02: "alla videoprompts för
+    de spanska och tyska ska automatiskt justeras så att de inte har american
+    accent"). Every scene prompt Hugo writes at the gate says "…to the camera
+    with an american accent…"; without this the finished prompt ordered an
+    American accent right beside the line AND a Spanish/German accent at the
+    end — two contradictory language orders, with the English one closest to
+    the dialogue. The English path is untouched: there, an American accent
+    phrase is exactly what belongs."""
     out = prompt
+    spec = SPOKEN_LANGUAGES.get(language)
+    if spec is not None:
+        out = _INLINE_EN_ACCENT_RE.sub(f" {spec.attribution}", out)
+        out = _EN_SPEECH_ORDER_RE.sub(spec.speech_order, out)
+        out = out.replace(ACCENT_CLAUSE["en"][0], "")
     clause, key = ACCENT_CLAUSE.get(language, ACCENT_CLAUSE["en"])
     if key not in out.lower():
         out = out.rstrip() + clause
@@ -752,16 +782,78 @@ def _has_foreign_speech_directive(prompt: str, language: str) -> bool:
                for code, spec in SPOKEN_LANGUAGES.items() if code != language)
 
 
+# Whitespace / punctuation that introduces a quoted line (": ", ", ", " — ").
+# `_inject_inline_attribution` slides back over it so the language lands INSIDE
+# the says-clause ("…to the camera in standard German: \"…\"") rather than
+# between the colon and the quote.
+_PRE_QUOTE_PUNCT_RE = re.compile(r"[\s:,\-–—]*$")
+
+
+def _inject_inline_attribution(text: str, spec: SpokenLanguage) -> str:
+    """Put "<attribution>" immediately before the FIRST quoted line.
+
+    Hugo 2026-08-02: the standalone accent clause is appended at the very END
+    of a long, otherwise-English prompt. In re_b3170d2118 that was too far from
+    the dialogue for Kling to obey — 8 of 10 🇩🇪 clips spoke ENGLISH even though
+    the quoted line was correct German and the clause was present. The clause
+    that DOES get obeyed is the one inside the says-clause, which is exactly
+    what the analyst writes for a run-level 🗣 run (`spanish_speech_clause`) and
+    exactly what the per-character localizer used to DELETE without replacing.
+
+    No-ops when the prompt carries no quoted line (nothing to attribute) or
+    already names the language inline (idempotent — a redo re-localizes the
+    same text)."""
+    if not text or spec.attribution.lower() in text.lower():
+        return text
+    matches = dialogue_matches(text)
+    if not matches:
+        return text
+    quote_at = matches[0].start(1) - 1        # the opening quote character
+    if quote_at <= 0:
+        return text
+    head, tail = text[:quote_at], text[quote_at:]
+    cut = _PRE_QUOTE_PUNCT_RE.search(head).start()
+    if cut <= 0:                               # nothing but punctuation before
+        return text                            # the quote — leave it alone
+    return f"{head[:cut]} {spec.attribution}{head[cut:]}{tail}"
+
+
+def enforce_language_directives(text: str, spec: SpokenLanguage) -> str:
+    """The THREE reinforcing layers that make the clip actually speak `spec`:
+
+    1. the inline attribution, right next to the quoted line (the one Kling
+       obeys — see `_inject_inline_attribution`),
+    2. the standalone accent clause (kept as a hard guarantee even when the
+       inline attribution already contains the accent keyword, which would
+       otherwise falsely suppress `with_accent`'s substring guard), and
+    3. an explicit "speaks ONLY <language>, no English" order.
+
+    Idempotent: re-running it on its own output changes nothing."""
+    out = _inject_inline_attribution(text, spec)
+    out = with_accent(out, spec.code)
+    if spec.accent_clause.strip() not in out:
+        out = out.rstrip() + spec.accent_clause
+    if spec.speak_only_key not in out.lower():
+        out = out.rstrip() + spec.speak_only_clause
+    return out
+
+
 def _force_language_speech(text: str, language: str) -> str:
     """Remove EVERY other language's order and guarantee `language`'s.
 
     One helper for both localize paths (dialogue translated / nothing to
     translate) so a prompt shape can never come out with the dialogue in the
     target language but the language order still in English. Strips the
-    standalone English clause + the inline American-accent attribution + any
-    OTHER registered language's clause/attribution, flips an explicit
-    "speaking English…" order in place, then falls back to appending the
-    target's standalone clause when nothing inline established the language."""
+    standalone English clause + any OTHER registered language's
+    clause/attribution, REPLACES the inline American-accent phrase with this
+    language's own attribution, flips an explicit "speaking English…" order in
+    place, and then enforces all three directive layers.
+
+    The American-accent phrase is REPLACED, not deleted (Hugo 2026-08-02).
+    Deleting it left "…says enthusiastically to the camera: \"<German>\"" — a
+    says-clause that names no language at all, inside an English prompt, with
+    the German clause 200 characters further down. Kling answered that by
+    speaking English."""
     spec = SPOKEN_LANGUAGES[language]
     out = text.replace(ACCENT_CLAUSE["en"][0], "")
     for code, other in SPOKEN_LANGUAGES.items():
@@ -769,12 +861,9 @@ def _force_language_speech(text: str, language: str) -> str:
             continue
         out = out.replace(other.accent_clause, "")
         out = _ATTRIBUTION_RES[code].sub("", out)
-    out = _INLINE_EN_ACCENT_RE.sub("", out)
+    out = _INLINE_EN_ACCENT_RE.sub(f" {spec.attribution}", out)
     out = _EN_SPEECH_ORDER_RE.sub(spec.speech_order, out)
-    # with_accent's keyword guard can be falsely suppressed by an incidental
-    # scene word ("Spanish-tiled kitchen", "German Shepherd"), so the marker
-    # check below is the hard guarantee.
-    out = with_accent(out, language)
+    out = enforce_language_directives(out, spec)
     if spec.marker not in out.lower():
         out = out.rstrip() + spec.accent_clause
     return out
