@@ -292,6 +292,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # "Telegram-kanal saknas" for every character.
     if "telegram_chat_id" not in char_cols:
         conn.execute("ALTER TABLE characters ADD COLUMN telegram_chat_id TEXT")
+    # Per-character gender (Hugo 2026-08-02): "male" | "female" | null. Decides
+    # whether the speaker-attribution agent runs on 👥 two-person scenes. NOTE:
+    # `characters` is one of the few tables still WITHOUT a model_json column,
+    # so every new CharacterAsset field needs its own column here + a line in
+    # upsert_character/_char_from_row — exactly the omission that silently
+    # blanked telegram_chat_id on every restart (2026-07-28).
+    if "gender" not in char_cols:
+        conn.execute("ALTER TABLE characters ADD COLUMN gender TEXT")
     # Step 6 (Compile) per-character output. Concatenated + editor-processed
     # final video for each character. Status null = never compiled.
     jc_cols2 = {r["name"] for r in conn.execute("PRAGMA table_info(job_characters)")}
@@ -376,6 +384,7 @@ def _char_from_row(r: sqlite3.Row, images: list[CharacterImage]) -> CharacterAss
         language=r["language"] if "language" in keys else None,
         telegram_chat_id=(r["telegram_chat_id"]
                           if "telegram_chat_id" in keys else None),
+        gender=r["gender"] if "gender" in keys else None,
         created_at=_parse_iso(r["created_at"]),
     )
 
@@ -651,8 +660,8 @@ def upsert_character(conn: sqlite3.Connection, c: CharacterAsset) -> None:
     conn.execute(
         """INSERT INTO characters (char_id, filename, name, primary_image_id,
                                    voice_id, voice_provider, language,
-                                   telegram_chat_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   telegram_chat_id, gender, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(char_id) DO UPDATE SET
              filename = excluded.filename,
              name = excluded.name,
@@ -660,10 +669,11 @@ def upsert_character(conn: sqlite3.Connection, c: CharacterAsset) -> None:
              voice_id = excluded.voice_id,
              voice_provider = excluded.voice_provider,
              language = excluded.language,
-             telegram_chat_id = excluded.telegram_chat_id""",
+             telegram_chat_id = excluded.telegram_chat_id,
+             gender = excluded.gender""",
         (c.char_id, c.filename, c.name, c.primary_image_id,
          c.voice_id, c.voice_provider, c.language, c.telegram_chat_id,
-         _iso(c.created_at)),
+         c.gender, _iso(c.created_at)),
     )
     # Replace the image rows atomically.
     conn.execute("DELETE FROM character_images WHERE char_id = ?", (c.char_id,))

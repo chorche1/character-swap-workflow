@@ -68,6 +68,14 @@ class CharacterAsset(BaseModel):
     # codes is `reengineer.SPOKEN_LANGUAGES`. None/"en" = default English (no
     # change). Additive to the per-run 🗣 picker.
     language: str | None = None
+    # Character's gender: "male" | "female" (None = not set yet, treated as
+    # male/unknown everywhere). Chosen when the character is created (Hugo
+    # 2026-08-02). Currently drives exactly one behavior: the speaker-attribution
+    # fix (speaker_fix.py) runs ONLY for female characters, and only on scenes
+    # flagged 👥 two-person — the prompts are written off male originals, so a
+    # woman in a two-person scene needs the speaker spelled out or the video
+    # model lets the man say the line.
+    gender: str | None = None
     # Telegram destination dedicated to this character's Swap/Animate/
     # Reengineer finals. Accepts a numeric channel chat id ("-100…") or a
     # public channel username ("@…"). The shared character bot must be an
@@ -188,6 +196,13 @@ class VideoVariant(BaseModel):
     # compile reads the spoken dialogue from here (not the English job prompt) so
     # captions + the Whisper bias hint match this clip's actual spoken language.
     localized_movement_prompt: str | None = None
+    # The movement prompt as rewritten by the speaker-attribution agent
+    # (speaker_fix.py, Hugo 2026-08-02) — set only for a FEMALE character on a
+    # scene flagged 👥 two-person, and only when the agent actually changed
+    # something. Recorded for visibility (⚥ chip + tooltip in the clip strip);
+    # the submitted text is this, then localized if the character also carries a
+    # 🗣 language flag.
+    speaker_fix_prompt: str | None = None
     # Clip-QC outcome (video_qc.py): dialogue transcript match + frame-sampled
     # anatomy check. Same semantics as GeneratedImage.qc_*.
     qc_status: str | None = None
@@ -318,6 +333,14 @@ class Job(BaseModel):
     # image is used AS-IS (no per-character swap), so `_kick_char` generates no
     # variants for them and one shared Kling clip is reused for every character.
     direct_scene_ids: list[str] = Field(default_factory=list)
+    # Scenes the user flagged "👥 två personer i bild" (subset of scene_ids,
+    # Hugo 2026-08-02). For every FEMALE character (CharacterAsset.gender) these
+    # scenes run one extra vision call right before the clip is submitted, which
+    # rewrites the movement prompt so the speaker is unmistakably HER (the source
+    # prompts are written off male originals and say "the man says…"). Opt-in per
+    # scene so the credits are only spent where two people can be confused —
+    # see speaker_fix.py.
+    two_person_scenes: list[str] = Field(default_factory=list)
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants

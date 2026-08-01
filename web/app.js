@@ -51,6 +51,9 @@ function studio() {
     uploadFiles: [],            // [{file, url}]
     uploadTargetCharId: null,   // null = new character
     uploadNewCharName: '',
+    // Kön för en NY karaktär — obligatoriskt (Hugo 2026-08-02). '' = inget valt
+    // ännu; submit vägrar tills man valt. Styr talar-agenten på 👥-scener.
+    uploadNewCharGender: '',
     uploadingChars: false,
     moveMenuJobId: null,
     searchQuery: '',
@@ -1206,6 +1209,9 @@ function studio() {
           file, name: file.name,
           previewUrl: URL.createObjectURL(file),
           motion_prompt: '', length: 5, direct: false,
+          // 👥 två personer i bild → talar-agenten körs för varje KVINNLIG
+          // karaktär på den här scenen (Hugo 2026-08-02). Opt-in per scen.
+          twoPerson: false,
           endFrameFile: null, endFrameUrl: '',
         });
       }
@@ -1306,6 +1312,9 @@ function studio() {
         fd.append('motion_prompts', JSON.stringify(g.rows.map(r => r.motion_prompt || '')));
         fd.append('lengths', JSON.stringify(g.rows.map(r => Number(r.length) || 0)));
         fd.append('direct', JSON.stringify(g.rows.map(r => !!r.direct)));
+        // 👥 två personer i bild — servern ignorerar flaggan på direct-rader.
+        fd.append('two_person',
+                  JSON.stringify(g.rows.map(r => !!r.twoPerson && !r.direct)));
         // Optional end frames (sparse): the files + a parallel array of their
         // row indices. Direct rows can't carry one (the UI hides the control).
         const endIdx = [];
@@ -2416,6 +2425,30 @@ function studio() {
         ...this.reSceneDrafts,
         [key]: { ...(this.reSceneDrafts[key] || {}), [field]: value },
       };
+    },
+
+    // 👥 "två personer i bild" på en befintlig scen (Hugo 2026-08-02). Egen
+    // PATCH utan draft-maskineriet: en kryssruta har inget utkast att rebasa,
+    // och servern markerar scenen "ändrad" efter gaten så "▶ Animera om
+    // ändrade" plockar upp den. Optimistisk uppdatering av rutan, sedan
+    // serverns svar (som vid fel visar det verkliga läget igen).
+    async reengineerSetTwoPerson(run, sc, on) {
+      sc.two_person = !!on;
+      const r = await fetch(`/api/reengineer/${run.re_id}/scenes/${sc.idx}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ two_person: !!on }),
+      });
+      if (!r.ok) {
+        sc.two_person = !on;
+        this.notifyError('Kunde inte spara 👥: ' + await r.text());
+        return;
+      }
+      const fresh = await r.json();
+      if (this._isTypingProtectedField()) {
+        this._rePendingSaveViews = { ...this._rePendingSaveViews, [run.re_id]: fresh };
+        return;
+      }
+      this._spliceReengineerView(fresh);
     },
 
     async reengineerSaveScene(run, sc) {
@@ -5234,6 +5267,7 @@ function studio() {
     openUploadModal(opts = {}) {
       this.uploadTargetCharId = opts.targetCharId || null;
       this.uploadNewCharName = '';
+      this.uploadNewCharGender = '';
       this._clearUploadFiles();
       if (opts.files && opts.files.length) this._addUploadFiles(opts.files);
       this.showUploadModal = true;
@@ -5244,6 +5278,7 @@ function studio() {
       this._clearUploadFiles();
       this.uploadTargetCharId = null;
       this.uploadNewCharName = '';
+      this.uploadNewCharGender = '';
       this.showUploadModal = false;
     },
 
@@ -5271,6 +5306,13 @@ function studio() {
         this.notifyError('Pick an existing character or name a new one');
         return;
       }
+      // Kön är obligatoriskt för en NY karaktär (Hugo 2026-08-02) — det avgör
+      // om talar-agenten körs på 👥-scener, och en karaktär utan kön skulle
+      // tyst behandlas som man.
+      if (!this.uploadTargetCharId && !this.uploadNewCharGender) {
+        this.notifyError('Välj kön (♂ man / ♀ kvinna) för den nya karaktären');
+        return;
+      }
       this.uploadingChars = true;
       try {
         let charId = this.uploadTargetCharId;
@@ -5282,6 +5324,7 @@ function studio() {
             fd.append('character_id', charId);
           } else if (newName) {
             fd.append('name', newName);
+            fd.append('gender', this.uploadNewCharGender);
           }
           const r = await fetch('/api/characters', { method: 'POST', body: fd });
           if (!r.ok) {
@@ -5410,6 +5453,19 @@ function studio() {
       // Always reload — on failure this also re-syncs the picker back to the
       // persisted (unchanged) value so the DOM never lies about the language.
       if (!r.ok) this.notifyError('Language update failed: ' + await r.text());
+      await this.loadLibrary();
+    },
+
+    // Kön på en befintlig karaktär (♂/♀-väljaren på bibliotekskortet). '' rensar
+    // tillbaka till "ej valt" (behandlas som man). Läses live vid animering, så
+    // en ändring slår igenom på nästa klipp utan att köra om jobbet.
+    async setCharacterGender(charId, gender) {
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gender: gender || '' }),
+      });
+      if (!r.ok) this.notifyError('Kön kunde inte sparas: ' + await r.text());
       await this.loadLibrary();
     },
 

@@ -765,6 +765,9 @@
                       <span x-show="vv.fallback_dropped_end_frame"
                             class="ml-1 text-amber-600 dark:text-amber-400"
                             :title="'Slutposen tappades: reservmodellen ' + (vv.fallback_model || '') + ' har inget stöd för slutrutor, så klippet gjordes bara från startbilden'">🎯✕ slutpose tappad</span>
+                      <span x-show="vv.speaker_fix_prompt"
+                            class="ml-1 text-fuchsia-600 dark:text-fuchsia-400"
+                            :title="'👥 Talar-agenten skrev om prompten så att hon säger repliken:\n\n' + (vv.speaker_fix_prompt || '')">⚥</span>
                     </div>
                     <div class="flex gap-2 text-xs shrink-0 items-center">
                       <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
@@ -1212,6 +1215,20 @@
                          title="Använd den här bilden som den är (ingen swap) — ETT delat klipp för alla karaktärer. T.ex. en produktbild eller en scen du förberett själv.">
                     <input type="checkbox" x-model="row.direct" class="rounded" />
                     📌 ingen swap
+                  </label>
+                  <!-- 👥 Två personer i bild (Hugo 2026-08-02): för varje
+                       KVINNLIG karaktär körs en AI-agent precis före klippet —
+                       den tittar på hennes swappade bild för scenen och skriver
+                       om videoprompten så att det garanterat är HON som säger
+                       repliken (prompterna är skrivna för manliga original).
+                       Manliga karaktärer påverkas inte. Döljs för direkt-rader
+                       (delat klipp, ingen karaktärsbild att titta på). -->
+                  <label x-show="!row.direct"
+                         class="flex items-center gap-1 text-xs cursor-pointer"
+                         :class="row.twoPerson ? 'text-fuchsia-600 dark:text-fuchsia-400' : 'text-neutral-500 dark:text-neutral-400'"
+                         title="Kryssa i om det syns TVÅ personer i bilden. Då kör en AI-agent en extra koll för varje KVINNLIG karaktär: den tittar på hennes bild för scenen och skriver om videoprompten så att det är hon — inte mannen bredvid — som säger repliken. Manliga karaktärer påverkas inte, och okryssade scener kostar inget.">
+                    <input type="checkbox" x-model="row.twoPerson" class="rounded" />
+                    👥 två personer
                   </label>
                   <!-- 🎯 Optional END FRAME (slutpose) staged at upload (Hugo
                        2026-06-23): Kling animerar från scenbilden → den här
@@ -1752,6 +1769,22 @@
                           <input type="file" accept="image/png,image/jpeg,image/webp" class="hidden"
                                  @change="reengineerReplaceSceneImage(r, sc, $event.target.files[0]); $event.target.value=''" />
                         </label>
+                        <!-- 👥 Två personer i bild (Hugo 2026-08-02): kryssa i
+                             här i efterhand — varje KVINNLIG karaktär får då sin
+                             videoprompt omskriven av en AI-agent som tittat på
+                             hennes bild för scenen, så att det är hon som säger
+                             repliken. Efter gaten markeras scenen "ändrad" så
+                             "▶ Animera om ändrade" tar med den. -->
+                        <template x-if="!sc.is_direct">
+                          <label class="flex items-center gap-1 cursor-pointer"
+                                 :class="sc.two_person ? 'text-fuchsia-600 dark:text-fuchsia-400' : 'text-neutral-500 dark:text-neutral-400'"
+                                 title="Två personer syns i den här scenen. Då kör en AI-agent en extra koll för varje KVINNLIG karaktär: den tittar på hennes bild för scenen och skriver om videoprompten så att det är hon — inte mannen bredvid — som säger repliken. Manliga karaktärer påverkas inte.">
+                            <input type="checkbox" class="rounded"
+                                   :checked="!!sc.two_person"
+                                   @change="reengineerSetTwoPerson(r, sc, $event.target.checked)" />
+                            👥 två personer
+                          </label>
+                        </template>
                         <!-- 📌 Direct image — no swap: use THIS scene's image as-is
                              for ALL characters (one shared clip). Click to use the
                              current scene image, or "(egen bild)" to upload one. -->
@@ -1926,6 +1959,13 @@
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).fallback_dropped_end_frame"
                                    class="text-[8px] text-amber-500 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'Reservmodellen har inget stöd för slutrutor, så klippet gjordes bara från startbilden — slutposen användes inte'">🎯✕ slutposen tappad</div>
+                              <!-- Talar-agenten (Hugo 2026-08-02): scenen är
+                                   kryssad 👥 och karaktären är kvinnlig, så
+                                   prompten skrevs om så att HON säger repliken.
+                                   Hela den nya texten ligger i tooltipen. -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).speaker_fix_prompt"
+                                   class="text-[8px] text-fuchsia-500 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'👥 Talar-agenten skrev om prompten så att hon säger repliken:\n\n' + ((reClipForVariant(jc, v.variant_id) || {}).speaker_fix_prompt || '')">⚥ talar-fix</div>
                               <!-- QC-rejected takes of THIS clip (Hugo 2026-06-20):
                                    every clip video-QC threw away before the final
                                    take, shown by default. Empty when QC passed. -->
@@ -4325,6 +4365,24 @@
                   x-text="expandedCharId === ch.char_id ? '▾' : '▸'"></span>
           </div>
           <div x-show="expandedCharId === ch.char_id" class="pl-2 pr-1 py-1 space-y-2">
+            <!-- Kön (Hugo 2026-08-02): kvinnliga karaktärer kör talar-agenten på
+                 scener som kryssats 👥 "två personer i bild" — den skriver om
+                 videoprompten så att det är HON som säger repliken. Ej satt =
+                 behandlas som man (agenten kör aldrig). -->
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-600 dark:text-neutral-300 select-none"
+                   @click.stop=""
+                   title="Karaktärens kön. Kvinnliga karaktärer får en automatisk talar-koll på scener du kryssat 👥 (två personer i bild): en AI-agent tittar på bilden och skriver om videoprompten så att det garanterat är hon som säger repliken.">
+              <span x-text="ch.gender === 'female' ? '♀ Kön' : '♂ Kön'"></span>
+              <select class="flex-1 px-1.5 py-1 text-[11px] border rounded focus:outline-none focus:ring-2 focus:ring-sky-500 bg-white dark:bg-neutral-950"
+                      :class="ch.gender ? 'border-neutral-300 dark:border-neutral-700'
+                                        : 'border-amber-400 dark:border-amber-600'"
+                      :value="ch.gender || ''"
+                      @change="setCharacterGender(ch.char_id, $event.target.value)">
+                <option value="">— ej valt (behandlas som man) —</option>
+                <option value="male">♂ Man</option>
+                <option value="female">♀ Kvinna</option>
+              </select>
+            </label>
             <!-- Spoken language: allt utom engelska gör att repliken inom
                  citationstecken översätts automatiskt i ALLA videor den här
                  karaktären är med i (Hugo 2026-06-26 spanska, 2026-08-02 tyska). -->
@@ -4442,10 +4500,34 @@
               <span>Add to existing</span>
             </label>
           </div>
-          <div class="mt-2" x-show="uploadTargetCharId === null">
+          <div class="mt-2 space-y-2" x-show="uploadTargetCharId === null">
             <input x-model="uploadNewCharName"
                    placeholder="Character name (optional — defaults to filename)"
                    class="w-full px-3 py-2 text-sm border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-200 dark:focus:ring-indigo-900" />
+            <!-- Kön: obligatoriskt för en NY karaktär (Hugo 2026-08-02). Styr om
+                 talar-agenten körs på 👥-scener — bara kvinnliga karaktärer. -->
+            <div>
+              <div class="text-xs text-neutral-500 dark:text-neutral-400 mb-1">
+                Kön <span class="text-rose-500">*</span>
+                <span class="text-[10px]">— kvinnliga karaktärer får automatisk talar-koll på scener du kryssat 👥</span>
+              </div>
+              <div class="flex gap-2">
+                <label class="flex-1 flex items-center justify-center gap-2 text-sm px-3 py-2 rounded-lg border cursor-pointer"
+                       :class="uploadNewCharGender === 'male'
+                                 ? 'border-sky-500 ring-1 ring-sky-400 bg-sky-50 dark:bg-sky-950/40'
+                                 : 'border-neutral-300 dark:border-neutral-700'">
+                  <input type="radio" name="upGender" value="male" x-model="uploadNewCharGender" class="sr-only" />
+                  <span>♂ Man</span>
+                </label>
+                <label class="flex-1 flex items-center justify-center gap-2 text-sm px-3 py-2 rounded-lg border cursor-pointer"
+                       :class="uploadNewCharGender === 'female'
+                                 ? 'border-fuchsia-500 ring-1 ring-fuchsia-400 bg-fuchsia-50 dark:bg-fuchsia-950/40'
+                                 : 'border-neutral-300 dark:border-neutral-700'">
+                  <input type="radio" name="upGender" value="female" x-model="uploadNewCharGender" class="sr-only" />
+                  <span>♀ Kvinna</span>
+                </label>
+              </div>
+            </div>
           </div>
           <div class="mt-2" x-show="uploadTargetCharId !== null">
             <select x-model="uploadTargetCharId"

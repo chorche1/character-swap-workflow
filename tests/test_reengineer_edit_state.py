@@ -125,6 +125,49 @@ def test_patch_post_gate_marks_dirty_and_syncs_job(wired):
     assert job.durations_by_scene["s2"] == 10           # floor + 2 (2026-06-13)
 
 
+# --- 👥 two-person toggle in edit mode (Hugo 2026-08-02) --------------------
+# Ticking a scene here must land on the JOB (that is what the runner reads at
+# submit time), not only in the run state — and after the gate the scene goes
+# dirty so "▶ Animera om ändrade" picks it up.
+
+def test_patch_two_person_lands_on_job_and_state(wired):
+    wired["job"] = _job(movement=False)
+    wired["states"]["re_t"] = _state("awaiting_approval")
+    asyncio.run(api.reengineer_edit_scene(
+        "re_t", 0, api.ReSceneEditBody(two_person=True)))
+    assert wired["states"]["re_t"]["scenes"][0]["two_person"] is True
+    assert wired["job"].two_person_scenes == ["s1"]
+
+    # …and unticking removes it from both again.
+    asyncio.run(api.reengineer_edit_scene(
+        "re_t", 0, api.ReSceneEditBody(two_person=False)))
+    assert "two_person" not in wired["states"]["re_t"]["scenes"][0]
+    assert wired["job"].two_person_scenes == []
+
+
+def test_patch_two_person_post_gate_marks_dirty(wired):
+    wired["job"] = _job(movement=True)
+    wired["states"]["re_t"] = _state("done")
+    asyncio.run(api.reengineer_edit_scene(
+        "re_t", 1, api.ReSceneEditBody(two_person=True)))
+    assert wired["states"]["re_t"]["scenes"][1]["dirty"] is True
+    assert wired["job"].two_person_scenes == ["s2"]
+
+
+def test_patch_two_person_refused_on_direct_scene(wired):
+    """A 📌 no-swap scene renders ONE shared clip with no per-character frame —
+    the agent would have nothing to look at. Refuse loudly instead of accepting
+    a flag that silently does nothing."""
+    wired["job"] = _job(movement=False)
+    st = _state("awaiting_approval")
+    st["scenes"][0]["is_direct"] = True
+    wired["states"]["re_t"] = st
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(api.reengineer_edit_scene(
+            "re_t", 0, api.ReSceneEditBody(two_person=True)))
+    assert e.value.status_code == 422
+
+
 def test_patch_duration_clamped(wired):
     wired["job"] = _job(movement=False)
     wired["states"]["re_t"] = _state()

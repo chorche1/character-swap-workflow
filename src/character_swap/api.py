@@ -506,6 +506,10 @@ def _job_to_dict(job: Job) -> dict:
                         # note when that fallback cost the clip its end pose.
                         "fallback_model": vv.fallback_model,
                         "fallback_dropped_end_frame": vv.fallback_dropped_end_frame,
+                        # Speaker-attribution rewrite (Hugo 2026-08-02) → ⚥ chip
+                        # on the clip; the text is the tooltip so the user can
+                        # SEE what the agent changed.
+                        "speaker_fix_prompt": vv.speaker_fix_prompt,
                         "download_name": _video_download_name(jc, vv),
                         # Per-video override + the fallback per-scene prompt,
                         # so the Step 5 regen modal can pre-fill correctly
@@ -864,6 +868,9 @@ def _char_to_dict(ch: CharacterAsset) -> dict:
         # translate their quoted dialogue to that language (Hugo 2026-06-26 /
         # 2026-08-02). None = English.
         "language": ch.language,
+        # "male" | "female" | None. Female characters run the speaker-attribution
+        # agent on 👥 two-person scenes (Hugo 2026-08-02).
+        "gender": ch.gender,
         "telegram_chat_id": ch.telegram_chat_id,
         "images": [
             {
@@ -882,6 +889,7 @@ async def upload_character(
     file: UploadFile,
     character_id: str | None = Form(None),
     name: str | None = Form(None),
+    gender: str | None = Form(None),
 ) -> dict:
     """Upload a character image. Two modes:
 
@@ -889,7 +897,17 @@ async def upload_character(
       character. The character's name is unchanged.
     - `character_id` missing or unknown → create a brand-new character.
       Name comes from the `name` form field, or falls back to the file's stem.
+
+    `gender` ("male" | "female") is required by the UI when creating a NEW
+    character (Hugo 2026-08-02) — it decides whether the speaker-attribution
+    agent runs on 👥 two-person scenes. The API keeps it optional so old clients
+    and appends still work; unset behaves as male/unknown (agent never runs).
     """
+    from character_swap import speaker_fix
+    try:
+        gender_norm = speaker_fix.normalize_gender(gender)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     ext = _safe_ext(file.filename or "")
     data = await _read_capped(file)
     if not data:
@@ -918,8 +936,16 @@ async def upload_character(
         else:
             display_name = (name or "").strip() or Path(file.filename or char_id).stem
             target = CharacterAsset(char_id=char_id, filename=image_filename,
-                                    name=display_name)
+                                    name=display_name, gender=gender_norm)
             s.add_character(target)
+    # A gender sent alongside an APPEND (or a fold-into-existing) still lands —
+    # it's the same "this is who this character is" fact, and re-uploading is the
+    # natural place to correct an unset one. Never cleared implicitly: only an
+    # explicit PATCH can unset it.
+    dirty = False
+    if gender_norm and target.gender != gender_norm:
+        target.gender = gender_norm
+        dirty = True
 
     # Append the image if it isn't already in this character's list.
     if not any(img.image_id == image_id for img in target.images):
@@ -927,6 +953,8 @@ async def upload_character(
         if target.primary_image_id is None:
             target.primary_image_id = image_id
             target.filename = image_filename
+        dirty = True
+    if dirty:
         s.add_character(target)  # upsert
     return _char_to_dict(target)
 
@@ -1025,6 +1053,9 @@ class RenameCharacterBody(BaseModel):
     # Spoken language of this character's videos: any code in
     # reengineer.SPOKEN_LANGUAGES ("es" | "de"); "" / "en" clears it (English).
     language: str | None = None
+    # "male" | "female"; "" clears it back to unset. Female characters run the
+    # speaker-attribution agent on 👥 two-person scenes (Hugo 2026-08-02).
+    gender: str | None = None
     # Numeric "-100…" channel id or public "@channelusername". Empty clears.
     telegram_chat_id: str | None = None
     # Set which uploaded reference image is the character's primary/preset image
@@ -1080,6 +1111,15 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
             known = " | ".join(["en", *reengineer_mod.SPOKEN_LANGUAGES])
             raise HTTPException(
                 400, f"Unknown language '{body.language}' ({known})")
+    if body.gender is not None:
+        # Unknown value → 400 rather than a silently-unset flag: a character the
+        # UI shows as ♀ but that never runs the speaker agent is exactly the
+        # silent-wrong-result class Hugo asked us to refuse loudly.
+        from character_swap import speaker_fix
+        try:
+            asset.gender = speaker_fix.normalize_gender(body.gender)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
     if body.telegram_chat_id is not None:
         asset.telegram_chat_id = body.telegram_chat_id.strip() or None
     if body.primary_image_id is not None:
@@ -2589,6 +2629,10 @@ def _apply_scene_duplicate(job: Job, scene_id: str) -> str:
     # Carry the scene's end-pose reference to the duplicate too.
     if (job.end_frames_by_scene or {}).get(scene_id):
         job.end_frames_by_scene[new_sid] = job.end_frames_by_scene[scene_id]
+    # …and its 👥 two-person flag: the copy shows the same two people, so its
+    # clips need the same speaker-attribution fix (Hugo 2026-08-02).
+    if scene_id in (job.two_person_scenes or []):
+        job.two_person_scenes = list(job.two_person_scenes) + [new_sid]
 
     job.scene_ids = scene_ids
     job.scene_image_paths = scene_paths
@@ -2638,6 +2682,13 @@ def _repoint_scene(job: Job, state: dict, idx: int, old_sid: str,
               job.durations_by_scene, job.end_frames_by_scene):
         if d and old_sid in d:
             d[new_sid] = d.pop(old_sid)
+    # …and the scene_id-keyed LIST of 👥 two-person scenes: a re-pointed scene
+    # keeps the flag the user set on that row (the new image is a replacement
+    # for the same shot), and leaving the old id behind would silently disable
+    # the speaker fix.
+    if old_sid in (job.two_person_scenes or []):
+        job.two_person_scenes = [new_sid if x == old_sid else x
+                                 for x in job.two_person_scenes]
 
     # Re-point this scene's variants — `_belongs_to_scene` catches legacy
     # null-scene variants when old_sid is the primary. Drop their stale
@@ -5490,6 +5541,7 @@ async def reengineer_from_images(
     motion_prompts: str = Form(...),         # JSON array of strings (one per file)
     lengths: str = Form(...),                # JSON array of seconds (one per file)
     direct: str = Form("[]"),                # JSON array of bools — "no swap" scenes
+    two_person: str = Form("[]"),            # JSON array of bools — 👥 two people in frame
     end_frame_files: list[UploadFile] = File([]),  # optional end pose per scene (sparse)
     end_frame_idx: str = Form("[]"),         # JSON array of row indices ‖ end_frame_files
     character_ids: str = Form(...),          # JSON array of char ids
@@ -5568,6 +5620,20 @@ async def reengineer_from_images(
         raise HTTPException(400, "direct must match the number of images")
     if not direct_list:
         direct_list = [False] * len(files)
+    # 👥 "två personer i bild" (Hugo 2026-08-02): opt-in per scene. Marked scenes
+    # run the speaker-attribution agent for every FEMALE character — see
+    # speaker_fix.py. Same sparse-array shape as `direct`; omitted = all False,
+    # so old clients are unaffected.
+    try:
+        two_person_list = json.loads(two_person) if two_person.strip() else []
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(400, "two_person must be a JSON array of booleans")
+    if not isinstance(two_person_list, list):
+        raise HTTPException(400, "two_person must be a JSON array")
+    if two_person_list and len(two_person_list) != len(files):
+        raise HTTPException(400, "two_person must match the number of images")
+    if not two_person_list:
+        two_person_list = [False] * len(files)
 
     # Optional END FRAME (slutpose) per scene, uploaded at creation so the
     # end-frame swap generates in the SAME swap phase as the start frames
@@ -5668,6 +5734,11 @@ async def reengineer_from_images(
             # Job.end_frames_by_scene at creation so the swap phase generates
             # the end-frame swap before the gate. Persisted in state (resume-safe).
             entry["end_frame_path"] = end_frame_paths_by_idx[idx]
+        # 👥 two people in frame. A DIRECT scene renders one SHARED clip with no
+        # per-character image, so there is nothing character-specific to
+        # re-attribute — the flag is meaningless there (the UI hides it too).
+        if bool(two_person_list[idx]) and not entry.get("is_direct"):
+            entry["two_person"] = True
         # Derive the dialogue from the says-clause so the '⚠ replik' hint +
         # caption script-bias work (empty when the prompt has no says-clause).
         entry["speech"] = runner_reengineer._spoken_text(entry)
@@ -6185,6 +6256,10 @@ class ReSceneEditBody(BaseModel):
     # (kling-v3). A real slug is validated against the registry. Non-Kling
     # scenes lose End-frame interpolation + Kling auto-length (soft degrade).
     video_model: str | None = None
+    # 👥 "två personer i bild" (Hugo 2026-08-02): toggle the speaker-attribution
+    # agent for THIS scene. Applies to every FEMALE character in the run; male
+    # characters are unaffected even when the scene is ticked.
+    two_person: bool | None = None
     # Explicit dirty mark — the frontend sets it after approve-swaps /
     # variant-regens on an already-animated scene (new image ≠ old clip).
     dirty: bool | None = None
@@ -6240,6 +6315,28 @@ async def reengineer_edit_scene(re_id: str, idx: int, body: ReSceneEditBody) -> 
         _mark_scene_dirty(entry)
 
     job = store().get_job(state.get("job_id") or "")
+    # 👥 flag: applied to the state entry AND straight onto the job, which is
+    # what the runner reads at submit time. A direct (no-swap) scene has one
+    # shared clip and no per-character frame, so the flag is refused there
+    # instead of being silently accepted and ignored.
+    if body.two_person is not None:
+        if body.two_person and entry.get("is_direct"):
+            raise HTTPException(
+                422, "En 📌 ingen-swap-scen har ett delat klipp — 👥 gäller inte där")
+        if bool(entry.get("two_person")) != bool(body.two_person):
+            if body.two_person:
+                entry["two_person"] = True
+            else:
+                entry.pop("two_person", None)
+            changed = True
+            if job is not None:
+                sid = entry["scene_id"]
+                ids = [x for x in (job.two_person_scenes or []) if x != sid]
+                if body.two_person:
+                    ids.append(sid)
+                job.two_person_scenes = ids
+                job.updated_at = datetime.utcnow()
+                store().update_job(job)
     post_gate = bool(job is not None and (job.movement_prompts or job.movement_prompt))
     if changed and post_gate:
         _mark_scene_dirty(entry)
@@ -6465,6 +6562,11 @@ async def reengineer_set_direct(re_id: str, idx: int,
                                   if jc.approved_variant_ids else None)
     if sid not in (job.direct_scene_ids or []):
         job.direct_scene_ids = list(job.direct_scene_ids or []) + [sid]
+    # A direct scene renders ONE shared clip with no per-character frame, so the
+    # 👥 speaker fix has nothing to look at — drop the flag with the variants
+    # rather than leave it set and inert.
+    entry.pop("two_person", None)
+    job.two_person_scenes = [x for x in (job.two_person_scenes or []) if x != sid]
     job.updated_at = datetime.utcnow()
     s.update_job(job)
 

@@ -588,6 +588,14 @@ async def _create_job_and_swap(re_id: str, state: dict,
     direct_ids = [sid for sid in uniq_ids if direct_map.get(sid)]
     swap_ids = [sid for sid in uniq_ids if not direct_map.get(sid)]
 
+    # 👥 "två personer i bild" (Hugo 2026-08-02): the scenes whose clips run the
+    # speaker-attribution agent for every FEMALE character. Direct scenes are
+    # excluded by construction (one shared clip, no per-character frame).
+    two_person_map = {e["scene_id"]: bool(e.get("two_person"))
+                      for e in scene_entries}
+    two_person_ids = [sid for sid in uniq_ids
+                      if two_person_map.get(sid) and not direct_map.get(sid)]
+
     # Optional per-scene END FRAME (slutpose) staged at upload (Hugo 2026-06-23):
     # carry it onto Job.end_frames_by_scene so _kick_char swaps every character
     # into the pose during the swap phase — before the gate, so there's no second
@@ -669,6 +677,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         scene_ids=uniq_ids,
         scene_image_paths=uniq_paths,
         direct_scene_ids=direct_ids,
+        two_person_scenes=two_person_ids,
         characters=chars,
         images_per_character=1,
         image_model=image_model,

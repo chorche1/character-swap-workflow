@@ -45,6 +45,10 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     # Vision QC — one cheap Haiku call per generated swap variant / video clip.
     if phase in {"swap_qc", "video_qc"}:
         return settings.swap_qc_price_usd
+    # Speaker-attribution fix — one Sonnet vision call per female character on a
+    # 👥 two-person scene (speaker_fix.py).
+    if phase == "speaker_fix":
+        return settings.speaker_fix_price_usd
     # Chat tab — each agent-loop iteration is one Opus call (vision + tool use).
     if phase == "chat":
         return settings.claude_opus_price_usd

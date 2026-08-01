@@ -74,6 +74,7 @@ def _call(files, motion, lengths, **kw):
         bg, files=files,
         motion_prompts=json.dumps(motion), lengths=json.dumps(lengths),
         direct=kw.get("direct", "[]"),
+        two_person=kw.get("two_person", "[]"),
         end_frame_files=kw.get("end_frame_files", []),
         end_frame_idx=kw.get("end_frame_idx", "[]"),
         character_ids=kw.get("character_ids", json.dumps(["cA"])),
@@ -359,3 +360,97 @@ def test_create_job_and_swap_populates_end_frames_by_scene(
     job = wired["jobs"]["j_ef"]
     # Only the SWAP scene's end frame is lifted onto the job — direct excluded.
     assert job.end_frames_by_scene == {"sc_swap": str(ef_swap)}
+
+
+# --- 👥 Två personer i bild (Hugo 2026-08-02) --------------------------------
+# Opt-in per scene at upload. Marked scenes run the speaker-attribution agent
+# for every FEMALE character (speaker_fix.py) so she — not the man beside her —
+# says the line. Same sparse-array shape as `direct`; a direct row can't carry
+# it (one shared clip, no per-character frame).
+
+def test_two_person_flag_staged_per_scene(wired):
+    out, _ = _call([_upload("a.png"), _upload("b.png"), _upload("c.png")],
+                   ["x", "y", "z"], [5, 5, 5],
+                   two_person=json.dumps([True, False, True]),
+                   direct=json.dumps([False, False, True]))
+    s0, s1, s2 = wired["states"][out["re_id"]]["scenes"]
+    assert s0["two_person"] is True
+    assert "two_person" not in s1                # unticked
+    assert "two_person" not in s2                # direct row → flag dropped
+
+
+def test_two_person_omitted_defaults_to_all_off(wired):
+    out, _ = _call([_upload("a.png")], ["x"], [5])
+    assert "two_person" not in wired["states"][out["re_id"]]["scenes"][0]
+
+
+def test_two_person_validation_errors(wired):
+    with pytest.raises(HTTPException) as e:      # array/file length mismatch
+        _call([_upload("a.png"), _upload("b.png")], ["x", "y"], [5, 5],
+              two_person=json.dumps([True]))
+    assert e.value.status_code == 400
+    with pytest.raises(HTTPException) as e:      # not JSON
+        _call([_upload("a.png")], ["x"], [5], two_person="nope")
+    assert e.value.status_code == 400
+
+
+def test_create_job_and_swap_populates_two_person_scenes(
+        wired, monkeypatch, tmp_path):
+    chars_dir = tmp_path / "characters2"
+    chars_dir.mkdir()
+    (chars_dir / "cA.png").write_bytes(b"char-bytes")
+    monkeypatch.setattr(type(api.settings), "characters_dir",
+                        property(lambda self: chars_dir), raising=False)
+
+    class _Char:
+        name = "Helene"
+
+        def resolve_source_filename(self, override):
+            return "cA.png"
+
+    class _S2:
+        def get_character(self, cid):
+            return _Char() if cid == "cA" else None
+
+        def add_job(self, job):
+            wired["jobs"][job.job_id] = job
+
+        def get_job(self, jid):
+            return wired["jobs"].get(jid)
+
+        def update_job(self, j):
+            wired["jobs"][j.job_id] = j
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S2())
+
+    scene_entries = [
+        {"idx": 0, "scene_id": "sc_two", "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "p", "two_person": True},
+        {"idx": 1, "scene_id": "sc_solo", "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "q"},
+        # A direct row that somehow carries the flag must still be excluded —
+        # its clip is shared, there is no per-character frame to inspect.
+        {"idx": 2, "scene_id": "sc_direct", "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "r", "is_direct": True, "direct_image_path": "x",
+         "two_person": True},
+    ]
+    state = {"re_id": "re_2p", "from_images": True, "status": "swapping",
+             "job_id": "j_2p", "character_ids": ["cA"],
+             "image_model": "gpt2-id-swap", "video_model": "kling-v3",
+             "outfit_mode": "scene", "background_source": "character",
+             "scenes": scene_entries, "n_scenes": 3}
+    wired["states"]["re_2p"] = dict(state)
+
+    from character_swap import runner as runner_mod
+
+    async def _noop_rig(jid):
+        return None
+
+    async def _noop_watch(*a, **k):
+        return None
+    monkeypatch.setattr(runner_mod, "run_image_generation", _noop_rig)
+    monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", _noop_watch)
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_2p", dict(state), scene_entries, "j_2p"))
+
+    assert wired["jobs"]["j_2p"].two_person_scenes == ["sc_two"]

@@ -372,6 +372,15 @@ class Settings(BaseSettings):
     swap_qc_model: str = Field(default="claude-sonnet-4-6",
                                validation_alias="SWAP_QC_MODEL")
     swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
+    # Speaker-attribution agent (speaker_fix.py, Hugo 2026-08-02): one vision
+    # call per (FEMALE character × scene ticked 👥 two-person) that rewrites the
+    # movement prompt so she — not the man beside her — says the line. Same
+    # Sonnet judge class as image QC; the job is "read the frame, edit one
+    # clause", not creative direction, so Opus is not warranted.
+    speaker_fix_model: str = Field(default="claude-sonnet-4-6",
+                                   validation_alias="SPEAKER_FIX_MODEL")
+    speaker_fix_price_usd: float = Field(
+        default=0.01, validation_alias="SPEAKER_FIX_PRICE_USD")
     swap_qc_price_usd: float = Field(default=0.04, validation_alias="SWAP_QC_PRICE_USD")
     # QC on generated video CLIPS: Whisper-vs-expected-dialogue (catches
     # garbled TTS like "baking goda") + frame-sampled vision check for

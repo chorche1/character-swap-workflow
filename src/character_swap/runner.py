@@ -19,6 +19,7 @@ from character_swap import (
     push,
     reengineer,
     runner_media,
+    speaker_fix,
     swap_qc,
     video_qc,
 )
@@ -1188,6 +1189,14 @@ def _character_language(char_id: str) -> str | None:
     return ch.language if ch else None
 
 
+def _character_gender(char_id: str) -> str | None:
+    """The library character's gender flag ("male" | "female" | None). Live
+    lookup, same as the language flag — setting ♀ on a character takes effect on
+    the next animate without re-creating the job."""
+    ch = store().get_character(char_id)
+    return ch.gender if ch else None
+
+
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
     duration_secs: int | None = None, end_image: Path | None = None,
@@ -1259,6 +1268,37 @@ async def _animate_one_video(
     # English/unflagged characters and for a run already localized upstream.
     # Done BEFORE prompt_text so the video-QC expected dialogue (derived from
     # the submitted prompt) and the QC-retry base both match the real audio.
+    # Speaker-attribution fix (Hugo 2026-08-02): on a scene the user ticked 👥
+    # "två personer i bild", a FEMALE character gets one vision call that reads
+    # the actual swapped frame and rewrites the prompt so SHE is unmistakably
+    # the speaker — the source prompts were written off male originals, so the
+    # model otherwise lets the man beside her say the line. Runs BEFORE
+    # localization so the translator sees the final English shape (and the
+    # translated attribution replaces the fixed one cleanly), and before
+    # prompt_text so video-QC's expected dialogue matches what was submitted.
+    if speaker_fix.needs_speaker_fix(
+            gender=_character_gender(jc.char_id),
+            scene_id=approved.scene_id,
+            two_person_scenes=job.two_person_scenes):
+        try:
+            fixed = await asyncio.to_thread(
+                speaker_fix.fix_speaker_attribution, movement_prompt,
+                Path(approved.path), character_name=jc.name, job_id=job.job_id)
+        except speaker_fix.SpeakerFixError as e:
+            # Loud failure (Hugo's directive): a clip that would put the words in
+            # the wrong person's mouth must never ship silently.
+            video.status = VideoStatus.ERROR
+            video.error = f"talar-agenten misslyckades: {e}"
+            _replace_video(job, jc, video)
+            await _emit(job.job_id, "video.failed", char_id=jc.char_id,
+                        video_id=video.video_id, error=video.error)
+            _maybe_complete_char(job, jc)
+            return
+        if fixed != movement_prompt:
+            video.speaker_fix_prompt = fixed
+            movement_prompt = fixed
+            await _emit(job.job_id, "video.speaker_fixed",
+                        char_id=jc.char_id, video_id=video.video_id)
     char_lang = _character_language(jc.char_id)
     lang_spec = reengineer.SPOKEN_LANGUAGES.get(char_lang or "")
     if lang_spec is not None:
