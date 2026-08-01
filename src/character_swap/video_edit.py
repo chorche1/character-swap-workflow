@@ -702,6 +702,15 @@ def _extract_audio(video_path: Path) -> Path:
 
 def transcribe_words(video_path: Path, *, job_id: str | None = None,
                      script_hint: str | None = None) -> list[Word]:
+    """Word-level timestamps only — see `transcribe_detailed` for the full
+    result (which also carries the language Whisper DETECTED in the audio)."""
+    return transcribe_detailed(video_path, job_id=job_id,
+                               script_hint=script_hint)[0]
+
+
+def transcribe_detailed(video_path: Path, *, job_id: str | None = None,
+                        script_hint: str | None = None,
+                        ) -> tuple[list[Word], str | None]:
     """Run OpenAI Whisper on the video's audio. Returns word-level timestamps.
 
     Uses `whisper-1` (current OpenAI Whisper API model) with
@@ -713,13 +722,20 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None,
     real wording — mis-hearings used to be burned into captions verbatim.
     Whisper only reads the prompt's final ~224 tokens, hence the char cap.
 
-    Returns `[]` (empty word list) for video-only inputs with no audio track
+    Returns `([], None)` for video-only inputs with no audio track
     — Higgsfield Supercomputer clips are typically silent. Callers that fan
     out across N clips get `match_clips_by_transcript` to fall back to
     upload-order placement when transcripts are empty.
+
+    The second element is the language Whisper DETECTED in the audio (its own
+    lowercase English name, e.g. "english" / "german"; `verbose_json` has
+    always carried it, we simply threw it away). It is the ONLY direct evidence
+    of what language a generated clip actually speaks, and video QC uses it to
+    catch a 🇪🇸/🇩🇪-flagged character whose clip came out English — the failure
+    that shipped 8 of 10 German clips in re_b3170d2118 (Hugo 2026-08-02).
     """
     if not _has_audio_stream(video_path):
-        return []
+        return [], None
     audio_path = _extract_audio(video_path)
     try:
         client = openai_image._client()  # reuses settings.openai_api_key + auth
@@ -753,7 +769,10 @@ def transcribe_words(video_path: Path, *, job_id: str | None = None,
             words.append(Word(text=getattr(w, "word", ""),
                               start=float(getattr(w, "start", 0)),
                               end=float(getattr(w, "end", 0))))
-    return words
+    detected = getattr(result, "language", None)
+    if not isinstance(detected, str) or not detected.strip():
+        detected = None
+    return words, (detected.strip().lower() if detected else None)
 
 
 # --- 3. Caption templates + ASS rendering ---------------------------------------------

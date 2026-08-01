@@ -381,6 +381,23 @@ class Settings(BaseSettings):
                                    validation_alias="SPEAKER_FIX_MODEL")
     speaker_fix_price_usd: float = Field(
         default=0.01, validation_alias="SPEAKER_FIX_PRICE_USD")
+    # WRONG-LANGUAGE clip retries (Hugo 2026-08-02). Independent of
+    # VIDEO_QC_MAX_RETRIES, which he deliberately runs at 0 (flag-only) for the
+    # fuzzy garbled-speech check: a 🇪🇸/🇩🇪 character whose clip came out
+    # ENGLISH is not a judgment call, it is an unusable clip, and shipping it
+    # quietly is exactly what happened to 8 of 10 German clips in
+    # re_b3170d2118. Re-render up to this many times with a hardened prompt;
+    # still wrong after that → the clip FAILS loudly instead of entering a
+    # final. 0 turns the check back into flag-only.
+    video_qc_language_max_retries: int = Field(
+        default=2, validation_alias="VIDEO_QC_LANGUAGE_MAX_RETRIES")
+    # How well the clip must match the ENGLISH source line before we call it
+    # "spoke the wrong language". High on purpose: this gates a loud clip
+    # failure, and the check only ever fires when the heard text ALSO matches
+    # English better than the translated line. (Whisper's own `language` field
+    # is not usable here — measured "english" on a plainly German clip.)
+    video_qc_language_threshold: float = Field(
+        default=0.6, validation_alias="VIDEO_QC_LANGUAGE_THRESHOLD")
     swap_qc_price_usd: float = Field(default=0.04, validation_alias="SWAP_QC_PRICE_USD")
     # QC on generated video CLIPS: Whisper-vs-expected-dialogue (catches
     # garbled TTS like "baking goda") + frame-sampled vision check for
