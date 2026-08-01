@@ -293,6 +293,28 @@ def test_wrong_language_fails_the_clip_loudly_when_retries_dont_take(
     assert "fel språk" in (video.error or "")
 
 
+def test_garbled_take_on_a_flagged_character_also_retries(monkeypatch, tmp_path):
+    """3 of the 8 English-speaking German clips came back as MANGLED English
+    that matches neither language ("Lay a friction knob lock for 10 seconds
+    under the netting"). They are not confidently wrong_language, but they
+    still don't say the line — on a flagged character that earns a retry.
+    A garbled LAST take ships flagged rather than failing the run."""
+    job, jc, video = _job(tmp_path)
+    garbled = video_qc.ClipVerdict(False, "dialogue mismatch (similarity 0.02)",
+                                   "say it right")
+    takes = _stub_runner(monkeypatch, tmp_path, verdicts=[garbled, _OK])
+    asyncio.run(runner._animate_one_video(job, jc, video, "He says hi"))
+    assert len(takes) == 2 and video.status == VideoStatus.DONE
+
+    job2, jc2, video2 = _job(tmp_path)
+    takes2 = _stub_runner(monkeypatch, tmp_path,
+                          verdicts=[garbled, garbled, garbled], lang_retries=2)
+    asyncio.run(runner._animate_one_video(job2, jc2, video2, "He says hi"))
+    assert len(takes2) == 3
+    assert video2.status == VideoStatus.DONE       # kept, flagged — not failed
+    assert video2.qc_status == "failed"
+
+
 def test_language_retries_are_off_for_unflagged_characters(monkeypatch, tmp_path):
     """An English character keeps the flag-only behavior exactly as before."""
     job, jc, video = _job(tmp_path)
