@@ -1566,30 +1566,39 @@ function studio() {
     },
 
     async refreshReengineer(reId) {
-      // Don't churn the run object (and thus the x-for scope) while the user is
-      // interacting with a scene field — re-rendering eats the keystroke /
-      // reverts the open duration picker. Defer and retry; the field's blur
-      // (or the next poll tick) lets it through.
-      if (this._isTypingProtectedField()) {
-        clearTimeout(this._reRefreshTimers[reId]);
-        this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 700);
-        return;
-      }
       try {
         // slim=1: variant prompts (~3.3KB × 45) are never rendered here.
+        // The fetch ALWAYS runs — only applying it is focus-gated below, so a
+        // phase change can never go unnoticed while a field holds focus.
         const r = await fetch('/api/reengineer/' + reId + '?slim=1');
         if (!r.ok) return;
         const fresh = await r.json();
-        // Re-check at RESPONSE time too: the user may have focused a field /
-        // opened a duration menu while the fetch was in flight — splicing now
-        // would churn the row mid-interaction just like the call-time case.
-        if (this._isTypingProtectedField()) {
+        const i = this.reengineerHistory.findIndex(x => x.re_id === reId);
+        const prev = i >= 0 ? this.reengineerHistory[i] : null;
+        const prevStatus = prev ? prev.status : null;
+        // Don't churn the run object (and thus the x-for scope) while the user
+        // is interacting with a scene field — replacing it eats the keystroke /
+        // reverts the open duration picker. Defer and retry; the field's blur
+        // (or the next poll tick) lets the full view through.
+        //
+        // The STATUS is exempt. Every phase control — the ✓ Approve all /
+        // ▶ Generate videos gate, the clip-review bar, ▶ Bygg ihop — is
+        // x-show'd on r.status, so deferring it froze the card mid-phase with
+        // no way forward and no hint anything was wrong (Hugo 2026-08-02:
+        // re_b3170d2118 sat at awaiting_approval server-side with 27/27 images
+        // ready while the card still read "swapping" and offered no gate).
+        // Patching the one field IN PLACE is safe: the object the x-for scope
+        // is bound to is never replaced, so no x-model re-seeds and no open
+        // <select> is torn down.
+        if (prev && this._isTypingProtectedField()) {
+          if (prevStatus !== fresh.status) {
+            prev.status = fresh.status;
+            this._fireReengineerStatusMilestone(prevStatus, fresh, reId);
+          }
           clearTimeout(this._reRefreshTimers[reId]);
           this._reRefreshTimers[reId] = setTimeout(() => this.refreshReengineer(reId), 700);
           return;
         }
-        const i = this.reengineerHistory.findIndex(x => x.re_id === reId);
-        const prev = i >= 0 ? this.reengineerHistory[i] : null;
         if (i >= 0) this.reengineerHistory.splice(i, 1, fresh);
         else this.reengineerHistory.unshift(fresh);
         // This fetch started after any parked save-PATCH response was written
@@ -1621,26 +1630,34 @@ function studio() {
         } else if (fresh.job_id) {
           this._ensureReengineerWS(fresh);
         }
-        if (prev && prev.status !== fresh.status) {
-          if (fresh.status === 'awaiting_approval') {
-            this.notifyMilestone('Reengineer — review swapped images',
-              (fresh.source_name || reId) + ' is ready for approval',
-              { kind: 'approval', tag: 're-approve-' + reId });
-          } else if (fresh.status === 'awaiting_assembly') {
-            this.notifyMilestone('Reengineer — granska klippen',
-              (fresh.source_name || reId) + ' — alla Kling-klipp är klara; granska och bygg ihop',
-              { kind: 'approval', tag: 're-clips-' + reId });
-          } else if (prev.status === 'reanimating'
-                     && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
-            this.notifyMilestone('Re-animation klar',
-              (fresh.source_name || reId) + ' — bygg ihop finalerna igen',
-              { kind: 'approval', tag: 're-reanim-' + reId });
-          } else if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
-            this.notifyMilestone('Reengineer ' + fresh.status,
-              fresh.source_name || reId, { tag: 're-done-' + reId });
-          }
-        }
+        this._fireReengineerStatusMilestone(prevStatus, fresh, reId);
       } catch (_) {}
+    },
+
+    // Phase-change notification. Split out of refreshReengineer so the
+    // status-only in-place patch (taken while a scene field holds focus) fires
+    // it too — the gate appearing and the chime announcing it must never come
+    // apart. Fires once per transition: the patch updates prev.status, so the
+    // later full splice sees no change and stays silent.
+    _fireReengineerStatusMilestone(prevStatus, fresh, reId) {
+      if (!prevStatus || prevStatus === fresh.status) return;
+      if (fresh.status === 'awaiting_approval') {
+        this.notifyMilestone('Reengineer — review swapped images',
+          (fresh.source_name || reId) + ' is ready for approval',
+          { kind: 'approval', tag: 're-approve-' + reId });
+      } else if (fresh.status === 'awaiting_assembly') {
+        this.notifyMilestone('Reengineer — granska klippen',
+          (fresh.source_name || reId) + ' — alla Kling-klipp är klara; granska och bygg ihop',
+          { kind: 'approval', tag: 're-clips-' + reId });
+      } else if (prevStatus === 'reanimating'
+                 && ['done', 'partial_success', 'failed'].includes(fresh.status)) {
+        this.notifyMilestone('Re-animation klar',
+          (fresh.source_name || reId) + ' — bygg ihop finalerna igen',
+          { kind: 'approval', tag: 're-reanim-' + reId });
+      } else if (['done', 'partial_success', 'failed'].includes(fresh.status)) {
+        this.notifyMilestone('Reengineer ' + fresh.status,
+          fresh.source_name || reId, { tag: 're-done-' + reId });
+      }
     },
 
     _startReengineerPolling() {

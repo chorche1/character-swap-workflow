@@ -144,9 +144,15 @@ def test_background_refresh_defers_while_typing(_=None):
         "x-if=\"reSceneEffModel(r, sc) === 'kling-v3'\"")[1][:300]                    # Reengineer Kling-längd
     assert "data-keep-focus" in _HTML.split(
         "x-if=\"reSceneEffModel(r, sc) !== 'kling-v3'\"")[1][:300]                    # Reengineer non-Kling Längd
-    # Reengineer poll/WS refresh defers and retries.
-    re_refresh = _JS.split("async refreshReengineer(reId) {")[1][:700]
+    # Reengineer poll/WS refresh defers and retries. (Whole body, not a fixed
+    # prefix: the guard moved BELOW the fetch on 2026-08-02 so a phase change is
+    # still observed while a field holds focus — see test_reengineer_focus_gate.)
+    re_refresh = _JS.split("async refreshReengineer(reId) {")[1].split("\n    },")[0]
     assert "_isTypingProtectedField()" in re_refresh
+    assert "this._reRefreshTimers[reId] = setTimeout(" in re_refresh
+    # The run object itself is still never replaced while a field is focused.
+    assert "splice" not in re_refresh.split("_isTypingProtectedField())")[1].split(
+        "if (i >= 0) this.reengineerHistory.splice")[0]
     # Swap WS handler defers the job replacement.
     handle = _JS.split("async handleEvent(evt) {")[1][:700]
     assert "_isTypingProtectedField()" in handle
