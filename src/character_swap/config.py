@@ -219,6 +219,17 @@ class Settings(BaseSettings):
         default=("blur, distort, low quality, morphing face, frozen lips, "
                  "warping fingers, extra limbs"),
         validation_alias="KLING_NEGATIVE_PROMPT")
+    # Veo 3.1 negative prompt. Veo used to be handed KLING_NEGATIVE_PROMPT,
+    # which is tuned for Kling's failure modes ("frozen lips", "warping
+    # fingers") and says nothing about Veo's own signature defect: burned-in,
+    # often garbled SUBTITLES on dialogue clips. Those terms lead here because
+    # earlier terms weigh more (same research as the Kling set: 5-8 terms beats
+    # a long list). Empty → the field is omitted and fal applies its own
+    # default.
+    veo_negative_prompt: str = Field(
+        default=("subtitles, captions, burned-in text, on-screen text, "
+                 "watermark, blur, distorted face, extra limbs"),
+        validation_alias="VEO_NEGATIVE_PROMPT")
     # fal Kling v3 tier: "pro" (1080p output) or "standard" (720p, cheaper).
     # Default PRO since 2026-06-12 (Hugo's call — quality over cost): the
     # whole downstream chain targets a 1080-px short edge, and standard-tier

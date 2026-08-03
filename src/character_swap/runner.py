@@ -46,6 +46,66 @@ logger = logging.getLogger(__name__)
 # marks stranded slots failed anyway.
 _CANCELLED_JOBS: set[str] = set()
 
+# Per-run cache of the two BILLED prompt rewrites — the 👥 speaker-attribution
+# agent and the 🗣 language localizer (Hugo 2026-08-03: "en agent körning per
+# scen per språk per kön"). Both outputs depend only on the input prompt, the
+# scene, the character's GENDER and (for the localizer) the LANGUAGE — never on
+# which individual character is being animated. Nine characters sharing one
+# scene therefore used to buy the same rewrite nine times.
+#
+# Keyed by (job_id, kind, scene_id, gender, language, prompt-hash). The prompt
+# hash is what keeps a per-clip prompt override (the regen-clip modal) out of
+# its scene-mates' cache slot — with it, "same scene" really means "same input
+# text". The lock makes the first caller compute while the rest wait, so
+# clips animating in parallel produce ONE call, not N.
+_PROMPT_CACHE: dict[tuple, str] = {}
+_PROMPT_LOCKS: dict[tuple, asyncio.Lock] = {}
+# `run_video_synthesis` clears its own job when the batch ends, but the retry /
+# "+N more" / reanimate paths call _animate_one_video directly and have no such
+# bracket — so the dicts are also hard-capped. Eviction is oldest-first and
+# purely a memory guard: a dropped entry costs one extra rewrite, never a wrong
+# one, because the key carries the prompt hash.
+_MAX_PROMPT_CACHE = 512
+
+
+def _prompt_cache_key(job_id: str, kind: str, scene_id: str | None,
+                      gender: str | None, language: str | None,
+                      prompt: str) -> tuple:
+    import hashlib
+    digest = hashlib.sha256((prompt or "").encode("utf-8")).hexdigest()[:16]
+    return (job_id, kind, scene_id or "", gender or "", language or "", digest)
+
+
+async def _cached_prompt(key: tuple, compute) -> str:
+    """Run `compute()` once per key; concurrent callers await the same result.
+
+    `compute` is an async callable. Exceptions are NOT cached — a failed
+    localization must be retryable on the next clip rather than poisoning every
+    sibling with the same error.
+    """
+    hit = _PROMPT_CACHE.get(key)
+    if hit is not None:
+        return hit
+    lock = _PROMPT_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        hit = _PROMPT_CACHE.get(key)
+        if hit is not None:
+            return hit
+        out = await compute()
+        _PROMPT_CACHE[key] = out
+        while len(_PROMPT_CACHE) > _MAX_PROMPT_CACHE:
+            oldest = next(iter(_PROMPT_CACHE))
+            _PROMPT_CACHE.pop(oldest, None)
+            _PROMPT_LOCKS.pop(oldest, None)
+        return out
+
+
+def _clear_prompt_cache(job_id: str) -> None:
+    """Drop a finished job's entries so the process-lifetime dicts stay small."""
+    for store_ in (_PROMPT_CACHE, _PROMPT_LOCKS):
+        for k in [k for k in store_ if k[0] == job_id]:
+            store_.pop(k, None)
+
 
 def cancel_job_generation(job_id: str) -> None:
     """Stop all FUTURE provider calls for a job (in-flight HTTP finishes)."""
@@ -1348,14 +1408,19 @@ async def _animate_one_video(
     # localization so the translator sees the final English shape (and the
     # translated attribution replaces the fixed one cleanly), and before
     # prompt_text so video-QC's expected dialogue matches what was submitted.
+    char_gender = _character_gender(jc.char_id)
     if speaker_fix.needs_speaker_fix(
-            gender=_character_gender(jc.char_id),
-            scene_id=approved.scene_id,
-            two_person_scenes=job.two_person_scenes):
+            gender=char_gender, scene_id=approved.scene_id):
         try:
-            fixed = await asyncio.to_thread(
+            two_person = speaker_fix.is_two_person_scene(
+                approved.scene_id, job.two_person_scenes)
+            key = _prompt_cache_key(job.job_id, "speaker_fix",
+                                    approved.scene_id, char_gender, None,
+                                    movement_prompt)
+            fixed = await _cached_prompt(key, lambda: asyncio.to_thread(
                 speaker_fix.fix_speaker_attribution, movement_prompt,
-                Path(approved.path), character_name=jc.name, job_id=job.job_id)
+                Path(approved.path), character_name=jc.name,
+                two_person=two_person, job_id=job.job_id))
         except speaker_fix.SpeakerFixError as e:
             # Loud failure (Hugo's directive): a clip that would put the words in
             # the wrong person's mouth must never ship silently.
@@ -1376,9 +1441,17 @@ async def _animate_one_video(
     original_speech: str | None = None
     if lang_spec is not None:
         try:
-            localized = await asyncio.to_thread(
+            # Shared per (scene × gender × language) for the same reason the
+            # speaker fix is: the translation of one scene's line does not
+            # depend on WHICH character speaks it. The gender is in the key
+            # because the speaker fix above may already have reshaped the text
+            # differently for women.
+            key = _prompt_cache_key(job.job_id, "localize", approved.scene_id,
+                                    char_gender, lang_spec.code,
+                                    movement_prompt)
+            localized = await _cached_prompt(key, lambda: asyncio.to_thread(
                 reengineer.localize_motion_prompt, movement_prompt,
-                lang_spec.code, job_id=job.job_id)
+                lang_spec.code, job_id=job.job_id))
         except reengineer.LocalizationError as e:
             # Fail LOUD (Hugo 2026-06-27): a language-flagged character must not
             # silently ship an English clip when translation fails — fail the
@@ -2202,9 +2275,13 @@ async def run_video_synthesis(job_id: str) -> None:
                 or movement_prompts.get(sid)
                 or fallback)
 
-    await asyncio.gather(
-        *[_animate_character(job, jc, m, prompt_for_scene) for jc in targets]
-    )
+    try:
+        await asyncio.gather(
+            *[_animate_character(job, jc, m, prompt_for_scene) for jc in targets]
+        )
+    finally:
+        # The shared speaker-fix / localization results only serve THIS batch.
+        _clear_prompt_cache(job_id)
 
     # Auto-finalize (Hugo 2026-07-19): when EVERY approved character's clips
     # succeeded, automatically compile the Step-6 finals + send them to

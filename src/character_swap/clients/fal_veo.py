@@ -175,8 +175,10 @@ def submit_image_to_video(
             payload["end_upload_url"] = end_url
         else:
             arguments["image_url"] = start_url
-        # Reuse the shared talking-head negative set (empty → field omitted).
-        neg = (settings.kling_negative_prompt or "").strip()
+        # Veo's OWN negative set — not Kling's (2026-08-03). Kling's terms
+        # describe Kling's failure modes and omit the burned-in-subtitle
+        # artefact Veo is known for on dialogue clips. Empty → field omitted.
+        neg = (settings.veo_negative_prompt or "").strip()
         if neg:
             arguments["negative_prompt"] = neg[:2500]
         try:

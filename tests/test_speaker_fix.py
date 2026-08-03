@@ -1,14 +1,20 @@
-"""Speaker-attribution fix for female characters in 👥 two-person scenes
-(Hugo 2026-08-02).
+"""Speaker-attribution fix for female characters (Hugo 2026-08-02, widened
+2026-08-03).
 
 Every movement prompt in the library was written off a MALE original ("the man
-says…"). With a female character in a shot where two people are visible, the
-video model picks the man. On scenes the user ticked 👥, a Claude vision call
-rewrites the prompt so SHE is unmistakably the speaker — before language
-localization, and failing the clip LOUDLY when it can't be done.
+says…"). A Claude vision call rewrites the prompt so SHE is unmistakably the
+speaker — before language localization, and failing the clip LOUDLY when it
+can't be done.
 
-The gate is deliberately two-sided: female character AND ticked scene. Ticking a
-scene must NOT spend credits on the male characters in the same run.
+The gate was originally two-sided (female AND a scene ticked 👥), which left
+the single-person case shipping "He says … while he is …" for a woman. Since
+2026-08-03 EVERY female character gets the fix and the 👥 tick is only a hint
+about a second person. Male characters are still never touched — the source
+prompts already speak about a man.
+
+The rewrite is computed ONCE per (scene × gender) and reused for every female
+character in that scene, so the agent must describe the speaker by POSITION,
+never by clothing: each character wears her own outfit.
 """
 from __future__ import annotations
 
@@ -33,6 +39,18 @@ FIXED = ('The woman on the left in the beige blazer says to the camera with a '
 
 
 # --- fixtures ----------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_prompt_cache():
+    """The shared (scene × gender × language) rewrite cache is process-level;
+    without this, one test's result answers the next test's call and the agent
+    stub is never reached."""
+    runner._PROMPT_CACHE.clear()
+    runner._PROMPT_LOCKS.clear()
+    yield
+    runner._PROMPT_CACHE.clear()
+    runner._PROMPT_LOCKS.clear()
+
 
 def _job(tmp_path, *, two_person=("s1",)):
     v_img = GeneratedImage(variant_id="v1", path=str(tmp_path / "v1.png"),
@@ -86,24 +104,32 @@ def _run(coro):
 
 # --- the gate ----------------------------------------------------------------
 
-def test_gate_requires_female_and_ticked_scene():
+def test_gate_is_female_on_any_scene():
     ticked = ["s1"]
     assert speaker_fix.needs_speaker_fix(
         gender="female", scene_id="s1", two_person_scenes=ticked)
-    # A MALE character in the very same ticked scene is skipped — ticking a
-    # scene must not spend credits on the men in the run (Hugo 2026-08-02).
+    # A MALE character is skipped even on a ticked scene — the source prompt
+    # already attributes the line to a man (Hugo 2026-08-02).
     assert not speaker_fix.needs_speaker_fix(
         gender="male", scene_id="s1", two_person_scenes=ticked)
-    # A woman on an UNTICKED scene is skipped too.
-    assert not speaker_fix.needs_speaker_fix(
+    # A woman on an UNTICKED scene now RUNS (widened 2026-08-03): without it
+    # her prompt still said "He says … while he is …".
+    assert speaker_fix.needs_speaker_fix(
         gender="female", scene_id="s2", two_person_scenes=ticked)
+    assert speaker_fix.needs_speaker_fix(
+        gender="female", scene_id="s1", two_person_scenes=[])
     # Gender never set → treated as male, agent never runs.
     assert not speaker_fix.needs_speaker_fix(
         gender=None, scene_id="s1", two_person_scenes=ticked)
-    assert not speaker_fix.needs_speaker_fix(
-        gender="female", scene_id="s1", two_person_scenes=[])
+    # No scene → nothing to key a shared rewrite on.
     assert not speaker_fix.needs_speaker_fix(
         gender="female", scene_id=None, two_person_scenes=ticked)
+
+
+def test_two_person_tick_is_now_only_a_hint():
+    assert speaker_fix.is_two_person_scene("s1", ["s1"])
+    assert not speaker_fix.is_two_person_scene("s1", [])
+    assert not speaker_fix.is_two_person_scene(None, ["s1"])
 
 
 def test_normalize_gender_accepts_both_languages_and_refuses_typos():
@@ -160,7 +186,12 @@ def test_agent_returns_rewritten_prompt(monkeypatch, tmp_path):
     assert call.kwargs["tool_choice"]["name"] == "submit_speaker_fix"
     text = "".join(b.get("text", "")
                    for b in call.kwargs["messages"][0]["content"])
-    assert BASE in text and "Helene" in text
+    assert BASE in text
+    # The character's NAME is deliberately NOT sent: one rewrite serves every
+    # female character in the scene, so anything person-specific in it would be
+    # wrong for all but one of them.
+    assert "Helene" not in text
+    assert "SCENE NOTE" in text
 
 
 def test_agent_reporting_no_change_keeps_the_original(monkeypatch, tmp_path):
@@ -220,17 +251,24 @@ def test_male_character_on_ticked_scene_never_calls_the_agent(monkeypatch, tmp_p
     assert video.speaker_fix_prompt is None
 
 
-def test_unticked_scene_never_calls_the_agent(monkeypatch, tmp_path):
+def test_unticked_scene_still_fixes_the_pronoun(monkeypatch, tmp_path):
+    """Widened 2026-08-03: a single-person scene left "He says … while he is …"
+    on a female character. Measured, Veo follows the frame and renders her
+    anyway — but the text was plainly wrong, and the model was doing the
+    saving, not the prompt."""
     job, jc, video = _job(tmp_path, two_person=())
     submits = _stub(monkeypatch, tmp_path, gender="female")
-    called = []
-    monkeypatch.setattr(runner.speaker_fix, "fix_speaker_attribution",
-                        lambda *a, **k: called.append(1) or FIXED)
+    hints = []
+    monkeypatch.setattr(
+        runner.speaker_fix, "fix_speaker_attribution",
+        lambda *a, **k: hints.append(k.get("two_person")) or FIXED)
 
     _run(runner._animate_one_video(job, jc, video, BASE))
 
-    assert not called
-    assert submits == [BASE]
+    assert submits == [FIXED]
+    # The tick still travels — as the second-person HINT, not as the gate.
+    assert hints == [False]
+    assert video.speaker_fix_prompt == FIXED
 
 
 def test_agent_failure_fails_the_clip_loudly(monkeypatch, tmp_path):
