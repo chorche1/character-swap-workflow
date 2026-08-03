@@ -202,6 +202,23 @@ def language_clip_truncated(secs: float | int | None) -> bool:
     return secs is not None and language_clip_secs(secs) < secs
 
 
+def video_fallback_model() -> str | None:
+    """The model a content-policy-refused clip is retried on, or None when the
+    rescue is disabled — which it is by DEFAULT since 2026-08-03 (Hugo).
+
+    Two reasons it is off. It silently moved a clip onto a different provider,
+    so one clip in a reel came out looking and sounding unlike its neighbours;
+    and it undoes the 🗣 language redirect outright — a German character's clip
+    would land on a model that cannot be trusted with German, which is exactly
+    what SPOKEN_LANGUAGE_VIDEO_MODEL exists to prevent. The fallback also drops
+    any resolved end frame. `VIDEO_MODERATION_FALLBACK=1` restores it.
+    """
+    from character_swap.config import settings
+    if not settings.video_moderation_fallback:
+        return None
+    return VIDEO_MODERATION_FALLBACK_MODEL
+
+
 def fallback_drops_end_frame(chosen_model: str) -> bool:
     """True when falling back from `chosen_model` to the moderation fallback
     would LOSE a resolved end frame — i.e. the chosen model honors end frames

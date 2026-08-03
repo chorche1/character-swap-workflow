@@ -1,6 +1,11 @@
 """Content-policy / NSFW video fallback → Grok Imagine 1.5 (Hugo 2026-07-14;
 fallback model switched from seedance-2.0 to grok-imagine-1.5 on 2026-07-26).
 
+OPT-IN since 2026-08-03 (Hugo: "ta bort fallbacken till en annan modell om ett
+klipp failar") — every test below therefore turns `VIDEO_MODERATION_FALLBACK`
+ON via the autouse fixture. The DEFAULT behaviour, a refused clip failing
+loudly on its own model, is locked at the bottom of this file.
+
 When a clip's chosen video model refuses it on moderation grounds, the runner
 retries the SAME clip ONCE on `grok-imagine-1.5` (a different, markedly more
 permissive provider stack). Only
@@ -30,6 +35,14 @@ _TIMEOUT = "Video job req-1 timed out after 600s"
 
 
 # --- fixtures ----------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _fallback_on(monkeypatch):
+    """The rescue is opt-in now; these tests describe it switched ON."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: True), raising=False)
+
 
 def _job_one_clip(tmp_path, *, video_model="kling-v3"):
     """One character, one approved image, one PENDING video clip."""
@@ -392,3 +405,62 @@ def test_dropped_end_frame_flag_is_serialized(tmp_path):
     vv = payload["characters"]["cA"]["videos"][0]
     assert vv["fallback_model"] == FALLBACK
     assert vv["fallback_dropped_end_frame"] is True
+
+
+# --- DEFAULT (rescue disabled): a refused clip fails on its own model --------
+
+@pytest.fixture
+def _fallback_off(monkeypatch):
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: False), raising=False)
+
+
+def test_default_is_off(monkeypatch):
+    """Ships disabled: the resolver returns nothing to fall back to."""
+    from character_swap.config import settings
+    monkeypatch.delenv("VIDEO_MODERATION_FALLBACK", raising=False)
+    assert type(settings).model_fields["video_moderation_fallback"].default is False
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: False), raising=False)
+    assert runner_media.video_fallback_model() is None
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: True), raising=False)
+    assert runner_media.video_fallback_model() == FALLBACK
+
+
+def test_refused_clip_fails_loudly_instead_of_switching_model(
+        monkeypatch, tmp_path, _fallback_off):
+    job, jc, video = _job_one_clip(tmp_path)
+    _stub(monkeypatch, tmp_path)
+    submits = []
+
+    def fake_submit(**kw):
+        submits.append(kw["model"])
+        raise RuntimeError(_MODERATION)
+    monkeypatch.setattr(runner.pipeline, "submit_video", fake_submit)
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+
+    _run(runner._animate_one_video(job, jc, video, "he waves"))
+
+    assert submits == ["kling-v3"], "no second provider may be tried"
+    assert video.status == VideoStatus.ERROR
+    assert video.fallback_model is None
+    # The REAL reason survives, so the user can reword rather than guess.
+    assert "nsfw" in (video.error or "").lower()
+
+
+def test_end_pose_is_never_dropped_when_the_rescue_is_off(
+        monkeypatch, tmp_path, _fallback_off):
+    """The dropped-end-frame flag existed only to make the fallback's loss
+    visible; with no fallback there is no loss to report."""
+    job, jc, video = _job_one_clip(tmp_path)
+    _stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner.pipeline, "submit_video",
+                        lambda **kw: (_ for _ in ()).throw(RuntimeError(_MODERATION)))
+    end = tmp_path / "end.png"; end.write_bytes(b"end")
+
+    _run(runner._animate_one_video(job, jc, video, "he waves", end_image=end))
+
+    assert video.fallback_dropped_end_frame is False

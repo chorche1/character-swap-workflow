@@ -1093,8 +1093,11 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     # before giving up — same rescue as the per-character swap clips in
     # runner._animate_one_video. Direct clips never carry an end frame, so the
     # fallback's missing end-frame support costs nothing here.
-    fb_model = runner_media.VIDEO_MODERATION_FALLBACK_MODEL
-    models_to_try = [model] + ([fb_model] if model != fb_model else [])
+    # See runner._animate_one_video: the rescue is OFF by default since
+    # 2026-08-03 and a refused clip fails loudly instead.
+    fb_model = runner_media.video_fallback_model()
+    models_to_try = [model] + (
+        [fb_model] if fb_model and model != fb_model else [])
     for _midx, active_model in enumerate(models_to_try):
         try:
             provider_job_id = await asyncio.to_thread(

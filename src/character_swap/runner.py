@@ -1401,26 +1401,21 @@ async def _animate_one_video(
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
-    # Content-policy / NSFW fallback (Hugo 2026-07-14): if the chosen video
-    # model refuses this clip on moderation grounds, retry it ONCE on
-    # grok-imagine-1.5 — a DIFFERENT provider stack (xAI via fal), markedly more
-    # permissive than Kling/Veo. ONLY genuine content-policy rejections trigger
-    # it (content_policy.is_content_rejection); timeouts / network / billing keep
-    # the normal fail path. If the fallback ALSO rejects, the clip fails LOUDLY
-    # (no silent partial — Hugo's standing rule).
-    #
-    # END FRAMES: the fallback model does NOT support them, so a clip with a
-    # resolved end pose loses it (`pipeline.submit_video` simply never forwards
-    # `end_image` for that model). Hugo 2026-07-26: fall back anyway — a clip
-    # without the end pose beats no clip — but flag the loss on the variant so
-    # the UI can say it out loud. `end_image` is still passed unchanged; the
-    # dispatch ignores it, and a scene whose original model already ignored the
-    # pose loses nothing (hence the supports_end_frame guard).
-    fb_model = runner_media.VIDEO_MODERATION_FALLBACK_MODEL
-    fb_drops_end = bool(end_image) and runner_media.fallback_drops_end_frame(
-        video_model)
+    # Content-policy / NSFW fallback — OFF by default since 2026-08-03 (Hugo:
+    # "ta bort fallbacken till en annan modell om ett klipp failar"). A clip its
+    # model refuses on moderation grounds now FAILS LOUDLY with the real reason,
+    # so the user can reword or retry, instead of quietly coming back rendered
+    # on a different provider — which made one clip in a reel look and sound
+    # unlike its neighbours, dropped any resolved end frame, and (since the 🗣
+    # redirect) would have moved a German/Spanish clip off the one model trusted
+    # with its language. `VIDEO_MODERATION_FALLBACK=1` restores the old rescue,
+    # unchanged: retry ONCE on grok-imagine-1.5, and if that ALSO refuses, fail
+    # loudly naming both.
+    fb_model = runner_media.video_fallback_model()
+    fb_drops_end = bool(fb_model) and bool(end_image) and (
+        runner_media.fallback_drops_end_frame(video_model))
     models_to_try = [video_model] + (
-        [fb_model] if video_model != fb_model else [])
+        [fb_model] if fb_model and video_model != fb_model else [])
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
     # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
     # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment

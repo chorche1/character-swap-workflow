@@ -427,6 +427,16 @@ class Settings(BaseSettings):
     # ($0.22/h vs $0.36/h) and is faster. whisper-1 stays the automatic
     # fallback on any Scribe failure, so this is never a single point of
     # failure — see video_edit._transcribe_scribe.
+    # Content-policy fallback for VIDEO clips. OFF since 2026-08-03 (Hugo:
+    # "ta bort fallbacken till en annan modell om ett klipp failar") — a clip
+    # its model refuses now FAILS LOUDLY with the real reason instead of being
+    # re-rendered on a different provider. Mirrors the image side's
+    # SWAP_MODERATION_FALLBACK, which has been opt-in since 2026-06-12 for the
+    # same reason: a silent provider switch produces a clip that doesn't match
+    # the rest of the reel. Set to 1 to restore the old rescue.
+    video_moderation_fallback: bool = Field(
+        default=False, validation_alias="VIDEO_MODERATION_FALLBACK")
+
     stt_engine: str = Field(default="scribe", validation_alias="STT_ENGINE")
     stt_scribe_model: str = Field(default="scribe_v2",
                                   validation_alias="STT_SCRIBE_MODEL")
