@@ -60,6 +60,11 @@ class _Store:
     def update_job(self, j):
         pass
 
+    def get_character(self, cid):
+        # The video-model resolver reads the character's 🗣 language flag
+        # (Hugo 2026-08-03); no library row here means "English".
+        return None
+
 
 def _png() -> UploadFile:
     return UploadFile(io.BytesIO(b"\x89PNG\r\n\x1a\nend-frame"),

@@ -169,6 +169,38 @@ def supports_end_frame(model: str) -> bool:
 # runner_reengineer._render_direct_clip.
 VIDEO_MODERATION_FALLBACK_MODEL = "grok-imagine-1.5"
 
+# Every clip of a 🗣 language-flagged character renders on THIS model, whatever
+# model the run/scene/clip picked (Hugo 2026-08-03). Measured: Kling 3.0 scored
+# 0.48 mean word-similarity on German against 1.00 English / 0.93 Spanish from
+# the same runs, and shipped plain non-words; the same two lines re-rendered on
+# veo-3.1-fast scored 0.95 / 0.93. See runner._language_video_model for the
+# full numbers. It DOES honor 🎯 end frames (it is in END_FRAME_VIDEO_MODELS),
+# so the redirect costs no end pose — but it accepts ONLY 4/6/8 s, hence
+# `language_clip_secs` below. SINGLE SOURCE OF TRUTH — read by
+# runner._language_video_model and the api duration/cost previews.
+SPOKEN_LANGUAGE_VIDEO_MODEL = "veo-3.1-fast"
+
+
+def language_clip_secs(secs: float | int | None) -> int:
+    """Snap a clip length to what `SPOKEN_LANGUAGE_VIDEO_MODEL` accepts.
+
+    Rounds UP to the next allowed value (Hugo 2026-08-03) — a redirected clip
+    must never come out SHORTER than asked for, or the tail of the line is cut
+    off mid-word. An ask above the model's ceiling snaps DOWN to it: 9 s and
+    10 s become 8 s, because the model cannot render longer. Callers flag that
+    case (`language_clip_truncated`) so the shortening is never silent.
+    """
+    opts = sorted(VIDEO_MODELS[SPOKEN_LANGUAGE_VIDEO_MODEL]["duration_options"])
+    if secs is None:
+        return int(VIDEO_MODELS[SPOKEN_LANGUAGE_VIDEO_MODEL]["duration_default"])
+    return int(next((o for o in opts if o >= secs), opts[-1]))
+
+
+def language_clip_truncated(secs: float | int | None) -> bool:
+    """True when `language_clip_secs` had to SHORTEN the requested length —
+    the ask exceeds what the redirect model can render."""
+    return secs is not None and language_clip_secs(secs) < secs
+
 
 def fallback_drops_end_frame(chosen_model: str) -> bool:
     """True when falling back from `chosen_model` to the moderation fallback

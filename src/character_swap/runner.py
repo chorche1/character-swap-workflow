@@ -1106,17 +1106,62 @@ def _eff_video_model_for_scene(job: Job, scene_id: str | None) -> str:
 
 def _eff_video_model_for_variant(job: Job, jc: JobCharacter,
                                  src_variant_id: str | None) -> str:
-    """Effective video model for one approved-image slot (a "clip"): the
-    per-CLIP override (regen-clip modal, `video_models_by_variant`) wins, else
-    the scene's per-scene override, else the job default, else grok-imagine.
-    Single resolution point so submit, end-frame gating, salvage re-poll and
-    resume all agree on the provider for a per-clip-overridden clip too."""
+    """Effective video model for one approved-image slot (a "clip"): a
+    language-flagged character is forced onto `SPOKEN_LANGUAGE_VIDEO_MODEL`
+    (see below); otherwise the per-CLIP override (regen-clip modal,
+    `video_models_by_variant`) wins, else the scene's per-scene override, else
+    the job default, else grok-imagine. Single resolution point so submit,
+    end-frame gating, salvage re-poll and resume all agree on the provider for
+    a per-clip-overridden clip too."""
+    forced = _language_video_model(jc.char_id)
+    if forced:
+        return forced
     if src_variant_id:
         ov = (job.video_models_by_variant or {}).get(src_variant_id)
         if ov:
             return ov
     appr = next((v for v in jc.images if v.variant_id == src_variant_id), None)
     return _eff_video_model_for_scene(job, appr.scene_id if appr else None)
+
+
+def _picked_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
+    """The model the USER picked for this clip — per-clip override, else scene,
+    else job default — ignoring the language redirect. Only for telling the
+    user what was overridden; never for submitting or polling."""
+    target = video.source_variant_id or jc.approved_variant_id
+    if target:
+        ov = (job.video_models_by_variant or {}).get(target)
+        if ov:
+            return ov
+    appr = next((v for v in jc.images if v.variant_id == target), None)
+    return _eff_video_model_for_scene(job, appr.scene_id if appr else None)
+
+
+def _language_video_model(char_id: str) -> str | None:
+    """The video model a 🗣 language-flagged character's clips are FORCED onto,
+    or None for an English character (which keeps the picked model).
+
+    Hugo 2026-08-03, measured: Kling 3.0 cannot speak German. Scored against
+    the line the prompt asked for, over the German clips of j_2a4d1ff40e +
+    j_b72c2c5536 and English/Spanish controls from those same runs —
+
+        english  n=16  mean 1.00      spanish  n=8   mean 0.93
+        german   n=20  mean 0.48   (19 of 20 below 0.70)
+
+    Passing clips contained plain non-words ("Kalber starke Vervantics in
+    Zucker" for "Kalte Stärke verwandelt sich in Zucker"). Re-rendering two of
+    those exact lines from the same swapped image on veo-3.1-fast scored 0.95
+    and 0.93 — word-perfect apart from digits-vs-words. So every non-English
+    character's clips go to Veo regardless of the model picked for the run.
+
+    Keyed on HAVING a language flag, not on the specific code, so a language
+    added to `SPOKEN_LANGUAGES` later is covered by default — the reason is
+    "the picked model is unreliable off English", which is not es/de-specific.
+    """
+    lang = _character_language(char_id)
+    if not lang or lang not in reengineer.SPOKEN_LANGUAGES:
+        return None
+    return runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
 
 
 def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
@@ -1133,6 +1178,16 @@ def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
     chosen model."""
     if video.fallback_model:
         return video.fallback_model
+    # A clip already REDIRECTED for its character's 🗣 language (Hugo
+    # 2026-08-03) resolves from that durable record rather than from the live
+    # character flag — same reason as `fallback_model` above: clearing a
+    # character's language after submit must not make the salvage re-poll and
+    # the post-restart resume query the ORIGINAL provider with a request_id
+    # that only exists on the redirect model's endpoint (fal request_ids are
+    # endpoint-scoped, so it would 404). `language_model_redirect` holds what
+    # the user picked; the clip itself ran on the language model.
+    if video.language_model_redirect:
+        return runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
     target = video.source_variant_id or jc.approved_variant_id
     return _eff_video_model_for_variant(job, jc, target)
 
@@ -1214,6 +1269,23 @@ async def _animate_one_video(
     # providers fail through the same VideoStatus.ERROR path so the UI doesn't
     # need per-provider handling.
     video_model = _eff_video_model(job, jc, video)
+    # A 🗣 language-flagged character was just forced onto the language model
+    # (Hugo 2026-08-03). Record WHAT the run asked for so the UI can say the
+    # clip was redirected instead of silently rendering on another provider,
+    # and snap the length to what that model accepts — rounding UP so the line
+    # is never cut, flagging the one case (>ceiling) where it must shorten.
+    if not video.fallback_model and _language_video_model(jc.char_id):
+        asked_model = _picked_video_model(job, jc, video)
+        if asked_model != video_model:
+            video.language_model_redirect = asked_model
+        asked_secs = duration_secs if duration_secs is not None else job.duration_secs
+        snapped = runner_media.language_clip_secs(asked_secs)
+        if snapped != asked_secs:
+            video.language_secs_from = asked_secs
+            video.language_secs_truncated = runner_media.language_clip_truncated(
+                asked_secs)
+        duration_secs = snapped
+        _replace_video(job, jc, video)
     # Each VideoVariant remembers WHICH approved variant it animates via
     # `source_variant_id` — so multi-scene jobs (with multiple approved
     # variants per char) animate every approval in parallel and keep

@@ -6719,6 +6719,26 @@ function studio() {
       return this._videoModelEntry().label;
     },
 
+    // 🗣 LANGUAGE REDIRECT (Hugo 2026-08-03). Every clip of a language-flagged
+    // character renders on ONE model whatever the run picked, because the
+    // picked model can't be trusted off English. Both read the server registry
+    // (`language_video_model` + that model's duration_options) so the slug and
+    // its ceiling can't drift from runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL.
+    _languageVideoEntry() {
+      const slug = this.models.language_video_model;
+      return (this.models.video || []).find(m => m.slug === slug) || {};
+    },
+
+    get languageVideoModel() {
+      return this._languageVideoEntry().label
+             || this.models.language_video_model || '';
+    },
+
+    get languageMaxSecs() {
+      const opts = this._languageVideoEntry().duration_options || [];
+      return opts.length ? opts[opts.length - 1] : '';
+    },
+
     videoModelAvailable() {
       return !!this._videoModelEntry().available;
     },

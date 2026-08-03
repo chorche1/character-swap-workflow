@@ -42,7 +42,10 @@ def _setup(monkeypatch, tmp_path, *, error: str, grok_job_id: str = "prov_1"):
 
     monkeypatch.setattr(runner, "store",
                         lambda: SimpleNamespace(get_job=lambda jid: job,
-                                                update_job=lambda j: None))
+                                                update_job=lambda j: None,
+                                                # The video-model resolver reads the
+                                                # character's 🗣 language flag (2026-08-03).
+                                                get_character=lambda cid: None))
     monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
     monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
     monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)

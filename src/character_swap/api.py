@@ -506,6 +506,13 @@ def _job_to_dict(job: Job) -> dict:
                         # note when that fallback cost the clip its end pose.
                         "fallback_model": vv.fallback_model,
                         "fallback_dropped_end_frame": vv.fallback_dropped_end_frame,
+                        # 🗣 language redirect (Hugo 2026-08-03): this clip
+                        # rendered on the language model instead of the picked
+                        # one, and possibly at a snapped length. Surfaced so the
+                        # move — and any shortening — is never silent.
+                        "language_model_redirect": vv.language_model_redirect,
+                        "language_secs_from": vv.language_secs_from,
+                        "language_secs_truncated": vv.language_secs_truncated,
                         # Speaker-attribution rewrite (Hugo 2026-08-02) → ⚥ chip
                         # on the clip; the text is the tooltip so the user can
                         # SEE what the agent changed.
@@ -3762,6 +3769,10 @@ def _models_payload() -> dict:
         # `audio` stays: app.js elevenlabsAvailable() gates every voice-swap
         # picker on an available elevenlabs-vc entry here.
         "audio":  [_entry(s, i) for s, i in runner_media.AUDIO_MODELS.items()],
+        # The model every 🗣 language-flagged character's clips are forced onto
+        # (Hugo 2026-08-03), so the UI can name it in the redirect chip without
+        # hardcoding the slug.
+        "language_video_model": runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL,
     }
 
 

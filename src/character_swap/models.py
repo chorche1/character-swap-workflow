@@ -231,6 +231,21 @@ class VideoVariant(BaseModel):
     # end pose beats no clip, but the loss must never be silent). Surfaced as an
     # explicit "slutposen tappades" note next to the ⇄ chip.
     fallback_dropped_end_frame: bool = False
+    # 🗣 LANGUAGE REDIRECT (Hugo 2026-08-03). Every clip of a language-flagged
+    # character renders on runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL whatever the
+    # run picked, because the picked model can't be trusted off English (Kling
+    # scored 0.48 on German vs 1.00 English). This holds the model the user
+    # ACTUALLY picked, so the UI can say the clip was moved instead of silently
+    # rendering on another provider. None = no redirect happened.
+    language_model_redirect: str | None = None
+    # The clip length originally asked for, when the redirect model couldn't
+    # take it verbatim (it accepts only 4/6/8 s). Set together with the flag
+    # below; None means the length went through unchanged.
+    language_secs_from: float | None = None
+    # True when snapping that length had to SHORTEN the clip (asked > ceiling)
+    # rather than round it up — the one case where the redirect can cut the
+    # tail of a line, so it is surfaced as a warning, never silently.
+    language_secs_truncated: bool = False
 
 
 class JobCharacter(BaseModel):

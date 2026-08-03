@@ -768,6 +768,15 @@
                       <span x-show="vv.speaker_fix_prompt"
                             class="ml-1 text-fuchsia-600 dark:text-fuchsia-400"
                             :title="'👥 Talar-agenten skrev om prompten så att hon säger repliken:\n\n' + (vv.speaker_fix_prompt || '')">⚥</span>
+                      <!-- 🗣 Språkomdirigering (Hugo 2026-08-03): karaktären har en
+                           språkflagga, så klippet kördes på språkmodellen i stället
+                           för den valda — aldrig tyst. -->
+                      <span x-show="vv.language_model_redirect"
+                            class="ml-1 text-sky-600 dark:text-sky-400"
+                            :title="'🗣 Språkflaggad karaktär: klippet kördes på ' + languageVideoModel + ' i stället för ' + (vv.language_model_redirect || '') + ' — den valda modellen talar inte språket tillförlitligt.'">🗣→</span>
+                      <span x-show="vv.language_secs_truncated"
+                            class="ml-1 text-amber-600 dark:text-amber-400"
+                            :title="'Klippet kortades från ' + (vv.language_secs_from || '') + ' s till ' + languageMaxSecs + ' s — ' + languageVideoModel + ' kan inte rendera längre. Kontrollera att hela repliken hinns med.'">⏱ kortad</span>
                     </div>
                     <div class="flex gap-2 text-xs shrink-0 items-center">
                       <a x-show="vv.url" :href="vv.url" :download="vv.download_name"
@@ -1966,6 +1975,16 @@
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).speaker_fix_prompt"
                                    class="text-[8px] text-fuchsia-500 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'👥 Talar-agenten skrev om prompten så att hon säger repliken:\n\n' + ((reClipForVariant(jc, v.variant_id) || {}).speaker_fix_prompt || '')">⚥ talar-fix</div>
+                              <!-- 🗣 Språkomdirigering (Hugo 2026-08-03): en
+                                   språkflaggad karaktär kör ALLTID på språkmodellen,
+                                   oavsett vald modell — den valda talar inte
+                                   språket tillförlitligt. Aldrig tyst. -->
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).language_model_redirect"
+                                   class="text-[8px] text-sky-500 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'🗣 Språkflaggad karaktär: klippet kördes på ' + languageVideoModel + ' i stället för ' + ((reClipForVariant(jc, v.variant_id) || {}).language_model_redirect || '') + ' — den valda modellen talar inte språket tillförlitligt.'">🗣→ <span x-text="languageVideoModel"></span></div>
+                              <div x-show="(reClipForVariant(jc, v.variant_id) || {}).language_secs_truncated"
+                                   class="text-[8px] text-amber-500 font-medium leading-tight mt-0.5 cursor-help"
+                                   :title="'Klippet kortades från ' + ((reClipForVariant(jc, v.variant_id) || {}).language_secs_from || '') + ' s till ' + languageMaxSecs + ' s — ' + languageVideoModel + ' kan inte rendera längre. Kontrollera att hela repliken hinns med.'">⏱ kortad till <span x-text="languageMaxSecs"></span> s</div>
                               <!-- QC-rejected takes of THIS clip (Hugo 2026-06-20):
                                    every clip video-QC threw away before the final
                                    take, shown by default. Empty when QC passed. -->

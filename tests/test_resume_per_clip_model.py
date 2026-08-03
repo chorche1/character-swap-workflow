@@ -34,6 +34,11 @@ class _FakeStore:
     def update_job(self, job):
         self.job = job
 
+    def get_character(self, cid):
+        # The video-model resolver reads the character's 🗣 language flag
+        # (Hugo 2026-08-03); no library row here means "English".
+        return None
+
 
 def _two_scene_inflight_job(**overrides) -> Job:
     """One char, two scenes; one IN-FLIGHT clip per scene (has a provider id,
