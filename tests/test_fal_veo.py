@@ -293,3 +293,83 @@ def test_submit_downgrades_resolution_for_short_clip_on_end_frame(monkeypatch):
     assert args["resolution"] == "720p"      # downgraded on the FLF path too
     assert args["first_frame_url"] == "https://fal.media/start.png"
     assert args["last_frame_url"] == "https://fal.media/end.png"
+
+
+# --- fal's own moderation dial (safety_tolerance) --------------------------
+#
+# Hugo 2026-08-04, after the 2026-08-03 failure wave (33 of 43 failed clips
+# were content-policy rejections, almost all Spanish dialogue that passed
+# verbatim in English): send fal's LEAST strict setting instead of letting fal
+# apply its default "4". Google's own Veo filter still applies underneath.
+
+def _fake_fal(captured):
+    class _Handler:
+        request_id = "rid-st"
+
+    class _FakeFal:
+        Completed = object
+        @staticmethod
+        def upload_file(p):
+            return f"https://fal.media/{Path(p).name}"
+        @staticmethod
+        def submit(endpoint, arguments):
+            captured["endpoint"] = endpoint
+            captured["arguments"] = arguments
+            return _Handler()
+    return _FakeFal
+
+
+def test_safety_tolerance_defaults_to_least_strict():
+    assert fal_veo.settings.veo_safety_tolerance == "6"
+    assert fal_veo._safety_tolerance() == "6"
+
+
+@pytest.mark.parametrize("configured,expected", [
+    ("6", "6"), ("1", "1"), ("4", "4"),
+    (" 5 ", "5"),      # whitespace tolerated
+    ("7", "6"),        # out of range → least strict, never fal's stricter default
+    ("bogus", "6"),
+    ("", "6"),
+    (None, "6"),
+])
+def test_safety_tolerance_clamps(monkeypatch, configured, expected):
+    monkeypatch.setattr(fal_veo.settings, "veo_safety_tolerance", configured)
+    assert fal_veo._safety_tolerance() == expected
+
+
+def test_submit_sends_safety_tolerance(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    fal_veo.submit_image_to_video(
+        image=Path("/frame.png"), prompt="she nods", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True,
+    )
+    assert captured["arguments"]["safety_tolerance"] == "6"
+    # auto_fix stays OFF: it rewrites the PROMPT, which carries the exact line
+    # the character must speak.
+    assert "auto_fix" not in captured["arguments"]
+
+
+def test_submit_sends_safety_tolerance_on_end_frame_endpoint(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    fal_veo.submit_image_to_video(
+        image=Path("/start.png"), prompt="she turns", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True, end_image=Path("/end.png"),
+    )
+    assert captured["endpoint"] == "fal-ai/veo3.1/fast/first-last-frame-to-video"
+    assert captured["arguments"]["safety_tolerance"] == "6"
+
+
+def test_env_can_still_tighten_it(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    monkeypatch.setattr(fal_veo.settings, "veo_safety_tolerance", "2")
+    fal_veo.submit_image_to_video(
+        image=Path("/frame.png"), prompt="x", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True,
+    )
+    assert captured["arguments"]["safety_tolerance"] == "2"

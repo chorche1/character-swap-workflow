@@ -293,6 +293,20 @@ VEO_FAL_RESOLUTION=1080p          # fal Veo 3.1 Fast (veo-3.1-fast) render resol
                                   # "720p" / "1080p" / "4k". Default 1080p (Hugo
                                   # 2026-06-18 — parity with KLING_V3_TIER=pro so
                                   # mixed-model reels match); 720p is fal's own default.
+VEO_SAFETY_TOLERANCE=6            # fal's OWN content-moderation dial on both Veo
+                                  # 3.1 endpoints: "1" strictest … "6" least strict.
+                                  # fal defaults to "4"; we send 6 (Hugo 2026-08-04,
+                                  # after the 08-03 wave where 33 of 43 failed clips
+                                  # were content-policy rejections of SPANISH dialogue
+                                  # that passed verbatim in English). Relaxes ONLY
+                                  # fal's layer — Google's Veo filter sits underneath
+                                  # with no such dial, so a clip Google itself refuses
+                                  # still fails (usually the silent
+                                  # `no_media_generated`). An out-of-range value falls
+                                  # back to 6, never to fal's stricter default. The
+                                  # sibling `auto_fix` knob (fal rewrites a prompt that
+                                  # trips the check) is deliberately NOT used: our
+                                  # prompts carry the character's exact spoken line.
 VEO_NEGATIVE_PROMPT="subtitles, captions, burned-in text, on-screen text, watermark, blur, distorted face, extra limbs"
                                   # Veo 3.1's OWN negative set (2026-08-03).
                                   # It used to be handed KLING_NEGATIVE_PROMPT,

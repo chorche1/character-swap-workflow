@@ -240,6 +240,17 @@ class Settings(BaseSettings):
     # pro so clips from different models in one reel share sharpness); 720p is
     # fal's own default (cheaper/faster). fal-routed Veo bills on FAL_API_KEY.
     veo_fal_resolution: str = Field(default="1080p", validation_alias="VEO_FAL_RESOLUTION")
+    # fal's own content-moderation dial on the Veo 3.1 endpoints: "1" (strictest)
+    # … "6" (least strict), fal's default is "4". Set to 6 on Hugo's call
+    # 2026-08-04 after the 2026-08-03 failure wave — 33 of 43 failed clips came
+    # back `content_policy_violation`, almost all of them Spanish health-claim
+    # dialogue that passed verbatim in English. This only relaxes the layer fal
+    # controls; Google's own Veo filter sits underneath and cannot be dialled,
+    # so a clip Google itself refuses still fails (usually as the silent
+    # `no_media_generated`). The sibling `auto_fix` knob is deliberately NOT
+    # used: it rewrites the PROMPT, which carries the character's exact line.
+    veo_safety_tolerance: str = Field(default="6",
+                                      validation_alias="VEO_SAFETY_TOLERANCE")
     # fal Grok Imagine 1.5 (image-to-video) render resolution: "480p" /
     # "720p" / "1080p". Default 720p (Hugo 2026-06-29 — verified fal pricing
     # tier at $0.14/s with native audio included; 480p is ~half cost, 1080p

@@ -18,6 +18,12 @@ API (no end frame): https://fal.ai/models/fal-ai/veo3.1/fast/image-to-video
   resolution      (enum)      "720p" | "1080p" | "4k"  (default "720p")
   generate_audio  (bool)      native audio (default true)
   negative_prompt (string)    optional
+  safety_tolerance (enum str) "1" (strictest) … "6" (least strict); fal's own
+                              default is "4" — we send "6" (see below)
+  auto_fix        (bool)      fal rewrites a prompt that trips its content
+                              check. We deliberately leave it off: our prompts
+                              carry the character's exact spoken line, and a
+                              silent rewrite would change the dialogue.
 Response: {video: {url, ...}, ...}  — identical shape to fal Kling v3.
 
 END FRAME (start→end interpolation): the plain image-to-video endpoint has NO
@@ -110,6 +116,26 @@ def _resolution(dur: int | None = None) -> str:
     return r
 
 
+_ALLOWED_SAFETY_TOLERANCE = ("1", "2", "3", "4", "5", "6")
+
+
+def _safety_tolerance() -> str:
+    """fal's own content-moderation dial on the Veo endpoints: "1" strictest …
+    "6" least strict. fal defaults to "4"; we send "6" (Hugo 2026-08-04, after
+    the 2026-08-03 wave where 33 of 43 failed clips were content-policy
+    rejections of Spanish dialogue that passed verbatim in English).
+
+    This relaxes only the layer fal controls — Google's Veo filter sits
+    underneath and has no such dial, so a clip Google itself refuses still
+    fails (typically as the silent `no_media_generated`).
+
+    An out-of-range value falls back to "6" rather than to fal's stricter
+    default: a typo in .env must never quietly make generation STRICTER than
+    asked for, and fal would reject an unknown enum outright."""
+    v = str(settings.veo_safety_tolerance or "6").strip()
+    return v if v in _ALLOWED_SAFETY_TOLERANCE else "6"
+
+
 def _aspect_ratio(aspect_ratio: str | None) -> str:
     """Veo accepts auto/16:9/9:16. Pass a portrait/landscape request straight
     through; anything else (1:1, None, …) → 'auto' (Veo derives it from the
@@ -161,6 +187,8 @@ def submit_image_to_video(
             "aspect_ratio": _aspect_ratio(aspect_ratio),
             "resolution": _resolution(dur),
             "generate_audio": generate_audio,
+            # fal's moderation dial — 6 = least strict (see _safety_tolerance).
+            "safety_tolerance": _safety_tolerance(),
         }
         if end_image is not None:
             # first-last-frame endpoint: start = first_frame_url,
