@@ -911,35 +911,11 @@ async def _compile_one_character(
                     voice_id=effective_voice_id,
                     voice_applied=result.voice_applied,
                     warning=combined_warning)
-        if slot is _REPURPOSE_SLOT:
-            # Repurpose is an independently requested final, so ship it as
-            # soon as this character's copy is ready. The original final is
-            # sent by the all-clips-success auto-finalize chain.
-            try:
-                from character_swap import telegram_delivery
-                if char_asset is None or not char_asset.telegram_chat_id:
-                    raise RuntimeError(
-                        f"Telegram-kanal saknas för {jc.name or char_id}")
-                receipt = await telegram_delivery.send_character_final(
-                    compiled_final,
-                    chat_id=char_asset.telegram_chat_id,
-                    char_name=jc.name or char_id,
-                    base=job.title or "swap",
-                    variant="repurpose",
-                    run_id=job_id,
-                )
-                fresh = s.get_job(job_id)
-                if fresh is not None and char_id in fresh.characters:
-                    fresh.characters[char_id].telegram_sends["repurpose"] = receipt
-                    s.update_job(fresh)
-            except Exception as exc:  # noqa: BLE001 — keep the valid final
-                logger.warning("%s/%s repurpose Telegram send failed: %s: %s",
-                               job_id, char_id, type(exc).__name__, exc)
-                push.notify(
-                    "Telegram misslyckades",
-                    f"{jc.name}: repurpose klar men inte skickad — "
-                    f"{str(exc)[:160]}",
-                    priority=5, tags=["rotating_light"])
+        # NOTE (Hugo 2026-08-03): a Swap 🔁 repurpose copy is NEVER sent to
+        # Telegram automatically — it lands as a finished card and the user
+        # ships it with the manual ➤ button. Only the ORIGINAL final keeps its
+        # auto-delivery (the all-clips-success auto-finalize chain). Editor
+        # reels are unaffected — see `repurpose_editor_job` below.
     except Exception as e:
         _persist_jc(job, jc, **{
             slot.status_field: "failed",

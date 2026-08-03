@@ -454,3 +454,94 @@ def test_do_repurpose_clears_stale_repurpose_error(monkeypatch, tmp_path):
     asyncio.run(runner_reengineer._do_repurpose("re_t", st2))
     assert updates[0]["repurposing"] is True
     assert "error" not in updates[0]                    # left alone
+
+
+# --- 6. Repurpose is NEVER auto-sent to Telegram (Hugo 2026-08-03) --------------------
+#
+# Hugo: "när jag repurposar i swap vill jag inte att det skickas till telegram
+# automatiskt". A 🔁 copy lands as a finished card and is shipped by hand with
+# the ➤ button. The ORIGINAL finals keep their auto-delivery, and standalone
+# Editor reels are untouched.
+
+
+def test_swap_repurpose_does_not_auto_send_to_telegram(monkeypatch, tmp_path):
+    """Step-6 🔁 on a Swap job: the character HAS a Telegram channel and the
+    copy builds fine — nothing is sent."""
+    from character_swap import telegram_delivery
+
+    sends: list = []
+
+    async def _boom(*a, **kw):
+        sends.append((a, kw))
+        return {"message_id": 1}
+    monkeypatch.setattr(telegram_delivery, "send_character_final", _boom)
+
+    job, jc = _mkjob_one_scene(tmp_path)
+    char = SimpleNamespace(name="A", voice_id=None,
+                           telegram_chat_id="@a_channel")
+    fake_store = SimpleNamespace(get_job=lambda jid: job,
+                                 update_job=lambda j: None,
+                                 get_character=lambda cid: char)
+    monkeypatch.setattr(runner_compile, "store", lambda: fake_store)
+    monkeypatch.setattr(settings, "output_dir", tmp_path, raising=False)
+
+    events: list[tuple[str, dict]] = []
+
+    async def fake_emit(job_id, kind, **kw):
+        events.append((kind, kw))
+    monkeypatch.setattr(runner_compile, "_emit", fake_emit)
+
+    final = tmp_path / "result.mp4"; final.write_text("final")
+
+    async def fake_pipeline(paths, **kw):
+        return EditorResult(final=final, voice_applied=False)
+    monkeypatch.setattr(runner_compile, "run_editor_pipeline", fake_pipeline)
+
+    pushes: list[tuple] = []
+    monkeypatch.setattr(runner_compile.push, "notify",
+                        lambda *a, **kw: pushes.append((a, kw)))
+
+    asyncio.run(runner_compile._compile_one_character(
+        "j1", "c1", template="capcut-bluebox", overrides=None,
+        enable_trim=False, enable_captions=False, enable_wpm_normalize=False,
+        target_wpm=190, threshold_db=-24.0, min_silence_secs=0.4, pad_secs=0.1,
+        voice_override=None, enable_voice_swap=False, slot=_REPURPOSE_SLOT))
+
+    # The copy still built...
+    assert jc.repurpose_status == "done"
+    assert {k for k, _ in events} >= {"char.repurpose_done"}
+    # ...but nothing left for Telegram, and no receipt was written.
+    assert sends == []
+    assert not jc.telegram_sends
+    assert pushes == []          # no "Telegram misslyckades" noise either
+
+
+def test_reengineer_repurpose_does_not_auto_send_to_telegram(
+        monkeypatch, tmp_path):
+    """🔁 on a run card (Swap-tab from_images runs AND Reengineer runs share
+    this path): the build finishes and no auto-send is scheduled."""
+    from character_swap import auto_finalize, telegram_delivery
+
+    sends: list = []
+
+    async def _boom(*a, **kw):
+        sends.append((a, kw))
+        return {"message_id": 1}
+    monkeypatch.setattr(telegram_delivery, "send_character_final", _boom)
+
+    job, _clips = _re_job(tmp_path)
+    updates, _calls = _wire_repurpose(monkeypatch, tmp_path, job)
+    asyncio.run(runner_reengineer._do_repurpose("re_t", _re_state()))
+
+    assert updates[-1]["repurposed"]["cA"]["status"] == "done"
+    assert sends == []
+    # The auto-send wrapper is gone entirely — nothing can call it back.
+    assert not hasattr(auto_finalize, "send_reengineer_repurposed")
+
+
+def test_original_finals_still_auto_send():
+    """Guard against over-reach: only the repurpose auto-send was removed."""
+    from character_swap import auto_finalize
+
+    assert callable(auto_finalize.send_reengineer_finals)
+    assert callable(auto_finalize.finalize_swap_job)

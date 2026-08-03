@@ -2190,11 +2190,10 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
                            if not _char_is_uninvolved(state, jc)])
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
-    try:
-        from character_swap import auto_finalize
-        await auto_finalize.send_reengineer_repurposed(re_id)
-    except Exception:
-        _log.exception("reengineer %s repurpose Telegram send failed", re_id)
+    # NOTE (Hugo 2026-08-03): repurpose copies are NEVER auto-sent to Telegram
+    # — the user ships them with the manual ➤ button on the finished card.
+    # The ORIGINAL finals keep their auto-delivery (`send_reengineer_finals`
+    # from the assemble chain).
 
 
 # --------------------------------------------------------------------------- edit mode

@@ -296,10 +296,11 @@ async def send_reengineer_finals(re_id: str,
         re_id, variant="final", require_opt_in=True, char_ids=char_ids)
 
 
-async def send_reengineer_repurposed(re_id: str) -> None:
-    """Send every newly built Reengineer repurpose copy."""
-    await _send_reengineer_bucket(
-        re_id, variant="repurpose", require_opt_in=False)
+# There is deliberately NO auto-send for the "repurposed" bucket (Hugo
+# 2026-08-03): a 🔁 repurpose copy is shipped by hand with the ➤ / "skicka
+# alla" buttons on the finished card (`/api/reengineer/{re_id}/telegram_send`
+# + `/telegram_send_all`, which deliver both variants). Only the ORIGINAL
+# finals are delivered automatically, via `send_reengineer_finals` above.
 
 
 def _notify_telegram_result(label: str, n_ok: int, n_fail: int) -> None:
