@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from character_swap import (
     call_log,
+    clip_failure,
     events,
     push,
     runner,
@@ -241,6 +242,25 @@ def _qc_rejects_dicts(rejects: list | None) -> list[dict]:
             "kind": r.kind,
         })
     return out
+
+
+def _clip_error_detail(job: Job, jc: JobCharacter,
+                       vv: VideoVariant) -> dict | None:
+    """Full, inline-renderable explanation of a failed clip (Hugo 2026-08-03).
+
+    Cheap by construction: a clip with no error returns immediately, so the
+    per-clip model resolution (which reads the character's 🗣 flag) only runs
+    for the handful of clips that actually failed.
+    """
+    if not vv.error:
+        return None
+    try:
+        model = runner._eff_video_model(job, jc, vv)
+        picked = runner._picked_video_model(job, jc, vv)
+    except Exception:  # never let a model lookup hide the error itself
+        model = picked = None
+    return clip_failure.explain(vv.error, model=model, picked_model=picked,
+                                fallback_model=vv.fallback_model)
 
 
 def _variant_download_name(jc: JobCharacter, variant: GeneratedImage) -> str:
@@ -493,6 +513,14 @@ def _job_to_dict(job: Job) -> dict:
                         "url": _file_url(vv.final_video_path),
                         "source_variant_id": vv.source_variant_id,
                         "error": vv.error,
+                        # The FULL reason this clip failed, parsed out of the
+                        # stored error and rendered inline next to the clip
+                        # (Hugo 2026-08-03) — classified cause, the provider's
+                        # own message/code, the model + length it ran at, and
+                        # the exact prompt submitted. Pure parsing, so clips
+                        # that failed before this shipped explain themselves
+                        # too. None while the clip is fine.
+                        "error_detail": _clip_error_detail(job, jc, vv),
                         "qc_status": vv.qc_status,
                         "qc_reason": vv.qc_reason,
                         "qc_attempts": vv.qc_attempts,

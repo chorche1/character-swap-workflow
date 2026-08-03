@@ -1852,6 +1852,47 @@ function studio() {
       await this._reMarkSceneDirtyIdx(run, sc.idx);
     },
 
+    // The full explanation for a FAILED CLIP, rendered inline next to the clip
+    // itself (Hugo 2026-08-03 — "det ska stå vid den failade genereringen,
+    // inte som popup"). The server parses the stored provider error into
+    // {headline, what, fix, provider_message, facts, prompt, raw}; this only
+    // covers the case where a cached/older payload has the raw error but no
+    // parsed detail, so the clip still says something readable.
+    clipFail(vv) {
+      if (!vv || !['failed', 'error'].includes(vv.status)) return null;
+      if (vv.error_detail) return vv.error_detail;
+      if (!vv.error) return null;
+      return {
+        kind: 'unknown',
+        headline: '✕ Klippet misslyckades',
+        what: '', fix: '',
+        provider_message: vv.error,
+        facts: [], prompt: null, raw: vv.error,
+      };
+    },
+
+    // Compact label for the tight per-scene clip strip, where the full panel
+    // doesn't fit — same classification, one or two words.
+    clipFailShort(vv) {
+      const d = this.clipFail(vv);
+      if (!d) return '';
+      return {
+        content_policy: 'innehållsavslag',
+        silent_refusal: 'tyst vägran',
+        wrong_language: 'fel språk',
+        billing_locked: 'fal-saldo slut',
+        timeout: 'timeout',
+        rate_limit: 'rate-limit',
+        provider_error: 'leverantörsfel',
+        network: 'nätverksfel',
+        interrupted: 'serveromstart',
+        missing_input: 'startbild saknas',
+        poll_failed: 'hämtning misslyckades',
+        speaker_fix_failed: 'talar-agenten',
+        localization_failed: 'översättning',
+      }[d.kind] || 'fel';
+    },
+
     // Human-readable one-liner for a failed variant slot — shown as visible
     // text in the strip (the tooltip-only error was invisible on iPhone).
     // The full raw error stays in the title attribute.
