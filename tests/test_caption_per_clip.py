@@ -127,7 +127,7 @@ def test_remap_clamps_word_spanning_a_cut():
 
 def _run_per_clip(monkeypatch, tx_by_name, *, paths, keeps, dialogues,
                   threshold=0.55):
-    def fake_tx(path, *, job_id=None, script_hint=None):
+    def fake_tx(path, *, job_id=None, script_hint=None, language=None):
         return tx_by_name(Path(path).name, script_hint)
     monkeypatch.setattr(video_edit, "transcribe_words", fake_tx)
     return asyncio.run(runner_compile._resolve_caption_words_per_clip(
@@ -188,7 +188,7 @@ def test_per_clip_warns_when_a_clip_falls_back(monkeypatch):
     async def warn(msg):
         warnings.append(msg)
 
-    def fake_tx(path, *, job_id=None, script_hint=None):
+    def fake_tx(path, *, job_id=None, script_hint=None, language=None):
         return tx(Path(path).name, script_hint)
     monkeypatch.setattr(video_edit, "transcribe_words", fake_tx)
     asyncio.run(runner_compile._resolve_caption_words_per_clip(
@@ -204,7 +204,7 @@ def test_per_clip_skips_second_whisper_call_when_hint_is_clean(monkeypatch):
     cleanly must NOT trigger a 2nd (unprompted) Whisper call."""
     calls: list = []
 
-    def fake_tx(path, *, job_id=None, script_hint=None):
+    def fake_tx(path, *, job_id=None, script_hint=None, language=None):
         calls.append((Path(path).name, script_hint))
         return _words("hello world")
 
@@ -229,7 +229,7 @@ def test_run_editor_pipeline_uses_per_clip_when_dialogues_known(
                 "clip_out_durations": [3.0, 4.0]}
     monkeypatch.setattr(video_edit, "assemble_clips", fake_assemble)
 
-    def fake_tx(path, *, job_id=None, script_hint=None):
+    def fake_tx(path, *, job_id=None, script_hint=None, language=None):
         return (_words("pour it on") if Path(path).name == "a.mp4"
                 else _words("uh hmm"))                    # clip B garbled
     monkeypatch.setattr(video_edit, "transcribe_words", fake_tx)

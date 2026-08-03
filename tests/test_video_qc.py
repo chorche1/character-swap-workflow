@@ -626,7 +626,7 @@ def test_inspect_clip_gating(monkeypatch):
     assert video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="p") is None
 
     monkeypatch.setattr(video_qc, "_transcribe",
-                        lambda *a, **k: (False, "baking goda", 0.93, "english"))
+                        lambda *a, **k: (False, "baking goda", 0.93, "english", "baking goda"))
     verdict = video_qc.inspect_clip(
         Path("/x.mp4"), movement_prompt='says: "baking soda"')
     assert verdict is not None and not verdict.passed
@@ -648,7 +648,7 @@ def test_inspect_clip_visual_disabled_runs_speech_only(monkeypatch):
                         lambda *a, **k: (visual_calls.append(1),
                                          video_qc.ClipVerdict(False, "extra arm", "fix"))[1])
     monkeypatch.setattr(video_qc, "_transcribe",
-                        lambda *a, **k: (True, "baking soda", 0.99, "english"))
+                        lambda *a, **k: (True, "baking soda", 0.99, "english", "baking soda"))
     verdict = video_qc.inspect_clip(
         Path("/x.mp4"), movement_prompt='says: "baking soda"')
     assert verdict is not None and verdict.passed     # speech ran + passed

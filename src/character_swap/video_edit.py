@@ -701,47 +701,108 @@ def _extract_audio(video_path: Path) -> Path:
 
 
 def transcribe_words(video_path: Path, *, job_id: str | None = None,
-                     script_hint: str | None = None) -> list[Word]:
+                     script_hint: str | None = None,
+                     language: str | None = None) -> list[Word]:
     """Word-level timestamps only — see `transcribe_detailed` for the full
-    result (which also carries the language Whisper DETECTED in the audio)."""
+    result (which also carries the language DETECTED in the audio)."""
     return transcribe_detailed(video_path, job_id=job_id,
-                               script_hint=script_hint)[0]
+                               script_hint=script_hint, language=language)[0]
+
+
+def _transcribe_scribe(video_path: Path, *, job_id: str | None,
+                       language: str | None,
+                       ) -> tuple[list[Word], str | None] | None:
+    """ElevenLabs Scribe leg of `transcribe_detailed`. Returns None when the
+    engine could not answer, so the caller falls back to whisper-1.
+
+    A transcription engine failing is not a reason to fail a render — the
+    fallback produces a correct (if less precisely timed) result — so this
+    degrades instead of raising. It is logged at WARNING, and every call is
+    recorded in calls.jsonl either way, so a silently-degraded run is still
+    visible after the fact.
+    """
+    from character_swap.clients import elevenlabs
+    audio_path = _extract_audio(video_path)
+    try:
+        raw, detected = elevenlabs.transcribe(
+            audio=audio_path, model_id=settings.stt_scribe_model,
+            language_code=language, app_job_id=job_id)
+    except Exception as e:  # noqa: BLE001 — degrade to whisper, never block
+        logger.warning("Scribe transcription failed (%s: %s) — falling back to "
+                    "whisper-1 for %s", type(e).__name__, e, video_path.name)
+        return None
+    finally:
+        audio_path.unlink(missing_ok=True)
+    words = [Word(text=w["text"], start=w["start"], end=w["end"]) for w in raw]
+    # An EMPTY result is ambiguous — a silent clip or a bad response — so let
+    # whisper-1 have a go rather than caption the video with nothing.
+    if not words:
+        return None
+    return words, detected
 
 
 def transcribe_detailed(video_path: Path, *, job_id: str | None = None,
                         script_hint: str | None = None,
+                        language: str | None = None,
                         ) -> tuple[list[Word], str | None]:
-    """Run OpenAI Whisper on the video's audio. Returns word-level timestamps.
+    """Transcribe the video's audio to word-level timestamps.
 
-    Uses `whisper-1` (current OpenAI Whisper API model) with
-    response_format=verbose_json + timestamp_granularities=['word'].
+    Two engines, chosen by `STT_ENGINE` (default `scribe`):
+
+    * **ElevenLabs Scribe** (`scribe_v2`) — the default since 2026-08-03.
+      Measured over 54 of Hugo's own clips against whisper-1: equal on English
+      (1.000 both, once digits-vs-words are normalized), better on Spanish
+      (0.962 vs 0.925) and German (0.605 vs 0.498), never worse. The reason to
+      switch is the TIMINGS, though: 88-97% of whisper-1's adjacent word pairs
+      have no gap at all — its per-word boundaries are interpolated inside each
+      segment — against 2-6% for Scribe. Every Remotion caption template
+      animates per word off these numbers. It is also cheaper ($0.22/h vs
+      $0.36/h) and faster (~1.5s vs ~2.0s per clip).
+    * **whisper-1** — the previous default, kept as the automatic fallback so
+      an ElevenLabs outage, a missing key or an exhausted plan can never block
+      a render. Set `STT_ENGINE=whisper` to pin it.
+
+    `language` is an ISO-639-1 hint ("de"/"es"). It is worth passing whenever
+    the caller knows it: on the German clips it lifted mean word-similarity
+    0.571 → 0.602, and 0.41 → 1.00 on one clip Scribe had otherwise read as
+    Dutch. NOTE the QC caveat — a hinted transcript cannot be used for the
+    wrong-language check, which needs to see the clip transcribe back to
+    ENGLISH; `video_qc` therefore runs an extra unhinted pass instead.
 
     `script_hint` (backlog #20, 2026-06-12): when the EXACT spoken script is
     already known (Reengineer dialogue, Step-6 movement-prompt lines), it is
-    passed as Whisper's `prompt` so the transcription is biased toward the
-    real wording — mis-hearings used to be burned into captions verbatim.
-    Whisper only reads the prompt's final ~224 tokens, hence the char cap.
+    passed as Whisper's `prompt` so the transcription is biased toward the real
+    wording — mis-hearings used to be burned into captions verbatim. Whisper
+    only reads the prompt's final ~224 tokens, hence the char cap. Scribe has
+    no equivalent free parameter (its `keyterms` carries a 20% surcharge and
+    takes terms, not prose) and does not need one: it matched or beat hinted
+    whisper on every group measured, unhinted.
 
     Returns `([], None)` for video-only inputs with no audio track
     — Higgsfield Supercomputer clips are typically silent. Callers that fan
     out across N clips get `match_clips_by_transcript` to fall back to
     upload-order placement when transcripts are empty.
 
-    The second element is the language Whisper DETECTED in the audio (its own
-    lowercase English name, e.g. "english" / "german"; `verbose_json` has
-    always carried it, we simply threw it away). It is the ONLY direct evidence
-    of what language a generated clip actually speaks, and video QC uses it to
-    catch a 🇪🇸/🇩🇪-flagged character whose clip came out English — the failure
-    that shipped 8 of 10 German clips in re_b3170d2118 (Hugo 2026-08-02).
+    The second element is the language DETECTED in the audio, as a lowercase
+    English name ("english" / "german") — the same shape whisper-1's
+    verbose_json always returned, so the engine swap is invisible to callers.
+    Treat it as weak evidence only: whisper-1 called 4 of 20 German clips
+    English, and Scribe called 3 of 20 Dutch or English.
     """
     if not _has_audio_stream(video_path):
         return [], None
+    if (settings.stt_engine or "scribe").strip().lower() == "scribe":
+        words = _transcribe_scribe(video_path, job_id=job_id, language=language)
+        if words is not None:
+            return words
     audio_path = _extract_audio(video_path)
     try:
         client = openai_image._client()  # reuses settings.openai_api_key + auth
         extra: dict = {}
         if script_hint and script_hint.strip():
             extra["prompt"] = script_hint.strip()[-800:]
+        if language:
+            extra["language"] = language
         with record(phase="editor_transcribe", model="whisper-1",
                     character="editor", job_id=job_id):
             with audio_path.open("rb") as f:

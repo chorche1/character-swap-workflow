@@ -241,7 +241,8 @@ def _cov(ws: list, dialogue: str) -> float:
 
 async def _align_one_clip(path: Path, keeps: list | None, dialogue: str,
                           out_dur: float, *, edit_id: str,
-                          threshold: float) -> tuple[list, bool]:
+                          threshold: float,
+                          language: str | None = None) -> tuple[list, bool]:
     """Caption words for ONE clip, on that clip's own (trimmed) timeline.
 
     Returns (words, fell_back): `fell_back` is True only when both Whisper
@@ -269,7 +270,7 @@ async def _align_one_clip(path: Path, keeps: list | None, dialogue: str,
         try:
             return await asyncio.to_thread(
                 video_edit.transcribe_words, path, job_id=edit_id,
-                script_hint=hint)
+                script_hint=hint, language=language)
         except Exception:
             return []
 
@@ -303,7 +304,8 @@ async def _align_one_clip(path: Path, keeps: list | None, dialogue: str,
 
 async def _resolve_caption_words_per_clip(
         clip_paths: list[Path], clip_keeps: list, clip_dialogues: list[str],
-        *, edit_id: str, threshold: float, warn=None) -> list:
+        *, edit_id: str, threshold: float, warn=None,
+        language: str | None = None) -> list:
     """Per-clip caption alignment across the whole reel (Hugo 2026-06-26).
 
     Each clip is aligned on its own timeline by `_align_one_clip`, then shifted
@@ -321,7 +323,8 @@ async def _resolve_caption_words_per_clip(
         out_dur = (sum(e - s for s, e in keeps) if keeps
                    else await asyncio.to_thread(video_edit._probe_duration, path))
         clip_words, fell_back = await _align_one_clip(
-            path, keeps, dialogue, out_dur, edit_id=edit_id, threshold=threshold)
+            path, keeps, dialogue, out_dur, edit_id=edit_id,
+            threshold=threshold, language=language)
         if fell_back:
             n_fallback += 1
         for w in clip_words:
@@ -359,6 +362,11 @@ async def run_editor_pipeline(
     warn=None,
     script_hint: str | None = None,
     clip_dialogues: list[str] | None = None,
+    # 🗣 The character's spoken language, when the caller knows it (Step-6
+    # compile + Reengineer assemble do). Passed to the transcriber so a German
+    # or Spanish final is not captioned off a mis-detected language — Scribe
+    # read 3 of 20 German clips as Dutch/English without it (2026-08-03).
+    language: str | None = None,
 ) -> EditorResult:
     """Concat + Editor finishing, shared by the Step-6 compile and the
     Reengineer assemble: per-clip audio-onset trim → concat → interior
@@ -573,6 +581,7 @@ async def run_editor_pipeline(
         words = await _resolve_caption_words_per_clip(
             clip_paths, clip_keeps, clip_dialogues, edit_id=edit_id,
             threshold=settings.caption_script_fallback_ratio, warn=warn,
+            language=language,
         )
     else:
         if (enable_transcribe or enable_captions or enable_wpm_normalize
@@ -580,7 +589,7 @@ async def run_editor_pipeline(
             try:
                 words = await asyncio.to_thread(
                     video_edit.transcribe_words, current, job_id=edit_id,
-                    script_hint=script_hint,
+                    script_hint=script_hint, language=language,
                 )
             except Exception as tx_err:
                 # Transcription failure must not fail the build, but NEVER
@@ -859,6 +868,11 @@ async def _compile_one_character(
         # `paths`) drives PER-CLIP caption alignment; the joined form is the
         # whole-concat Whisper bias hint / fallback (backlog #20).
         script_hint = " ".join(d for d in dialogues if d.strip()) or None
+        # 🗣 The character's spoken language, read live from the library like
+        # the runner does — so a German/Spanish final is transcribed WITH the
+        # hint instead of relying on auto-detection (2026-08-03).
+        _lib_char = s.get_character(char_id)
+        caption_language = getattr(_lib_char, "language", None) or None
 
         result = await run_editor_pipeline(
             paths,
@@ -874,6 +888,7 @@ async def _compile_one_character(
             warn=_warn,
             script_hint=script_hint,
             clip_dialogues=dialogues,
+            language=caption_language,
         )
 
         # Copy the final result to the canonical per-character location so the

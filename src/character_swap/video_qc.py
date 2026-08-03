@@ -106,8 +106,45 @@ def expected_speech(prompt: str) -> str:
     return video_edit.extract_dialogue(prompt or "")
 
 
+# Number words → digits, so an engine that writes "ten seconds" scores the same
+# as one that writes "10 seconds" (Hugo 2026-08-03). This is pure measurement
+# hygiene: both transcriptions are CORRECT, and penalizing one cost real points
+# in both directions — Scribe read "ten"/"zehn" where the prompt said "10"
+# (English 0.983 instead of 1.000), whisper-1 read "Nummer 1" where the prompt
+# said "Nummer eins" (German 0.942 instead of 1.000). Only the range that
+# actually shows up in these scripts is covered; unknown words pass through.
+_NUMBER_WORDS = {
+    "en": ["zero", "one", "two", "three", "four", "five", "six", "seven",
+           "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+           "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"],
+    "de": ["null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben",
+           "acht", "neun", "zehn", "elf", "zwölf", "dreizehn", "vierzehn",
+           "fünfzehn", "sechzehn", "siebzehn", "achtzehn", "neunzehn",
+           "zwanzig"],
+    "es": ["cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete",
+           "ocho", "nueve", "diez", "once", "doce", "trece", "catorce",
+           "quince", "dieciséis", "diecisiete", "dieciocho", "diecinueve",
+           "veinte"],
+}
+_NUMBERS = {w: str(n) for words in _NUMBER_WORDS.values()
+            for n, w in enumerate(words)}
+# German ordinals/inflections that appear as list markers ("Nummer eins").
+_NUMBERS.update({"ein": "1", "eine": "1", "una": "1", "un": "1"})
+
+
 def _norm_words(text: str) -> str:
-    return " ".join(re.sub(r"[^a-z0-9' ]+", " ", text.lower()).split())
+    """Lowercase word tokens for comparison.
+
+    Keeps NON-ASCII letters. The old `[^a-z0-9' ]` class deleted every umlaut
+    and accent, which did not merely drop a character — it SPLIT the word:
+    "Stärke" became the two tokens "st" + "rke", so every German and Spanish
+    transcript was scored against a differently-tokenized expectation and lost
+    points it never should have. `\\w` under Python 3's default unicode
+    semantics keeps them whole. ß→ss is folded because the two spellings are
+    the same word; accents are NOT folded, since "año" and "ano" are not.
+    """
+    cleaned = re.sub(r"[^\w' ]+", " ", text.lower().replace("ß", "ss"))
+    return " ".join(_NUMBERS.get(w, w) for w in cleaned.split())
 
 
 def speech_similarity(expected: str, heard: str) -> float:
@@ -127,27 +164,58 @@ def speech_similarity(expected: str, heard: str) -> float:
 
 def check_speech(video: Path, expected: str, *, app_job_id: str | None = None
                  ) -> tuple[bool, str, float] | None:
-    """Whisper-transcribe the clip and compare to the expected dialogue.
-    Returns (ok, heard_text, similarity), or None when transcription is
-    unavailable (no OpenAI key / API error) — callers skip the check."""
+    """Transcribe the clip and compare to the expected dialogue. Returns
+    (ok, heard_text, similarity), or None when transcription is unavailable
+    (no OpenAI key / API error) — callers skip the check. No language hint:
+    `inspect_clip` owns that decision, since it is the caller that knows
+    whether the character is 🗣 flagged."""
     got = _transcribe(video, expected, app_job_id=app_job_id)
     return None if got is None else got[:3]
 
 
-def _transcribe(video: Path, expected: str, *, app_job_id: str | None = None
-                ) -> tuple[bool, str, float, str | None] | None:
-    """One Whisper pass serving BOTH speech checks: (ok, heard, similarity,
-    detected_language). The language ships along for free — `verbose_json`
-    always carried it — so the wrong-language check costs no extra call."""
+def _transcribe(video: Path, expected: str, *, app_job_id: str | None = None,
+                language: str | None = None,
+                ) -> tuple[bool, str, float, str | None, str] | None:
+    """Transcribe the clip for BOTH speech checks: (ok, heard, similarity,
+    detected_language, heard_unhinted).
+
+    For a 🗣 language-flagged character this runs TWO passes, and they are not
+    interchangeable:
+
+    * UNHINTED feeds the wrong-language check, which works by seeing the clip
+      transcribe back to the ENGLISH source line. Tell the engine the audio is
+      German and English audio comes back as German-ish nonsense that matches
+      nothing — the check would go blind exactly when it matters.
+    * HINTED feeds the similarity score, because the hint is worth real points
+      on correct clips (German mean 0.571 → 0.602, and 0.41 → 1.00 on a clip
+      Scribe had otherwise read as Dutch).
+
+    Gating on the engine's own detected language instead would be cheaper and
+    is tempting — but measured, neither engine is good enough for it:
+    whisper-1 called 4 of 20 German clips English, Scribe called 3 of 20 Dutch
+    or English. `detected` is returned for display only.
+
+    English characters pass no hint, so they still cost exactly one call.
+    """
     from character_swap.config import settings
     if not expected.strip() or not settings.openai_api_key:
         return None
     try:
         from character_swap import video_edit
         words, detected = video_edit.transcribe_detailed(video, job_id=app_job_id)
-        heard = " ".join(w.text for w in words)
+        heard_unhinted = " ".join(w.text for w in words)
+        heard = heard_unhinted
+        if language:
+            h_words, h_detected = video_edit.transcribe_detailed(
+                video, job_id=app_job_id, language=language)
+            hinted = " ".join(w.text for w in h_words)
+            # A hinted pass that comes back EMPTY is a failure, not a verdict —
+            # keep the unhinted text rather than scoring the clip against "".
+            if hinted.strip():
+                heard, detected = hinted, h_detected
         sim = speech_similarity(expected, heard)
-        return (sim >= settings.video_qc_speech_threshold, heard, sim, detected)
+        return (sim >= settings.video_qc_speech_threshold, heard, sim, detected,
+                heard_unhinted)
     except Exception:
         return None
 
@@ -235,10 +303,15 @@ def inspect_clip(video: Path, *, movement_prompt: str,
 
     ran_any = False
     expected = expected_speech(movement_prompt)
-    speech = _transcribe(video, expected, app_job_id=app_job_id)
+    # The hint is only passed for a language-flagged character — see
+    # `_transcribe` for why that costs a second, UNHINTED pass there.
+    from character_swap import reengineer as _re
+    _spec = _re.SPOKEN_LANGUAGES.get((expected_language or "").lower())
+    speech = _transcribe(video, expected, app_job_id=app_job_id,
+                         language=_spec.code if _spec else None)
     if speech is not None:
         ran_any = True
-        ok, heard, sim, detected = speech
+        ok, heard, sim, detected, heard_unhinted = speech
         # LANGUAGE FIRST — it outranks the fuzzy word-similarity check. A clip
         # that says the ORIGINAL ENGLISH line instead of the translated one is
         # not a "garbled TTS" case (which Hugo runs flag-only); it is unusable,
@@ -254,17 +327,21 @@ def inspect_clip(video: Path, *, movement_prompt: str,
         # re-rendered and then FAILED correct German clips — worse than the bug.
         # Matching the English line cannot go wrong the same way: a clip
         # speaking German does not transcribe into the English sentence.
-        from character_swap import reengineer
-        spec = reengineer.SPOKEN_LANGUAGES.get((expected_language or "").lower())
+        #
+        # It is scored on the UNHINTED transcript (2026-08-03): the hinted pass
+        # is told the audio is German, so English audio comes back as German-ish
+        # nonsense that matches the English line at ~0 — the check would go
+        # blind on exactly the clips it exists to catch.
+        spec = _spec
         if spec is not None and (original_speech or "").strip():
-            en_sim = speech_similarity(original_speech, heard)
+            en_sim = speech_similarity(original_speech, heard_unhinted)
             if en_sim >= settings.video_qc_language_threshold and en_sim > sim:
                 return ClipVerdict(
                     passed=False,
                     reason=(f"fel språk: klippet talar engelska, inte "
                             f"{spec.name_en} (matchar originalrepliken "
                             f"{en_sim:.2f} mot {sim:.2f}) — hörde "
-                            f"“{heard[:100]}”"),
+                            f"“{heard_unhinted[:100]}”"),
                     corrective_hint=(
                         f"CRITICAL: every spoken word must be in "
                         f"{spec.name_en}. The previous take spoke ENGLISH. Say "

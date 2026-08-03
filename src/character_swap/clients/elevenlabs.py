@@ -198,3 +198,75 @@ def voice_changer(
                 raise exc(msg)
             entry["request_id"] = r.headers.get("x-request-id")
             return r.content
+
+
+# ISO-639-3 (what Scribe returns) → the lowercase English language NAME that
+# `video_edit.transcribe_detailed` has always returned, so swapping the engine
+# can't change that contract for callers. Only the languages this project can
+# actually produce need entries; anything else passes through unchanged.
+_ISO3_TO_NAME = {
+    "eng": "english", "deu": "german", "ger": "german", "spa": "spanish",
+    "swe": "swedish", "fra": "french", "fre": "french", "ita": "italian",
+    "nld": "dutch", "por": "portuguese", "dan": "danish", "nor": "norwegian",
+}
+
+
+def transcribe(
+    *,
+    audio: Path,
+    model_id: str = "scribe_v2",
+    language_code: str | None = None,
+    app_job_id: str | None = None,
+) -> tuple[list[dict], str | None]:
+    """POST /v1/speech-to-text — Scribe. Returns (words, detected_language).
+
+    Each word is {"text", "start", "end"} in seconds. Unlike whisper-1 these
+    are REAL per-word boundaries: measured over 54 of Hugo's clips, 88-97% of
+    whisper-1's adjacent word pairs had NO gap at all (its timings are
+    interpolated inside each segment), against 2-6% for Scribe. The Remotion
+    caption templates animate per word off exactly these numbers.
+
+    `language_code` is the ISO-639-1/3 hint. It matters: on the German clips it
+    lifted mean word-similarity 0.571 → 0.602, and on one clip 0.41 → 1.00
+    where Scribe had otherwise decided the audio was Dutch. Scribe's own
+    detection is NOT reliable enough to gate on (3 of 20 German clips came back
+    nld/eng), which is why the wrong-language QC check still works off an
+    UNHINTED transcript rather than this field.
+    """
+    _require_elevenlabs()
+    _check_account_block("speech to text")
+    data: dict[str, str] = {
+        "model_id": model_id,
+        "timestamps_granularity": "word",
+        # Laughter/footstep tags would land in the transcript as literal
+        # "(laughs)" tokens and pollute both the QC score and the captions.
+        "tag_audio_events": "false",
+    }
+    if language_code:
+        data["language_code"] = language_code
+    with record(phase="elevenlabs_stt", model=model_id,
+                character="—", job_id=app_job_id) as entry:
+        with audio.open("rb") as f, httpx.Client(timeout=180) as c:
+            r = c.post(
+                f"{_BASE_URL}/speech-to-text",
+                headers={"xi-api-key": settings.elevenlabs_api_key},
+                files={"file": (audio.name, f, "audio/wav")}, data=data,
+            )
+        if r.status_code >= 400:
+            exc = _classify_http_error(r.status_code, r.text)
+            msg = f"Speech-to-text failed ({r.status_code}): {r.text[:300]}"
+            if exc is ElevenLabsAccountError:
+                _trip_account_block(msg)
+            raise exc(msg)
+        entry["request_id"] = r.headers.get("x-request-id")
+        payload = r.json()
+    words = [
+        {"text": w.get("text", ""),
+         "start": float(w.get("start") or 0.0),
+         "end": float(w.get("end") or 0.0)}
+        # "spacing" and "audio_event" entries are not spoken words; keeping
+        # them would insert empty tokens into every caption card.
+        for w in (payload.get("words") or []) if w.get("type") == "word"
+    ]
+    iso3 = (payload.get("language_code") or "").strip().lower()
+    return words, (_ISO3_TO_NAME.get(iso3, iso3) or None)

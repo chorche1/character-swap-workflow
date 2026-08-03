@@ -132,11 +132,13 @@ def _qc_on(monkeypatch):
 
 
 def _heard(monkeypatch, text, sim):
-    """Whisper heard `text`; `sim` is its similarity to the TRANSLATED line.
-    The 4th element is Whisper's own language field — deliberately unused by
-    the check (see below), so the tests feed it the wrong answer on purpose."""
+    """The engine heard `text`; `sim` is its similarity to the TRANSLATED line.
+    The 4th element is the engine's own language field — deliberately unused by
+    the check (see below), so the tests feed it the wrong answer on purpose.
+    The 5th is the UNHINTED transcript the wrong-language check scores against
+    (2026-08-03); here both passes heard the same thing."""
     monkeypatch.setattr(video_qc, "_transcribe",
-                        lambda *a, **k: (sim >= 0.35, text, sim, "english"))
+                        lambda *a, **k: (sim >= 0.35, text, sim, "english", text))
 
 
 def test_clip_that_speaks_the_english_source_line_is_wrong_language(monkeypatch):

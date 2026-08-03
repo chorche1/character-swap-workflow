@@ -417,6 +417,20 @@ class Settings(BaseSettings):
     video_qc_speech_threshold: float = Field(default=0.7,
                                              validation_alias="VIDEO_QC_SPEECH_THRESHOLD")
 
+    # Speech-to-text engine for BOTH captions and video QC (Hugo 2026-08-03).
+    # "scribe" = ElevenLabs Scribe, the default; "whisper" pins the old
+    # whisper-1 path. Scribe is chosen for its per-word TIMINGS: measured over
+    # 54 of Hugo's clips, 88-97% of whisper-1's adjacent word pairs had no gap
+    # at all (interpolated inside each segment) against 2-6% for Scribe, and
+    # every Remotion caption template animates per word off those numbers. It
+    # also scored equal-or-better on text in all three languages, costs less
+    # ($0.22/h vs $0.36/h) and is faster. whisper-1 stays the automatic
+    # fallback on any Scribe failure, so this is never a single point of
+    # failure — see video_edit._transcribe_scribe.
+    stt_engine: str = Field(default="scribe", validation_alias="STT_ENGINE")
+    stt_scribe_model: str = Field(default="scribe_v2",
+                                  validation_alias="STT_SCRIBE_MODEL")
+
     # Reengineer swap-phase watchdog. PROGRESS-based, not a fixed deadline:
     # the old fixed 30-min ceiling fired below the realistic duration of any
     # gpt-image run > ~27 slots (128s median/call at concurrency 4) and marked

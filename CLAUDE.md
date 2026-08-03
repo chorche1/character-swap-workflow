@@ -249,6 +249,15 @@ REMOTION_CONCURRENCY=4            # browser tabs PER render (--concurrency). Mea
 REMOTION_TIMEOUT_MS=120000        # per-frame delayRender budget (--timeout). Remotion's 30s
                                   # default is too tight for cold OffthreadVideo seeks in
                                   # long Step-6 concat videos.
+STT_ENGINE=scribe                 # speech-to-text for BOTH captions and video QC
+                                  # (2026-08-03): "scribe" = ElevenLabs Scribe,
+                                  # "whisper" pins the old whisper-1 path. Scribe
+                                  # is the default for its REAL per-word timings
+                                  # (see "Whisper word timestamps quirk" below);
+                                  # whisper-1 remains the automatic fallback on
+                                  # any Scribe failure, so a bad key or an
+                                  # ElevenLabs outage never blocks a render.
+STT_SCRIBE_MODEL=scribe_v2
 SPEAKER_FIX_MODEL=claude-sonnet-4-6
                                   # 👥 speaker-attribution agent (2026-08-02): one
                                   # vision call per (FEMALE character × scene ticked
@@ -426,7 +435,9 @@ src/character_swap/
     ├── grok.py           — xAI Grok REST: video submit/poll/download +
                             image generate. submit() accepts duration_secs kwarg
                             (clamped to [5, 15]).
-    ├── elevenlabs.py     — list_voices + text_to_speech + voice_changer (live)
+    ├── elevenlabs.py     — list_voices + text_to_speech + voice_changer +
+                            transcribe (Scribe STT — the DEFAULT speech-to-text
+                            engine since 2026-08-03; whisper-1 is the fallback)
     ├── google_genai.py   — Nano Banana / Nano Banana Pro via Gemini's REST
                             `generateContent` endpoint (httpx, no SDK dep). The Veo
                             submit stub remains in the file but is UNREGISTERED —
@@ -786,8 +797,12 @@ Status terminal: {done, failed, error, cancelled}; success: {done}.
 Grok image model: `grok-imagine-image` (xAI deprecated `grok-2-image-1212` on 2026-02-24).
 ```
 
-### Whisper word timestamps quirk
+### Whisper word timestamps quirk — why Scribe is now the default
 `whisper-1` with `timestamp_granularities=["word"]` returns word durations that are mostly INTERPOLATED inside each segment — `word[i].end == word[i+1].start` for most adjacent words. Real silences only show up as gaps > ~0.4s. The WPM helpers in `video_edit.py` (`compute_wpm`) account for this by computing `active_secs = span − sum(long_gaps)` instead of summing per-word durations.
+
+**This is what drove the 2026-08-03 engine switch.** Measured over 54 of Hugo's own clips, the share of adjacent word pairs with NO gap at all was 97% (en) / 91% (es) / 91% (de) for whisper-1 against 2% / 6% / 5% for ElevenLabs Scribe — i.e. whisper-1's per-word boundaries are mostly fabricated, and every Remotion caption template animates per word off exactly those numbers. Word accuracy moved the same direction (en 1.000 → 1.000, es 0.925 → 0.962, de 0.498 → 0.605, once digits-vs-words are normalized), and Scribe is cheaper ($0.22/h vs $0.36/h) and faster (~1.5s vs ~2.0s per clip). `STT_ENGINE=whisper` pins the old path; whisper-1 also stays the automatic fallback on any Scribe failure, so this is not a single point of failure.
+
+**Language hint:** pass `language=` whenever the caller knows it (the Step-6 compile and Reengineer assemble read it off the character's 🗣 flag). On the German clips it lifted mean word-similarity 0.571 → 0.602, and 0.41 → 1.00 on one clip Scribe had otherwise read as Dutch. **Never force it in video QC's only pass**, though: the wrong-language check works by seeing the clip transcribe back to the ENGLISH source line, and a hinted pass would go blind on exactly the clips it exists to catch — `video_qc._transcribe` therefore runs an UNHINTED pass for that check plus a hinted one for the score. Gating on either engine's own detected language is not an option: whisper-1 called 4 of 20 German clips English, Scribe called 3 of 20 Dutch or English.
 
 ---
 

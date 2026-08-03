@@ -225,9 +225,12 @@ def apply_fakes(monkeypatch, ledger: FakeLedger | None = None,
     monkeypatch.setattr(video_qc, "inspect_clip", fake_inspect_clip)
 
     # --- Whisper: canned words --------------------------------------------
-    def fake_transcribe_words(video_path, *, job_id=None, script_hint=None):
+    def fake_transcribe_words(video_path, *, job_id=None, script_hint=None,
+                              language=None):
+        # `language` is the 🗣 hint the compile passes for a language-flagged
+        # character (2026-08-03); recorded so a flow test can assert it arrives.
         led.record("transcribes", video=str(video_path), job_id=job_id,
-                   script_hint=script_hint)
+                   script_hint=script_hint, language=language)
         return list(CANNED_WORDS)
 
     monkeypatch.setattr(video_edit, "transcribe_words", fake_transcribe_words)
