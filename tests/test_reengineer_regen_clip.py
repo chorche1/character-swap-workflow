@@ -130,13 +130,56 @@ def test_regen_clip_no_finals_leaves_flag_unset(wired):
 
 
 def test_regen_clip_409_when_run_not_editable(wired):
+    # Phases with no clips at all (the swap/analysis phases) still refuse.
     wired["job"] = _job()
-    wired["states"]["re_t"] = _state("animating", finals=True)
+    wired["states"]["re_t"] = _state("swapping", finals=True)
     with pytest.raises(HTTPException) as ei:
         asyncio.run(api.reengineer_regen_clip(
             "re_t", BackgroundTasks(),
             api.ReClipRegenBody(char_id="c0", video_id="c0-vid1")))
     assert ei.value.status_code == 409
+
+
+# --- Retaking a clip MID-RENDER (Hugo 2026-08-04) --------------------------
+# A run with 7 content-policy rejects among 18 still-rendering clips used to
+# refuse every ✎↻ with "cannot edit while run status is 'animating'" for the
+# whole ~40 min the rest took. A per-clip retake touches only that clip's row,
+# so the run's other clips are none of its business — only the TARGET clip has
+# to be idle.
+
+@pytest.mark.parametrize("status", ["animating", "reanimating"])
+def test_regen_clip_allowed_while_run_still_rendering(wired, status):
+    wired["job"] = _job()
+    wired["states"]["re_t"] = _state(status, finals=True)
+    bg = BackgroundTasks()
+    asyncio.run(api.reengineer_regen_clip(
+        "re_t", bg,
+        api.ReClipRegenBody(char_id="c0", video_id="c0-vid1",
+                            prompt="neutralare ordval")))
+    assert bg.tasks[0].args[1:] == ("j1", "c0", "c0-vid1", "neutralare ordval")
+
+
+@pytest.mark.parametrize("busy", [VideoStatus.PENDING, VideoStatus.PROCESSING])
+def test_regen_clip_409_while_that_clip_renders(wired, busy, monkeypatch):
+    # The one clip that must NOT be retaken is the one currently queued/rendering:
+    # re-submitting it double-bills and leaves the in-flight task writing to a
+    # detached row. Refused loudly BEFORE any override is persisted.
+    monkeypatch.setattr(type(api.settings), "has_provider", lambda self, p: True)
+    job = _job()
+    job.characters["c0"].videos[0].status = busy
+    wired["job"] = job
+    wired["states"]["re_t"] = _state("animating", finals=True)
+    bg = BackgroundTasks()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(api.reengineer_regen_clip(
+            "re_t", bg,
+            api.ReClipRegenBody(char_id="c0", video_id="c0-vid1",
+                                video_model="seedance-2.0", duration_secs=8)))
+    assert ei.value.status_code == 409
+    assert not bg.tasks
+    # The rejected retake left the job untouched (no per-clip override written).
+    assert not job.video_models_by_variant
+    assert not job.durations_by_variant
 
 
 # --- Stale video_id recovery (2026-07-16, master 8d1ca56) -----------------
