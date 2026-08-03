@@ -4363,13 +4363,19 @@ async def editor_auto_edit(
                        edit_id, type(persist_err).__name__, persist_err)
 
     telegram_info: dict
-    try:
-        telegram_info = await editor_telegram_send(
-            edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
-    except HTTPException as exc:
-        telegram_info = {"ok": False, "error": str(exc.detail)}
-        logger.warning("%s: automatic Telegram delivery failed: %s",
-                       edit_id, exc.detail)
+    if not _editor_telegram_configured():
+        # Not set up on this machine — nothing was ever meant to go out.
+        # See _editor_telegram_configured().
+        telegram_info = {"skipped": True,
+                         "reason": "Telegram är inte konfigurerat här."}
+    else:
+        try:
+            telegram_info = await editor_telegram_send(
+                edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
+        except HTTPException as exc:
+            telegram_info = {"ok": False, "error": str(exc.detail)}
+            logger.warning("%s: automatic Telegram delivery failed: %s",
+                           edit_id, exc.detail)
 
     push.notify("Editor: auto-edit klar",
                 f"{cap_info['n_words']} ord · {template}" if cap_info
@@ -4748,13 +4754,19 @@ async def editor_multi_auto_edit(
                        edit_id, type(persist_err).__name__, persist_err)
 
     telegram_info: dict
-    try:
-        telegram_info = await editor_telegram_send(
-            edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
-    except HTTPException as exc:
-        telegram_info = {"ok": False, "error": str(exc.detail)}
-        logger.warning("%s: automatic Telegram delivery failed: %s",
-                       edit_id, exc.detail)
+    if not _editor_telegram_configured():
+        # Not set up on this machine — nothing was ever meant to go out.
+        # See _editor_telegram_configured().
+        telegram_info = {"skipped": True,
+                         "reason": "Telegram är inte konfigurerat här."}
+    else:
+        try:
+            telegram_info = await editor_telegram_send(
+                edit_id, TelegramSendBody(gen_id=edit_id, slot="final"))
+        except HTTPException as exc:
+            telegram_info = {"ok": False, "error": str(exc.detail)}
+            logger.warning("%s: automatic Telegram delivery failed: %s",
+                           edit_id, exc.detail)
 
     push.notify("Editor: multi-clip klar",
                 f"{len(ordered_paths)} klipp · {template}",
@@ -8114,6 +8126,22 @@ def _require_character_telegram() -> None:
     if not settings.telegram_character_bot_token:
         raise HTTPException(
             409, "TELEGRAM_CHARACTER_BOT_TOKEN saknas i .env.")
+
+
+def _editor_telegram_configured() -> bool:
+    """True when this machine has an Editor Telegram destination at all.
+
+    Distinguishes "never set up here" from "set up and the send failed".
+    The automatic delivery after a render must stay LOUD about the second
+    (a final that was supposed to go out and didn't) while staying quiet
+    about the first — an install with no token was never going to send
+    anything, and reporting that as a failed delivery puts a red error on
+    every successful render (2026-08-04, found packaging the Editor for
+    another Mac). Manual ➤ clicks still answer with the 409 below, because
+    there the user explicitly asked for a send.
+    """
+    return bool(settings.telegram_editor_bot_token
+                and settings.telegram_editor_chat_id)
 
 
 def _require_editor_telegram() -> None:

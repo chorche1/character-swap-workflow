@@ -45,6 +45,21 @@ CHARLIB_BTN_OLD = """        <button @click="toggleCharLib()"
 CHARLIB_BTN_NEW = """        <button x-show="false" @click="toggleCharLib()"
                 title="Toggle character library\""""
 
+# Varningsbannern och statusprickarna talar om bild- och videogenerering,
+# som inte finns i den här kopian. En röd "API key(s) missing"-banner högst
+# upp får appen att se trasig ut fast allt fungerar.
+BANNER_OLD = """    <div x-show="!health.openai_key || !health.xai_key\""""
+BANNER_NEW = """    <div x-show="!health.openai_key\""""
+
+XAI_DOT_OLD = """        <span class="flex items-center gap-1">
+          <span :class="health.xai_key ? 'bg-emerald-500' : 'bg-red-500'" class="w-2 h-2 rounded-full"></span>
+          xAI
+        </span>"""
+XAI_DOT_NEW = ""
+
+SUBTITLE_OLD = "          Drop a scene. Pick characters. Generate, approve, edit, animate."
+SUBTITLE_NEW = "          Släpp in en video. Klipp, jämna ut tempot, byt röst, bränn in text."
+
 VALID_TABS_OLD = """      const _validTabs = ['swap', 'animate', 'reengineer', 'editor'];
       const _storedTab = localStorage.getItem('active_tab');
       this.activeTab = _validTabs.includes(_storedTab) ? _storedTab : 'swap';"""
@@ -63,6 +78,9 @@ EDITS: list[tuple[str, str, str]] = [
     ("web/index.html", TAB_BAR_OLD, TAB_BAR_NEW),
     ("web/index.html", SIDEBAR_OLD, SIDEBAR_NEW),
     ("web/index.html", CHARLIB_BTN_OLD, CHARLIB_BTN_NEW),
+    ("web/index.html", BANNER_OLD, BANNER_NEW),
+    ("web/index.html", XAI_DOT_OLD, XAI_DOT_NEW),
+    ("web/index.html", SUBTITLE_OLD, SUBTITLE_NEW),
     ("web/app.js", VALID_TABS_OLD, VALID_TABS_NEW),
 ]
 

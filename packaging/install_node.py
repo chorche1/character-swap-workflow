@@ -36,7 +36,10 @@ def _arch() -> str:
 def _latest_lts(arch: str) -> str:
     with urllib.request.urlopen(INDEX_URL, timeout=TIMEOUT) as r:
         releases = json.load(r)
-    want = f"osx-{arch}-tar-gz"
+    # Nyckeln i index.json är "osx-arm64-tar" / "osx-x64-tar" och täcker
+    # både .tar.gz och .tar.xz. Någon "-tar-gz"-nyckel finns INTE — att
+    # gissa på den gav "hittade ingen LTS-version" på varje maskin.
+    want = f"osx-{arch}-tar"
     for rel in releases:            # nyast först
         # "lts" är false för icke-LTS, annars kodnamnet ("Jod", "Iron", …)
         if rel.get("lts") and want in rel.get("files", []):

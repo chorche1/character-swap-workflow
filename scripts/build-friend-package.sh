@@ -42,10 +42,16 @@ git ls-files -z | rsync -a --files-from=- --from0 ./ "$BUILD/"
 
 echo "▸ Plockar bort utvecklings- och privatfiler …"
 rm -rf "$BUILD/tests" "$BUILD/scripts" "$BUILD/.claude" "$BUILD/packaging"
-rm -f  "$BUILD/CLAUDE.md" "$BUILD/AGENTS.md" "$BUILD/README.md" \
+rm -f  "$BUILD/CLAUDE.md" "$BUILD/AGENTS.md" \
        "$BUILD/WORKFLOWS_GUIDE.md" "$BUILD/ux-improvements.md" \
        "$BUILD/.gitignore"
 rm -f  "$BUILD"/RELIABILITY_AUDIT_*.md
+# README.md kan INTE bara raderas: pyproject.toml pekar ut den som
+# `readme`, och hatchling vägrar bygga paketet utan den ("Readme file does
+# not exist") — vilket får hela installationen hos mottagaren att fallera.
+# Den ersätts med en pekare till den riktiga guiden.
+printf '# Character Swap Editor\n\nSe "LÄS MIG.md" för installation och användning.\n' \
+  > "$BUILD/README.md"
 
 echo "▸ Reducerar till Editor-fliken …"
 "$UV" run python packaging/editor_only.py "$BUILD"
