@@ -6239,6 +6239,36 @@ def _editable_reengineer_state(re_id: str, *, statuses: set[str] | None = None) 
     return state
 
 
+# Statuses a PER-CLIP operation (retake ONE clip / import ONE clip) may run in.
+# Deliberately WIDER than the scene- and run-level edit gates: retaking or
+# importing a single clip touches only that clip's own row, so it must not have
+# to wait for the run's OTHER clips to finish rendering (Hugo 2026-08-04 — a
+# 90-clip run with 7 content-policy rejects among 18 still-rendering clips left
+# ✎↻ refusing with "cannot edit while run status is 'animating'" for the ~40 min
+# the rest took; the only working recovery was the blunt "↻ Ta om misslyckade",
+# which cannot reword the prompt the model refused).
+#
+# The clip ITSELF stays protected at the finer grain: a PENDING/PROCESSING clip
+# is refused loudly (`_refuse_busy_clip` here, `ClipBusyError` inside
+# attach_imported_clip), so an in-flight generation can never be double-submitted
+# nor silently clobbered by an import. The run's own `_watch_video_phase` waits
+# for EVERY clip to go terminal, so a clip retaken mid-phase is simply waited for
+# and the auto-build still fires once — no extra wiring needed.
+_PER_CLIP_RUN_STATES = {"awaiting_assembly", "animating", "reanimating",
+                        "done", "partial_success", "failed"}
+
+
+def _refuse_busy_clip(video) -> None:
+    """409 when the clip is queued or mid-render. Same rule (and wording) as
+    `runner.attach_imported_clip`'s ClipBusyError: re-submitting a PENDING clip
+    double-bills it and leaves the original task writing to a detached row, and
+    a PROCESSING one would leak a running provider job."""
+    if video.status in {VideoStatus.PENDING, VideoStatus.PROCESSING}:
+        raise HTTPException(
+            409, "Klippet renderas fortfarande — vänta tills det är klart "
+                 "innan du gör om det.")
+
+
 def _reengineer_entry(state: dict, idx: int) -> dict:
     entries = state.get("scenes") or []
     if idx < 0 or idx >= len(entries):
@@ -6898,10 +6928,14 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
     source variant), and the final is marked stale so the user re-assembles
     with "▶ Bygg ihop igen" (the live poll keeps refreshing because the new
     clip is pending/processing). Unlike /scenes/{idx}/redo this carries a
-    per-clip prompt and never touches the scene-level motion prompt."""
+    per-clip prompt and never touches the scene-level motion prompt.
+
+    Runs MID-RENDER too (Hugo 2026-08-04): the gate is `_PER_CLIP_RUN_STATES`,
+    so a clip the video model refused can be reworded and retaken while the
+    run's other clips are still animating. Only the TARGET clip has to be idle
+    (`_refuse_busy_clip`)."""
     from character_swap import runner
-    state = _editable_reengineer_state(
-        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
+    state = _editable_reengineer_state(re_id, statuses=_PER_CLIP_RUN_STATES)
     job_id = state.get("job_id")
     job = store().get_job(job_id or "")
     if job is None:
@@ -6933,6 +6967,12 @@ async def reengineer_regen_clip(re_id: str, background_tasks: BackgroundTasks,
     # per-clip override keys the RIGHT source variant — never body.video_id,
     # which may be the stale id we just re-resolved above.
     target = next(v for v in jc.videos if v.video_id == video_id)
+    # Refuse a clip that is queued or mid-render — checked BEFORE any override
+    # is persisted, so a rejected retake never mutates the job (mirror of the
+    # Swap `retry_video` ordering). Reachable now that the run may still be
+    # animating around this clip; `retry_one_video` would otherwise return
+    # silently on PROCESSING and the user would see nothing happen.
+    _refuse_busy_clip(target)
     prompt_override = (body.prompt or "").strip() or None
     # Per-clip model + length override from the regen modal — validated (422 on
     # a locked model) and persisted onto the job before the clip re-submits.
@@ -6960,12 +7000,17 @@ async def reengineer_import_clip(re_id: str, idx: int,
     """Replace ONE character's clip for the scene at `idx` with a user-imported
     video (Hugo 2026-06-21). The scene's approved variant is resolved server-
     side; the imported clip rides into "▶ Bygg ihop igen" like a generated one
-    (trimmed in the assemble pass). Re-animation never clobbers it."""
+    (trimmed in the assemble pass). Re-animation never clobbers it.
+
+    Runs MID-RENDER too (Hugo 2026-08-04): the gate is `_PER_CLIP_RUN_STATES`
+    and the old run-level `_ANIMATING` refusal is gone — it was the wrong
+    grain. What actually has to be protected is the TARGET slot, and
+    `attach_imported_clip` already refuses a PENDING/PROCESSING one loudly
+    (ClipBusyError → 409), whether the render was started by the run's own
+    animate phase or by a scene redo. So a run-mate still rendering no longer
+    blocks importing over a clip that is sitting there failed."""
     from character_swap import runner_reengineer
-    state = _editable_reengineer_state(
-        re_id, statuses={"awaiting_assembly", "done", "partial_success", "failed"})
-    if re_id in runner_reengineer._ANIMATING:
-        raise HTTPException(409, "animation already running for this run")
+    state = _editable_reengineer_state(re_id, statuses=_PER_CLIP_RUN_STATES)
     entry = _reengineer_entry(state, idx)
     if entry.get("is_direct"):
         raise HTTPException(409, "Import stöds inte för direkt-scener ännu")
