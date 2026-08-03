@@ -738,7 +738,10 @@
                     </template>
                     <template x-if="!vv.url">
                       <div class="text-neutral-400 text-xs flex flex-col items-center gap-2 p-4 text-center">
-                        <span x-show="['failed','error'].includes(vv.status)" class="text-red-400">✕ <span x-text="vv.error || 'failed'"></span></span>
+                        <!-- Kort rubrik i rutan; hela förklaringen står i
+                             panelen under kortet (Hugo 2026-08-03). -->
+                        <span x-show="['failed','error'].includes(vv.status)" class="text-red-400"
+                              x-text="(clipFail(vv) || {}).headline || '✕ failed'"></span>
                         <span x-show="!['failed','error'].includes(vv.status)" class="animate-pulse">🎬 <span x-text="vv.status || 'submitting…'"></span></span>
                       </div>
                     </template>
@@ -801,6 +804,49 @@
                             class="text-emerald-500 animate-pulse">📥…</span>
                     </div>
                   </div>
+                  <!-- WHY this clip failed — inline under the clip, never a
+                       tooltip (Hugo 2026-08-03). Classified cause + the
+                       provider's own words + the settings it ran at; the exact
+                       prompt and the raw payload fold out in place. -->
+                  <template x-if="clipFail(vv)">
+                    <div x-data="{ showPrompt: false, showRaw: false }"
+                         class="mx-2 mb-2 rounded-lg border border-rose-300 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 p-2 space-y-1">
+                      <div class="text-[11px] font-semibold text-rose-700 dark:text-rose-300 leading-snug"
+                           x-text="clipFail(vv).headline"></div>
+                      <div x-show="clipFail(vv).what"
+                           class="text-[10px] text-rose-900/80 dark:text-rose-200/80 leading-snug"
+                           x-text="clipFail(vv).what"></div>
+                      <div x-show="clipFail(vv).fix"
+                           class="text-[10px] text-rose-700 dark:text-rose-300 leading-snug"
+                           x-text="'→ ' + clipFail(vv).fix"></div>
+                      <div x-show="clipFail(vv).provider_message"
+                           class="text-[10px] font-mono text-neutral-700 dark:text-neutral-300 break-words leading-snug border-l-2 border-rose-300 dark:border-rose-800 pl-2"
+                           x-text="clipFail(vv).provider_message"></div>
+                      <div class="flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-neutral-500 dark:text-neutral-400">
+                        <template x-for="f in (clipFail(vv).facts || [])" :key="vv.video_id + '-f-' + f.label">
+                          <span><span class="opacity-60" x-text="f.label + ':'"></span>
+                            <span class="font-medium break-all" x-text="f.value"></span></span>
+                        </template>
+                      </div>
+                      <div class="flex flex-wrap gap-3 pt-0.5">
+                        <button x-show="clipFail(vv).prompt"
+                                class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline"
+                                @click="showPrompt = !showPrompt"
+                                x-text="(showPrompt ? '▾' : '▸') + ' prompten som skickades'"></button>
+                        <button class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline"
+                                @click="showRaw = !showRaw"
+                                x-text="(showRaw ? '▾' : '▸') + ' rått felmeddelande'"></button>
+                        <a x-show="clipFail(vv).doc_url" :href="clipFail(vv).doc_url" target="_blank"
+                           class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline">↗ leverantörens dok</a>
+                      </div>
+                      <pre x-show="showPrompt" x-cloak
+                           class="text-[9px] whitespace-pre-wrap break-words bg-white dark:bg-neutral-950 border border-rose-200 dark:border-rose-900 rounded p-1.5 max-h-48 overflow-auto"
+                           x-text="clipFail(vv).prompt"></pre>
+                      <pre x-show="showRaw" x-cloak
+                           class="text-[9px] whitespace-pre-wrap break-all bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded p-1.5 max-h-48 overflow-auto text-neutral-600 dark:text-neutral-400"
+                           x-text="clipFail(vv).raw"></pre>
+                    </div>
+                  </template>
                 </div>
               </template>
             </div>
@@ -1921,9 +1967,57 @@
                               <div x-show="['pending','processing'].includes(reClipForVariant(jc, v.variant_id).status)"
                                    class="w-28 h-12 rounded bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center text-[10px] text-amber-500 animate-pulse"
                                    title="Klippet renderas…">🎬 renderar…</div>
-                              <div x-show="['failed','error'].includes(reClipForVariant(jc, v.variant_id).status)"
-                                   class="w-28 text-[9px] text-rose-500 leading-tight"
-                                   :title="reClipForVariant(jc, v.variant_id).error || 'klippet misslyckades'">✕ klippet misslyckades</div>
+                              <!-- WHY the clip failed — inline under the clip,
+                                   never a tooltip (Hugo 2026-08-03). The
+                                   headline + the provider's message always
+                                   show; the settings, the exact prompt and the
+                                   raw payload fold out in place (the panel
+                                   widens past the w-28 column when opened). -->
+                              <template x-if="clipFail(reClipForVariant(jc, v.variant_id))">
+                                <div x-data="{ open: false, showPrompt: false, showRaw: false }"
+                                     class="mt-0.5 rounded border border-rose-300 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 p-1 space-y-0.5"
+                                     :class="open ? 'w-72' : 'w-28'">
+                                  <div class="text-[9px] font-semibold text-rose-600 dark:text-rose-300 leading-tight"
+                                       x-text="clipFail(reClipForVariant(jc, v.variant_id)).headline"></div>
+                                  <div x-show="clipFail(reClipForVariant(jc, v.variant_id)).provider_message"
+                                       class="text-[8px] font-mono text-neutral-700 dark:text-neutral-300 leading-tight break-words"
+                                       :class="open ? '' : 'max-h-9 overflow-hidden'"
+                                       x-text="clipFail(reClipForVariant(jc, v.variant_id)).provider_message"></div>
+                                  <button class="text-[9px] text-indigo-500 hover:underline leading-tight"
+                                          @click="open = !open"
+                                          x-text="(open ? '▾ mindre' : '▸ varför / detaljer')"></button>
+                                  <div x-show="open" x-cloak class="space-y-1">
+                                    <div x-show="clipFail(reClipForVariant(jc, v.variant_id)).what"
+                                         class="text-[9px] text-rose-900/80 dark:text-rose-200/80 leading-snug"
+                                         x-text="clipFail(reClipForVariant(jc, v.variant_id)).what"></div>
+                                    <div x-show="clipFail(reClipForVariant(jc, v.variant_id)).fix"
+                                         class="text-[9px] text-rose-700 dark:text-rose-300 leading-snug"
+                                         x-text="'→ ' + clipFail(reClipForVariant(jc, v.variant_id)).fix"></div>
+                                    <div class="flex flex-wrap gap-x-2 gap-y-0.5 text-[8px] text-neutral-500 dark:text-neutral-400">
+                                      <template x-for="f in (clipFail(reClipForVariant(jc, v.variant_id)).facts || [])"
+                                                :key="v.variant_id + '-cf-' + f.label">
+                                        <span><span class="opacity-60" x-text="f.label + ':'"></span>
+                                          <span class="font-medium break-all" x-text="f.value"></span></span>
+                                      </template>
+                                    </div>
+                                    <div class="flex flex-wrap gap-2">
+                                      <button x-show="clipFail(reClipForVariant(jc, v.variant_id)).prompt"
+                                              class="text-[9px] text-indigo-500 hover:underline"
+                                              @click="showPrompt = !showPrompt"
+                                              x-text="(showPrompt ? '▾' : '▸') + ' prompten som skickades'"></button>
+                                      <button class="text-[9px] text-indigo-500 hover:underline"
+                                              @click="showRaw = !showRaw"
+                                              x-text="(showRaw ? '▾' : '▸') + ' rått fel'"></button>
+                                    </div>
+                                    <pre x-show="showPrompt" x-cloak
+                                         class="text-[8px] whitespace-pre-wrap break-words bg-white dark:bg-neutral-950 border border-rose-200 dark:border-rose-900 rounded p-1 max-h-40 overflow-auto"
+                                         x-text="clipFail(reClipForVariant(jc, v.variant_id)).prompt"></pre>
+                                    <pre x-show="showRaw" x-cloak
+                                         class="text-[8px] whitespace-pre-wrap break-all bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 rounded p-1 max-h-40 overflow-auto text-neutral-600 dark:text-neutral-400"
+                                         x-text="clipFail(reClipForVariant(jc, v.variant_id)).raw"></pre>
+                                  </div>
+                                </div>
+                              </template>
                               <div class="flex items-center gap-2 mt-0.5 flex-wrap">
                                 <a x-show="reClipForVariant(jc, v.variant_id).status === 'done' && reClipForVariant(jc, v.variant_id).url"
                                    :href="reClipForVariant(jc, v.variant_id).url"
@@ -2159,9 +2253,12 @@
                         </template>
                         <span x-show="['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
                               class="text-amber-500" title="Renderas…">⏳</span>
+                        <!-- Compact strip: the classified cause in words, not
+                             a bare ✕ behind a tooltip (Hugo 2026-08-03). The
+                             full panel sits under the clip in the strip above. -->
                         <span x-show="['failed','error'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
-                              class="text-rose-500 cursor-help"
-                              :title="reengineerClipFor(r, sc, cid)?.video?.error || 'failed'">✕</span>
+                              class="text-rose-500"
+                              x-text="'✕ ' + clipFailShort(reengineerClipFor(r, sc, cid)?.video)"></span>
                         <span x-show="!reengineerClipFor(r, sc, cid)?.variant"
                               class="text-neutral-400 cursor-help"
                               title="Ingen godkänd bild för den här scenen — godkänn en först">—</span>
