@@ -5,11 +5,55 @@ import asyncio
 import os
 import shutil
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 from character_swap.clients import telegram
 from character_swap.config import settings
+
+
+# In-flight registry (Hugo 2026-08-03): ONE upload at a time per delivery
+# target — (run_id, target_id, variant). An upload takes minutes (34 MB finals,
+# 600 s timeout × 3 attempts), so the automatic post-build delivery and a
+# manual ➤ Telegram click can easily overlap and post the SAME video twice in
+# the channel. Everything blocked here is per TARGET: sending another
+# character (or another run) while one upload runs is fine and must stay
+# possible — the old blunt "whole run is busy" guard was exactly the bug.
+# In-process only, mutated from the event loop thread; a restart clears it,
+# which is correct (no upload survives the process).
+_SENDING: set[tuple[str, str, str]] = set()
+
+
+class AlreadySending(RuntimeError):
+    """Raised when this exact video is already being uploaded right now."""
+
+
+def send_key(run_id: str, target_id: str, variant: str) -> tuple[str, str, str]:
+    return (str(run_id), str(target_id), str(variant or "final"))
+
+
+def is_sending(run_id: str, target_id: str, variant: str) -> bool:
+    return send_key(run_id, target_id, variant) in _SENDING
+
+
+@contextmanager
+def sending(run_id: str, target_id: str, variant: str):
+    """Claim a delivery target for the duration of one upload.
+
+    Raises AlreadySending if another sender holds it — callers turn that into
+    an honest message ("skickas redan just nu") instead of a build-status lie.
+    """
+    key = send_key(run_id, target_id, variant)
+    if key in _SENDING:
+        raise AlreadySending(
+            "Den här videon skickas redan till Telegram just nu — "
+            "vänta tills den är klar.")
+    _SENDING.add(key)
+    try:
+        yield
+    finally:
+        _SENDING.discard(key)
 
 
 def safe_name(name: str) -> str:

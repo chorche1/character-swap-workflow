@@ -188,9 +188,16 @@ async def _send_job_finals(job_id: str) -> None:
     sent: dict[str, dict] = {}
     for cid, path, char_name, chat_id in targets:
         try:
-            sent[cid] = await telegram_delivery.send_character_final(
-                path, chat_id=chat_id, char_name=char_name, base=base,
-                variant="final", run_id=job_id)
+            with telegram_delivery.sending(job_id, cid, "final"):
+                sent[cid] = await telegram_delivery.send_character_final(
+                    path, chat_id=chat_id, char_name=char_name, base=base,
+                    variant="final", run_id=job_id)
+        except telegram_delivery.AlreadySending:
+            # A manual ➤ click is uploading this exact video right now —
+            # skip it rather than post it twice. Not a failure: the manual
+            # send writes its own receipt.
+            logger.info("auto-finalize %s: %s already being sent manually "
+                        "— skipping", job_id, cid)
         except Exception as e:  # noqa: BLE001 — record + keep going
             failed[cid] = f"{type(e).__name__}: {e}"
             logger.warning("auto-finalize %s: Telegram send failed for %s: %s",
@@ -259,9 +266,16 @@ async def _send_reengineer_bucket(
                 "Ange den i karaktärsbiblioteket.")
             continue
         try:
-            sent[cid] = await telegram_delivery.send_character_final(
-                Path(entry["final_path"]), chat_id=chat_id,
-                char_name=char_name, base=base, variant=variant, run_id=re_id)
+            with telegram_delivery.sending(re_id, cid, variant):
+                sent[cid] = await telegram_delivery.send_character_final(
+                    Path(entry["final_path"]), chat_id=chat_id,
+                    char_name=char_name, base=base, variant=variant,
+                    run_id=re_id)
+        except telegram_delivery.AlreadySending:
+            # Manual ➤ click owns this upload right now — skip, don't
+            # duplicate. It writes its own receipt.
+            logger.info("auto-finalize %s: %s (%s) already being sent "
+                        "manually — skipping", re_id, cid, variant)
         except Exception as e:  # noqa: BLE001 — record + keep going
             failed[cid] = f"{type(e).__name__}: {e}"
             logger.warning("auto-finalize %s: reengineer Telegram send failed for "

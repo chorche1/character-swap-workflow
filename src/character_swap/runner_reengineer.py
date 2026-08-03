@@ -2073,8 +2073,10 @@ async def repurpose(re_id: str) -> None:
         _log.info("reengineer %s: repurpose already in flight — skipping", re_id)
         return
     _REPURPOSING.add(re_id)
+    built = False
     try:
         await _do_repurpose(re_id, state)
+        built = True
     except Exception as e:
         _log.exception("reengineer %s repurpose failed", re_id)
         # FAIL LOUDLY (2026-07-01): per-char cards only exist for failures
@@ -2090,6 +2092,22 @@ async def repurpose(re_id: str) -> None:
                       " — kör 🔁 Repurpose igen")
     finally:
         _REPURPOSING.discard(re_id)
+
+    if not built:
+        return
+    # Auto-send the repurpose copies to Telegram — runs AFTER the _REPURPOSING
+    # guard is cleared, exactly like assemble() (Hugo 2026-08-03). It used to
+    # sit INSIDE _do_repurpose, so the guard was held for the whole delivery:
+    # 7 finals × ~34 MB, sequential, 600 s timeout × 3 attempts — and every
+    # manual ➤ Telegram click during that window was refused with "Bygget
+    # pågår — vänta tills finalen är klar", which was simply false (the build
+    # was done; the SEND was running). Overlap with a manual click is handled
+    # per character by telegram_delivery's in-flight registry instead.
+    try:
+        from character_swap import auto_finalize
+        await auto_finalize.send_reengineer_repurposed(re_id)
+    except Exception:
+        _log.exception("reengineer %s repurpose Telegram send failed", re_id)
 
 
 async def _do_repurpose(re_id: str, state: dict) -> None:
@@ -2190,11 +2208,8 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
                            if not _char_is_uninvolved(state, jc)])
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
-    try:
-        from character_swap import auto_finalize
-        await auto_finalize.send_reengineer_repurposed(re_id)
-    except Exception:
-        _log.exception("reengineer %s repurpose Telegram send failed", re_id)
+    # NOTE: the Telegram auto-send lives in repurpose(), after the
+    # _REPURPOSING guard is released — never here.
 
 
 # --------------------------------------------------------------------------- edit mode

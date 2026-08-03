@@ -8115,9 +8115,16 @@ async def _telegram_character_file(source: Path, *, char_id: str,
     _require_character_telegram()
     name, chat_id = _character_telegram_target(char_id, char_name)
     try:
-        return await telegram_delivery.send_character_final(
-            source, chat_id=chat_id, char_name=name, base=base,
-            variant=variant, run_id=run_id)
+        # One upload at a time per (run, character, variant): the automatic
+        # post-build delivery runs for minutes, and without this a manual
+        # click mid-upload posts the same video twice in the channel. Only
+        # THIS target is blocked — other characters stay sendable.
+        with telegram_delivery.sending(run_id, char_id, variant):
+            return await telegram_delivery.send_character_final(
+                source, chat_id=chat_id, char_name=name, base=base,
+                variant=variant, run_id=run_id)
+    except telegram_delivery.AlreadySending as exc:
+        raise HTTPException(409, str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — preserve Telegram's real reason
@@ -8317,8 +8324,11 @@ async def editor_telegram_send(edit_id: str,
     gen = store().get_generation(body.gen_id) if body.gen_id else None
     base = (gen.prompt[:80] if gen and gen.prompt else "Editor")
     try:
-        receipt = await telegram_delivery.send_editor_final(
-            final, base=base, variant=body.slot, edit_id=edit_id)
+        with telegram_delivery.sending(edit_id, "editor", body.slot):
+            receipt = await telegram_delivery.send_editor_final(
+                final, base=base, variant=body.slot, edit_id=edit_id)
+    except telegram_delivery.AlreadySending as exc:
+        raise HTTPException(409, str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
