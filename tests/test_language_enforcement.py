@@ -235,7 +235,7 @@ def _stub_runner(monkeypatch, tmp_path, *, verdicts, lang_retries=2):
     monkeypatch.setattr(runner, "_character_gender", lambda cid: None)
     monkeypatch.setattr(runner, "_character_language", lambda cid: "de")
     monkeypatch.setattr(reengineer, "localize_motion_prompt",
-                        lambda p, code, job_id=None: p + " [DE]")
+                        lambda p, code, job_id=None, force=False: p + " [DE]")
 
     async def _noop(*a, **k):
         return None

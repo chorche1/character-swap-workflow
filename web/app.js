@@ -5453,6 +5453,20 @@ function studio() {
       return (this.CHAR_LANGUAGES[code] || {}).flag || '';
     },
 
+    // The library character's 🗣 language code ('es' | 'de'), or '' for
+    // English/unflagged. Read from the LIVE library (same source the animate
+    // path reads), so a language set after the job was created is reflected.
+    charSpokenLanguage(charId) {
+      const ch = (this.library || []).find(c => c.char_id === charId);
+      const code = ch && ch.language;
+      return this.CHAR_LANGUAGES[code] ? code : '';
+    },
+
+    // Short label for the regen modal's language note: "🇩🇪 tyska".
+    charLanguageShort(code) {
+      return ({ es: '🇪🇸 spanska', de: '🇩🇪 tyska' })[code] || '';
+    },
+
     charLanguageTitle(code) {
       return (this.CHAR_LANGUAGES[code] || {}).label || '';
     },
@@ -6125,6 +6139,10 @@ function studio() {
     regenModal: {
       open: false, charId: null, videoId: null, charName: '',
       sceneId: null, prompt: '', hadOverride: false, submitting: false,
+      // Character's 🗣 language ('' = English) + whether the box was prefilled
+      // with the localized text, so the modal can say which language the clip
+      // is submitted in (Hugo 2026-08-03).
+      charLang: '', localizedPrefill: false,
       // Per-clip model + length override (Hugo 2026-07-16). videoModel/
       // durationSecs empty ('' / 0) = keep the scene/job default (no per-clip
       // override written); a concrete pick = override JUST this clip. curModel/
@@ -6398,9 +6416,11 @@ function studio() {
     },
 
     openRegenModal(charId, vv) {
-      // Pre-fill the prompt with the previous override if any (so iterating
-      // on the same video keeps building on what the user last tried),
-      // otherwise the effective per-scene prompt the API resolved for us.
+      // Pre-fill the prompt with what the clip was ACTUALLY submitted with:
+      // the localized (🇪🇸/🇩🇪) text when the character is language-flagged,
+      // else the previous override (so iterating on the same video keeps
+      // building on what the user last tried), else the effective per-scene
+      // prompt the API resolved for us.
       const job = this.job;
       const sceneId = this._sceneIdForVideo(charId, vv);
       const svid = vv.source_variant_id;
@@ -6410,19 +6430,37 @@ function studio() {
         || job?.video_model || 'grok-imagine';
       const curSecs = (sceneId && job?.durations_by_scene?.[sceneId])
         || job?.duration_secs || this.videoModelDurationSpec(curModel).default;
+      const charLang = this.charSpokenLanguage(charId);
       this.regenModal = {
         open: true,
         charId,
         videoId: vv.video_id,
         charName: job?.characters?.[charId]?.name || charId,
         sceneId,
-        prompt: vv.movement_prompt_override || vv.effective_movement_prompt || '',
+        prompt: this.regenPromptPrefill(vv, charLang),
         hadOverride: !!vv.movement_prompt_override,
+        charLang,
+        localizedPrefill: !!(charLang && vv.localized_movement_prompt),
         submitting: false,
         videoModel: (svid && job?.video_models_by_variant?.[svid]) || '',
         durationSecs: (svid && job?.durations_by_variant?.[svid]) || 0,
         curModel, curSecs,
       };
+    },
+
+    // What the "Regenerate this clip" box is prefilled with. For a 🗣-flagged
+    // character that is the LOCALIZED prompt — the text actually submitted
+    // (Hugo 2026-08-03): the English source in the box read like the retry
+    // would come back speaking English. Editing it is safe either way — a new
+    // English line typed into a German prompt is re-translated at submit
+    // (runner._animate_one_video passes force=True for a typed prompt).
+    // `lang` is the character's CURRENT 🗣 flag: a character switched back to
+    // English must not be prefilled with the German text of its last take.
+    regenPromptPrefill(vv, lang) {
+      return (lang && vv.localized_movement_prompt)
+        || vv.movement_prompt_override
+        || vv.effective_movement_prompt
+        || '';
     },
 
     // Reengineer: open the SAME regen modal for a per-scene clip, but carry the
@@ -6439,14 +6477,17 @@ function studio() {
         || job?.video_model || 'kling-v3';
       const curSecs = (sc ? this.reSceneDuration(reRun, sc) : 0)
         || job?.duration_secs || this.videoModelDurationSpec(curModel).default;
+      const charLang = this.charSpokenLanguage(charId);
       this.regenModal = {
         open: true,
         charId,
         videoId: vv.video_id,
         charName: jc?.name || charId,
         sceneId: sceneId || null,
-        prompt: vv.movement_prompt_override || vv.effective_movement_prompt || '',
+        prompt: this.regenPromptPrefill(vv, charLang),
         hadOverride: !!vv.movement_prompt_override,
+        charLang,
+        localizedPrefill: !!(charLang && vv.localized_movement_prompt),
         submitting: false,
         reRun,
         videoModel: (svid && job?.video_models_by_variant?.[svid]) || '',

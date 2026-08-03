@@ -633,7 +633,9 @@ SPOKEN_LANGUAGES: dict[str, SpokenLanguage] = {
             "in widely-distributed social content — no country-specific slang, "
             "no Spain 'vosotros'/'th' seseo). Convey meaning and tone, not a "
             "word-for-word translation. Spell numbers and units as Spanish "
-            "words. Return STRICT JSON: the SAME keys you were given, each "
+            "words. If a line is ALREADY in Spanish, return it EXACTLY as "
+            "given — unchanged, word for word — never a reworded version. "
+            "Return STRICT JSON: the SAME keys you were given, each "
             "mapped to its Spanish translation. No extra keys, no commentary."),
     ),
     "de": SpokenLanguage(
@@ -657,7 +659,9 @@ SPOKEN_LANGUAGES: dict[str, SpokenLanguage] = {
             "dialect (no Bavarian, Swiss or Austrian markers), no heavy slang. "
             "Address the viewer with the informal 'du'. Convey meaning and "
             "tone, not a word-for-word translation. Spell numbers and units as "
-            "German words. Return STRICT JSON: the SAME keys you were given, "
+            "German words. If a line is ALREADY in German, return it EXACTLY "
+            "as given — unchanged, word for word — never a reworded version. "
+            "Return STRICT JSON: the SAME keys you were given, "
             "each mapped to its German translation. No extra keys, no "
             "commentary."),
     ),
@@ -903,7 +907,8 @@ def _strip_quotes(text: str) -> str:
 
 
 def localize_motion_prompt(prompt: str, language: str | None, *,
-                           job_id: str | None = None) -> str:
+                           job_id: str | None = None,
+                           force: bool = False) -> str:
     """Localize ONE clip's motion prompt for a per-CHARACTER spoken language
     (Hugo 2026-06-26; "es" = neutral Latin American Spanish, "de" = standard
     German since 2026-08-02 — see SPOKEN_LANGUAGES).
@@ -920,6 +925,16 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     language (it already carries that accent marker), it is returned unchanged
     so user-approved text is never re-translated.
 
+    `force=True` overrides ONLY that marker short-circuit — for a prompt the
+    USER just typed (the per-clip "Regenerate this clip" modal, which prefills
+    the localized text since 2026-08-03). The marker then proves nothing about
+    the DIALOGUE: Hugo can type a fresh ENGLISH line inside a prompt that still
+    says "in standard German", and the short-circuit would ship that line
+    verbatim — the clip speaks English, silently. Forcing costs one cheap
+    translate call whose no-op case is explicit in every `translate_system`
+    ("a line already in the language is returned unchanged"), so re-localizing
+    an already-translated prompt does not reword it.
+
     Fail LOUD: if the clip HAS dialogue but translation fails, raises
     LocalizationError so the runner fails the clip (Hugo 2026-06-27) instead of
     silently shipping English for a flagged character. A clip with no dialogue,
@@ -930,8 +945,9 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     if spec is None or not (prompt or "").strip():
         return prompt
     # Already in the target language (run-level picker localized it upstream,
-    # or this exact prompt came back through a redo).
-    if spec.marker in prompt.lower():
+    # or this exact prompt came back through a redo) — unless the caller says
+    # the text is user-typed and the marker can no longer be trusted (`force`).
+    if spec.marker in prompt.lower() and not force:
         return prompt
     cached = _LOCALIZE_CACHE.get((lang, prompt))
     if cached is not None:

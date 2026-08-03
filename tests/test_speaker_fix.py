@@ -305,7 +305,7 @@ def test_speaker_fix_runs_before_localization(monkeypatch, tmp_path):
     monkeypatch.setattr(runner.speaker_fix, "fix_speaker_attribution",
                         lambda prompt, image, **kw: FIXED)
 
-    def fake_localize(prompt, code, job_id=None):
+    def fake_localize(prompt, code, job_id=None, force=False):
         seen.append(prompt)
         return prompt + " [ES]"
     monkeypatch.setattr(reengineer, "localize_motion_prompt", fake_localize)

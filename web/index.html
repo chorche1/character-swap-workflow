@@ -4982,6 +4982,17 @@
             Same prompt = new random take. Edit to nudge the result (e.g. "less arm
             movement", "smile less", "look slightly off-camera").
           </p>
+          <!-- 🗣 Språkflaggad karaktär (Hugo 2026-08-03): rutan visar den prompt
+               som FAKTISKT skickas — den översatta — och en replik du skriver på
+               engelska översätts automatiskt vid submit. -->
+          <p x-show="regenModal.charLang"
+             class="text-[10px] text-sky-600 dark:text-sky-400 mt-1">
+            🗣 <span x-text="regenModal.charName"></span> talar
+            <span x-text="charLanguageShort(regenModal.charLang)"></span> —
+            <span x-show="regenModal.localizedPrefill">rutan visar prompten som faktiskt skickades.</span>
+            <span x-show="!regenModal.localizedPrefill">klippet skickas på det språket.</span>
+            Skriver du en ny replik på engelska översätts den automatiskt.
+          </p>
         </label>
 
         <!-- Per-clip video-model + length override (Hugo 2026-07-16). Applies

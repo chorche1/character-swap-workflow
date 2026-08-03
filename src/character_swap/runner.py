@@ -1378,7 +1378,16 @@ async def _animate_one_video(
         try:
             localized = await asyncio.to_thread(
                 reengineer.localize_motion_prompt, movement_prompt,
-                lang_spec.code, job_id=job.job_id)
+                lang_spec.code, job_id=job.job_id,
+                # A prompt the USER typed in the per-clip regen modal is always
+                # re-localized (Hugo 2026-08-03). That modal now prefills the
+                # LOCALIZED text, so the "already in this language" marker is
+                # still in the box when Hugo edits the line — and a new English
+                # line written inside it would sail straight through the marker
+                # short-circuit and be spoken in English. Re-translating an
+                # untouched localized line is a no-op (the translator returns an
+                # already-translated line verbatim).
+                force=bool(video.movement_prompt_override))
         except reengineer.LocalizationError as e:
             # Fail LOUD (Hugo 2026-06-27): a language-flagged character must not
             # silently ship an English clip when translation fails — fail the
@@ -1397,7 +1406,16 @@ async def _animate_one_video(
             video.localized_movement_prompt = localized
             # Keep the ENGLISH line: a clip that transcribes back to it spoke
             # the wrong language (Hugo 2026-08-02 — see video_qc.inspect_clip).
-            original_speech = video_qc.expected_speech(movement_prompt)
+            # ONLY when the DIALOGUE actually changed: since the regen modal
+            # prefills the localized prompt, a re-render can localize a prompt
+            # whose line is ALREADY German/Spanish (only the clauses move). Arming
+            # the check with that line would compare German audio against a
+            # German "original" and could fail a perfectly correct clip as "fel
+            # språk" — the exact false-positive class Hugo's 2026-08-02 note
+            # warns about.
+            src_line = video_qc.expected_speech(movement_prompt)
+            if src_line and src_line != video_qc.expected_speech(localized):
+                original_speech = src_line
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"

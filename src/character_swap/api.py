@@ -522,6 +522,14 @@ def _job_to_dict(job: Job) -> dict:
                         # so the Step 5 regen modal can pre-fill correctly
                         # without re-fetching the job.
                         "movement_prompt_override": vv.movement_prompt_override,
+                        # The prompt this clip was ACTUALLY submitted with when
+                        # the character is 🗣 language-flagged (dialogue
+                        # translated + the language directives). The regen modal
+                        # prefills it so Hugo sees and edits the German/Spanish
+                        # text instead of the English source, which read like the
+                        # retry would come back in English (Hugo 2026-08-03).
+                        # None for an English/unflagged character.
+                        "localized_movement_prompt": vv.localized_movement_prompt,
                         "effective_movement_prompt": (
                             vv.movement_prompt_override
                             or (job.movement_prompts or {}).get(
