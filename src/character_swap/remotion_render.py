@@ -78,6 +78,32 @@ def _remotion_dir() -> Path:
     return settings.project_root / "remotion"
 
 
+REMOTION_MISSING_MSG = (
+    "Remotion är inte installerat på den här datorn (Node och/eller "
+    "remotion/node_modules saknas). Kör `character-swap remotion-install`, "
+    "eller välj en textremsmall utan animation."
+)
+
+
+def _ensure_installed(remotion_dir: Path) -> None:
+    """Refuse LOUDLY when the Remotion toolchain isn't installed.
+
+    `remotion/package.json` is COMMITTED but `node_modules/` is not, so the
+    package.json guard alone passed on a fresh checkout and we fell through
+    to `Popen(["npx", ...])`. Without node that raises FileNotFoundError —
+    an OSError, not a RuntimeError — and the caption endpoints in api.py
+    only catch RuntimeError, so the user got an opaque 500 instead of being
+    told to run the installer. The app's own DEFAULT caption template is a
+    Remotion one, which makes this the most likely first failure on a
+    machine that skipped `remotion-install` (2026-08-04).
+
+    Mirrors api._remotion_available(), which gates the template LIST the
+    same way — this is the render-side half of the same rule.
+    """
+    if not (remotion_dir / "node_modules").is_dir() or shutil.which("node") is None:
+        raise RuntimeError(REMOTION_MISSING_MSG)
+
+
 def _kill_render_tree(proc: subprocess.Popen) -> None:
     """SIGKILL the render's entire process group. The render is spawned with
     start_new_session=True so its pgid == its pid and the group holds every
@@ -209,6 +235,7 @@ def render_remotion(
             f"Remotion project missing at {remotion_dir}. "
             f"Run `character-swap remotion-install` first."
         )
+    _ensure_installed(remotion_dir)
 
     probe = _probe_video(input_video)
     input_video = input_video.resolve()
@@ -359,11 +386,17 @@ def _render_locked(
             # timeout we can kill the WHOLE tree — subprocess.run's own
             # timeout only SIGKILLed the direct child (npx), leaving the
             # wedged node/Chrome descendants alive (see _kill_render_tree).
-            proc = subprocess.Popen(
-                cmd, cwd=str(remotion_dir),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                start_new_session=True,
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd, cwd=str(remotion_dir),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    start_new_session=True,
+                )
+            except FileNotFoundError as e:
+                # npx vanished between the preflight guard above and here
+                # (PATH change, half-finished install). Same loud message —
+                # never let an OSError surface as an opaque 500.
+                raise RuntimeError(REMOTION_MISSING_MSG) from e
             timeout_secs = max(60, settings.remotion_render_timeout_secs)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout_secs)

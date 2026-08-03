@@ -352,12 +352,49 @@ def _clip_gain_db(input_i: float, input_tp: float, target_i: float,
     return max(-max_gain, min(max_gain, gain))
 
 
+# ffmpeg's own stream line, used whenever ffprobe is unavailable:
+#   Stream #0:0[0x1](und): Video: h264 (avc1 / 0x31637661), yuv420p(tv,
+#   bt709), 1080x1920 [SAR 1:1 DAR 9:16], 4989 kb/s, 30 fps, 30 tbr, ...
+# The dims pattern requires a comma/space boundary so the hex fourcc
+# ("0x31637661") can never be read as a resolution.
+_VIDEO_STREAM_RE = re.compile(r"^\s*Stream #\S+.*: Video: .*$", re.M)
+_STREAM_DIMS_RE = re.compile(r"[,\s](\d{2,5})x(\d{2,5})(?=[\s,\[])")
+_STREAM_FPS_RE = re.compile(r"(\d+(?:\.\d+)?)\s+fps\b")
+
+
+def _ffmpeg_header(input_path: Path) -> str:
+    """Header-only `ffmpeg -i` output (metadata printed to stderr, no frame
+    decoded, no output file). The fallback source for every stream fact
+    ffprobe would otherwise answer — see _probe_duration, which has used
+    this same trick for duration since 2026-06-12."""
+    try:
+        return _run([_ffmpeg(), "-hide_banner", "-i", str(input_path)])
+    except RuntimeError as e:
+        # `ffmpeg -i` with no output target always exits non-zero AFTER
+        # printing the metadata; _run raises with that stderr embedded.
+        return str(e)
+    except OSError:
+        return ""
+
+
+def _video_stream_line(input_path: Path) -> str | None:
+    m = _VIDEO_STREAM_RE.search(_ffmpeg_header(input_path))
+    return m.group(0) if m else None
+
+
 def _probe_fps(input_path: Path) -> float | None:
     """Average frame rate of the first video stream, or None when probing
-    fails. Parses ffprobe's rational form ('24/1', '2997/100')."""
+    fails. Parses ffprobe's rational form ('24/1', '2997/100'), falling back
+    to ffmpeg's own '30 fps' when ffprobe isn't installed.
+
+    The fallback matters on any machine without a system ffmpeg: only
+    ffmpeg is bundled (imageio-ffmpeg ships no ffprobe), and without it
+    assemble_clips silently pinned every concat to 30 fps regardless of the
+    source material — a quiet quality regression nobody was told about
+    (2026-08-04, found while packaging the app for another Mac)."""
     probe = _ffprobe()
     if not probe:
-        return None
+        return _probe_fps_via_ffmpeg(input_path)
     try:
         proc = subprocess.run(
             [probe, "-v", "error", "-select_streams", "v:0",
@@ -366,14 +403,28 @@ def _probe_fps(input_path: Path) -> float | None:
             capture_output=True, text=True, check=False)
         raw = (proc.stdout or "").strip().splitlines()
         if proc.returncode != 0 or not raw:
-            return None
+            return _probe_fps_via_ffmpeg(input_path)
         num_s, _, den_s = raw[0].partition("/")
         num, den = float(num_s), float(den_s or "1")
         if num <= 0 or den <= 0:
-            return None
+            return _probe_fps_via_ffmpeg(input_path)
         return num / den
     except (ValueError, OSError):
+        return _probe_fps_via_ffmpeg(input_path)
+
+
+def _probe_fps_via_ffmpeg(input_path: Path) -> float | None:
+    line = _video_stream_line(input_path)
+    if not line:
         return None
+    m = _STREAM_FPS_RE.search(line)
+    if not m:
+        return None
+    try:
+        fps = float(m.group(1))
+    except ValueError:
+        return None
+    return fps if fps > 0 else None
 
 
 def _detect_silences(input_path: Path, threshold_db: float = -23.0,
@@ -2203,10 +2254,15 @@ def _target_resolution(aspect_ratio: str) -> tuple[int, int]:
 
 
 def _probe_dims(input_path: Path) -> tuple[int, int] | None:
-    """Width/height of the first video stream, or None when probing fails."""
+    """Width/height of the first video stream, or None when probing fails.
+
+    Falls back to ffmpeg's own stream line when ffprobe isn't installed —
+    without it bar_crop_for_clip returns None for every clip and the
+    automatic black-bar removal switches itself off machine-wide, silently
+    (2026-08-04)."""
     probe = _ffprobe()
     if not probe:
-        return None
+        return _probe_dims_via_ffmpeg(input_path)
     try:
         proc = subprocess.run(
             [probe, "-v", "error", "-select_streams", "v:0",
@@ -2214,12 +2270,26 @@ def _probe_dims(input_path: Path) -> tuple[int, int] | None:
              "-of", "csv=p=0", str(input_path)],
             capture_output=True, text=True, check=False)
         if proc.returncode != 0:
-            return None
+            return _probe_dims_via_ffmpeg(input_path)
         w_s, h_s = proc.stdout.strip().split(",")[:2]
         w, h = int(w_s), int(h_s)
-        return (w, h) if w > 0 and h > 0 else None
+        return (w, h) if w > 0 and h > 0 else _probe_dims_via_ffmpeg(input_path)
     except (ValueError, OSError):
+        return _probe_dims_via_ffmpeg(input_path)
+
+
+def _probe_dims_via_ffmpeg(input_path: Path) -> tuple[int, int] | None:
+    line = _video_stream_line(input_path)
+    if not line:
         return None
+    m = _STREAM_DIMS_RE.search(line)
+    if not m:
+        return None
+    try:
+        w, h = int(m.group(1)), int(m.group(2))
+    except ValueError:
+        return None
+    return (w, h) if w > 0 and h > 0 else None
 
 
 _CROPDETECT_RE = re.compile(r"crop=(\d+):(\d+):(\d+):(\d+)")

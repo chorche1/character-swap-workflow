@@ -97,6 +97,10 @@ def render_env(tmp_path, monkeypatch):
             duration_secs=1.0, width=1080, height=1920),
     )
     monkeypatch.setattr(remotion_render, "record", _no_record)
+    # The install preflight (2026-08-04) would otherwise refuse every render
+    # here — node_modules/ is gitignored, so a checkout that never ran
+    # `remotion-install` has none. Its own behavior is covered below.
+    monkeypatch.setattr(remotion_render, "_ensure_installed", lambda _d: None)
     remotion_render._gate = None
     yield tmp_path
     remotion_render._gate = None
@@ -432,3 +436,60 @@ def test_offthread_cache_budget_scales_with_gate_and_has_a_floor():
     finally:
         s.remotion_offthread_cache_bytes = orig_total
         s.remotion_max_concurrent_renders = orig_gate
+
+
+# ---------------------------------------------------------------------------
+# Install preflight (2026-08-04). Packaging the app for a machine that never
+# ran `character-swap remotion-install` exposed this: remotion/package.json is
+# COMMITTED but node_modules/ is gitignored, so the old guard passed and the
+# render fell through to Popen(["npx", ...]) → FileNotFoundError. That's an
+# OSError, and api.py's caption endpoints catch only RuntimeError, so the user
+# got an opaque 500 — on the app's own DEFAULT template, which is a Remotion
+# one. Both the preflight and the Popen-time backstop must refuse LOUDLY.
+# ---------------------------------------------------------------------------
+
+def test_render_refuses_loudly_when_node_modules_missing(render_env, monkeypatch):
+    monkeypatch.undo()  # drop render_env's _ensure_installed stub
+    missing = render_env / "remotion-no-modules"
+    (missing).mkdir()
+    (missing / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(remotion_render, "_remotion_dir", lambda: missing)
+    monkeypatch.setattr(remotion_render, "record", _no_record)
+
+    def _never_spawn(*_a, **_kw):
+        raise AssertionError("must refuse BEFORE spawning npx")
+
+    monkeypatch.setattr(remotion_render.subprocess, "Popen", _never_spawn)
+    with pytest.raises(RuntimeError, match="remotion-install"):
+        remotion_render.render_remotion(
+            _make_input(render_env, "in.mp4"), render_env / "out.mp4",
+            composition_id="CapCutPurplePill", props={}, words=WORDS)
+
+
+def test_render_refuses_loudly_when_node_is_absent(render_env, monkeypatch, tmp_path):
+    """node_modules/ present but no `node` on PATH — half-finished install."""
+    monkeypatch.undo()
+    have_modules = tmp_path / "remotion-ok"
+    (have_modules / "node_modules").mkdir(parents=True)
+    (have_modules / "package.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(remotion_render, "_remotion_dir", lambda: have_modules)
+    monkeypatch.setattr(remotion_render, "record", _no_record)
+    monkeypatch.setattr(remotion_render.shutil, "which", lambda _n: None)
+    with pytest.raises(RuntimeError, match="remotion-install"):
+        remotion_render.render_remotion(
+            _make_input(render_env, "in2.mp4"), render_env / "out.mp4",
+            composition_id="CapCutPurplePill", props={}, words=WORDS)
+
+
+def test_missing_npx_at_spawn_becomes_runtimeerror_not_oserror(render_env, monkeypatch):
+    """Backstop: PATH changed between preflight and spawn. A raw
+    FileNotFoundError here would surface as an opaque 500 (api.py catches
+    RuntimeError only), so it must be translated."""
+    def _no_npx(*_a, **_kw):
+        raise FileNotFoundError(2, "No such file or directory: 'npx'")
+
+    monkeypatch.setattr(remotion_render.subprocess, "Popen", _no_npx)
+    with pytest.raises(RuntimeError, match="remotion-install"):
+        remotion_render.render_remotion(
+            _make_input(render_env, "in3.mp4"), render_env / "out.mp4",
+            composition_id="CapCutPurplePill", props={}, words=WORDS)
