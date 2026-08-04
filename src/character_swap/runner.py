@@ -1496,19 +1496,30 @@ async def _animate_one_video(
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
-    # Content-policy / NSFW fallback — OFF by default since 2026-08-03 (Hugo:
-    # "ta bort fallbacken till en annan modell om ett klipp failar"). A clip its
-    # model refuses on moderation grounds now FAILS LOUDLY with the real reason,
-    # so the user can reword or retry, instead of quietly coming back rendered
-    # on a different provider — which made one clip in a reel look and sound
-    # unlike its neighbours, dropped any resolved end frame, and (since the 🗣
-    # redirect) would have moved a German/Spanish clip off the one model trusted
-    # with its language. `VIDEO_MODERATION_FALLBACK=1` restores the old rescue,
+    # Content-policy / NSFW fallback — resolved per (CHOSEN MODEL, LANGUAGE).
+    #
+    # VEO + SPANISH (Hugo 2026-08-04, always on): a refused Spanish
+    # veo-3.1-fast clip retries ONCE on kling-v3. Veo is where the 🗣 redirect
+    # sends every Spanish clip and where fal's checker kills 46% of them
+    # (11 of 24 in j_619e0a2cf2), and Kling keeps the 🎯 end pose, matches the
+    # rest of the reel, and is measured 0.953 on Spanish against Veo's 0.992.
+    # A refused GERMAN clip gets no rescue — Kling is 0.48 on German, so it
+    # would only be re-rejected by the language net.
+    #
+    # EVERY OTHER CLIP — OFF by default since 2026-08-03 (Hugo: "ta bort
+    # fallbacken till en annan modell om ett klipp failar"). A clip its model
+    # refuses on moderation grounds FAILS LOUDLY with the real reason, so the
+    # user can reword or retry, instead of quietly coming back rendered on a
+    # different provider — which made one clip in a reel look and sound unlike
+    # its neighbours, dropped any resolved end frame, and (since the 🗣 redirect)
+    # would have moved a German/Spanish clip off the one model trusted with its
+    # language. `VIDEO_MODERATION_FALLBACK=1` restores the old rescue for them,
     # unchanged: retry ONCE on grok-imagine-1.5, and if that ALSO refuses, fail
     # loudly naming both.
-    fb_model = runner_media.video_fallback_model()
+    fb_lang = lang_spec.code if lang_spec else None
+    fb_model = runner_media.video_fallback_model(video_model, language=fb_lang)
     fb_drops_end = bool(fb_model) and bool(end_image) and (
-        runner_media.fallback_drops_end_frame(video_model))
+        runner_media.fallback_drops_end_frame(video_model, language=fb_lang))
     models_to_try = [video_model] + (
         [fb_model] if fb_model and video_model != fb_model else [])
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
@@ -1619,10 +1630,14 @@ async def _animate_one_video(
                     continue
                 break
         except Exception as e:
-            # Retry ONCE on the fallback model when THIS model refused the clip
-            # on content-policy grounds AND a fallback model is still queued.
+            # Retry ONCE on the fallback model when THIS model REFUSED the clip
+            # AND a fallback model is still queued. "Refused" = a content-policy
+            # rejection, plus (on Veo only) an empty-output `no_media_generated`
+            # refusal — see runner_media.triggers_fallback. Timeouts, network
+            # errors and fal balance failures are NOT refusals and keep the loud
+            # fail path with their real reason.
             if (_model_idx + 1 < len(models_to_try)
-                    and content_policy.is_content_rejection(e)):
+                    and runner_media.triggers_fallback(active_model, e)):
                 video.fallback_model = fb_model
                 video.fallback_dropped_end_frame = fb_drops_end
                 video.status = VideoStatus.PROCESSING

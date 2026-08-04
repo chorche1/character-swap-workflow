@@ -92,6 +92,10 @@ VIDEO_MODELS: dict[str, dict] = {
     # resolution via SEEDANCE_FAL_* env (default standard/720p). Priciest model
     # in the stack ($0.302/s @720p standard). Bills on FAL_API_KEY.
     "seedance-2.0":         {"label": "Seedance 2.0 (fal)",              "provider": "fal",        "price_setting": "seedance_price_usd",     "duration_options": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], "duration_default": 5, "end_frame": True},
+    # NOTE — there is deliberately no `seedance-2.0-fast` slug. It was added
+    # 2026-08-04 for the Veo rescue and removed the same day: ByteDance refuses
+    # every frame containing a real person (11/11 measured, both tiers), so it
+    # can render nothing this app produces. See VEO_MODERATION_FALLBACK_MODEL.
     # Kling — every confirmed model_name string from Kling's official i2v API
     # (Singapore region, May 2026). Slug == API name to keep the mapping
     # trivial in `kling._resolve_model_name`. Legacy aliases (`kling`,
@@ -169,6 +173,99 @@ def supports_end_frame(model: str) -> bool:
 # runner_reengineer._render_direct_clip.
 VIDEO_MODERATION_FALLBACK_MODEL = "grok-imagine-1.5"
 
+# VEO + SPANISH rescue — ALWAYS ON, no env flag (Hugo 2026-08-04, after the
+# measurement below: "fallback to seedance 2.0 fast for all veo clips in swap
+# that fails" — Seedance turned out to be impossible, Kling 3.0 replaced it).
+#
+# Veo is the model the 🗣 language redirect sends every German/Spanish clip to,
+# and fal's content checker refuses a large share of them even at the least
+# strict `safety_tolerance` — measured on j_619e0a2cf2, 11 of 24 redirected
+# Spanish clips died refused, i.e. 46% of the spoken-language clips in one run,
+# on dialogue as innocuous as "Mezcla una cucharada de aceite de coco". Those
+# clips have nowhere to go under the generic rescue: it is off by default, and
+# grok-imagine-1.5 would undo the redirect.
+#
+# WHY NOT SEEDANCE 2.0 FAST, which this rescue was originally built on:
+# ByteDance refuses EVERY frame containing a real person. Measured 2026-08-04 —
+# 11 of 11 submits refused (7 in-app + 4 probes), on BOTH tiers, across three
+# different faces, always the same shape:
+#     loc: [body, image_url] · content_policy_violation
+#     "The images or videos provided may contain likenesses of real people…"
+#     ctx.extra_info.reason = partner_validation_failed
+# A control frame with NO person in it rendered fine on the same endpoint and
+# key, so this is ByteDance's real-people policy, not our account and not the
+# prompt. Every frame this app produces is a photoreal person, so Seedance can
+# never rescue a single clip here — no prompt change reaches an image check.
+# Do not re-try this model as a rescue; re-run the probe first if in doubt.
+#
+# WHY KLING 3.0: it is the only candidate that is both ACCEPTED and GOOD.
+# Measured on the clips Veo had actually refused, re-rendered verbatim (same
+# frame, same localized prompt): kling-v3 2/2 rendered, grok-imagine-1.5 2/2.
+# Spanish speech fidelity over every Spanish clip on disk, scored the way video
+# QC scores it (Scribe transcript vs the line the prompt asked for):
+#     veo-3.1-fast      n=37   mean 0.992   min 0.909   100% ≥0.8
+#     kling-v3          n=106  mean 0.953   min 0.000    98% ≥0.8
+#     grok-imagine-1.5  n=6    mean 1.000                100% ≥0.8
+# Kling costs ~0.04 mean against Veo and carries a ~1% English-leak tail (the
+# one 0.000 clip spoke English on a Spanish prompt) — which the existing
+# wrong-language net re-renders. It wins over Grok on the two things that make
+# a rescued clip fit the reel it lands in: it is IN END_FRAME_VIDEO_MODELS so
+# the 🎯 end pose survives, and it is the runs' own default model, so the
+# rescued clip looks and sounds like its neighbours instead of announcing
+# itself. Grok's 1.000 is 6 clips — too thin to outweigh either.
+#
+# SPANISH ONLY (Hugo 2026-08-04). A refused GERMAN clip still fails loudly.
+# Kling is measured BAD at German — 0.48 mean word-similarity against 1.00
+# English / 0.93 Spanish from the same runs, which is the whole reason
+# SPOKEN_LANGUAGE_VIDEO_MODEL exists. Rescuing German onto it would ship a clip
+# the language net then has to reject anyway: slower, more expensive, same
+# outcome. English clips are not redirected to Veo in the first place.
+#
+# Scope: ONLY (model ∈ VEO_VIDEO_MODELS) AND (language ∈ VEO_FALLBACK_LANGUAGES).
+# Every other clip still fails LOUDLY on a content refusal unless
+# VIDEO_MODERATION_FALLBACK=1 — Hugo's 2026-08-03 default is untouched.
+VEO_VIDEO_MODELS: frozenset[str] = frozenset({"veo-3.1-fast"})
+VEO_MODERATION_FALLBACK_MODEL = "kling-v3"
+VEO_FALLBACK_LANGUAGES: frozenset[str] = frozenset({"es"})
+
+# Veo's SECOND refusal shape — fal `no_media_generated` (2026-08-04). Veo does
+# not always answer a prompt it dislikes with `content_policy_violation`;
+# sometimes it accepts the submit, runs, and returns NOTHING, which fal reports
+# as: "The model did not generate the expected output for this prompt. This may
+# occur for several reasons, including unsafe content, …". 4 of the 11 refused
+# Spanish clips in j_619e0a2cf2 failed this way on re-render, on lines as
+# innocuous as a teeth-whitening pitch — `content_policy.is_content_rejection`
+# matches none of its wording, so those clips were dying with no rescue.
+#
+# It is treated as a refusal ONLY on the Veo leg, and it is NOT added to
+# content_policy's global signal list: that detector also drives the image
+# moderation ladder and the generic video rescue, and `no_media_generated` is
+# a fal-wide catch-all whose other causes (incompatible media type, missing
+# attachment) are real bugs that must keep failing loudly elsewhere. On Veo
+# specifically none of those apply — we always send an image + prompt to an
+# i2v endpoint — and it is definitively not a timeout / network / balance
+# failure, which is the line Hugo drew when he scoped this rescue to genuine
+# refusals.
+VEO_EMPTY_OUTPUT_SIGNALS: tuple[str, ...] = (
+    "no_media_generated", "did not generate the expected output",
+)
+
+
+def triggers_fallback(chosen_model: str, exc: BaseException) -> bool:
+    """True when `exc` from `chosen_model` should be rescued on the fallback.
+
+    A genuine content rejection always qualifies. On Veo, an empty-output
+    refusal (`no_media_generated`) qualifies too — see VEO_EMPTY_OUTPUT_SIGNALS.
+    Everything else (timeout, network, fal balance) keeps the loud-fail path.
+    """
+    from character_swap import content_policy
+    if content_policy.is_content_rejection(exc):
+        return True
+    if chosen_model in VEO_VIDEO_MODELS:
+        msg = str(exc).lower()
+        return any(sig in msg for sig in VEO_EMPTY_OUTPUT_SIGNALS)
+    return False
+
 # Every clip of a 🗣 language-flagged character renders on THIS model, whatever
 # model the run/scene/clip picked (Hugo 2026-08-03). Measured: Kling 3.0 scored
 # 0.48 mean word-similarity on German against 1.00 English / 0.93 Spanish from
@@ -202,30 +299,64 @@ def language_clip_truncated(secs: float | int | None) -> bool:
     return secs is not None and language_clip_secs(secs) < secs
 
 
-def video_fallback_model() -> str | None:
-    """The model a content-policy-refused clip is retried on, or None when the
-    rescue is disabled — which it is by DEFAULT since 2026-08-03 (Hugo).
+def _veo_rescue_applies(chosen_model: str | None, language: str | None) -> bool:
+    """True when the always-on Veo rescue covers this (model, language) pair.
 
-    Two reasons it is off. It silently moved a clip onto a different provider,
-    so one clip in a reel came out looking and sounding unlike its neighbours;
-    and it undoes the 🗣 language redirect outright — a German character's clip
-    would land on a model that cannot be trusted with German, which is exactly
-    what SPOKEN_LANGUAGE_VIDEO_MODEL exists to prevent. The fallback also drops
-    any resolved end frame. `VIDEO_MODERATION_FALLBACK=1` restores it.
+    BOTH have to hold: Veo is the only model with a rescue that ignores the env
+    flag, and Spanish is the only language Kling 3.0 is measured good enough to
+    take. `language` is the 🗣 flag's ISO code ("es"/"de"), None for English.
     """
+    return (chosen_model in VEO_VIDEO_MODELS
+            and (language or "") in VEO_FALLBACK_LANGUAGES)
+
+
+def video_fallback_model(chosen_model: str | None = None, *,
+                         language: str | None = None) -> str | None:
+    """The model a refused clip on `chosen_model` is retried on, or None when
+    no rescue applies.
+
+    VEO + SPANISH (Hugo 2026-08-04): a refused Spanish `veo-3.1-fast` clip
+    ALWAYS retries on `VEO_MODERATION_FALLBACK_MODEL` (Kling 3.0), env flag or
+    not — Veo is where the 🗣 redirect puts every Spanish clip and where fal's
+    checker kills 46% of them, and Kling keeps the 🎯 end pose, matches the rest
+    of the reel, and scores 0.953 on Spanish against Veo's 0.992. A refused
+    GERMAN Veo clip gets NO rescue: Kling is measured 0.48 on German, so a
+    rescue would only be re-rejected by the language net. See the VEO_*
+    constants above for the full measurement.
+
+    EVERY OTHER CLIP keeps Hugo's 2026-08-03 default: no rescue, the clip FAILS
+    LOUDLY with the real reason so it can be reworded or retried, because the
+    generic rescue silently moved a clip onto a different provider (one clip in
+    a reel looking and sounding unlike its neighbours), undid the language
+    redirect, and dropped any resolved end frame. `VIDEO_MODERATION_FALLBACK=1`
+    restores that older rescue for them.
+
+    Called with no arguments this answers only for the generic path — kept for
+    back-compat with callers that have neither model nor language in hand.
+    """
+    if _veo_rescue_applies(chosen_model, language):
+        return VEO_MODERATION_FALLBACK_MODEL
     from character_swap.config import settings
     if not settings.video_moderation_fallback:
         return None
     return VIDEO_MODERATION_FALLBACK_MODEL
 
 
-def fallback_drops_end_frame(chosen_model: str) -> bool:
-    """True when falling back from `chosen_model` to the moderation fallback
-    would LOSE a resolved end frame — i.e. the chosen model honors end frames
-    but the fallback does not. Callers use this to flag the degradation loudly
-    instead of shipping a silently different clip."""
-    return (supports_end_frame(chosen_model)
-            and not supports_end_frame(VIDEO_MODERATION_FALLBACK_MODEL))
+def fallback_drops_end_frame(chosen_model: str, *,
+                             language: str | None = None) -> bool:
+    """True when falling back from `chosen_model` would LOSE a resolved end
+    frame — i.e. the chosen model honors end frames but the fallback it would
+    actually land on does not. Callers use this to flag the degradation loudly
+    instead of shipping a silently different clip.
+
+    Resolves the fallback for THIS clip, so it correctly answers False for the
+    Veo → Kling 3.0 rescue (both interpolate start→end) while still answering
+    True for the generic → grok-imagine-1.5 one.
+    """
+    fb = (VEO_MODERATION_FALLBACK_MODEL
+          if _veo_rescue_applies(chosen_model, language)
+          else VIDEO_MODERATION_FALLBACK_MODEL)
+    return supports_end_frame(chosen_model) and not supports_end_frame(fb)
 
 
 def video_duration_spec(model: str) -> dict:

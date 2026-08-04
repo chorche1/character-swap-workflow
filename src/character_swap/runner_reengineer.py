@@ -1089,13 +1089,17 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
     from character_swap import content_policy, pipeline, runner_media
     # Content-policy / NSFW fallback (Hugo 2026-07-14): a direct clip rejected
-    # on moderation grounds retries ONCE on the fallback model (grok-imagine-1.5)
-    # before giving up — same rescue as the per-character swap clips in
-    # runner._animate_one_video. Direct clips never carry an end frame, so the
-    # fallback's missing end-frame support costs nothing here.
-    # See runner._animate_one_video: the rescue is OFF by default since
-    # 2026-08-03 and a refused clip fails loudly instead.
-    fb_model = runner_media.video_fallback_model()
+    # on moderation grounds retries ONCE on the fallback model before giving up
+    # — same rescue as the per-character swap clips in runner._animate_one_video,
+    # and resolved the same way: a SPANISH Veo clip always falls back to
+    # kling-v3 (Hugo 2026-08-04), everything else only with
+    # VIDEO_MODERATION_FALLBACK=1 (off since 2026-08-03 — a refused clip fails
+    # loudly instead). A direct clip has no per-character 🗣 flag, so the RUN's
+    # language gates it — the same value that built `prompt` above. Direct clips
+    # never carry an end frame, so no end-frame degradation is possible here
+    # either way.
+    fb_model = runner_media.video_fallback_model(
+        model, language=state.get("language") or None)
     models_to_try = [model] + (
         [fb_model] if fb_model and model != fb_model else [])
     for _midx, active_model in enumerate(models_to_try):
@@ -1119,7 +1123,7 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
             return
         except Exception as e:
             if (_midx + 1 < len(models_to_try)
-                    and content_policy.is_content_rejection(e)):
+                    and runner_media.triggers_fallback(active_model, e)):
                 _log.warning("reengineer %s: direct clip scene %s rejected on "
                              "content policy by %s — retrying on %s",
                              re_id, scene_id, active_model, fb_model)
