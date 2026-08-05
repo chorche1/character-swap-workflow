@@ -293,6 +293,31 @@ def test_directive_forbids_the_gender_substitution_that_broke_the_run():
             "and must stay exactly as in the original photo") in d
 
 
+def test_directive_replaces_the_whole_person_including_the_hands():
+    """Hugo, on the retakes that DID land on the right person: "mannen är ju i
+    bild" — the original man's big weathered farm hands were still holding the
+    cotton pad and the shot glass, on a woman whose own arms were gone. The
+    base prompt's "keep hand positions EXACTLY" framing anchor is what the
+    model satisfies by keeping his actual hands, so the split between POSITION
+    (keep) and WHOSE HANDS (replace) has to be said out loud."""
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert "Replace the ENTIRE person, not only the face" in d
+    assert "arms and HANDS all become the new character's" in d
+    assert ("The hands holding the props are the new character's own hands — "
+            "same position, same objects") in d
+    assert ("No part of the older man grey beard on the left may remain visible "
+            "anywhere in the frame.") in d
+    # …and the co-star's hands are locked the other way.
+    assert "same face, same hair, same hands, same clothes" in d
+
+
+def test_whole_person_clause_does_not_need_a_known_gender():
+    # It is the fix for a wrong-hands take, not a gender question.
+    d = api._person_directive(_MAN, gender=None)
+    assert "Replace the ENTIRE person, not only the face" in d
+    assert "The new character is a" not in d
+
+
 def test_directive_allows_exactly_one_changed_face():
     """Helene's first retake landed on the right person but ALSO replaced the
     co-star — both women in frame came back as Helene. Her reference and the

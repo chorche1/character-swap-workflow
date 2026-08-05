@@ -6035,6 +6035,19 @@ def _person_directive(person: dict, *, others: list[dict] | None = None,
            f"{who} with the new character — {who} is the ONLY person you may "
            f"change."]
 
+    # The WHOLE person, not just the head. The retakes that finally landed on
+    # the right person still left the original man's hands holding the props —
+    # big weathered farm hands on a woman whose own arms were gone. The base
+    # prompt's "keep hand positions EXACTLY" anchor is what the model satisfies
+    # by keeping his actual hands, so the split has to be spelled out: same
+    # position and same objects, new character's hands.
+    out.append(f" Replace the ENTIRE person, not only the face: {who}'s head, "
+               f"hair, skin, body, arms and HANDS all become the new "
+               f"character's. The hands holding the props are the new "
+               f"character's own hands — same position, same objects, but the "
+               f"new character's skin and build. No part of {who} may remain "
+               f"visible anywhere in the frame.")
+
     noun = _GENDER_NOUN.get((gender or "").strip().lower())
     if noun:
         out.append(f" The new character is a {noun}, so {who} becomes a {noun} "
@@ -6054,7 +6067,7 @@ def _person_directive(person: dict, *, others: list[dict] | None = None,
             ", ".join(named[:-1]) + " and " + named[-1])
         out.append(f" {joined[0].upper()}{joined[1:]} is NOT the new character "
                    f"and must stay exactly as in the original photo — same "
-                   f"face, same hair, same clothes.")
+                   f"face, same hair, same hands, same clothes.")
     else:
         out.append(" Keep the other people in the scene exactly as they are.")
     # Helene's first retake put her face on BOTH people (her reference and the
