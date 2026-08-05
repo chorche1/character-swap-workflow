@@ -87,6 +87,39 @@ def test_client_never_compresses_oversized_cloud_file(monkeypatch, tmp_path):
     assert src.read_bytes() == original
 
 
+def test_no_test_can_deliver_to_a_real_telegram_channel(monkeypatch, tmp_path):
+    """The autouse conftest guard dead-ends every unstubbed send.
+
+    Hugo's real "Character Swap – Editor Finals" channel had filled up with
+    1-byte .mp4 "finals" named after test fixtures (2026-08-04). They all came
+    from `pytest`: the PostToolUse hook runs the suite from the MAIN checkout,
+    whose `.env` carries the live editor bot token + chat id, and five tests
+    reached delivery for real on every run — the two `repurpose_editor_job`
+    workers (which stub `run_editor_pipeline` but not the send that follows
+    it) and the three TestClient calls to `/api/editor/auto_edit` +
+    `/api/editor/multi_auto_edit`, both of which auto-send the finished reel.
+
+    Credentials are pinned PRESENT here on purpose: a guard that only holds
+    because the tokens happen to be empty would pass in a worktree and still
+    post from the main checkout — exactly the asymmetry that hid this bug.
+    Both public delivery helpers must dead-end, so the next auto-send site is
+    covered the day it is written.
+    """
+    src = tmp_path / "04-final.mp4"
+    src.write_bytes(b"\x00")
+    monkeypatch.setattr(settings, "telegram_editor_bot_token", "token-live")
+    monkeypatch.setattr(settings, "telegram_editor_chat_id", "-1001234567890")
+    monkeypatch.setattr(settings, "telegram_character_bot_token", "token-live")
+
+    with pytest.raises(RuntimeError, match="real Telegram Bot API"):
+        _run(telegram_delivery.send_editor_final(
+            src, base="regression", variant="final", edit_id="ed_guard"))
+    with pytest.raises(RuntimeError, match="real Telegram Bot API"):
+        _run(telegram_delivery.send_character_final(
+            src, chat_id="@chang", char_name="Chang", base="regression",
+            variant="final", run_id="j_guard"))
+
+
 def test_send_file_core_snapshots_and_builds_public_message_url(
         monkeypatch, tmp_path):
     src = tmp_path / "live.mp4"

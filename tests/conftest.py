@@ -97,3 +97,39 @@ def _no_real_phone_push(monkeypatch):
     explicitly via monkeypatch + a stubbed `_send`/`notify`."""
     from character_swap.config import settings
     monkeypatch.setattr(settings, "ntfy_topic", "", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_telegram_send(monkeypatch):
+    """No test may deliver a REAL video to a REAL Telegram channel.
+
+    Observed 2026-08-04: Hugo's "Character Swap – Editor Finals" channel had
+    filled up with dozens of 1-byte .mp4 "finals" named after test fixtures
+    ("hello world this is the script — repurpose [ed_…]"). Every one came from
+    `pytest`, not from the app. The PostToolUse hook fires on any .py edit —
+    including edits inside a worktree — and runs the suite from the MAIN
+    checkout, whose `.env` carries the live TELEGRAM_EDITOR_BOT_TOKEN +
+    TELEGRAM_EDITOR_CHAT_ID. Five tests reached delivery for real on every
+    run: the two `repurpose_editor_job` workers (which stub
+    `run_editor_pipeline` but not the send that follows it) and the three
+    TestClient calls to `/api/editor/auto_edit` + `/api/editor/multi_auto_edit`
+    (both endpoints auto-send the finished reel).
+
+    `_post_with_retry` is the single HTTP egress in `clients/telegram.py`, so
+    blocking it here stops delivery no matter which layer a test enters
+    through, while leaving `send_document`'s own logic (token/limit checks,
+    multipart shape) testable: the tests that exercise the transport patch
+    `_post_with_retry` or `send_document` themselves, and a per-test patch is
+    applied after this fixture, so it wins."""
+    from character_swap.clients import telegram
+
+    def _blocked(*_a, **_k):
+        raise RuntimeError(
+            "A test tried to reach the real Telegram Bot API. Stub the send in "
+            "the test itself — monkeypatch telegram_delivery.send_editor_final "
+            "/ send_character_final for a delivery path, or "
+            "clients.telegram.send_document / _post_with_retry for the "
+            "transport."
+        )
+
+    monkeypatch.setattr(telegram, "_post_with_retry", _blocked)
