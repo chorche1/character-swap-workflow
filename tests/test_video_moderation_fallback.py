@@ -307,25 +307,22 @@ def test_direct_clip_moderation_fallback(monkeypatch, tmp_path):
 # beats no clip) but record the loss so the UI can say it out loud — never
 # silently ship a differently-composed clip.
 
-def test_fallback_drops_end_frame_helper():
-    """The capability helper is the single source of truth for the degradation:
-    true only when the CHOSEN model honors end frames and the fallback IT would
-    actually land on does not."""
+def test_leg_drops_end_frame_helper():
+    """The capability helper is the single source of truth for the degradation,
+    and it is asked PER LEG — a chain can keep the pose on one leg and lose it
+    on the next, so one answer for the whole chain would be a lie either way."""
     assert not runner_media.supports_end_frame(FALLBACK)
-    # kling-v3 honors end frames and falls back to grok → the pose is lost.
-    assert runner_media.fallback_drops_end_frame("kling-v3")
-    # A SPANISH veo-3.1-fast clip falls back to kling-v3 instead (Hugo
-    # 2026-08-04), which DOES interpolate start→end — so nothing is lost and
-    # nothing is flagged. Half the reason Kling beat grok for this rescue.
-    assert not runner_media.fallback_drops_end_frame("veo-3.1-fast",
-                                                     language="es")
-    # …but a German/English Veo clip has no Veo rescue, so it resolves against
-    # the generic grok fallback and the pose WOULD be lost there.
-    assert runner_media.fallback_drops_end_frame("veo-3.1-fast", language="de")
-    assert runner_media.fallback_drops_end_frame("veo-3.1-fast")
+    # kling-v3 honors end frames; moving to grok loses the pose.
+    assert runner_media.leg_drops_end_frame("kling-v3", FALLBACK)
+    # The Spanish Veo → Kling leg keeps it (both interpolate start→end) — half
+    # the reason Kling still LEADS the chain now that grok sits behind it.
+    assert not runner_media.leg_drops_end_frame(VEO, VEO_FALLBACK)
+    # …but the grok leg BEHIND Kling drops it, and so does the direct
+    # English-Veo → grok hop.
+    assert runner_media.leg_drops_end_frame(VEO, FALLBACK)
     # A model that never honored the pose loses nothing.
-    assert not runner_media.fallback_drops_end_frame("grok-imagine")
-    assert not runner_media.fallback_drops_end_frame(FALLBACK)
+    assert not runner_media.leg_drops_end_frame("grok-imagine", FALLBACK)
+    assert not runner_media.leg_drops_end_frame(FALLBACK, FALLBACK)
 
 
 def test_fallback_with_end_frame_flags_dropped_pose(monkeypatch, tmp_path):
@@ -475,19 +472,26 @@ def test_end_pose_is_never_dropped_when_the_rescue_is_off(
     assert video.fallback_dropped_end_frame is False
 
 
-# --- VEO + SPANISH → KLING 3.0 (Hugo 2026-08-04, ALWAYS ON) -----------------
+# --- THE VEO RESCUE CHAIN (Hugo 2026-08-04, chained 2026-08-06, ALWAYS ON) --
 #
-# "Gör så att alla veo klipp som failar fallbackar till seedance 2.0 fast."
-#
-# Seedance turned out to be IMPOSSIBLE and Kling 3.0 replaced it — see
+# 2026-08-04: "Gör så att alla veo klipp som failar fallbackar till seedance 2.0
+# fast."  Seedance turned out to be IMPOSSIBLE and Kling 3.0 replaced it — see
 # `test_the_rescue_is_not_seedance` at the bottom for the measurement, and read
 # it before ever pointing this rescue at Seedance again.
+#
+# 2026-08-06: "om veo failar, reroutea till grok imagine 1.5 som backup, för
+# alla utom de tyska."  Grok joined as a SECOND leg rather than replacing Kling:
+#
+#     "es"          → kling-v3 → grok-imagine-1.5
+#     "de"          → (nothing) — fails loudly
+#     anything else → grok-imagine-1.5
 #
 # Veo is where the 🗣 redirect sends every Spanish clip, and fal's checker
 # refuses them in bulk even at the least strict safety_tolerance — 11 of 24
 # redirected Spanish clips in j_619e0a2cf2. Those clips get their own rescue,
 # independent of VIDEO_MODERATION_FALLBACK. GERMAN is deliberately excluded
-# (Kling scores 0.48 on it); every OTHER model keeps the 2026-08-03 default.
+# (Kling scores 0.48 on it, grok is unmeasured); every NON-VEO model keeps the
+# 2026-08-03 default of failing loudly.
 
 VEO = "veo-3.1-fast"
 VEO_FALLBACK = "kling-v3"
@@ -514,31 +518,53 @@ def _speaks(monkeypatch):
 def test_veo_rescue_constants():
     assert runner_media.VEO_MODERATION_FALLBACK_MODEL == VEO_FALLBACK
     assert VEO in runner_media.VEO_VIDEO_MODELS
-    # The rescue target must be a REAL registered model, or submit would 422.
+    # Both rescue targets must be REAL registered models, or submit would 422.
     assert VEO_FALLBACK in runner_media.VIDEO_MODELS
-    # …and end-frame capable, which is half the reason it beat grok.
+    assert FALLBACK in runner_media.VIDEO_MODELS
+    # Kling is end-frame capable, which is why it still LEADS the chain.
     assert runner_media.supports_end_frame(VEO_FALLBACK)
-    # Spanish only — German is measured 0.48 on Kling and must NOT be rescued.
-    assert runner_media.VEO_FALLBACK_LANGUAGES == frozenset({"es"})
+    # German is the ONLY language carved out — Kling is measured 0.48 on it and
+    # grok is unmeasured, so neither leg is worth the render.
+    assert runner_media.VEO_RESCUE_BLOCKED_LANGUAGES == frozenset({"de"})
+    # Kling leads only where it is MEASURED good; everything else goes to grok.
+    assert runner_media.VEO_KLING_FIRST_LANGUAGES == frozenset({"es"})
 
 
-def test_veo_resolver_is_language_scoped(monkeypatch):
-    """The Veo rescue is NOT gated on VIDEO_MODERATION_FALLBACK, but it IS
-    gated on the language: Spanish resolves, German does not."""
+def test_veo_chain_is_language_scoped(monkeypatch):
+    """The Veo rescue is NOT gated on VIDEO_MODERATION_FALLBACK, but the CHAIN
+    it resolves to is gated on the language."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: False), raising=False)
+    chain = runner_media.video_fallback_chain
+    # Spanish keeps Kling first, with grok behind it as the last resort.
+    assert chain(VEO, language="es") == [VEO_FALLBACK, FALLBACK]
+    # German: nothing. The clip fails loudly on Veo.
+    assert chain(VEO, language="de") == []
+    # English (and any unmeasured language) goes STRAIGHT to grok — the
+    # Kling-first leg is a Spanish-specific measured decision.
+    assert chain(VEO) == [FALLBACK]
+    assert chain(VEO, language="fr") == [FALLBACK]
+    # A non-Veo clip still has no rescue while the flag is off.
+    assert chain("kling-v3", language="es") == []
+    # Flag ON: every other model gets the old single-leg generic rescue back.
+    monkeypatch.setattr(type(settings), "video_moderation_fallback",
+                        property(lambda self: True), raising=False)
+    assert chain(VEO, language="es") == [VEO_FALLBACK, FALLBACK]
+    assert chain(VEO, language="de") == [FALLBACK]
+    assert chain("kling-v3") == [FALLBACK]
+    # A clip already ON the rescue model is never queued behind itself.
+    assert chain(FALLBACK) == []
+
+
+def test_video_fallback_model_is_the_first_leg(monkeypatch):
+    """The old single-answer resolver still works — it is the chain's head."""
     from character_swap.config import settings
     monkeypatch.setattr(type(settings), "video_moderation_fallback",
                         property(lambda self: False), raising=False)
     assert runner_media.video_fallback_model(VEO, language="es") == VEO_FALLBACK
+    assert runner_media.video_fallback_model(VEO) == FALLBACK
     assert runner_media.video_fallback_model(VEO, language="de") is None
-    assert runner_media.video_fallback_model(VEO) is None       # English
-    assert runner_media.video_fallback_model("kling-v3", language="es") is None
-    # Flag ON: everything else gets the old generic rescue; Spanish Veo keeps
-    # Kling rather than being dragged onto grok.
-    monkeypatch.setattr(type(settings), "video_moderation_fallback",
-                        property(lambda self: True), raising=False)
-    assert runner_media.video_fallback_model(VEO, language="es") == VEO_FALLBACK
-    assert runner_media.video_fallback_model(VEO, language="de") == FALLBACK
-    assert runner_media.video_fallback_model("kling-v3") == FALLBACK
 
 
 def test_refused_spanish_veo_clip_renders_on_kling(
@@ -570,9 +596,11 @@ def test_refused_spanish_veo_clip_renders_on_kling(
 
 def test_refused_german_veo_clip_fails_loudly(
         monkeypatch, tmp_path, _fallback_off, _speaks):
-    """Hugo 2026-08-04: rescue Spanish only. Kling is measured 0.48 on German —
-    rescuing it there would ship a clip the language net has to reject anyway,
-    so a refused German clip fails with the real reason instead."""
+    """Hugo 2026-08-06: "för alla utom de tyska". German is the ONE language
+    carved out of the chain — Kling is measured 0.48 on it and grok is
+    unmeasured, so either leg would ship a clip the wrong-language net has to
+    reject anyway. A refused German clip fails with the real reason instead,
+    and must reach NEITHER leg."""
     _speaks("de")
     job, jc, video = _job_one_clip(tmp_path, video_model="kling-v3")
     _stub(monkeypatch, tmp_path)
@@ -585,10 +613,11 @@ def test_refused_german_veo_clip_fails_loudly(
 
     _run(runner._animate_one_video(job, jc, video, "sagt den Satz"))
 
-    assert submits == [VEO], "a German clip must never be rescued onto Kling"
+    assert submits == [VEO], "a German clip must never reach Kling OR grok"
     assert video.status == VideoStatus.ERROR
     assert video.fallback_model is None
     assert "nsfw" in (video.error or "").lower()
+    assert "reservmodell" not in (video.error or "").lower()
 
 
 def test_veo_rescue_keeps_the_end_pose(
@@ -639,10 +668,11 @@ def test_veo_non_content_failure_still_fails_loudly(
     assert "timed out" in (video.error or "")
 
 
-def test_veo_rescue_also_refused_fails_naming_both(
+def test_veo_chain_all_refused_fails_naming_every_leg(
         monkeypatch, tmp_path, _fallback_off, _speaks):
-    """Both providers blocked it → fail LOUDLY naming the rescue, never a
-    half-rendered clip."""
+    """Every provider blocked it → fail LOUDLY naming BOTH rescue legs, never a
+    half-rendered clip. Naming only the last one would hide that Kling refused
+    it too, which is what tells the user rewording is the only way out."""
     _speaks("es")
     job, jc, video = _job_one_clip(tmp_path, video_model="kling-v3")
     _stub(monkeypatch, tmp_path)
@@ -655,9 +685,97 @@ def test_veo_rescue_also_refused_fails_naming_both(
 
     _run(runner._animate_one_video(job, jc, video, "dice la frase"))
 
-    assert submits == [VEO, VEO_FALLBACK]
+    assert submits == [VEO, VEO_FALLBACK, FALLBACK]
     assert video.status == VideoStatus.ERROR
     assert VEO_FALLBACK in (video.error or "")
+    assert FALLBACK in (video.error or "")
+    # clip_failure keys off this word to explain the failure inline.
+    assert "reservmodell" in (video.error or "").lower()
+
+
+def test_refused_english_veo_clip_renders_on_grok(
+        monkeypatch, tmp_path, _fallback_off, _speaks):
+    """Hugo 2026-08-06 — "för alla utom de tyska". An ENGLISH Veo clip had no
+    always-on rescue before (the generic one is off by default); now it goes
+    straight to grok, skipping the Kling leg, which is Spanish-only."""
+    _speaks(None)
+    job, jc, video = _job_one_clip(tmp_path, video_model=VEO)
+    _stub(monkeypatch, tmp_path)
+    submits = []
+
+    def fake_submit(**kw):
+        submits.append(kw["model"])
+        if len(submits) == 1:
+            raise RuntimeError(_MODERATION)
+        return f"req-{len(submits)}"
+    monkeypatch.setattr(runner.pipeline, "submit_video", fake_submit)
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+
+    _run(runner._animate_one_video(job, jc, video, "he says the line"))
+
+    assert submits == [VEO, FALLBACK], "English must not detour via Kling"
+    assert video.status == VideoStatus.DONE
+    assert video.fallback_model == FALLBACK
+    assert video.error is None
+
+
+def test_spanish_clip_kling_also_refuses_lands_on_grok(
+        monkeypatch, tmp_path, _fallback_off, _speaks):
+    """The whole point of the second leg: a Spanish clip Kling ALSO refuses used
+    to die there. It now renders on grok, and `fallback_model` records the leg
+    it actually landed on so salvage re-polls grok's endpoint."""
+    _speaks("es")
+    job, jc, video = _job_one_clip(tmp_path, video_model="kling-v3")
+    _stub(monkeypatch, tmp_path)
+    submits = []
+
+    def fake_submit(**kw):
+        submits.append(kw["model"])
+        if len(submits) < 3:
+            raise RuntimeError(_MODERATION)
+        return f"req-{len(submits)}"
+    monkeypatch.setattr(runner.pipeline, "submit_video", fake_submit)
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+
+    _run(runner._animate_one_video(job, jc, video, "dice la frase"))
+
+    assert submits == [VEO, VEO_FALLBACK, FALLBACK]
+    assert video.status == VideoStatus.DONE
+    assert video.fallback_model == FALLBACK
+    assert video.error is None
+
+
+def test_end_pose_flag_flips_on_the_grok_leg(
+        monkeypatch, tmp_path, _fallback_off, _speaks):
+    """The end-pose loss is recorded PER LEG: nothing is flagged while the clip
+    sits on Kling (which interpolates start→end), and the flag turns on only
+    when the grok leg behind it actually drops the pose."""
+    _speaks("es")
+    job, jc, video = _job_one_clip(tmp_path, video_model="kling-v3")
+    _stub(monkeypatch, tmp_path)
+    end = tmp_path / "end.png"; end.write_bytes(b"end")
+    seen, flags = [], []
+
+    def fake_submit(**kw):
+        seen.append((kw["model"], kw.get("end_image")))
+        flags.append(video.fallback_dropped_end_frame)
+        if len(seen) < 3:
+            raise RuntimeError(_MODERATION)
+        return "req-3"
+    monkeypatch.setattr(runner.pipeline, "submit_video", fake_submit)
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+
+    _run(runner._animate_one_video(job, jc, video, "dice la frase",
+                                   end_image=end))
+
+    assert [m for m, _ in seen] == [VEO, VEO_FALLBACK, FALLBACK]
+    assert seen[1][1] == end, "the Kling leg must still receive the end frame"
+    assert flags == [False, False, True], "flagged only once it reaches grok"
+    assert video.fallback_dropped_end_frame is True
+    assert video.status == VideoStatus.DONE
 
 
 def test_rescued_veo_clip_resumes_on_kling(tmp_path):

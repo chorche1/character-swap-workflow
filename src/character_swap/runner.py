@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from character_swap import (
+    clip_failure,
     content_policy,
     events,
     pipeline,
@@ -1496,32 +1497,33 @@ async def _animate_one_video(
             movement_prompt = localized
     prompt_text = movement_prompt
     phase = "submit"
-    # Content-policy / NSFW fallback — resolved per (CHOSEN MODEL, LANGUAGE).
+    # Content-policy / NSFW fallback CHAIN — resolved per (CHOSEN MODEL,
+    # LANGUAGE). Each leg is tried only while the previous one REFUSED the clip.
     #
-    # VEO + SPANISH (Hugo 2026-08-04, always on): a refused Spanish
-    # veo-3.1-fast clip retries ONCE on kling-v3. Veo is where the 🗣 redirect
-    # sends every Spanish clip and where fal's checker kills 46% of them
-    # (11 of 24 in j_619e0a2cf2), and Kling keeps the 🎯 end pose, matches the
-    # rest of the reel, and is measured 0.953 on Spanish against Veo's 0.992.
-    # A refused GERMAN clip gets no rescue — Kling is 0.48 on German, so it
-    # would only be re-rejected by the language net.
+    # VEO (Hugo 2026-08-04, chained 2026-08-06 — "om veo failar, reroutea till
+    # grok imagine 1.5 som backup, för alla utom de tyska"), always on: Veo is
+    # where the 🗣 redirect sends every Spanish clip and where fal's checker
+    # kills 46% of them (11 of 24 in j_619e0a2cf2).
+    #     "es"          → kling-v3 → grok-imagine-1.5
+    #     "de"          → (nothing) — fails loudly, no candidate is good at German
+    #     anything else → grok-imagine-1.5
+    # Spanish leads with Kling because it keeps the 🎯 end pose, matches the rest
+    # of the reel, and is measured 0.953 on Spanish against Veo's 0.992; Grok is
+    # the more permissive stack behind it. See runner_media for the numbers.
     #
-    # EVERY OTHER CLIP — OFF by default since 2026-08-03 (Hugo: "ta bort
+    # EVERY NON-VEO CLIP — OFF by default since 2026-08-03 (Hugo: "ta bort
     # fallbacken till en annan modell om ett klipp failar"). A clip its model
     # refuses on moderation grounds FAILS LOUDLY with the real reason, so the
     # user can reword or retry, instead of quietly coming back rendered on a
     # different provider — which made one clip in a reel look and sound unlike
     # its neighbours, dropped any resolved end frame, and (since the 🗣 redirect)
     # would have moved a German/Spanish clip off the one model trusted with its
-    # language. `VIDEO_MODERATION_FALLBACK=1` restores the old rescue for them,
-    # unchanged: retry ONCE on grok-imagine-1.5, and if that ALSO refuses, fail
-    # loudly naming both.
+    # language. `VIDEO_MODERATION_FALLBACK=1` restores the old single-leg rescue
+    # for them, unchanged: retry ONCE on grok-imagine-1.5, and if that ALSO
+    # refuses, fail loudly naming both.
     fb_lang = lang_spec.code if lang_spec else None
-    fb_model = runner_media.video_fallback_model(video_model, language=fb_lang)
-    fb_drops_end = bool(fb_model) and bool(end_image) and (
-        runner_media.fallback_drops_end_frame(video_model, language=fb_lang))
-    models_to_try = [video_model] + (
-        [fb_model] if fb_model and video_model != fb_model else [])
+    models_to_try = [video_model] + runner_media.video_fallback_chain(
+        video_model, language=fb_lang)
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
     # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
     # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment
@@ -1630,41 +1632,51 @@ async def _animate_one_video(
                     continue
                 break
         except Exception as e:
-            # Retry ONCE on the fallback model when THIS model REFUSED the clip
-            # AND a fallback model is still queued. "Refused" = a content-policy
-            # rejection, plus (on Veo only) an empty-output `no_media_generated`
-            # refusal — see runner_media.triggers_fallback. Timeouts, network
-            # errors and fal balance failures are NOT refusals and keep the loud
-            # fail path with their real reason.
+            # Step to the NEXT leg of the chain when THIS model REFUSED the clip
+            # AND a leg is still queued. "Refused" = a content-policy rejection,
+            # plus (on Veo only) an empty-output `no_media_generated` refusal —
+            # see runner_media.triggers_fallback. Timeouts, network errors and
+            # fal balance failures are NOT refusals and keep the loud fail path
+            # with their real reason.
             if (_model_idx + 1 < len(models_to_try)
                     and runner_media.triggers_fallback(active_model, e)):
-                video.fallback_model = fb_model
+                next_model = models_to_try[_model_idx + 1]
+                # Asked PER LEG: the Spanish Veo → Kling leg keeps the 🎯 end
+                # pose, the Kling → Grok leg behind it drops it.
+                fb_drops_end = bool(end_image) and runner_media.leg_drops_end_frame(
+                    video_model, next_model)
+                video.fallback_model = next_model
                 video.fallback_dropped_end_frame = fb_drops_end
                 video.status = VideoStatus.PROCESSING
                 _replace_video(job, jc, video)
                 await _emit(job.job_id, "video.fallback",
                             char_id=jc.char_id, video_id=video.video_id,
-                            model=fb_model, reason=str(e),
+                            model=next_model, reason=str(e),
                             dropped_end_frame=fb_drops_end)
                 if fb_drops_end:
                     logger.warning(
                         "job %s char %s video %s: falling back to %s — the "
                         "resolved end frame is DROPPED (%s has no end-frame "
                         "input)", job.job_id, jc.char_id, video.video_id,
-                        fb_model, fb_model)
+                        next_model, next_model)
                 continue
             video.status = VideoStatus.ERROR
             base = f"submit: {e}" if phase == "submit" else str(e)
+            # Name every leg that was actually tried, not just the last one — on
+            # a two-leg chain "kling-v3 och grok-imagine-1.5 nekades också" is
+            # the honest report.
+            fb_label = clip_failure.fallback_label(
+                models_to_try[1:_model_idx + 1])
             if video.fallback_model and content_policy.is_content_rejection(e):
                 # The fallback was tried and ALSO refused on content grounds —
-                # say so plainly (both providers blocked the clip).
-                video.error = (f"content-policy: reservmodellen {fb_model} "
+                # say so plainly (every provider blocked the clip).
+                video.error = (f"content-policy: {fb_label} "
                                f"nekades också ({phase}): {e}")
             elif video.fallback_model:
                 # We fell back but it failed for a NON-content reason (timeout /
                 # network / fal balance) — report the REAL cause, never a false
                 # content block (Hugo: fail loud, real reason).
-                video.error = f"reservmodellen {fb_model} misslyckades ({phase}): {e}"
+                video.error = f"{fb_label} misslyckades ({phase}): {e}"
             else:
                 video.error = base
             _replace_video(job, jc, video)

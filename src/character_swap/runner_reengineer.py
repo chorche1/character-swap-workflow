@@ -1087,21 +1087,19 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     model = _scene_video_model(entry, state)
     dur = _scene_duration(entry, state)
     dest = reengineer.reengineer_dir(re_id) / f"direct_clip_{scene_id}.mp4"
-    from character_swap import content_policy, pipeline, runner_media
-    # Content-policy / NSFW fallback (Hugo 2026-07-14): a direct clip rejected
-    # on moderation grounds retries ONCE on the fallback model before giving up
-    # — same rescue as the per-character swap clips in runner._animate_one_video,
-    # and resolved the same way: a SPANISH Veo clip always falls back to
-    # kling-v3 (Hugo 2026-08-04), everything else only with
-    # VIDEO_MODERATION_FALLBACK=1 (off since 2026-08-03 — a refused clip fails
-    # loudly instead). A direct clip has no per-character 🗣 flag, so the RUN's
-    # language gates it — the same value that built `prompt` above. Direct clips
-    # never carry an end frame, so no end-frame degradation is possible here
-    # either way.
-    fb_model = runner_media.video_fallback_model(
+    from character_swap import clip_failure, content_policy, pipeline, runner_media
+    # Content-policy / NSFW fallback CHAIN (Hugo 2026-07-14, chained 2026-08-06):
+    # a direct clip rejected on moderation grounds walks the same legs as the
+    # per-character swap clips in runner._animate_one_video, resolved the same
+    # way — a refused Veo clip goes es → kling-v3 → grok-imagine-1.5, any other
+    # language straight to grok-imagine-1.5, and GERMAN nowhere (it fails
+    # loudly); a NON-Veo clip only moves with VIDEO_MODERATION_FALLBACK=1 (off
+    # since 2026-08-03 — a refused clip fails loudly instead). A direct clip has
+    # no per-character 🗣 flag, so the RUN's language gates it — the same value
+    # that built `prompt` above. Direct clips never carry an end frame, so no
+    # end-frame degradation is possible here on any leg.
+    models_to_try = [model] + runner_media.video_fallback_chain(
         model, language=state.get("language") or None)
-    models_to_try = [model] + (
-        [fb_model] if fb_model and model != fb_model else [])
     for _midx, active_model in enumerate(models_to_try):
         try:
             provider_job_id = await asyncio.to_thread(
@@ -1124,25 +1122,28 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
         except Exception as e:
             if (_midx + 1 < len(models_to_try)
                     and runner_media.triggers_fallback(active_model, e)):
+                next_model = models_to_try[_midx + 1]
                 _log.warning("reengineer %s: direct clip scene %s rejected on "
                              "content policy by %s — retrying on %s",
-                             re_id, scene_id, active_model, fb_model)
+                             re_id, scene_id, active_model, next_model)
                 await events.publish(job.job_id,
                                      {"kind": "direct.clip.fallback",
                                       "job_id": job.job_id,
-                                      "scene_id": scene_id, "model": fb_model})
+                                      "scene_id": scene_id, "model": next_model})
                 continue
             _log.exception("reengineer %s: direct clip for scene %s failed",
                            re_id, scene_id)
             err = f"{type(e).__name__}: {e}"
-            if active_model == fb_model and model != fb_model:
+            # Name every leg actually tried, not just the last — a Spanish chain
+            # that ends on Grok must still say Kling refused it first.
+            fb_label = clip_failure.fallback_label(models_to_try[1:_midx + 1])
+            if fb_label:
                 # Distinguish a genuine content refusal by the fallback from a
                 # transient/billing failure on that leg (Hugo: real reason).
                 if content_policy.is_content_rejection(e):
-                    err = (f"content-policy: reservmodellen {fb_model} "
-                           f"nekades också: {e}")
+                    err = f"content-policy: {fb_label} nekades också: {e}"
                 else:
-                    err = f"reservmodellen {fb_model} misslyckades: {err}"
+                    err = f"{fb_label} misslyckades: {err}"
             await _persist_direct(re_id, scene_id, direct_error=err)
             return
 

@@ -27,7 +27,30 @@ import json
 import re
 from typing import Any
 
-__all__ = ["explain"]
+__all__ = ["explain", "fallback_label"]
+
+
+# ── the fallback vocabulary (producer + parser live together) ───────────────
+
+def fallback_label(models: list[str] | tuple[str, ...]) -> str:
+    """Name the rescue leg(s) a clip was moved onto, in Swedish.
+
+    The runners build their error strings with this and `explain()` below keys
+    off the word it produces (`_FALLBACK_RE`), so the two must not drift. A Veo
+    rescue can have TWO legs (Spanish: kling-v3 → grok-imagine-1.5) and naming
+    only the last one would hide that the first refused the clip as well.
+    """
+    models = list(models)
+    if not models:
+        return ""
+    if len(models) == 1:
+        return f"reservmodellen {models[0]}"
+    return ("reservmodellerna "
+            + " och ".join((", ".join(models[:-1]), models[-1])))
+
+
+# Matches BOTH "reservmodellen" and "reservmodellerna" — see fallback_label.
+_FALLBACK_RE = re.compile(r"reservmodell", re.I)
 
 
 # ── payload extraction ──────────────────────────────────────────────────────
@@ -242,7 +265,7 @@ def explain(error: str | None, *, model: str | None = None,
 
     # The runner wraps a fallback attempt's error — say plainly that BOTH
     # models refused rather than reporting only the last one.
-    if fallback_model and re.search(r"reservmodellen", error, re.I):
+    if fallback_model and _FALLBACK_RE.search(error):
         if kind == "content_policy":
             what = (f"Både den valda modellen och reservmodellen "
                     f"{fallback_model} nekade klippet på innehållsgrund. " + what)
