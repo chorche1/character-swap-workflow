@@ -145,13 +145,17 @@ def test_create_job_no_ambiguity_proceeds(wire, monkeypatch):
 @pytest.fixture
 def gate(monkeypatch, tmp_path):
     box = {"job": None, "states": {}, "kicked": []}
+    # ch_a = male, ch_f = FEMALE. The person directive is written per
+    # character precisely because those two must not read the same.
     plan = prompt_director.plan_from_scene_prompts(
-        "intent", {"s2": "BASE PROMPT s2"}, [("ch_a", "A")])
+        "intent", {"s2": "BASE PROMPT s2"}, [("ch_a", "A"), ("ch_f", "F")])
     job = Job(job_id="j_t", scene_id="s2", scene_image_path="/p",
               scene_ids=["s2"], scene_image_paths=["/p"], use_director=True,
               director_prompts_json=plan.model_dump_json(),
               characters={"ch_a": JobCharacter(char_id="ch_a", name="A",
-                          source_image_path="/c.png", status=CharStatus.QUEUED)},
+                          source_image_path="/c.png", status=CharStatus.QUEUED),
+                          "ch_f": JobCharacter(char_id="ch_f", name="F",
+                          source_image_path="/f.png", status=CharStatus.QUEUED)},
               origin="reengineer:re_t")
     box["job"] = job
 
@@ -165,6 +169,14 @@ def gate(monkeypatch, tmp_path):
         def get_scene(self, sid):
             return None
     monkeypatch.setattr(api, "store", lambda: _S())
+
+    genders = {"ch_a": "male", "ch_f": "female"}
+
+    class _CS:
+        def get_character(self, cid):
+            return CharacterAsset(char_id=cid, name=cid, filename=f"{cid}.png",
+                                  gender=genders.get(cid))
+    monkeypatch.setattr(runner, "store", lambda: _CS())
 
     box["states"]["re_t"] = {
         "re_id": "re_t", "status": "awaiting_person_choice", "job_id": "j_t",
@@ -200,7 +212,8 @@ def test_resolve_people_bakes_choice_and_kicks(gate):
     p = plan.lookup("ch_a", "s2")[0]
     assert p.startswith("BASE PROMPT s2")
     assert "Replace SPECIFICALLY the man blue on the right" in p
-    assert "keep the other people in the scene exactly as they are" in p
+    # The non-chosen person is named and locked, never removed.
+    assert "The woman red on the left is NOT the new character" in p
     assert "Remove the other people" not in p
     # Scene flag cleared + choice recorded; swap kicked.
     sc = box["states"]["re_t"]["scenes"][0]
@@ -208,6 +221,17 @@ def test_resolve_people_bakes_choice_and_kicks(gate):
     assert sc["swap_person_idx"] == 1
     assert "other_action" not in sc
     assert len(bg.tasks) == 1
+
+
+def test_resolve_people_keeps_people_descriptions(gate):
+    """Only the GATE flag is cleared. `people` stays on the entry: the
+    descriptions are the sole record of who was in frame, and rebuilding the
+    directive for a retake needs them."""
+    box = gate
+    asyncio.run(api.reengineer_resolve_people("re_t", BackgroundTasks(), _body()))
+    sc = box["states"]["re_t"]["scenes"][0]
+    assert "multi_person" not in sc
+    assert [p["description"] for p in sc["people"]] == ["woman red", "man blue"]
 
 
 def test_resolve_people_first_person_directive(gate):
@@ -232,6 +256,109 @@ def test_resolve_people_wrong_status_409(gate):
     with pytest.raises(HTTPException) as e:
         asyncio.run(api.reengineer_resolve_people("re_t", BackgroundTasks(), _body()))
     assert e.value.status_code == 409
+
+
+# ------------------------------------------------------- gender (Hugo 2026-08-06)
+#
+# re_a5613a883e: on a man+woman scene the user chose "the older man grey beard
+# on the left". All 6 MALE characters swapped onto the man correctly; both
+# FEMALE characters were painted onto the BLONDE WOMAN instead, leaving the
+# chosen man untouched — 4 of 4 images, both scenes. GPT Image 2 resolves the
+# new character by GENDER first and position second, so a position-only
+# directive loses whenever character and target are different genders.
+
+_MAN = {"position": "left", "description": "older man grey beard"}
+_WOMAN = {"position": "right", "description": "blonde woman denim jacket"}
+
+
+def test_described_gender_matches_whole_words_only():
+    # "woman" contains "man" — the substring must not win.
+    assert api._described_gender("blonde woman denim jacket") == "female"
+    assert api._described_gender("older man grey beard") == "male"
+    assert api._described_gender("person in a red top") is None
+
+
+def test_directive_states_the_characters_gender():
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert "The new character is a woman" in d
+    assert "the older man grey beard on the left becomes a woman" in d
+
+
+def test_directive_forbids_the_gender_substitution_that_broke_the_run():
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert ("NEVER put the new character on a different person in the frame "
+            "because that person's gender matches the new character better") in d
+    # …and the woman she was wrongly painted onto is named + locked.
+    assert ("The blonde woman denim jacket on the right is NOT the new character "
+            "and must stay exactly as in the original photo") in d
+
+
+def test_directive_allows_exactly_one_changed_face():
+    """Helene's first retake landed on the right person but ALSO replaced the
+    co-star — both women in frame came back as Helene. Her reference and the
+    scene's co-star are both blonde women of a similar age, so naming the
+    co-star was not enough; the count is."""
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert ("Exactly ONE face in the image changes; every other face stays "
+            "identical to the original photo.") in d
+
+
+def test_directive_calls_out_a_real_gender_mismatch():
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert ("The older man grey beard on the left is not the same gender as the "
+            "new character — replace them anyway.") in d
+
+
+def test_directive_claims_no_mismatch_when_genders_agree():
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="male")
+    assert "The new character is a man" in d
+    assert "not the same gender" not in d       # would be a lie
+
+
+def test_directive_forbids_mirroring_the_frame():
+    # Susanne's take also flipped the composition (man moved left→right).
+    d = api._person_directive(_MAN, others=[_WOMAN], gender="female")
+    assert "do not mirror, flip or rearrange the people" in d
+
+
+def test_directive_without_a_known_gender_stays_position_only():
+    d = api._person_directive(_MAN, gender=None)
+    assert "The new character is a" not in d
+    assert "Replace SPECIFICALLY the older man grey beard on the left" in d
+    assert "Keep the other people in the scene exactly as they are." in d
+
+
+def test_resolve_people_writes_a_DIFFERENT_directive_per_character(gate):
+    """The regression test for the run itself: one shared scene prompt cannot
+    express 'she replaces the man', so the directive is written per character."""
+    box = gate
+    box["states"]["re_t"]["scenes"][0]["people"] = [_MAN, _WOMAN]
+    asyncio.run(api.reengineer_resolve_people(
+        "re_t", BackgroundTasks(), _body(swap_person_idx=0)))
+    plan = prompt_director.SwapDirectorPlan.model_validate_json(
+        box["job"].director_prompts_json)
+    male = plan.lookup("ch_a", "s2")[0]
+    female = plan.lookup("ch_f", "s2")[0]
+    assert male != female
+    # Both target the SAME person — the man the user picked.
+    for p in (male, female):
+        assert p.startswith("BASE PROMPT s2")
+        assert "Replace SPECIFICALLY the older man grey beard on the left" in p
+    assert "The new character is a woman" in female
+    assert "The new character is a man" in male
+    assert "not the same gender" in female and "not the same gender" not in male
+
+
+def test_replace_scene_prompt_in_plan_can_scope_to_one_character():
+    plan = prompt_director.plan_from_scene_prompts(
+        "i", {"s1": "BASE"}, [("ch_a", "A"), ("ch_f", "F")])
+    assert prompt_director.replace_scene_prompt_in_plan(
+        plan, "s1", "ONLY-F", char_id="ch_f") is True
+    assert plan.lookup("ch_f", "s1") == ["ONLY-F"]
+    assert plan.lookup("ch_a", "s1") == ["BASE"]
+    # Unknown character changes nothing.
+    assert prompt_director.replace_scene_prompt_in_plan(
+        plan, "s1", "X", char_id="ch_nope") is False
 
 
 # --------------------------------------------------------------------------- resume + frontend

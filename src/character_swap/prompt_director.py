@@ -1244,12 +1244,21 @@ def direct_moderation_rewrite(
 
 
 def replace_scene_prompt_in_plan(plan: SwapDirectorPlan, scene_id: str,
-                                 prompt: str) -> bool:
+                                 prompt: str, *,
+                                 char_id: str | None = None) -> bool:
     """Overwrite the cached plan's prompt for ONE scene across every
     character (scene prompts are shared — identity varies via the reference
-    image, not the text). Returns True if any entry changed."""
+    image, not the text). Returns True if any entry changed.
+
+    `char_id` narrows the write to ONE character. The multi-person swap
+    directive needs this (Hugo 2026-08-06): which person in frame to replace
+    reads differently for a female character than a male one, so that one
+    clause is per character even though the rest of the scene prompt is not.
+    """
     changed = False
     for cp in plan.characters:
+        if char_id is not None and cp.char_id != char_id:
+            continue
         for sp in cp.scenes:
             if sp.scene_id == scene_id:
                 for vp in sp.variants:

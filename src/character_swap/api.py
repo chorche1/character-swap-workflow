@@ -5973,22 +5973,98 @@ class ResolvePeopleBody(BaseModel):
     scenes: list[ResolvePeopleSceneBody] = Field(default_factory=list)
 
 
-def _person_directive(person: dict) -> str:
-    """Directive appended to a multi-person scene's swap prompt once the user
-    picks WHICH person to swap. The other people always stay as they are."""
+_GENDER_NOUN = {"male": "man", "female": "woman"}
+
+# Words that give away a described person's gender. Longest-match first so
+# "woman" never reads as "man" (substring) and "grandmother" never as "her".
+_GENDER_WORDS: tuple[tuple[str, str], ...] = (
+    ("woman", "female"), ("women", "female"), ("lady", "female"),
+    ("girl", "female"), ("female", "female"), ("mother", "female"),
+    ("grandmother", "female"), ("wife", "female"), ("blonde", "female"),
+    ("man", "male"), ("men", "male"), ("guy", "male"), ("boy", "male"),
+    ("male", "male"), ("father", "male"), ("grandfather", "male"),
+    ("husband", "male"), ("beard", "male"), ("bearded", "male"),
+)
+
+
+def _described_gender(description: str) -> str | None:
+    """Best-effort gender of a Director-described person ("older man grey
+    beard" → "male"). Whole-word match only, so "woman" cannot register as
+    "man". None when the description says nothing about gender."""
+    words = re.findall(r"[a-z]+", (description or "").lower())
+    for token, gender in _GENDER_WORDS:
+        if token in words:
+            return gender
+    return None
+
+
+def _person_phrase(person: dict) -> str:
+    """"the older man grey beard on the left" — position + description as the
+    Director reported them, degrading gracefully when either is missing."""
     pos = (person.get("position") or "").strip()
     desc = (person.get("description") or "").strip()
     if pos and desc:
-        who = f"the {desc} on the {pos}"
-    elif desc:
-        who = f"the {desc}"
-    elif pos:
-        who = f"the person on the {pos}"
+        return f"the {desc} on the {pos}"
+    if desc:
+        return f"the {desc}"
+    if pos:
+        return f"the person on the {pos}"
+    return "the indicated person"
+
+
+def _person_directive(person: dict, *, others: list[dict] | None = None,
+                      gender: str | None = None) -> str:
+    """Directive appended to a multi-person scene's swap prompt once the user
+    picks WHICH person to swap. The other people always stay as they are.
+
+    Built PER CHARACTER, because the hard part is gender (Hugo 2026-08-06).
+    In re_a5613a883e the user picked "the older man grey beard on the left" on
+    a man+woman scene: all 6 MALE characters landed on the man correctly, but
+    both FEMALE characters (Helene, Susanne) were painted onto the BLONDE
+    WOMAN instead and the chosen man was left untouched — 4 of 4 images, both
+    scenes. GPT Image 2 resolves "the new character" by gender first and
+    position second, so a position-only directive loses whenever the character
+    and the target person are different genders.
+
+    So when we know the character's gender we say it out loud, state that the
+    target CHANGES gender, and forbid the substitution the model keeps making.
+    The other people are named and locked (Susanne's take also mirrored the
+    frame, hence the explicit no-mirror clause)."""
+    who = _person_phrase(person)
+    out = [f" Multiple people are visible in this scene. Replace SPECIFICALLY "
+           f"{who} with the new character — {who} is the ONLY person you may "
+           f"change."]
+
+    noun = _GENDER_NOUN.get((gender or "").strip().lower())
+    if noun:
+        out.append(f" The new character is a {noun}, so {who} becomes a {noun} "
+                   f"in the result: that position gets the new character's face, "
+                   f"hair, skin tone and body.")
+        if _described_gender(person.get("description") or "") not in (None, gender):
+            out.append(f" {who[0].upper()}{who[1:]} is not the same gender as "
+                       f"the new character — replace them anyway.")
+        out.append(f" NEVER put the new character on a different person in the "
+                   f"frame because that person's gender matches the new "
+                   f"character better.")
+
+    named = [_person_phrase(p) for p in (others or [])]
+    named = [n for n in named if n != "the indicated person"]
+    if named:
+        joined = named[0] if len(named) == 1 else (
+            ", ".join(named[:-1]) + " and " + named[-1])
+        out.append(f" {joined[0].upper()}{joined[1:]} is NOT the new character "
+                   f"and must stay exactly as in the original photo — same "
+                   f"face, same hair, same clothes.")
     else:
-        who = "the indicated person"
-    return (f" Multiple people are visible in this scene. Replace SPECIFICALLY "
-            f"{who} with the new character; keep the other people in the scene "
-            f"exactly as they are and do not change anyone else's identity.")
+        out.append(" Keep the other people in the scene exactly as they are.")
+    # Helene's first retake put her face on BOTH people (her reference and the
+    # scene's co-star are both blonde women of a similar age, so the identity
+    # bled across). Counting faces is the constraint that states it plainly.
+    out.append(" Exactly ONE face in the image changes; every other face stays "
+               "identical to the original photo. Keep every person on their "
+               "original side of the frame — do not mirror, flip or rearrange "
+               "the people.")
+    return "".join(out)
 
 
 @app.post("/api/reengineer/{re_id}/resolve_people")
@@ -6027,12 +6103,23 @@ async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTask
                          for cp in plan.characters for sp in cp.scenes
                          if sp.scene_id == sid and sp.variants), None)
             if base is not None:
-                prompt_director.replace_scene_prompt_in_plan(
-                    plan, sid, base + _person_directive(people[pi]))
+                others = [p for j, p in enumerate(people) if j != pi]
+                # PER CHARACTER, not once for the scene: the directive names
+                # the character's gender so a female character cannot be
+                # painted onto the wrong person in frame (see _person_directive).
+                for cid in job.characters:
+                    prompt_director.replace_scene_prompt_in_plan(
+                        plan, sid,
+                        base + _person_directive(
+                            people[pi], others=others,
+                            gender=runner._character_gender(cid)),
+                        char_id=cid)
         # Record the choice + clear the gate flag so the scene shows normally.
+        # `people` is KEPT (only the gate flag goes): the descriptions are the
+        # only record of who was in frame, and re-deriving the directive for a
+        # retake needs them.
         e["swap_person_idx"] = pi
         e.pop("multi_person", None)
-        e.pop("people", None)
 
     if plan is not None:
         job.director_prompts_json = plan.model_dump_json()
