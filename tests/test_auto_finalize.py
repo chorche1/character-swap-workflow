@@ -92,18 +92,29 @@ def _patch_telegram(monkeypatch):
 
 # ------------------------------------------------------ the success gate
 
+def _mp4(tmp_path, name: str) -> str:
+    """A clip file that actually EXISTS. The gate resolves each approved image
+    through `pick_clip_for_variant`, exactly like the build does, and that
+    picker ignores a DONE row whose file is gone — so a fixture pointing at a
+    non-existent path would read as an uncovered approval and mask the cause
+    the test is actually asserting."""
+    p = tmp_path / name
+    p.write_bytes(b"v")
+    return str(p)
+
+
 def test_all_videos_successful_true_when_all_done(tmp_path):
     job = _job(tmp_path, chars=[
-        _char("c1", "Chang", clips=[("v1", "done")], path="/a.mp4"),
-        _char("c2", "Ravi", clips=[("v2", "done")], path="/b.mp4"),
+        _char("c1", "Chang", clips=[("v1", "done")], path=_mp4(tmp_path, "a.mp4")),
+        _char("c2", "Ravi", clips=[("v2", "done")], path=_mp4(tmp_path, "b.mp4")),
     ])
     assert auto_finalize._all_videos_successful(job) is True
 
 
 def test_all_videos_successful_false_on_one_failed(tmp_path):
     job = _job(tmp_path, chars=[
-        _char("c1", "Chang", clips=[("v1", "done")], path="/a.mp4"),
-        _char("c2", "Ravi", clips=[("v2", "failed")], path="/b.mp4"),
+        _char("c1", "Chang", clips=[("v1", "done")], path=_mp4(tmp_path, "a.mp4")),
+        _char("c2", "Ravi", clips=[("v2", "failed")], path=_mp4(tmp_path, "b.mp4")),
     ])
     assert auto_finalize._all_videos_successful(job) is False
 
@@ -111,14 +122,14 @@ def test_all_videos_successful_false_on_one_failed(tmp_path):
 def test_all_videos_successful_false_on_pending(tmp_path):
     job = _job(tmp_path, chars=[
         _char("c1", "Chang", clips=[("v1", "done"), ("v1b", "pending")],
-              path="/a.mp4"),
+              path=_mp4(tmp_path, "a.mp4")),
     ])
     assert auto_finalize._all_videos_successful(job) is False
 
 
 def test_all_videos_successful_false_when_no_approvals(tmp_path):
     job = _job(tmp_path, chars=[
-        _char("c1", "Chang", clips=[("v1", "done")], path="/a.mp4",
+        _char("c1", "Chang", clips=[("v1", "done")], path=_mp4(tmp_path, "a.mp4"),
               approved=False),
     ])
     assert auto_finalize._all_videos_successful(job) is False
@@ -129,6 +140,114 @@ def test_all_videos_successful_false_when_approved_no_videos(tmp_path):
     jc.approved_variant_ids = ["var1"]        # approved but nothing rendered
     job = _job(tmp_path, chars=[jc])
     assert auto_finalize._all_videos_successful(job) is False
+
+
+# --------------------------------- per-approved-image coverage (Hugo 2026-08-06)
+#
+# "Säkerställ att ingen swap-körning skickas till telegram automatiskt om inte
+# alla approved bilder fick en video som inte blev nekad."
+#
+# Counting the VIDEO ROWS cannot answer that: it only sees clips that exist.
+# Real case — j_86b8c588a8 (run re_c4f2bb9d0a, 2026-07-30): Connor had 5
+# approved images and 4 clip rows, all DONE. The old gate passed, Step-6
+# downgraded the unfillable scene to a WARNING and still marked the character
+# done, and a 4-scene final was auto-delivered to his channel.
+
+
+def _multi_scene_char(cid: str, name: str, *, approved: list[str],
+                      clips: list[tuple[str, str, str]]) -> JobCharacter:
+    """clips = (video_id, source_variant_id, file path). Approvals and clips
+    are declared independently so a slot can be left with NO row at all."""
+    jc = JobCharacter(char_id=cid, name=name, source_image_path="x.png")
+    jc.approved_variant_ids = list(approved)
+    jc.videos = [VideoVariant(video_id=v, grok_job_id="g-" + v,
+                              source_variant_id=src,
+                              status=VideoStatus.DONE, final_video_path=p)
+                 for v, src, p in clips]
+    return jc
+
+
+def test_gate_blocks_when_an_approved_image_has_no_clip_row_at_all(tmp_path):
+    """The Connor case: every row that EXISTS is done, but one approval never
+    got a row. The old gate saw only the rows and said yes."""
+    jc = _multi_scene_char(
+        "c1", "Connor", approved=["var1", "var2", "var3"],
+        clips=[("vd1", "var1", _mp4(tmp_path, "1.mp4")),
+               ("vd2", "var2", _mp4(tmp_path, "2.mp4"))])   # var3: nothing
+    assert all(v.status == VideoStatus.DONE for v in jc.videos)  # old gate: pass
+    assert auto_finalize._uncovered_approvals(jc) == ["var3"]
+    assert auto_finalize._all_videos_successful(
+        _job(tmp_path, chars=[jc])) is False
+
+
+def test_gate_blocks_when_an_approved_images_only_clip_was_refused(tmp_path):
+    """A content-policy refusal fails the clip loudly (VIDEO_MODERATION_FALLBACK
+    is off since 2026-08-03), leaving the approval uncovered."""
+    jc = _multi_scene_char("c1", "Connor", approved=["var1", "var2"],
+                           clips=[("vd1", "var1", _mp4(tmp_path, "1.mp4"))])
+    jc.videos.append(VideoVariant(video_id="vd2", grok_job_id="g",
+                                  source_variant_id="var2",
+                                  status=VideoStatus.FAILED,
+                                  error="content_policy_violation"))
+    assert auto_finalize._uncovered_approvals(jc) == ["var2"]
+    assert auto_finalize._all_videos_successful(
+        _job(tmp_path, chars=[jc])) is False
+
+
+def test_gate_blocks_when_a_done_clips_file_is_gone(tmp_path):
+    """The build resolves clips through the same picker, which skips a DONE row
+    whose file vanished — so the gate must too, or it green-lights a final the
+    compile cannot fill."""
+    jc = _multi_scene_char("c1", "Connor", approved=["var1"],
+                           clips=[("vd1", "var1", str(tmp_path / "gone.mp4"))])
+    assert auto_finalize._uncovered_approvals(jc) == ["var1"]
+    assert auto_finalize._all_videos_successful(
+        _job(tmp_path, chars=[jc])) is False
+
+
+def test_gate_passes_when_every_approved_image_has_its_own_clip(tmp_path):
+    jc = _multi_scene_char(
+        "c1", "Connor", approved=["var1", "var2", "var3"],
+        clips=[("vd1", "var1", _mp4(tmp_path, "1.mp4")),
+               ("vd2", "var2", _mp4(tmp_path, "2.mp4")),
+               ("vd3", "var3", _mp4(tmp_path, "3.mp4"))])
+    assert auto_finalize._uncovered_approvals(jc) == []
+    assert auto_finalize._all_videos_successful(
+        _job(tmp_path, chars=[jc])) is True
+
+
+def test_send_refuses_an_incomplete_final_even_when_compile_says_done(
+        monkeypatch, tmp_path):
+    """The last lock. `compile_status == "done"` is not proof of completeness:
+    Step-6 turns a scene it cannot fill into a warning and still finishes. The
+    send re-asks per approved image and refuses, loudly, with a reason."""
+    final = tmp_path / "final.mp4"
+    final.write_bytes(b"f")
+    jc = _multi_scene_char("c1", "Connor", approved=["var1", "var2"],
+                           clips=[("vd1", "var1", _mp4(tmp_path, "1.mp4"))])
+    jc.compile_status = "done"                  # compile only WARNED
+    jc.compiled_video_path = str(final)
+    job = _job(tmp_path, chars=[jc])
+
+    class _Asset:
+        telegram_chat_id = "@connor"
+    monkeypatch.setattr(auto_finalize, "store",
+                        lambda: _FakeStore(job, {"c1": _Asset()}))
+    calls = _patch_telegram(monkeypatch)
+    events_seen = {}
+
+    async def fake_emit(job_id, kind, **data):
+        events_seen[kind] = data
+    monkeypatch.setattr(auto_finalize, "_emit", fake_emit)
+    monkeypatch.setattr(auto_finalize, "_notify_telegram_result",
+                        lambda *a, **k: None)
+
+    _run(auto_finalize._send_job_finals("j1"))
+
+    assert calls["sends"] == []                 # nothing left the machine
+    failed = events_seen["job.auto_telegram_sent"]["failed"]
+    assert "c1" in failed and "skickades INTE automatiskt" in failed["c1"]
+    assert not (jc.telegram_sends or {}).get("final")
 
 
 # ------------------------------------------- finalize_swap_job gating

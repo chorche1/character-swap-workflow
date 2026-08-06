@@ -72,11 +72,46 @@ async def _emit(job_id: str | None, kind: str, **data) -> None:
     await events.publish(job_id, payload)
 
 
+def _approved_ids(jc) -> list[str]:
+    """The character's approved image ids (multi-approve list, falling back to
+    the legacy single field)."""
+    ids = list(jc.approved_variant_ids or [])
+    if not ids and jc.approved_variant_id:
+        ids = [jc.approved_variant_id]
+    return ids
+
+
+def _uncovered_approvals(jc) -> list[str]:
+    """Approved images that did NOT get a usable clip.
+
+    Hugo 2026-08-06: "ingen swap-körning ska skickas till telegram automatiskt
+    om inte alla approved bilder fick en video som inte blev nekad."
+
+    Checking the VIDEO ROWS alone cannot answer that — it only sees the clips
+    that exist. An approved image with NO row at all is invisible to it, and
+    that state is reachable in production: in j_86b8c588a8 (run re_c4f2bb9d0a,
+    2026-07-30) Connor had 5 approved images and only 4 clip rows, and the
+    Step-6 compile treats a scene it cannot fill as a WARNING, not a failure —
+    so a 4-scene final was built, marked `done`, and auto-delivered.
+
+    So ask the question the final actually depends on, per approved image:
+    is there a DONE take with its file on disk? `pick_clip_for_variant` is the
+    same picker the compile uses, so this gate and the build cannot disagree.
+    A refused clip (content policy) leaves a FAILED row, a lost/never-created
+    slot leaves none — both come back uncovered.
+    """
+    from character_swap import runner          # lazy: runner imports us back
+    return [vid for vid in _approved_ids(jc)
+            if runner.pick_clip_for_variant(jc, vid) is None]
+
+
 def _all_videos_successful(job: Job) -> bool:
-    """True iff EVERY character with an approval has clips AND all of them are
-    DONE (none pending / failed / errored) — Hugo's "alla videor blir lyckade"
-    gate. A single failed clip returns False, so the auto chain waits for the
-    user's retry instead of shipping a final that silently drops a scene."""
+    """True iff EVERY character with an approval has clips, all of them are
+    DONE (none pending / failed / errored), AND every approved image is
+    covered by one of them — Hugo's "alla videor blir lyckade" gate. A single
+    failed clip or a single uncovered approval returns False, so the auto
+    chain waits for the user's retry instead of shipping a final that silently
+    drops a scene."""
     approved = [jc for jc in job.characters.values()
                 if (jc.approved_variant_ids or jc.approved_variant_id)]
     if not approved:
@@ -89,6 +124,8 @@ def _all_videos_successful(job: Job) -> bool:
             if v.status != VideoStatus.DONE:
                 return False       # pending / failed / errored → not all good
             saw_done_video = True
+        if _uncovered_approvals(jc):
+            return False           # an approved image with no clip of its own
     return saw_done_video
 
 
@@ -166,6 +203,23 @@ async def _send_job_finals(job_id: str) -> None:
             continue
         path = jc.compiled_video_path
         if path and jc.compile_status == "done" and Path(path).is_file():
+            # Second lock on the same invariant, at the last moment before the
+            # bytes leave: `compile_status == "done"` is NOT proof the final is
+            # complete — Step-6 downgrades a scene it cannot fill to a warning
+            # and still marks the character done. Re-ask here so a clip that
+            # died (or a row that vanished) between the gate and the upload
+            # cannot ship a short reel to a character's channel. The manual ➤
+            # button stays open: overriding this is the user's call, not ours.
+            gaps = _uncovered_approvals(jc)
+            if gaps:
+                failed[cid] = (
+                    f"{jc.name or cid}: {len(gaps)} godkänd(a) bild(er) fick "
+                    "inget klipp — finalen är ofullständig och skickades INTE "
+                    "automatiskt. Ta om klippet och bygg ihop igen.")
+                logger.warning("auto-finalize %s: refusing to send %s — %d "
+                               "approved image(s) without a clip: %s",
+                               job_id, cid, len(gaps), ", ".join(gaps))
+                continue
             asset = s.get_character(cid)
             chat_id = (asset.telegram_chat_id if asset else None) or ""
             if not chat_id:
