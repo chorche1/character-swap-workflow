@@ -1691,9 +1691,10 @@
                   </div>
                   <!-- Multi-person gate: pick WHICH person to swap + what to do
                        with the other(s). Only for ambiguous scenes. -->
-                  <template x-if="r.status === 'awaiting_person_choice' && sc.multi_person">
+                  <template x-if="(r.status === 'awaiting_person_choice' || sc.awaiting_person) && sc.multi_person">
                     <div class="mt-2 p-3 rounded-lg border border-violet-200 dark:border-violet-800 bg-violet-50 dark:bg-violet-950/30 space-y-2">
                       <div class="text-[11px] font-medium text-violet-700 dark:text-violet-300">Flera personer i scenen — vem ska bytas ut?</div>
+                      <div x-show="sc.awaiting_person" class="text-[10px] text-violet-600 dark:text-violet-400">Bilderna för den här scenen väntar tills du svarat. Resten av körningen påverkas inte.</div>
                       <div class="space-y-1">
                         <template x-for="(p, pi) in (sc.people || [])" :key="sc.idx + '-p-' + pi">
                           <label class="flex items-center gap-2 text-[11px] cursor-pointer">
@@ -1705,6 +1706,12 @@
                         </template>
                       </div>
                       <div class="text-[10px] text-neutral-400 dark:text-neutral-500">De andra personerna lämnas som de är.</div>
+                      <!-- Added-scene gate (Hugo 2026-08-06): this scene alone
+                           is waiting, so it gets its own submit — the run-level
+                           '▶ Fortsätt' button below only exists at run start. -->
+                      <button x-show="sc.awaiting_person"
+                              class="px-2.5 py-1 rounded-md bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-medium"
+                              @click="submitReengineerScenePersonChoice(r, sc)">▶ Generera bilder för scenen</button>
                     </div>
                   </template>
                   <!-- motion prompt: editable at the gate and in edit mode -->

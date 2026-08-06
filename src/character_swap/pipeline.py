@@ -518,6 +518,45 @@ def _flip_image_roles(prompt: str) -> str:
                   .replace("\x00", "Image 2"))
 
 
+# CAST LOCK (Hugo 2026-08-06, re_a5613a883e scene 2). Every swap prompt in this
+# module says "Replace THE PERSON" — singular — and the constraint list forbids
+# ADDING people while saying nothing about removing them. On a two-person photo
+# that is an open question, and nine characters answered it nine different ways:
+# the second person deleted in most, kept in three, and once the new character
+# was painted onto HER instead. This clause states the invariant that was only
+# ever implied.
+#
+# Appended at DISPATCH rather than baked into the prompt builders, deliberately:
+#   1. `stock_swap_prompts()` keeps returning the exact strings already stored on
+#      existing jobs, so an old job's prompt is still recognised as stock and
+#      still gets the engine-appropriate rebuild on a retry. Editing the builders
+#      would silently reclassify every stored prompt as "custom" and feed
+#      gpt2-id-swap the long scene-first template it measurably renders worse
+#      from (6.00 vs 6.95 in the bake-off).
+#   2. It reaches CUSTOM prompts too — the AI Director's per-scene prompts, the
+#      🪄 rewrites and anything the user typed. Those never had the rule either,
+#      and the Director's are exactly what a multi-person scene runs on.
+# Which person to replace is NOT decided here: when the person-choice gate has
+# run, `api._person_directive` names them and is appended after this. Without it
+# the model still picks, but it can no longer delete anyone while picking.
+CAST_LOCK = (
+    " If more than one person is visible, replace ONLY one of them and leave "
+    "every other person in the photo exactly as they are — same face, same "
+    "hair, same hands, same clothes, same position in the frame. Never delete, "
+    "omit, crop out or merge away a person: the finished photo shows the SAME "
+    "number of people as the original."
+)
+
+
+def with_cast_lock(prompt: str) -> str:
+    """Append `CAST_LOCK` to an engine-effective swap prompt, once. Idempotent
+    on the exact clause so a re-dispatch (QC retry, regenerate) cannot stack
+    copies of it."""
+    if CAST_LOCK.strip() in prompt:
+        return prompt
+    return prompt.rstrip() + CAST_LOCK
+
+
 def stock_swap_prompts(outfit_mode: str = "scene",
                        outfit_text: str | None = None) -> set[str]:
     """Every "stock" (non-user-customized) swap prompt for an outfit mode,
@@ -656,12 +695,12 @@ def _dispatch_variant(
             character_name=character_name,
             dest=dest,
             job_id=job_id,
-            prompt=eff_prompt,
+            prompt=with_cast_lock(eff_prompt),
             extra_reference_image=extra_reference_image,
         )
     if model == "grok-image":
         data = grok.generate_image(
-            prompt=prompt,
+            prompt=with_cast_lock(prompt),
             character=character_name,
             app_job_id=job_id,
         )
@@ -679,7 +718,7 @@ def _dispatch_variant(
             nb_prompt = build_edit_swap_prompt(outfit_mode, outfit_text,
                                                background_mode=bg_mode)
         data = google_genai.generate_nano_banana(
-            prompt=nb_prompt,
+            prompt=with_cast_lock(nb_prompt),
             reference_images=refs,
             app_job_id=job_id,
             model=model,
@@ -702,7 +741,7 @@ def _dispatch_variant(
             model_slug=model,
             scene_image=scene_image,
             character_image=character_image,
-            prompt=effective,
+            prompt=with_cast_lock(effective),
             aspect_ratio="9:16",
             app_job_id=job_id,
             extra_reference_image=extra_reference_image,
@@ -723,7 +762,7 @@ def _dispatch_variant(
         if extra_reference_image is not None:
             refs.append(extra_reference_image)
         image_bytes = openai_image.generate(
-            prompt=effective,
+            prompt=with_cast_lock(effective),
             reference_images=refs,
             phase="generate",
             character=character_name,

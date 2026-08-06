@@ -494,6 +494,14 @@ async def _generate_one_variant(
                 # image looks straight into the camera — the judge must
                 # ENFORCE it, not fail it as a SCENE mismatch.
                 camera_gaze=job.from_reengineer,
+                # Multi-person scenes only (Hugo 2026-08-06): how many people
+                # are in THIS scene and which one the user chose to replace.
+                # Absent for every single-subject scene, so the judge stays as
+                # lenient there as the catastrophe-only policy demands.
+                scene_people_count=(job.scene_people_counts or {}).get(
+                    variant.scene_id or ""),
+                swap_target=(job.scene_swap_targets or {}).get(
+                    variant.scene_id or ""),
                 job_id=job.job_id,
             ) if qc_on else None)
             if verdict is None:

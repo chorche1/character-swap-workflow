@@ -63,7 +63,9 @@ def test_user_idfirst_prompt_round_trips_to_engine(monkeypatch, tmp_path):
         model="gpt2-id-swap", scene_image=scene, character_image=char,
         character_name="X", prompt=stored, dest=tmp_path / "o.png", job_id=None)
 
-    assert seen["prompt"] == user_typed                  # engine == what user typed
+    # engine == what the user typed, plus the always-on cast lock every swap
+    # dispatch appends (2026-08-06) — the user's own words are untouched.
+    assert seen["prompt"] == user_typed + pipeline.CAST_LOCK
     assert seen["reference_images"] == [char, scene]     # identity-first ref order
 
 
@@ -80,7 +82,8 @@ def test_display_round_trip_matches_engine(monkeypatch, tmp_path):
     pipeline._dispatch_variant(
         model="gpt2-id-swap", scene_image=scene, character_image=char,
         character_name="X", prompt=stored, dest=tmp_path / "o.png", job_id=None)
-    assert seen["prompt"] == display         # what you SEE == what the engine RUNS
+    # what you SEE == what the engine RUNS (+ the always-on cast lock).
+    assert seen["prompt"] == display + pipeline.CAST_LOCK
 
 
 # --- engine-aware default (get_swap_defaults) -------------------------------

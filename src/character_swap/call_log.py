@@ -49,6 +49,9 @@ def _cost_usd(phase: str, ok: bool, payload: dict | None = None) -> float:
     # 👥 two-person scene (speaker_fix.py).
     if phase == "speaker_fix":
         return settings.speaker_fix_price_usd
+    # People detection — one Sonnet vision call per scene IMAGE (scene_people.py).
+    if phase == "scene_people":
+        return settings.scene_people_price_usd
     # Chat tab — each agent-loop iteration is one Opus call (vision + tool use).
     if phase == "chat":
         return settings.claude_opus_price_usd

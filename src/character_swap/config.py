@@ -403,6 +403,14 @@ class Settings(BaseSettings):
                                    validation_alias="SPEAKER_FIX_MODEL")
     speaker_fix_price_usd: float = Field(
         default=0.01, validation_alias="SPEAKER_FIX_PRICE_USD")
+    # People detection for swap scenes (scene_people.py, Hugo 2026-08-06): one
+    # vision call per scene IMAGE — not per character — that answers "is it
+    # ambiguous which person should be replaced here?". Same read-the-frame
+    # judge class as image QC and the speaker fix, so Sonnet, not Opus.
+    scene_people_model: str = Field(default="claude-sonnet-4-6",
+                                    validation_alias="SCENE_PEOPLE_MODEL")
+    scene_people_price_usd: float = Field(
+        default=0.01, validation_alias="SCENE_PEOPLE_PRICE_USD")
     # WRONG-LANGUAGE clip retries (Hugo 2026-08-02). Independent of
     # VIDEO_QC_MAX_RETRIES, which he deliberately runs at 0 (flag-only) for the
     # fuzzy garbled-speech check: a 🇪🇸/🇩🇪 character whose clip came out

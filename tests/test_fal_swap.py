@@ -139,7 +139,10 @@ def test_dispatch_routes_fal_slugs(monkeypatch, tmp_path):
     )
     assert got == dest and dest.read_bytes() == b"img"
     assert seen["model_slug"] == "kontext-max-swap"
-    assert seen["prompt"] == "PP"
+    # The custom prompt reaches the engine verbatim, plus the always-on cast
+    # lock every swap dispatch appends (2026-08-06).
+    assert seen["prompt"].startswith("PP")
+    assert pipeline.CAST_LOCK.strip() in seen["prompt"]
     assert seen["app_job_id"] == "j9"
 
 
@@ -152,10 +155,11 @@ def test_dispatch_default_prompt_swapped_for_edit_prompt(monkeypatch, tmp_path):
     common = dict(model="qwen-edit-swap", scene_image=Path("/s.png"),
                   character_image=Path("/c.png"), character_name="X",
                   dest=tmp_path / "o.png", job_id=None)
+    # Every dispatched prompt also carries the always-on cast lock (2026-08-06).
     pipeline._dispatch_variant(prompt=pipeline.GENERATION_PROMPT, **common)
-    assert seen["prompt"] == pipeline.EDIT_SWAP_PROMPT
+    assert seen["prompt"] == pipeline.EDIT_SWAP_PROMPT + pipeline.CAST_LOCK
     pipeline._dispatch_variant(prompt="my custom swap", **common)
-    assert seen["prompt"] == "my custom swap"
+    assert seen["prompt"] == "my custom swap" + pipeline.CAST_LOCK
 
 
 def test_dispatch_unknown_model_still_raises(tmp_path):

@@ -356,6 +356,22 @@ class Job(BaseModel):
     # scene so the credits are only spent where two people can be confused —
     # see speaker_fix.py.
     two_person_scenes: list[str] = Field(default_factory=list)
+    # How many people `scene_people.detect_people` (or the Director's own
+    # metadata) found in each scene image — {scene_id: count}, written only for
+    # scenes with 2+ people (Hugo 2026-08-06). Image QC reads it to enforce that
+    # a two-person scene comes back with two people: in re_a5613a883e the woman
+    # on the right vanished from most of the nine swaps and every one PASSED,
+    # because the judge's MISSING/EXTRA PEOPLE class only fires on "no person at
+    # all" or an invented extra. A missing entry means "not measured" and leaves
+    # the judge exactly as lenient as before — never stricter by default.
+    scene_people_counts: dict[str, int] = Field(default_factory=dict)
+    # {scene_id: "the older man grey beard on the left"} — WHICH person the user
+    # picked at the person-choice gate, in the same words the swap prompt names
+    # them by. Written only for scenes that went through the gate; QC uses it to
+    # catch the other half of the failure (the character painted onto the wrong
+    # person in frame, with the chosen one left untouched — 4 of 4 images for
+    # both female characters in re_a5613a883e).
+    scene_swap_targets: dict[str, str] = Field(default_factory=dict)
     characters: dict[str, JobCharacter] = Field(default_factory=dict)
     prompt: str | None = None                # custom swap prompt; falls back to pipeline.GENERATION_PROMPT
     image_model: str = "gpt-image"           # which adapter generates the variants

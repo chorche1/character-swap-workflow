@@ -54,6 +54,7 @@ from character_swap import (
     runner,
     runner_compile,
     runner_media,
+    scene_people,
     swap_qc,
     video_edit,
 )
@@ -642,6 +643,8 @@ async def _create_job_and_swap(re_id: str, state: dict,
     # drifts (wrong props / zoomed-out framing). Failure → None → the normal
     # template chain applies; generation never blocks on the Director.
     director_json: str | None = None
+    people_meta: dict[str, dict] = {}
+    people_detected = False
     if state.get("use_director"):
         from character_swap import prompt_director
         result = await asyncio.to_thread(
@@ -659,13 +662,38 @@ async def _create_job_and_swap(re_id: str, state: dict,
                 intent, prompts,
                 [(cid, jc.name) for cid, jc in chars.items()],
             ).model_dump_json()
-            # Flag multi-person SWAP scenes onto their entries — the person-
-            # choice gate reads these (direct scenes never swap, so skip them).
-            for e in scene_entries:
-                m = meta.get(e["scene_id"])
-                if m and e["scene_id"] not in direct_ids:
-                    e["multi_person"] = True
-                    e["people"] = m["people"]
+            people_meta = {sid: m for sid, m in meta.items()
+                           if m and m.get("people")}
+            people_detected = True
+
+    # People detection when the Director did NOT provide it — the checkbox is
+    # off, or its call failed (Hugo 2026-08-06). The whole multi-person gate
+    # used to live inside that one Director call, so with the Director off a
+    # two-person scene silently generated from the singular "replace the
+    # person" prompt and every character resolved it differently. Standalone
+    # detection makes the gate independent of the Director; only SWAP scenes
+    # cost a call (a direct scene is never swapped, so there is no person to
+    # choose).
+    if not people_detected:
+        people_meta = await detect_people_for_scenes(
+            [(sid, p) for sid, p in zip(uniq_ids, uniq_paths)
+             if sid not in direct_ids],
+            job_id=job_id)
+
+    # Flag multi-person SWAP scenes onto their entries — the person-choice gate
+    # reads these (direct scenes never swap, so skip them).
+    for e in scene_entries:
+        m = people_meta.get(e["scene_id"])
+        if m and m.get("people") and e["scene_id"] not in direct_ids:
+            e["multi_person"] = True
+            e["people"] = m["people"]
+    # Persist the head-count for image QC, which enforces it only where it was
+    # actually measured (> 1). Direct scenes are excluded — no swap, no judge.
+    scene_people_counts = {
+        sid: scene_people.people_count(m)
+        for sid, m in people_meta.items()
+        if sid not in direct_ids and scene_people.people_count(m) > 1
+    }
 
     job = Job(
         job_id=job_id,
@@ -678,6 +706,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         scene_image_paths=uniq_paths,
         direct_scene_ids=direct_ids,
         two_person_scenes=two_person_ids,
+        scene_people_counts=scene_people_counts,
         characters=chars,
         images_per_character=1,
         image_model=image_model,
@@ -1557,6 +1586,15 @@ def _collect_clips(
                 missing.append(f"scen {e['idx'] + 1} (direktklipp ej klart)")
                 waitable = True
             continue
+        if e.get("awaiting_person"):
+            # Held at the per-scene person-choice gate (2026-08-06). It has NO
+            # variant slots yet, which the "no slots = never theirs" rule below
+            # would read as a scene this character was never part of — and the
+            # final would ship silently WITHOUT it. It IS theirs; nobody has
+            # answered which person to replace. Not waitable: only a user
+            # answer can move it.
+            missing.append(f"scen {e['idx'] + 1} (välj vem som ska bytas ut)")
+            continue
         vid_variant = _approved_variant_for(jc, e["scene_id"])
         if vid_variant is None:
             # No approved image. A scene the character has NO slots for was
@@ -1879,6 +1917,12 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
                     _gap(hard, cid, name, e, "direktklipp misslyckades")
                 else:
                     _gap(pending, cid, name, e, "direktklipp ej klart")
+                continue
+            if e.get("awaiting_person"):
+                # Mirrors _collect_clips: a scene held at the person-choice
+                # gate has no slots, and "no slots = never theirs" would drop
+                # it from the final in silence (2026-08-06).
+                _gap(hard, cid, name, e, "välj vem som ska bytas ut")
                 continue
             vid = _approved_variant_for(jc, e["scene_id"])
             if vid is None:
@@ -2286,6 +2330,28 @@ def _sync_movement_from_state(job: Job, state: dict,
     store().update_job(job)
 
 
+async def detect_people_for_scenes(
+        scenes: list[tuple[str, str]], *,
+        job_id: str | None = None) -> dict[str, dict]:
+    """`{scene_id: {multi_person, people}}` for the given (scene_id, image path)
+    pairs — one cheap vision call per IMAGE, all in parallel (Hugo 2026-08-06).
+
+    Only scenes the detector is confident about appear in the result: a failed
+    or single-person verdict is simply absent, so a caller can never mistake
+    "the judge was down" for "one person in frame". Detection never raises —
+    `scene_people.detect_people` returns None on any failure — so a run is
+    never blocked by this."""
+    async def one(sid: str, path: str) -> tuple[str, dict | None]:
+        return sid, await asyncio.to_thread(
+            scene_people.detect_people, Path(path), job_id=job_id)
+
+    out: dict[str, dict] = {}
+    for sid, meta in await asyncio.gather(*[one(s, p) for s, p in scenes]):
+        if meta and meta.get("multi_person"):
+            out[sid] = meta
+    return out
+
+
 async def generate_added_scene(re_id: str, scene_id: str, *,
                                whisper_source: str | None = None) -> None:
     """Background half of '+ Lägg till scen': optional Whisper dialogue
@@ -2333,6 +2399,57 @@ async def generate_added_scene(re_id: str, scene_id: str, *,
                 e["speech"] = spoken
         reengineer.save_state(state)
 
+    # Person-choice gate for the added scene (Hugo 2026-08-06). This is the
+    # path that produced re_a5613a883e scene 2: an image added after the run
+    # started never met the Director, so nothing ever asked which of its two
+    # people to replace and all nine characters improvised. Ask BEFORE spending
+    # any image credits — the answer changes every one of them.
+    #
+    # Scoped to THIS scene: the run may be sitting at awaiting_assembly with
+    # finished finals, so the run-level `awaiting_person_choice` status is the
+    # wrong instrument. The scene waits; nothing else in the run does.
+    scene = store().get_scene(scene_id)
+    scene_path = (settings.scenes_dir / scene.filename) if scene else None
+    meta = ((await detect_people_for_scenes([(scene_id, str(scene_path))],
+                                            job_id=job.job_id)).get(scene_id)
+            if scene_path and scene_path.exists() else None)
+    if meta and meta.get("people"):
+        # The whisper + detection awaits above span seconds — re-read both the
+        # run state and the JOB so this write doesn't clobber a concurrent one
+        # with a pre-await snapshot (the same hazard the add-scene endpoint
+        # guards against).
+        state = reengineer.load_state(re_id) or state
+        for e in state.get("scenes") or []:
+            if e.get("scene_id") == scene_id:
+                e["multi_person"] = True
+                e["people"] = meta["people"]
+                e["awaiting_person"] = True
+        reengineer.save_state(state)
+        job = store().get_job(job.job_id) or job
+        job.scene_people_counts = {
+            **(job.scene_people_counts or {}),
+            scene_id: scene_people.people_count(meta),
+        }
+        job.updated_at = datetime.utcnow()
+        store().update_job(job)
+        await events.publish(job.job_id, {"kind": "scene.awaiting_person",
+                                          "scene_id": scene_id})
+        return
+
+    await swap_added_scene(re_id, scene_id)
+
+
+async def swap_added_scene(re_id: str, scene_id: str) -> None:
+    """Generate the added scene's swap image for EVERY character (shared
+    provider semaphore; QC runs inside `_generate_one_variant`). Split out of
+    `generate_added_scene` so the person-choice gate can run this tail once the
+    user has picked who to replace."""
+    state = reengineer.load_state(re_id)
+    if not state or not state.get("job_id"):
+        return
+    job = store().get_job(state["job_id"])
+    if job is None:
+        return
     sem = asyncio.Semaphore(
         runner._image_concurrency_for_model(runner._swap_image_model(job)))
     await asyncio.gather(*[

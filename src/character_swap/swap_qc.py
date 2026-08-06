@@ -57,6 +57,19 @@ holds — when in any doubt, PASS:
   important check.
 - MISSING/EXTRA PEOPLE: no person at all in RESULT, or clearly extra,
   invented people who appear in neither SCENE nor CHARACTER.
+- PERSON COUNT: ONLY when the context flags state a `scene_people` count
+  greater than 1 — RESULT does not show that many people. Someone who is in
+  SCENE was deleted, cropped away, or merged into another figure. Count real
+  people who are part of the shot, the same way the count was made: ignore
+  distant background passers-by, people on posters or screens, and
+  reflections. When no `scene_people` flag is present, do NOT judge how many
+  people are in the frame at all.
+- WRONG PERSON SWAPPED: ONLY when the context flags name a `swap_target` —
+  RESULT clearly gave CHARACTER's face to a DIFFERENT person in the frame than
+  the named one, leaving the named person unchanged. The named person is the
+  one who must end up looking like CHARACTER; note that they may differ from
+  CHARACTER in gender or age, and changing them anyway is CORRECT, not a
+  failure. Without a `swap_target` flag, never judge which person was swapped.
 - BROKEN IMAGE: fully or mostly black / blank / censored / heavily corrupted
   output, or RESULT is just the unmodified SCENE or CHARACTER with no swap
   performed at all.
@@ -92,11 +105,17 @@ background, outfit, or gaze.
 
 Be decisive and LENIENT. Only a genuinely unusable image fails. When you DO
 fail, START the reason with the violated rule's NAME in caps — exactly one of
-"WRONG PERSON", "MISSING/EXTRA PEOPLE", "BROKEN IMAGE" or "SEVERE ARTIFACTS"
-(the retry machinery routes repair vs full re-roll on it) — then give a
-one-sentence corrective instruction for the image model (e.g. "Make the face
-match the character reference exactly — do not retain the original person's
-facial features.").
+"WRONG PERSON", "MISSING/EXTRA PEOPLE", "PERSON COUNT", "WRONG PERSON SWAPPED",
+"BROKEN IMAGE" or "SEVERE ARTIFACTS" (the retry machinery routes repair vs full
+re-roll on it) — then give a one-sentence corrective instruction for the image
+model (e.g. "Make the face match the character reference exactly — do not
+retain the original person's facial features.").
+
+The corrective instruction is appended verbatim to the prompt of the NEXT
+attempt, so make it concrete about the people: name who went missing or who was
+swapped by mistake and where they stand (e.g. "Keep the blonde woman on the
+right in the photo exactly as she is — the previous attempt deleted her; only
+the man on the left may be replaced.").
 """
 
 QC_TOOL: dict = {
@@ -226,6 +245,12 @@ _REROLL_MARKERS = (
     "wrong background", "wrong framing", "wrong zoom",
     "missing/extra people", "missing people", "extra people",
     "broken image", "unmodified scene",
+    # A person the model deleted cannot be edited back in from the failed
+    # image — they only exist in the SCENE — and a swap that landed on the
+    # wrong person needs the whole composition redone, not a face touch-up.
+    # Both re-roll from the scene with the judge's hint appended (2026-08-06).
+    # Plain "WRONG PERSON" (identity didn't take) stays repairable in place.
+    "person count", "wrong person swapped",
 )
 
 
@@ -271,6 +296,8 @@ def inspect_variant(
     outfit_text: str | None = None,
     user_intent: str | None = None,
     camera_gaze: bool = False,
+    scene_people_count: int | None = None,
+    swap_target: str | None = None,
     job_id: str | None = None,
 ) -> QCVerdict | None:
     """ONE cheap vision call: does the generated swap pass? None when QC is
@@ -280,7 +307,19 @@ def inspect_variant(
     `background_image`: the requested replacement environment. Without it
     the judge can only IGNORE background changes — it cannot catch the
     observed 2026-06-12 failure where the ORIGINAL scene background was kept
-    despite a replacement being requested (that image PASSED QC)."""
+    despite a replacement being requested (that image PASSED QC).
+
+    `scene_people_count` / `swap_target`: how many people `scene_people` found
+    in the SCENE, and the phrase naming which of them the user chose to
+    replace. Both OPT-IN and both only ever passed for a measured multi-person
+    scene, so a single-subject swap is judged exactly as leniently as before
+    (Hugo 2026-08-06 — the catastrophe-only policy stands; this closes one hole
+    in it). The hole: in re_a5613a883e a two-person scene came back with the
+    woman on the right deleted for six of nine characters, and painted over
+    instead of the man for two more — all nine PASSED, because
+    MISSING/EXTRA PEOPLE only fires on "no person at all" or an invented
+    extra. Counts below 2 are dropped rather than sent, so the judge is never
+    handed a count it should not act on."""
     from character_swap.config import settings
     if not settings.swap_qc_enabled or not settings.anthropic_api_key:
         return None
@@ -292,6 +331,12 @@ def inspect_variant(
             flags += f', custom_outfit="{outfit_text[:200]}"'
         if camera_gaze:
             flags += ", camera_gaze=true"
+        # Only ever sent for a MEASURED multi-person scene — a count of 1 (or
+        # an unmeasured scene) must leave the judge as lenient as it was.
+        if scene_people_count is not None and scene_people_count > 1:
+            flags += f", scene_people={int(scene_people_count)}"
+            if swap_target and swap_target.strip():
+                flags += f', swap_target="{swap_target.strip()[:120]}"'
         intent_block = (
             f"USER INTENT (authoritative — do not fail deviations it "
             f"requests):\n{user_intent.strip()[:600]}\n\n" if user_intent

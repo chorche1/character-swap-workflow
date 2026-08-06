@@ -2662,6 +2662,23 @@ function studio() {
       this._startReengineerPolling();
     },
 
+    // Per-SCENE person choice for a scene added after the run started
+    // (Hugo 2026-08-06). The run-level gate above answers every ambiguous
+    // scene at once before the first image; this one releases a single held
+    // scene while the rest of the run carries on untouched.
+    async submitReengineerScenePersonChoice(run, sc) {
+      const c = this.rePersonChoices[run.re_id + ':' + sc.idx] || {};
+      const r = await fetch(
+        `/api/reengineer/${run.re_id}/scenes/${sc.idx}/resolve_people`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ swap_person_idx: Number(c.swap_person_idx) || 0 }),
+        });
+      if (!r.ok) { this.notifyError('Kunde inte fortsätta: ' + await r.text()); return; }
+      this._spliceReengineerView(await r.json());
+      this.notifyInfo('Tack — genererar bilderna för scenen…');
+      this._startReengineerPolling();
+    },
+
     // Replace a scene's REFERENCE image with an uploaded one → re-swap every
     // character against it (Hugo 2026-06-13). Mirrors the "🪄 Ändra bild"
     // response handling: cache-bust the regenerated variant files, splice the

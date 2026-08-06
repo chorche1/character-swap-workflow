@@ -6012,6 +6012,30 @@ def _person_phrase(person: dict) -> str:
     return "the indicated person"
 
 
+# First words of every person directive — also the seam `_strip_person_directive`
+# cuts on, so the two can never drift apart.
+_PERSON_DIRECTIVE_LEAD = " Multiple people are visible in this scene."
+
+
+def _strip_person_directive(prompt: str) -> str:
+    """The scene prompt WITHOUT any previously-appended person directive.
+
+    Baking a choice must be idempotent (2026-08-06 review). `base` is read back
+    out of the plan, where a previous bake already left the FIRST character's
+    directive — including its gender clause. Appending on top of that gave every
+    character both genders for the same target ("The new character is a man …"
+    followed by "The new character is a woman …"), and since GPT Image 2 resolves
+    the target by gender first, that is precisely the mis-swap this whole feature
+    exists to prevent — reintroduced on the one scene it was asked to protect.
+
+    Reachable without any code change: two `state.scenes` entries can share one
+    scene_id (byte-identical frames collapse), so one run-level resolve bakes the
+    scene twice; and "📌 ingen swap" → "↩ ta bort direkt" re-arms the added-scene
+    gate, so answering it again re-enters with the already-baked plan."""
+    i = prompt.find(_PERSON_DIRECTIVE_LEAD)
+    return prompt[:i] if i >= 0 else prompt
+
+
 def _person_directive(person: dict, *, others: list[dict] | None = None,
                       gender: str | None = None) -> str:
     """Directive appended to a multi-person scene's swap prompt once the user
@@ -6031,7 +6055,7 @@ def _person_directive(person: dict, *, others: list[dict] | None = None,
     The other people are named and locked (Susanne's take also mirrored the
     frame, hence the explicit no-mirror clause)."""
     who = _person_phrase(person)
-    out = [f" Multiple people are visible in this scene. Replace SPECIFICALLY "
+    out = [f"{_PERSON_DIRECTIVE_LEAD} Replace SPECIFICALLY "
            f"{who} with the new character — {who} is the ONLY person you may "
            f"change."]
 
@@ -6080,6 +6104,70 @@ def _person_directive(person: dict, *, others: list[dict] | None = None,
     return "".join(out)
 
 
+def _bake_person_choice(job, plan, scene_id: str, people: list[dict],
+                        pi: int):
+    """Write the user's person choice into the job so every character's swap
+    prompt names WHO to replace. Returns the (possibly newly created) plan.
+
+    Per character, not once per scene: `_person_directive` states the
+    character's gender, and that clause is what stops a female character being
+    painted onto the woman standing next to the man the user actually picked.
+
+    Works with NO cached Director plan (Hugo 2026-08-06). The gate used to bail
+    out silently when `plan is None` — which is the normal state with the AI
+    Director switched off — so the choice was recorded in the run state, shown
+    in the UI, and then never reached the image model. A plan is synthesised
+    from the job's ENGINE-EFFECTIVE prompt instead (the compact identity-first
+    text for gpt2-id-swap, not the long stored template the engine never sees),
+    so the directive rides on the same prompt generation would have used
+    anyway."""
+    from character_swap import pipeline, prompt_director
+    who = _person_phrase(people[pi])
+    others = [p for j, p in enumerate(people) if j != pi]
+    base = None
+    if plan is not None:
+        base = next((sp.variants[0].prompt
+                     for cp in plan.characters for sp in cp.scenes
+                     if sp.scene_id == scene_id and sp.variants), None)
+        # A previous bake left the FIRST character's directive on that entry.
+        # Re-baking on top of it stacks two contradictory gender clauses — see
+        # `_strip_person_directive`.
+        if base is not None:
+            base = _strip_person_directive(base)
+    if base is None:
+        stored = (job.enriched_image_prompt or job.prompt
+                  or pipeline.GENERATION_PROMPT)
+        base = runner.engine_effective_swap_prompt(job, stored)
+        if plan is None:
+            plan = prompt_director.plan_from_scene_prompts(
+                "", {}, [(cid, jc.name) for cid, jc in job.characters.items()])
+    for cid in job.characters:
+        directive = base + _person_directive(
+            people[pi], others=others, gender=runner._character_gender(cid))
+        if prompt_director.replace_scene_prompt_in_plan(
+                plan, scene_id, directive, char_id=cid):
+            continue
+        # The scene has no entry for this character yet — an added scene, or a
+        # character joined after the plan was written. Append one; `_kick_char`
+        # / `regen_scene_variants` look the prompt up by (char_id, scene_id).
+        cp = next((c for c in plan.characters if c.char_id == cid), None)
+        if cp is None:
+            jc = job.characters[cid]
+            cp = prompt_director.CharacterPlan(char_id=cid, name=jc.name,
+                                               scenes=[])
+            plan.characters.append(cp)
+        cp.scenes.append(prompt_director.ScenePlanForChar(
+            scene_id=scene_id,
+            variants=[prompt_director.VariantPlan(variant_index=0,
+                                                  prompt=directive)]))
+    # QC reads both: how many people must survive the swap, and which one was
+    # supposed to change (see swap_qc's PERSON COUNT / WRONG PERSON SWAPPED).
+    job.scene_people_counts = {**(job.scene_people_counts or {}),
+                               scene_id: max(2, len(people))}
+    job.scene_swap_targets = {**(job.scene_swap_targets or {}), scene_id: who}
+    return plan
+
+
 @app.post("/api/reengineer/{re_id}/resolve_people")
 async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTasks,
                                     body: ResolvePeopleBody) -> dict:
@@ -6110,23 +6198,13 @@ async def reengineer_resolve_people(re_id: str, background_tasks: BackgroundTask
         people = e.get("people") or []
         sc = by_idx[i]
         pi = max(0, min(sc.swap_person_idx, len(people) - 1)) if people else 0
-        if people and plan is not None:
-            sid = e["scene_id"]
-            base = next((sp.variants[0].prompt
-                         for cp in plan.characters for sp in cp.scenes
-                         if sp.scene_id == sid and sp.variants), None)
-            if base is not None:
-                others = [p for j, p in enumerate(people) if j != pi]
-                # PER CHARACTER, not once for the scene: the directive names
-                # the character's gender so a female character cannot be
-                # painted onto the wrong person in frame (see _person_directive).
-                for cid in job.characters:
-                    prompt_director.replace_scene_prompt_in_plan(
-                        plan, sid,
-                        base + _person_directive(
-                            people[pi], others=others,
-                            gender=runner._character_gender(cid)),
-                        char_id=cid)
+        if people:
+            # PER CHARACTER, not once for the scene: the directive names the
+            # character's gender so a female character cannot be painted onto
+            # the wrong person in frame (see `_person_directive`). Synthesises
+            # a plan when the Director is off — before 2026-08-06 that case
+            # dropped the choice on the floor.
+            plan = _bake_person_choice(job, plan, e["scene_id"], people, pi)
         # Record the choice + clear the gate flag so the scene shows normally.
         # `people` is KEPT (only the gate flag goes): the descriptions are the
         # only record of who was in frame, and re-deriving the directive for a
@@ -6780,6 +6858,52 @@ async def reengineer_clear_direct(re_id: str, idx: int,
     background_tasks.add_task(_run_async, runner_reengineer.generate_added_scene,
                               re_id, sid)
     return _reengineer_view(state)
+
+
+class ResolveScenePersonBody(BaseModel):
+    swap_person_idx: int = 0
+
+
+@app.post("/api/reengineer/{re_id}/scenes/{idx}/resolve_people")
+async def reengineer_resolve_scene_person(
+        re_id: str, idx: int, background_tasks: BackgroundTasks,
+        body: ResolveScenePersonBody) -> dict:
+    """Answer the person-choice gate for ONE added scene, then generate its
+    swap images (Hugo 2026-08-06).
+
+    The run-level `/resolve_people` gate only exists at run creation. A scene
+    added later ("+ egen") is held by `runner_reengineer.generate_added_scene`
+    instead — per SCENE, because the run itself may be sitting on finished
+    finals and must not be dragged back into a global gate. Answering here
+    bakes the same per-character directive the run-level gate bakes, then
+    releases just this scene's generation."""
+    from character_swap import runner_reengineer
+    state = _editable_reengineer_state(re_id)
+    entry = _reengineer_entry(state, idx)
+    if not entry.get("awaiting_person"):
+        raise HTTPException(409, "scenen väntar inte på ett personval")
+    people = entry.get("people") or []
+    if not people:
+        raise HTTPException(409, "scenen har inga personer att välja mellan")
+    job = store().get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    pi = max(0, min(body.swap_person_idx, len(people) - 1))
+    plan = _bake_person_choice(job, runner._parse_director_plan(job),
+                               entry["scene_id"], people, pi)
+    job.director_prompts_json = plan.model_dump_json()
+    job.updated_at = datetime.utcnow()
+    store().update_job(job)
+    # `people` is KEPT — it is the only record of who was in frame, and
+    # re-deriving the directive for a retake needs the descriptions.
+    entry["swap_person_idx"] = pi
+    entry.pop("multi_person", None)
+    entry.pop("awaiting_person", None)
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_reengineer.swap_added_scene,
+                              re_id, entry["scene_id"])
+    return _reengineer_view(state, slim=True)
 
 
 @app.post("/api/reengineer/{re_id}/scenes/{idx}/duplicate")

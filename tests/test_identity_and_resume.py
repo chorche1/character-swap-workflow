@@ -98,7 +98,9 @@ def test_gpt2_dispatch_mechanically_flips_custom_prompt(monkeypatch, tmp_path):
         character_name="X", prompt="My rule: pose from Image 1, face from Image 2.",
         dest=tmp_path / "o.png", job_id=None,
     )
-    assert seen["prompt"] == "My rule: pose from Image 2, face from Image 1."
+    assert (seen["prompt"]
+            == "My rule: pose from Image 2, face from Image 1."
+            + pipeline.CAST_LOCK)
 
 
 # ------------------------------------------------------------- crash resume
