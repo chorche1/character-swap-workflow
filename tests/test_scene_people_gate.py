@@ -423,6 +423,68 @@ def test_answered_scene_stops_blocking_the_build(tmp_path):
     assert gaps["hard"] == []
 
 
+def test_scene_regen_keeps_the_per_character_directive(added, monkeypatch):
+    """"🪄 Ändra bild" / a scene-wide regen writes ONE prompt for the whole
+    scene, which on its own flattens the per-character person directive away —
+    and with it the gender clause that stops a female character landing on the
+    woman next to the chosen man. The regen must re-append it per character."""
+    box = added
+    _two_people(monkeypatch)
+    asyncio.run(runner_reengineer.generate_added_scene("re_t", "s_new"))
+    asyncio.run(api.reengineer_resolve_scene_person(
+        "re_t", 1, BackgroundTasks(),
+        api.ResolveScenePersonBody(swap_person_idx=0)))
+
+    # Simulate the scene-wide rewrite persisting a brand-new shared prompt.
+    from character_swap import prompt_director as pd
+    plan = pd.SwapDirectorPlan.model_validate_json(
+        box["job"].director_prompts_json)
+    pd.replace_scene_prompt_in_plan(plan, "s_new", "A BRAND NEW SCENE PROMPT")
+    assert "The new character is a woman" not in plan.lookup("ch_f", "s_new")[0]
+
+    entry = box["states"]["re_t"]["scenes"][1]
+    plan = api._bake_person_choice(box["job"], plan, "s_new",
+                                   entry["people"], entry["swap_person_idx"])
+    female = plan.lookup("ch_f", "s_new")[0]
+    male = plan.lookup("ch_a", "s_new")[0]
+    assert female.startswith("A BRAND NEW SCENE PROMPT")
+    assert "The new character is a woman" in female
+    assert "The new character is a man" in male
+    assert "The new character is a woman" not in male
+
+
+def test_regen_uses_the_per_character_prompt(monkeypatch):
+    """The per-character prompts must reach retry_single_variant — a shared
+    prompt would overwrite each slot with one gender's directive."""
+    seen: list = []
+
+    async def fake_retry(job_id, cid, vid, prompt, **kw):
+        seen.append((cid, prompt))
+    monkeypatch.setattr(runner_reengineer.runner, "retry_single_variant",
+                        fake_retry)
+    job = Job(job_id="j_t", scene_id="s1", scene_image_path="/p",
+              scene_ids=["s1"], scene_image_paths=["/p"],
+              characters={
+                  "ch_a": JobCharacter(char_id="ch_a", name="A",
+                                       source_image_path="/a.png",
+                                       status=CharStatus.APPROVED),
+                  "ch_f": JobCharacter(char_id="ch_f", name="F",
+                                       source_image_path="/f.png",
+                                       status=CharStatus.APPROVED)})
+
+    class _S:
+        def get_job(self, jid):
+            return job
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+
+    asyncio.run(runner_reengineer.regen_scene_images_with_prompt(
+        "j_t", "SHARED", {"ch_a": "v1", "ch_f": "v2"},
+        prompts_by_char={"ch_f": "FEMALE-SPECIFIC"}))
+    got = dict(seen)
+    assert got["ch_f"] == "FEMALE-SPECIFIC"
+    assert got["ch_a"] == "SHARED"          # no override → the shared prompt
+
+
 # ------------------------------------------------- Director-OFF coverage
 
 @pytest.fixture
@@ -617,7 +679,11 @@ def test_qc_told_the_head_count_and_the_target(monkeypatch, tmp_path):
         swap_target="the older man grey beard on the left")
     text = _flags(calls)
     assert "scene_people=2" in text
-    assert 'swap_target="the older man grey beard on the left"' in text
+    # Named `replace_person`, not `swap_target` — a judge given the old name
+    # read it as the person to PRESERVE and passed a female character painted
+    # onto the woman ("the swap target remains unchanged and correct"),
+    # measured on the real re_a5613a883e images.
+    assert 'replace_person="the older man grey beard on the left"' in text
 
 
 def test_qc_stays_catastrophe_only_on_single_subject_scenes(monkeypatch,
@@ -632,7 +698,7 @@ def test_qc_stays_catastrophe_only_on_single_subject_scenes(monkeypatch,
             result_image=tmp_path / "r.png", scene_people_count=count,
             swap_target="the man on the left")
         assert "scene_people" not in _flags(calls)
-        assert "swap_target" not in _flags(calls)
+        assert "replace_person" not in _flags(calls)
 
 
 def test_qc_prompt_defines_the_new_classes():
@@ -640,12 +706,16 @@ def test_qc_prompt_defines_the_new_classes():
     assert "PERSON COUNT" in sys and "WRONG PERSON SWAPPED" in sys
     # Both are explicitly conditional on the context flag being present.
     assert "ONLY when the context flags state a `scene_people` count" in sys
-    assert "ONLY when the context flags name a `swap_target`" in sys
+    assert "ONLY when the context flags name a `replace_person`" in sys
+    assert "says who to REPLACE, never who to preserve" in " ".join(sys.split())
     # The chosen person may legitimately differ in gender from the character —
     # the judge must not read that as a mistake and re-roll a correct image.
     flat = " ".join(sys.split())
-    assert "they may differ from CHARACTER in gender or age" in flat
-    assert "changing them anyway is CORRECT" in flat
+    assert "may differ from CHARACTER in gender or age" in flat
+    assert "replacing them anyway is CORRECT" in flat
+    # The judge must never call an untouched target "correct" — that is exactly
+    # how Susanne's mis-swap passed on the real re_a5613a883e images.
+    assert "left UNCHANGED is ALWAYS a failure" in flat
 
 
 def test_new_classes_reroll_but_plain_wrong_person_still_repairs():

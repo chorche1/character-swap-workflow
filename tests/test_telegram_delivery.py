@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from character_swap import api, telegram_delivery
+from character_swap import api, telegram_delivery, video_edit
 from character_swap.clients import telegram
 from character_swap.config import settings
 from character_swap.models import CharacterAsset, Job, JobCharacter
@@ -111,6 +112,12 @@ def test_no_test_can_deliver_to_a_real_telegram_channel(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "telegram_editor_chat_id", "-1001234567890")
     monkeypatch.setattr(settings, "telegram_character_bot_token", "token-live")
 
+    def fake_scrub(source, destination):
+        destination.write_bytes(source.read_bytes())
+
+    monkeypatch.setattr(
+        telegram_delivery, "_write_metadata_free_copy", fake_scrub)
+
     with pytest.raises(RuntimeError, match="real Telegram Bot API"):
         _run(telegram_delivery.send_editor_final(
             src, base="regression", variant="final", edit_id="ed_guard"))
@@ -126,6 +133,12 @@ def test_send_file_core_snapshots_and_builds_public_message_url(
     src.write_bytes(b"stable bytes")
     seen = {}
 
+    def fake_scrub(source, destination):
+        seen["snapshot"] = Path(source)
+        seen["snapshot_bytes"] = Path(source).read_bytes()
+        assert Path(source) != src
+        destination.write_bytes(b"metadata-free bytes")
+
     def fake_send(path, **kwargs):
         seen["path"] = Path(path)
         seen["bytes"] = Path(path).read_bytes()
@@ -136,15 +149,140 @@ def test_send_file_core_snapshots_and_builds_public_message_url(
             "document": {"file_id": "f9", "file_unique_id": "u9"},
         }
 
+    monkeypatch.setattr(
+        telegram_delivery, "_write_metadata_free_copy", fake_scrub)
     monkeypatch.setattr(telegram_delivery.telegram, "send_document", fake_send)
     receipt = _run(telegram_delivery.send_file_core(
         src, bot_token="tok", chat_id="@public_channel",
         filename="final.mp4", caption="Final", account="character"))
 
-    assert seen["bytes"] == b"stable bytes"
+    assert seen["snapshot_bytes"] == b"stable bytes"
+    assert seen["bytes"] == b"metadata-free bytes"
     assert receipt["url"] == "https://t.me/public_channel/9"
     assert receipt["file_id"] == "f9"
-    assert not seen["path"].exists()          # snapshot cleaned up
+    assert not seen["snapshot"].exists()      # both temporary files cleaned up
+    assert not seen["path"].exists()
+
+
+def _packet_hash(path: Path, stream: str) -> str:
+    proc = subprocess.run(
+        [
+            video_edit._ffmpeg(), "-v", "error", "-i", str(path),
+            "-map", stream, "-c", "copy", "-f", "hash",
+            "-hash", "sha256", "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _decoded_hash(path: Path, stream: str) -> str:
+    proc = subprocess.run(
+        [
+            video_edit._ffmpeg(), "-v", "error", "-i", str(path),
+            "-map", stream, "-f", "hash", "-hash", "sha256", "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_metadata_free_copy_strips_tags_without_reencoding(tmp_path):
+    source = tmp_path / "tagged.mp4"
+    clean = tmp_path / "clean.mp4"
+    video_edit._run([
+        video_edit._ffmpeg(),
+        "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=64x64:r=10:d=0.5",
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-shortest", "-c:v", "libx264", "-c:a", "aac",
+        "-metadata", "title=Private title",
+        "-metadata", "artist=Private artist",
+        "-metadata", "comment=Private comment",
+        "-metadata", "creation_time=2026-08-05T01:02:03Z",
+        "-metadata:s:v:0", "handler_name=Private video track",
+        "-metadata:s:a:0", "handler_name=Private audio track",
+        str(source),
+    ])
+    original_bytes = source.read_bytes()
+
+    telegram_delivery._write_metadata_free_copy(source, clean)
+
+    probe = subprocess.run(
+        [video_edit._ffmpeg(), "-hide_banner", "-i", str(clean)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stderr
+    assert "Private title" not in probe
+    assert "Private artist" not in probe
+    assert "Private comment" not in probe
+    assert "Private video track" not in probe
+    assert "Private audio track" not in probe
+    assert source.read_bytes() == original_bytes
+    # x264 writes its identity/options into a User Data Unregistered SEI unit.
+    # That codec metadata is gone, so encoded packet hashes intentionally
+    # differ — but decoded frames are byte-identical (zero generation loss).
+    assert b"x264 - core" in source.read_bytes()
+    assert b"x264 - core" not in clean.read_bytes()
+    assert _packet_hash(source, "0:v:0") != _packet_hash(clean, "0:v:0")
+    assert _decoded_hash(source, "0:v:0") == _decoded_hash(clean, "0:v:0")
+    assert _packet_hash(source, "0:a:0") == _packet_hash(clean, "0:a:0")
+
+
+def test_codec_metadata_scrub_refuses_hdr_instead_of_changing_appearance(
+        monkeypatch, tmp_path):
+    source = tmp_path / "hdr.mp4"
+    source.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        telegram_delivery, "_probe_video_streams",
+        lambda _path: [{"codec": "hevc", "hdr": True}],
+    )
+
+    with pytest.raises(RuntimeError, match="HDR-videon"):
+        telegram_delivery._codec_metadata_filter_args(source)
+
+
+def test_unknown_codec_fails_closed(monkeypatch, tmp_path):
+    source = tmp_path / "unknown.mp4"
+    source.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        telegram_delivery, "_probe_video_streams",
+        lambda _path: [{"codec": "prores", "hdr": False}],
+    )
+
+    with pytest.raises(RuntimeError, match="prores"):
+        telegram_delivery._codec_metadata_filter_args(source)
+
+
+def test_send_file_core_never_uploads_when_metadata_scrub_fails(
+        monkeypatch, tmp_path):
+    source = tmp_path / "final.mp4"
+    source.write_bytes(b"original remains local")
+    sent = False
+
+    def fail_scrub(_source, _destination):
+        raise RuntimeError("metadata scrub failed")
+
+    def fake_send(*_args, **_kwargs):
+        nonlocal sent
+        sent = True
+
+    monkeypatch.setattr(
+        telegram_delivery, "_write_metadata_free_copy", fail_scrub)
+    monkeypatch.setattr(telegram_delivery.telegram, "send_document", fake_send)
+
+    with pytest.raises(RuntimeError, match="metadata scrub failed"):
+        _run(telegram_delivery.send_file_core(
+            source, bot_token="tok", chat_id="@channel",
+            filename="final.mp4", caption="Final", account="editor"))
+
+    assert sent is False
+    assert source.read_bytes() == b"original remains local"
 
 
 class _Store:

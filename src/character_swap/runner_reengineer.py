@@ -2460,7 +2460,8 @@ async def swap_added_scene(re_id: str, scene_id: str) -> None:
 
 async def regen_scene_images_with_prompt(job_id: str, prompt: str | None,
                                          variant_ids: dict[str, str],
-                                         change: str | None = None) -> None:
+                                         change: str | None = None,
+                                         prompts_by_char: dict[str, str] | None = None) -> None:
     """Scene-level "ändra bilden" (Hugo 2026-06-13): regenerate ONE scene's
     swap image for EVERY character. `prompt` is the NEW swap prompt
     (Director-rewritten or hand-edited) OR None to keep each slot's existing
@@ -2472,14 +2473,24 @@ async def regen_scene_images_with_prompt(job_id: str, prompt: str | None,
     usual inside _generate_one_variant; the prompt persists on each slot so
     later per-slot retries inherit it. `change` = the user's plain-language
     change request, forwarded as the slot's QC intent so the judge treats
-    the deviation as requested instead of repairing it back."""
+    the deviation as requested instead of repairing it back.
+
+    `prompts_by_char` overrides `prompt` FOR ONE CHARACTER (Hugo 2026-08-06).
+    A scene whose person choice has been answered carries a directive that is
+    written per character — it names the character's gender, which is what
+    stops a female character being painted onto the woman standing next to the
+    man the user picked. A single shared prompt cannot carry that, so this
+    scene-wide regen would otherwise flatten the directive onto every
+    character using one gender."""
     job = store().get_job(job_id)
     if job is None:
         return
+    per_char = prompts_by_char or {}
     sem = asyncio.Semaphore(
         runner._image_concurrency_for_model(runner._swap_image_model(job)))
     await asyncio.gather(*[
-        runner.retry_single_variant(job_id, cid, vid, prompt,
+        runner.retry_single_variant(job_id, cid, vid,
+                                    per_char.get(cid) or prompt,
                                     qc_intent=change, sem=sem)
         for cid, vid in variant_ids.items()
     ])

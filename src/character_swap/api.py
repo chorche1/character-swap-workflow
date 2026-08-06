@@ -7554,10 +7554,25 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
         if prompt_director.replace_scene_prompt_in_plan(plan, scene_id, prompt):
             job.director_prompts_json = plan.model_dump_json()
     else:
-        job.director_prompts_json = prompt_director.plan_from_scene_prompts(
+        plan = prompt_director.plan_from_scene_prompts(
             "scene-image rewrite", {scene_id: prompt},
-            [(cid, jc.name) for cid, jc in job.characters.items()],
-        ).model_dump_json()
+            [(cid, jc.name) for cid, jc in job.characters.items()])
+        job.director_prompts_json = plan.model_dump_json()
+    # A scene whose person choice has been answered must KEEP its per-character
+    # directive (Hugo 2026-08-06). The plan write above is scene-WIDE, so on its
+    # own it flattens that directive away — and the directive is what names the
+    # character's GENDER, the clause that stops a female character landing on
+    # the woman standing next to the man the user picked. Re-append it per
+    # character on top of the new prompt; `_bake_person_choice` strips any
+    # previous copy first, so re-running this stays idempotent.
+    people = entry.get("people") or []
+    prompts_by_char: dict[str, str] | None = None
+    if people and entry.get("swap_person_idx") is not None and plan is not None:
+        pi = max(0, min(int(entry["swap_person_idx"]), len(people) - 1))
+        plan = _bake_person_choice(job, plan, scene_id, people, pi)
+        job.director_prompts_json = plan.model_dump_json()
+        prompts_by_char = {cid: (plan.lookup(cid, scene_id) or [prompt])[0]
+                           for cid in job.characters}
     s.update_job(job)
 
     # New image ≠ old clip: post-gate the scene must re-animate.
@@ -7569,7 +7584,8 @@ async def reengineer_regen_scene_images(re_id: str, idx: int,
     background_tasks.add_task(_run_async,
                               runner_reengineer.regen_scene_images_with_prompt,
                               job.job_id, prompt, targets,
-                              (body.change or "").strip() or None)
+                              (body.change or "").strip() or None,
+                              prompts_by_char)
     view = _reengineer_view(state, slim=True)
     view["regen_variants"] = targets
     return view

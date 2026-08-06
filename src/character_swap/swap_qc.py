@@ -64,12 +64,14 @@ holds — when in any doubt, PASS:
   distant background passers-by, people on posters or screens, and
   reflections. When no `scene_people` flag is present, do NOT judge how many
   people are in the frame at all.
-- WRONG PERSON SWAPPED: ONLY when the context flags name a `swap_target` —
-  RESULT clearly gave CHARACTER's face to a DIFFERENT person in the frame than
-  the named one, leaving the named person unchanged. The named person is the
-  one who must end up looking like CHARACTER; note that they may differ from
-  CHARACTER in gender or age, and changing them anyway is CORRECT, not a
-  failure. Without a `swap_target` flag, never judge which person was swapped.
+- WRONG PERSON SWAPPED: ONLY when the context flags name a `replace_person`.
+  That named person is the one who MUST end up looking like CHARACTER — the
+  flag says who to REPLACE, never who to preserve. FAIL when the named person
+  is still the SCENE's own original person while CHARACTER's face was put on
+  somebody ELSE in the frame. The named person may differ from CHARACTER in
+  gender or age; replacing them anyway is CORRECT, and a named person left
+  UNCHANGED is ALWAYS a failure — never call that correct. Without a
+  `replace_person` flag, never judge which person was swapped.
 - BROKEN IMAGE: fully or mostly black / blank / censored / heavily corrupted
   output, or RESULT is just the unmodified SCENE or CHARACTER with no swap
   performed at all.
@@ -336,7 +338,12 @@ def inspect_variant(
         if scene_people_count is not None and scene_people_count > 1:
             flags += f", scene_people={int(scene_people_count)}"
             if swap_target and swap_target.strip():
-                flags += f', swap_target="{swap_target.strip()[:120]}"'
+                # Named `replace_person`, not `swap_target`: measured on the
+                # re_a5613a883e images, a judge given "swap_target" read it as
+                # the person to PRESERVE and passed a female character painted
+                # onto the woman with "the swap target remains unchanged and
+                # correct" — the exact defect the flag exists to catch.
+                flags += f', replace_person="{swap_target.strip()[:120]}"'
         intent_block = (
             f"USER INTENT (authoritative — do not fail deviations it "
             f"requests):\n{user_intent.strip()[:600]}\n\n" if user_intent

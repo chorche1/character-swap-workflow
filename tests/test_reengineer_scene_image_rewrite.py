@@ -257,9 +257,11 @@ def test_regen_images_withdraws_approvals_and_queues(wired):
         assert f"{cid}-v2" in (jc.approved_variant_ids or [])   # s2 untouched
     # Background fan-out queued once with (job_id, prompt, targets, change).
     assert len(bg.tasks) == 1
+    # prompts_by_char is None for a scene with no recorded person choice —
+    # every character gets the one shared prompt, as before (2026-08-06).
     assert bg.tasks[0].args[1:] == ("j1", "NEW PROMPT",
                                     {"c0": "c0-v1", "c1": "c1-v1"},
-                                    "byt mugg mot glas")
+                                    "byt mugg mot glas", None)
     saved = wired["states"]["re_t"]
     assert saved["scenes"][0]["dirty"] is True       # post-gate: clip is stale
     assert saved["finals_stale"] is True
