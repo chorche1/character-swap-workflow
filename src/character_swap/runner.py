@@ -1520,8 +1520,11 @@ async def _animate_one_video(
     fb_model = runner_media.video_fallback_model(video_model, language=fb_lang)
     fb_drops_end = bool(fb_model) and bool(end_image) and (
         runner_media.fallback_drops_end_frame(video_model, language=fb_lang))
-    models_to_try = [video_model] + (
-        [fb_model] if fb_model and video_model != fb_model else [])
+    # A refused clip is first re-submitted UNCHANGED on its own model
+    # (VIDEO_REFUSAL_RETRIES, Hugo 2026-08-06) and only then handed to the
+    # rescue above — see runner_media.video_attempt_models for why that order.
+    models_to_try = runner_media.video_attempt_models(
+        video_model, language=fb_lang)
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
     # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
     # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment
@@ -1636,8 +1639,20 @@ async def _animate_one_video(
             # refusal — see runner_media.triggers_fallback. Timeouts, network
             # errors and fal balance failures are NOT refusals and keep the loud
             # fail path with their real reason.
-            if (_model_idx + 1 < len(models_to_try)
-                    and runner_media.triggers_fallback(active_model, e)):
+            next_model = (models_to_try[_model_idx + 1]
+                          if _model_idx + 1 < len(models_to_try) else None)
+            if next_model and runner_media.triggers_fallback(active_model, e):
+                if next_model == active_model:
+                    # Plain re-submit on the SAME model — nothing about the
+                    # request changes, so this is NOT a fallback: leave
+                    # `fallback_model` unset (it drives the ⇄ chip and the
+                    # salvage/resume endpoint resolution in _eff_video_model).
+                    video.status = VideoStatus.PROCESSING
+                    _replace_video(job, jc, video)
+                    await _emit(job.job_id, "video.refusal_retry",
+                                char_id=jc.char_id, video_id=video.video_id,
+                                model=active_model, reason=str(e))
+                    continue
                 video.fallback_model = fb_model
                 video.fallback_dropped_end_frame = fb_drops_end
                 video.status = VideoStatus.PROCESSING
@@ -1665,6 +1680,15 @@ async def _animate_one_video(
                 # network / fal balance) — report the REAL cause, never a false
                 # content block (Hugo: fail loud, real reason).
                 video.error = f"reservmodellen {fb_model} misslyckades ({phase}): {e}"
+            elif (takes := models_to_try.count(active_model)) > 1 and \
+                    runner_media.triggers_fallback(active_model, e):
+                # Refused on every unchanged re-submit and no rescue applies.
+                # Name the take count so the failure reads as "this model will
+                # not render this clip", not "one unlucky call" — that is the
+                # signal to change the START FRAME, which is where the hard
+                # blocks actually sit (see runner_media.video_attempt_models).
+                video.error = (f"nekades {takes} gånger av {active_model} "
+                               f"({phase}): {e}")
             else:
                 video.error = base
             _replace_video(job, jc, video)

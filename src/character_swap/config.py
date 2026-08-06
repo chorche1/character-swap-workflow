@@ -459,6 +459,32 @@ class Settings(BaseSettings):
     video_moderation_fallback: bool = Field(
         default=False, validation_alias="VIDEO_MODERATION_FALLBACK")
 
+    # How many times a REFUSED clip is re-submitted UNCHANGED on its own model
+    # before the fallback (or the loud failure) takes over — Hugo 2026-08-06,
+    # "gör så fler videor inte blir nekade utan att ändra prompt".
+    #
+    # The refusal is not deterministic: the same line on the same start frame
+    # passes sometimes and is refused other times (measured 2026-08-03, and
+    # again 08-06 — Veo refused 50-60% of its calls across four days while the
+    # same prompts rendered fine on other attempts). Nothing about the request
+    # changes between takes, so this costs no prompt edit and no quality drop:
+    # the clip stays on the model the run picked, next to its neighbours.
+    #
+    # Billing: fal prices Veo 3.1 Fast PER GENERATED SECOND ("for every second
+    # of video you generate you will be charged $0.10/$0.15"), and a refused
+    # take generates none — so a re-submit of a refused clip has nothing to
+    # bill against. (fal's general FAQ warns that 422s "may still be charged if
+    # a runner spent GPU time"; the endpoint's own per-second price is the
+    # narrower rule. If a fal invoice ever shows overhead against the count of
+    # FINISHED clips, drop this to 0 — that is the number to watch.)
+    #
+    # 2 is Hugo's pick: at the measured ~50% per-attempt pass rate two extra
+    # takes recover ~75% of the stochastic refusals. It does NOT help the hard
+    # blocks (`no_media_generated` sits on the IMAGE and the scene, refused 6/6
+    # in the 2026-08-03 probe) — those just fail ~26s later. 0 disables.
+    video_refusal_retries: int = Field(
+        default=2, validation_alias="VIDEO_REFUSAL_RETRIES")
+
     stt_engine: str = Field(default="scribe", validation_alias="STT_ENGINE")
     stt_scribe_model: str = Field(default="scribe_v2",
                                   validation_alias="STT_SCRIBE_MODEL")
