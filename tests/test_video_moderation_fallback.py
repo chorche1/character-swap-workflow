@@ -38,10 +38,19 @@ _TIMEOUT = "Video job req-1 timed out after 600s"
 
 @pytest.fixture(autouse=True)
 def _fallback_on(monkeypatch):
-    """The rescue is opt-in now; these tests describe it switched ON."""
+    """The rescue is opt-in now; these tests describe it switched ON.
+
+    Also pins VIDEO_REFUSAL_RETRIES to 0 so every test below sees exactly ONE
+    take per model. In production a refused clip is re-submitted unchanged on
+    its own model FIRST (Hugo 2026-08-06) and only then handed to the rescue —
+    that ordering is locked in test_video_refusal_retry.py; this file is about
+    what happens once the chosen model has run out of takes.
+    """
     from character_swap.config import settings
     monkeypatch.setattr(type(settings), "video_moderation_fallback",
                         property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(settings), "video_refusal_retries",
+                        property(lambda self: 0), raising=False)
 
 
 def _job_one_clip(tmp_path, *, video_model="kling-v3"):

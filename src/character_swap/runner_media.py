@@ -342,6 +342,32 @@ def video_fallback_model(chosen_model: str | None = None, *,
     return VIDEO_MODERATION_FALLBACK_MODEL
 
 
+def video_attempt_models(chosen_model: str, *,
+                         language: str | None = None) -> list[str]:
+    """The ordered list of models one clip is attempted on, refusal by refusal.
+
+    `[chosen] * (1 + VIDEO_REFUSAL_RETRIES)` followed by the rescue model when
+    one applies — so a REFUSED clip is first re-submitted UNCHANGED on its own
+    model (Hugo 2026-08-06) and only moves to another provider once its own has
+    refused it every time. Ordering is deliberate: a Spanish Veo clip that
+    passes on take 2 keeps Veo's 0.992 speech fidelity and still looks and
+    sounds like the rest of a 🗣 reel, where every OTHER clip is on Veo too —
+    the Kling rescue (0.953) is the last resort it always was, not the first.
+    Costs ~60 s per extra take, which is the trade Hugo chose.
+    SINGLE SOURCE OF TRUTH for both runners' attempt loops.
+
+    Callers step through the list and compare consecutive entries: a repeat of
+    the same model is a plain re-submit, a CHANGE is the fallback leg (and only
+    that leg may set `VideoVariant.fallback_model`).
+    """
+    from character_swap.config import settings
+    models = [chosen_model] * (1 + max(0, settings.video_refusal_retries))
+    fb = video_fallback_model(chosen_model, language=language)
+    if fb and fb != chosen_model:
+        models.append(fb)
+    return models
+
+
 def fallback_drops_end_frame(chosen_model: str, *,
                              language: str | None = None) -> bool:
     """True when falling back from `chosen_model` would LOSE a resolved end

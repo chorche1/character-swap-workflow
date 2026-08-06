@@ -1258,10 +1258,12 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     # language gates it — the same value that built `prompt` above. Direct clips
     # never carry an end frame, so no end-frame degradation is possible here
     # either way.
+    # A refused clip is first re-submitted UNCHANGED on its own model
+    # (VIDEO_REFUSAL_RETRIES, Hugo 2026-08-06) before the rescue above gets it.
     fb_model = runner_media.video_fallback_model(
         model, language=state.get("language") or None)
-    models_to_try = [model] + (
-        [fb_model] if fb_model and model != fb_model else [])
+    models_to_try = runner_media.video_attempt_models(
+        model, language=state.get("language") or None)
     for _midx, active_model in enumerate(models_to_try):
         try:
             provider_job_id = await asyncio.to_thread(
@@ -1282,8 +1284,20 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
                                               "scene_id": scene_id})
             return
         except Exception as e:
-            if (_midx + 1 < len(models_to_try)
-                    and runner_media.triggers_fallback(active_model, e)):
+            next_model = (models_to_try[_midx + 1]
+                          if _midx + 1 < len(models_to_try) else None)
+            if next_model and runner_media.triggers_fallback(active_model, e):
+                if next_model == active_model:
+                    # Unchanged re-submit on the same model — not a fallback.
+                    _log.warning("reengineer %s: direct clip scene %s refused "
+                                 "by %s — re-submitting unchanged",
+                                 re_id, scene_id, active_model)
+                    await events.publish(
+                        job.job_id, {"kind": "direct.clip.refusal_retry",
+                                     "job_id": job.job_id,
+                                     "scene_id": scene_id,
+                                     "model": active_model})
+                    continue
                 _log.warning("reengineer %s: direct clip scene %s rejected on "
                              "content policy by %s — retrying on %s",
                              re_id, scene_id, active_model, fb_model)
@@ -1303,6 +1317,11 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
                            f"nekades också: {e}")
                 else:
                     err = f"reservmodellen {fb_model} misslyckades: {err}"
+            elif (takes := models_to_try.count(active_model)) > 1 and \
+                    runner_media.triggers_fallback(active_model, e):
+                # Refused on every unchanged re-submit, no rescue applies —
+                # name the count so it reads as a hard block on this input.
+                err = f"nekades {takes} gånger av {active_model}: {err}"
             await _persist_direct(re_id, scene_id, direct_error=err)
             return
 
