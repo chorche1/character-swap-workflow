@@ -55,6 +55,7 @@ from character_swap.clients import ProviderNotConfigured
 from character_swap.clients.fal_kling import (
     FalAccountError,
     _check_account_block,
+    account_error,
     _is_account_error,
     _trip_account_block,
     error_detail,
@@ -176,8 +177,7 @@ def submit_image_to_video(
         except Exception as e:
             if _is_account_error(e):
                 _trip_account_block(e)
-                raise FalAccountError(
-                    f"fal account cannot accept work: {error_detail(e)}") from e
+                raise account_error(e) from e
             raise RuntimeError(f"fal.upload_file failed: {error_detail(e)}") from e
         payload["upload_url"] = start_url
 
@@ -214,8 +214,7 @@ def submit_image_to_video(
         except Exception as e:
             if _is_account_error(e):
                 _trip_account_block(e)
-                raise FalAccountError(
-                    f"fal account cannot accept work: {error_detail(e)}") from e
+                raise account_error(e) from e
             raise RuntimeError(f"fal {endpoint} submit failed: {error_detail(e)}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id

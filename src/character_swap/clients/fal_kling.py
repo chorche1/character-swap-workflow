@@ -21,7 +21,9 @@ Response: {video: {url, ...}, ...}
 """
 from __future__ import annotations
 
+import logging
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -30,6 +32,8 @@ import httpx
 from character_swap import call_log
 from character_swap.clients import ProviderNotConfigured
 from character_swap.config import settings
+
+log = logging.getLogger(__name__)
 
 
 class FalAccountError(RuntimeError):
@@ -87,18 +91,101 @@ def _is_account_error(e: Exception) -> bool:
     return any(m in s for m in _ACCOUNT_ERROR_MARKERS)
 
 
+# Live balance probe, so the pause above releases the moment the account is
+# topped up instead of always sitting out its full 10 minutes (Hugo
+# 2026-08-06). Measured that day: after a top-up to $47.90 fal's OWN lock flag
+# lingered and cleared UNEVENLY — of 14 retried clips 5 were accepted and 9
+# still came back "User is locked". The first of those 9 re-armed the pause,
+# so the remaining ~41 clips of the batch were never even attempted. A pause
+# is the right answer for a dead account; on an account that demonstrably has
+# money it just holds the batch hostage.
+_BALANCE_URL = "https://rest.alpha.fal.ai/billing/user_balance"
+_BALANCE_CACHE_SECS = 30.0
+_BALANCE_TIMEOUT_SECS = 8.0
+_balance_probe: dict = {"at": 0.0, "balance": None}
+_balance_lock = threading.Lock()
+
+
+def account_balance(*, force: bool = False) -> float | None:
+    """Current fal balance in USD, or None when it can't be determined (no
+    key / network error / unexpected payload).
+
+    Cached for `_BALANCE_CACHE_SECS` behind a lock so a 55-clip batch makes
+    ONE HTTP call, not 55. NEVER raises — an unknown balance must fall back to
+    the conservative behavior (keep the pause), never break a submit."""
+    if not settings.fal_api_key:
+        return None
+    with _balance_lock:
+        now = time.monotonic()
+        if not force and _balance_probe["at"] and \
+                now - _balance_probe["at"] < _BALANCE_CACHE_SECS:
+            return _balance_probe["balance"]
+        balance: float | None = None
+        try:
+            r = httpx.get(_BALANCE_URL,
+                          headers={"Authorization": f"Key {settings.fal_api_key}"},
+                          timeout=_BALANCE_TIMEOUT_SECS)
+            r.raise_for_status()
+            body = r.text.strip()
+            try:                              # bare number today, dict tomorrow
+                balance = float(body)
+            except ValueError:
+                data = r.json()
+                for key in ("balance", "user_balance", "amount"):
+                    if isinstance(data, dict) and key in data:
+                        balance = float(data[key])
+                        break
+        except Exception as e:                # unknown → caller keeps the pause
+            log.warning("fal balance probe failed: %s", e)
+            balance = None
+        _balance_probe.update(at=now, balance=balance)
+        return balance
+
+
+def _funded() -> bool:
+    """True only when fal ITSELF confirms a positive balance."""
+    bal = account_balance()
+    return bal is not None and bal > 0
+
+
 def _check_account_block() -> None:
     remaining = _account_block["until"] - time.monotonic()
-    if remaining > 0:
-        raise FalAccountError(
-            f"fal submits paused ({int(remaining)}s left): "
-            f"{_account_block['reason']} — fix billing at "
-            "fal.ai/dashboard/billing, then retry the failed clips")
+    if remaining <= 0:
+        return
+    if _funded():
+        # The account has money — this pause is stale. Clear it and let the
+        # clip through: fal may still reject it (its lock flag clears
+        # unevenly), but that is now a per-clip failure the user can retry,
+        # not a batch-wide freeze.
+        log.info("fal pause cleared early — balance is positive (was: %s)",
+                 _account_block["reason"][:120])
+        _account_block.update(until=0.0, reason="")
+        return
+    raise FalAccountError(
+        f"fal submits paused ({int(remaining)}s left): "
+        f"{_account_block['reason']} — fix billing at "
+        "fal.ai/dashboard/billing, then retry the failed clips")
 
 
 def _trip_account_block(e: Exception) -> None:
     _account_block["until"] = time.monotonic() + _ACCOUNT_BLOCK_SECS
     _account_block["reason"] = error_detail(e)[:300]
+
+
+def account_error(e: Exception) -> FalAccountError:
+    """The FalAccountError every fal client raises on an account-level
+    rejection. When the balance is positive the account is NOT out of money —
+    fal's lock flag is simply still lingering after a top-up — so the clip's
+    error chip must say that instead of "top up your balance", which would
+    send the user to a billing page that already looks fine."""
+    detail = error_detail(e)
+    bal = account_balance()
+    if bal is not None and bal > 0:
+        return FalAccountError(
+            f"fal rejected the job even though the balance is ${bal:.2f} — "
+            "fal's account lock lingers for a few minutes after a top-up and "
+            f"clears unevenly. Retry the clip shortly. ({detail})")
+    return FalAccountError(f"fal account cannot accept work: {detail}")
 
 
 def _endpoint() -> str:
@@ -168,8 +255,7 @@ def submit_image_to_video(
         except Exception as e:
             if _is_account_error(e):
                 _trip_account_block(e)
-                raise FalAccountError(
-                    f"fal account cannot accept work: {error_detail(e)}") from e
+                raise account_error(e) from e
             raise RuntimeError(f"fal.upload_file failed: {error_detail(e)}") from e
         payload["upload_url"] = start_url
 
@@ -199,8 +285,7 @@ def submit_image_to_video(
         except Exception as e:
             if _is_account_error(e):
                 _trip_account_block(e)
-                raise FalAccountError(
-                    f"fal account cannot accept work: {error_detail(e)}") from e
+                raise account_error(e) from e
             raise RuntimeError(f"fal {_endpoint()} submit failed: {error_detail(e)}") from e
         request_id = handler.request_id
         payload["request_id"] = request_id

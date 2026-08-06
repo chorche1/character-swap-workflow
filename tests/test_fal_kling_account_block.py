@@ -15,12 +15,21 @@ import pytest
 
 from character_swap.clients import fal_kling
 
+# Captured before the autouse fixture stubs it out, so the probe tests below
+# can exercise the REAL function.
+_REAL_BALANCE = fal_kling.account_balance
+
 
 @pytest.fixture(autouse=True)
-def _reset_block():
+def _reset_block(monkeypatch):
     fal_kling._account_block.update(until=0.0, reason="")
+    fal_kling._balance_probe.update(at=0.0, balance=None)
+    # Default for the legacy cases below: the account really IS out of money,
+    # which is what the original circuit-breaker tests assert.
+    monkeypatch.setattr(fal_kling, "account_balance", lambda **kw: -69.86)
     yield
     fal_kling._account_block.update(until=0.0, reason="")
+    fal_kling._balance_probe.update(at=0.0, balance=None)
 
 
 def _wire(monkeypatch, upload_error: Exception | None = None,
@@ -162,6 +171,95 @@ def test_every_fal_client_shares_the_body_aware_classifier():
         assert mod._is_account_error(exc), mod.__name__
         assert mod.error_detail is fal_kling.error_detail, mod.__name__
     assert fal_veed.error_detail is fal_kling.error_detail
+
+
+# --- the pause must release once the account is funded (Hugo 2026-08-06) -----
+#
+# THE BUG: after topping fal up to $47.90, retrying 55 failed clips got 5 in
+# and 9 rejected by fal itself (its lock flag clears unevenly); the first
+# rejection re-armed the 600s pause, so the remaining ~41 were never attempted.
+# The pause must protect a DEAD account, never a funded one.
+
+
+def test_pause_clears_early_when_balance_is_positive(monkeypatch, tmp_path):
+    uploads, submits = _wire(monkeypatch)
+    fal_kling._account_block.update(
+        until=fal_kling.time.monotonic() + 599, reason="User is locked")
+    monkeypatch.setattr(fal_kling, "account_balance", lambda **kw: 47.90)
+
+    assert _submit(tmp_path) == "req_1"          # got through despite the pause
+    assert len(submits) == 1
+    assert fal_kling._account_block["until"] == 0.0   # and the pause is gone
+
+
+def test_pause_holds_while_balance_is_still_exhausted(monkeypatch, tmp_path):
+    uploads, submits = _wire(monkeypatch)
+    fal_kling._account_block.update(
+        until=fal_kling.time.monotonic() + 599, reason="User is locked")
+    monkeypatch.setattr(fal_kling, "account_balance", lambda **kw: 0.0)
+
+    with pytest.raises(fal_kling.FalAccountError, match="paused"):
+        _submit(tmp_path)
+    assert not uploads and not submits
+
+
+def test_unknown_balance_keeps_the_pause(monkeypatch, tmp_path):
+    """Probe failed / no key → we must NOT assume the account is funded."""
+    uploads, _ = _wire(monkeypatch)
+    fal_kling._account_block.update(
+        until=fal_kling.time.monotonic() + 599, reason="User is locked")
+    monkeypatch.setattr(fal_kling, "account_balance", lambda **kw: None)
+
+    with pytest.raises(fal_kling.FalAccountError, match="paused"):
+        _submit(tmp_path)
+    assert not uploads
+
+
+def test_rejection_on_a_funded_account_reads_as_a_lingering_lock(monkeypatch, tmp_path):
+    """The clip chip must not say "top up your balance" when the balance is
+    fine — that sends Hugo to a billing page that already shows money."""
+    monkeypatch.setattr(fal_kling, "account_balance", lambda **kw: 47.90)
+    _wire(monkeypatch, submit_error=RuntimeError(
+        "User is locked. Reason: Exhausted balance"))
+
+    with pytest.raises(fal_kling.FalAccountError) as ei:
+        _submit(tmp_path)
+    assert "even though the balance is $47.90" in str(ei.value)
+
+    from character_swap import clip_failure
+    info = clip_failure.explain(str(ei.value))
+    assert info["kind"] == "billing_lock_lingering"
+    assert "trots saldo" in info["headline"]
+
+
+def test_balance_probe_is_cached_and_never_raises(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(fal_kling, "account_balance", _REAL_BALANCE)
+
+    def boom(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("network down")
+    monkeypatch.setattr(fal_kling.settings, "fal_api_key", "fal_test")
+    monkeypatch.setattr(fal_kling.httpx, "get", boom)
+    fal_kling._balance_probe.update(at=0.0, balance=None)
+
+    assert fal_kling.account_balance() is None      # swallowed, not raised
+    assert fal_kling.account_balance() is None      # served from cache
+    assert len(calls) == 1
+
+
+def test_balance_probe_parses_a_bare_number(monkeypatch):
+    monkeypatch.setattr(fal_kling, "account_balance", _REAL_BALANCE)
+    monkeypatch.setattr(fal_kling.settings, "fal_api_key", "fal_test")
+
+    class R:
+        text = "47.9023054"
+
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fal_kling.httpx, "get", lambda *a, **kw: R())
+    fal_kling._balance_probe.update(at=0.0, balance=None)
+
+    assert fal_kling.account_balance() == pytest.approx(47.9023054)
 
 
 # --- transient-error retries on download (backlog #34) -----------------------

@@ -124,6 +124,18 @@ _KINDS: list[tuple[re.Pattern[str], tuple[str, str, str, str]]] = [
         "stoppades hellre än att spelas in på engelska.",
         "↻ kör om klippet. Håller felet i sig: kolla OPENAI_API_KEY och kvoten.",
     )),
+    # MUST precede the billing_locked rule below — this message quotes fal's
+    # own "User is locked" text, so the broader pattern would swallow it and
+    # send Hugo to a billing page that already shows money (2026-08-06).
+    (re.compile(r"even though the balance is", re.I), (
+        "billing_lock_lingering",
+        "💳 fal:s lås ligger kvar trots saldo",
+        "Kontot har pengar, men fal:s låsflagga från det tomma saldot sitter "
+        "kvar en stund efter påfyllningen och släpper ojämnt — en del klipp "
+        "tas emot, andra nekas.",
+        "↻ ta om de failade klippen om någon minut. Fler går igenom för varje "
+        "runda tills låset släppt helt.",
+    )),
     (re.compile(r"Exhausted balance|User is locked|fal submits paused", re.I), (
         "billing_locked",
         "💳 fal-kontot är låst — saldot är slut",
