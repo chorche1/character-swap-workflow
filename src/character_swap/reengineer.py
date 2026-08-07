@@ -608,6 +608,14 @@ class SpokenLanguage:
         """Replacement for an explicit "speaking English…" order in a prompt."""
         return f"speaking {self.attribution}"
 
+    @property
+    def accent_phrase(self) -> str:
+        """The attribution as a bare NOUN phrase — "standard German" — for the
+        Director's labeled voice fields ("Accent: American" → "Accent: standard
+        German", "Voice: male, American accent" → "…, standard German
+        accent"). Derived from `attribution` so the two can never drift."""
+        return re.sub(r"(?i)^in\s+", "", self.attribution)
+
 
 GERMAN_SPEECH_ATTRIBUTION = "in standard German"
 
@@ -684,6 +692,15 @@ ACCENT_CLAUSE: dict[str, tuple[str, str]] = {
 }
 
 
+# The two non-language clauses `with_accent` appends to EVERY scene, silent
+# ones included. Named so `_without_own_clauses` can subtract our own
+# boilerplate before scanning a prompt for a speech directive — otherwise a
+# wordless shot looks like it orders speech and the loud nets misfire.
+_PRONOUNCE_CLAUSE = (" Every word is pronounced clearly, correctly and "
+                     "distinctly.")
+_NO_MUSIC_CLAUSE = (" No background music — natural ambient room sound only.")
+
+
 def with_accent(prompt: str, language: str = "en") -> str:
     """Kling synthesizes voice AND ambience from the prompt — enforce three
     guarantees centrally, even if a scene's agent-written prompt forgot them:
@@ -714,11 +731,9 @@ def with_accent(prompt: str, language: str = "en") -> str:
     if key not in out.lower():
         out = out.rstrip() + clause
     if "pronounc" not in out.lower():
-        out = (out.rstrip() + " Every word is pronounced clearly, correctly "
-               "and distinctly.")
+        out = out.rstrip() + _PRONOUNCE_CLAUSE
     if "music" not in out.lower():
-        out = (out.rstrip() + " No background music — natural ambient room "
-               "sound only.")
+        out = out.rstrip() + _NO_MUSIC_CLAUSE
     return out
 
 
@@ -741,9 +756,43 @@ _INLINE_EN_ACCENT_RE = re.compile(
 # the clip speaks English anyway (Hugo 2026-07-31). The optional trailing
 # `with a … accent` is consumed with it so no orphan English-region accent
 # survives the swap.
+#
+# The verb and "English" are not always adjacent (Hugo 2026-08-07): the
+# Director wrote "Voice of a middle-aged man speaking clearly and
+# enthusiastically in English" on re_db8e7b4e91, so the order survived, sat
+# next to the appended Spanish attribution, and the clip came out Spanish with
+# an ENGLISH tail ("…and it's really for Colferin", vd_295249). Up to five
+# intervening word/comma tokens are allowed; `.` and `—` are NOT in the class,
+# so the span can never cross a sentence boundary — and our own speak-only
+# clause ("speaks ONLY German — … No English is spoken at any point") stays
+# unmatched for exactly that reason.
 _EN_SPEECH_ORDER_RE = re.compile(
-    r"(?i)\b(?:speaks?|speaking|spoken)\s+(?:fluent\s+|natural\s+)*English\b"
+    r"(?i)\b(?:speaks?|speaking|spoken)\s+(?:[\w,-]+\s+){0,5}?"
+    r"(?:in\s+)?English\b"
     r"(?:\s+with\s+an?\s+(?:[\w-]+\s+){0,3}?accent)?")
+
+# A BARE English accent with no "with an" / "in an" preposition — the
+# Director's AUDIO block writes it as a field: "Voice: Male, American accent"
+# / "Accent: American." `_INLINE_EN_ACCENT_RE` requires the preposition, so
+# these went to the model untouched. On re_db8e7b4e91 scene 1 that was one of
+# the two misses that let four 🇪🇸/🇩🇪 clips ship in verbatim English.
+# Replaced with the target language's own accent phrase (not deleted) for the
+# 2026-08-02 reason: a voice field that names NO language reads as English.
+_BARE_EN_ACCENT_RE = re.compile(
+    r"(?i)\b(?:\w+\s+){0,2}?American(?:\s+English)?\s+accent")
+
+# `Language: English.` as a labeled field in the same AUDIO block. Nothing
+# stripped it, so re_db8e7b4e91 shipped prompts ordering English and German at
+# once, with English written FIRST and closest to the line.
+_EN_LANGUAGE_FIELD_RE = re.compile(
+    r"(?i)\bLanguage\s*:\s*English\b")
+# The negative lookahead is what keeps this off OUR OWN output: the
+# replacement is "Accent: neutral Latin American Spanish", whose "…Latin
+# American" would otherwise re-match and make the residual scan refuse every
+# good Spanish clip.
+_EN_ACCENT_FIELD_RE = re.compile(
+    r"(?i)\bAccent\s*:\s*(?:\w+\s+){0,2}?American(?:\s+English)?\b"
+    r"(?!\s+Spanish)")
 
 # The inline attribution of ANOTHER registered language ("...says to the camera
 # in neutral Latin American Spanish:"). Reachable when the run-level 🗣 picker
@@ -771,7 +820,81 @@ def _has_english_speech_directive(prompt: str) -> bool:
     text = prompt or ""
     return bool(ACCENT_CLAUSE["en"][0] in text
                 or _INLINE_EN_ACCENT_RE.search(text)
-                or _EN_SPEECH_ORDER_RE.search(text))
+                or _EN_SPEECH_ORDER_RE.search(text)
+                or _BARE_EN_ACCENT_RE.search(text)
+                or _EN_LANGUAGE_FIELD_RE.search(text)
+                or _EN_ACCENT_FIELD_RE.search(text))
+
+
+def _without_own_clauses(text: str, spec: SpokenLanguage) -> str:
+    """`text` with OUR OWN boilerplate removed, so the scans below cannot trip
+    over words we ourselves appended — `speak_only_clause` ends with "No
+    English is spoken at any point.", and `with_accent` appends the English
+    accent clause ("The person speaks fluent American English…") to EVERY
+    scene, silent ones included."""
+    out = text or ""
+    for clause in (spec.speak_only_clause, spec.accent_clause,
+                   ACCENT_CLAUSE["en"][0], _PRONOUNCE_CLAUSE, _NO_MUSIC_CLAUSE):
+        out = out.replace(clause, " ")
+    return _ATTRIBUTION_RES[spec.code].sub(" ", out)
+
+
+def _residual_english_order(text: str, spec: SpokenLanguage) -> str | None:
+    """The English speech order still standing AFTER sanitization, or None.
+
+    The sanitizer recognises SHAPES, and the Director writes free-form English
+    — every shape it has not met yet is a silent English clip (five leaked on
+    2026-08-06 alone). This turns the next unknown shape into a LOUD failure
+    before a single credit is spent, which is Hugo's standing rule."""
+    stripped = _without_own_clauses(text, spec)
+    for rx in (_INLINE_EN_ACCENT_RE, _EN_SPEECH_ORDER_RE, _BARE_EN_ACCENT_RE,
+               _EN_LANGUAGE_FIELD_RE, _EN_ACCENT_FIELD_RE):
+        m = rx.search(stripped)
+        if m:
+            return m.group(0).strip()
+    if ACCENT_CLAUSE["en"][0] in stripped:
+        return ACCENT_CLAUSE["en"][0].strip()
+    return None
+
+
+# A quoted line long enough to BE dialogue (≥5 words) that the extractor could
+# not read. A quoted PROP — `bottle labeled "Heinz White Vinegar"`, `comment
+# "Skin"` — is shorter than that, which is what keeps a silent scene from
+# tripping the loud refusal below.
+_QUOTED_LINE_RE = re.compile(r'["“]([^"”]{8,})["”]')
+
+# Deliberately wider than the extractor's own verb list — this one only has to
+# recognise that the prompt is TALKING ABOUT speech, and the shapes that broke
+# used "Spoken words are", "Voice:" and "Dialogue" with no verb at all. Run on
+# the prompt with our own boilerplate subtracted, so the accent/pronounce
+# clauses auto-appended to every scene never make a silent shot look spoken.
+_SPEECH_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:dialogue|dialog|spoken|speech|voice|voice-?over|says?|saying|"
+    r"said|speaks?|speaking|narrat\w*|utter\w*|recites?|announces|declares|"
+    r"proclaims)\b")
+
+
+def _unparsed_dialogue_line(prompt: str, spec: SpokenLanguage) -> str | None:
+    """A quoted LINE the extractor missed, or None.
+
+    Called only once the prompt is known to ORDER speech. `dialogue_matches`
+    found nothing, yet a sentence-length quote sits in a speech context — so
+    the clip WILL talk, and we could neither translate what it says nor give
+    video-QC anything to check it against. That combination is exactly how
+    re_db8e7b4e91 shipped four verbatim-English clips carrying
+    `qc_status="skipped"` (Hugo 2026-08-07: fail loudly instead).
+
+    The ≥5-word rule is what separates a LINE from a quoted PROP — `bottle
+    labeled "Heinz White Vinegar"` (3) and `comment "Skin"` (1) stay below it,
+    so a wordless shot is never refused."""
+    stripped = _without_own_clauses(prompt, spec)
+    if not _SPEECH_CONTEXT_RE.search(stripped):
+        return None
+    for m in _QUOTED_LINE_RE.finditer(stripped):
+        line = m.group(1).strip()
+        if len(line.split()) >= 5:
+            return line
+    return None
 
 
 def _has_foreign_speech_directive(prompt: str, language: str) -> bool:
@@ -865,12 +988,31 @@ def _force_language_speech(text: str, language: str) -> str:
             continue
         out = out.replace(other.accent_clause, "")
         out = _ATTRIBUTION_RES[code].sub("", out)
+    # LABELED voice fields first (most specific), then the prepositional inline
+    # phrase, and only then the BARE accent — running bare first would eat the
+    # preposition's object and leave a dangling "with a".
+    out = _EN_LANGUAGE_FIELD_RE.sub(f"Language: {spec.name_en}", out)
+    out = _EN_ACCENT_FIELD_RE.sub(f"Accent: {spec.accent_phrase}", out)
     out = _INLINE_EN_ACCENT_RE.sub(f" {spec.attribution}", out)
     out = _EN_SPEECH_ORDER_RE.sub(spec.speech_order, out)
+    out = _BARE_EN_ACCENT_RE.sub(f"{spec.accent_phrase} accent", out)
+    out = _dedupe_attribution(out, spec)
     out = enforce_language_directives(out, spec)
     if spec.marker not in out.lower():
         out = out.rstrip() + spec.accent_clause
     return out
+
+
+def _dedupe_attribution(text: str, spec: SpokenLanguage) -> str:
+    """Collapse an attribution repeated back-to-back.
+
+    Replacing an English order can land the attribution right next to one the
+    prompt already carried — "speaking clearly and enthusiastically in English
+    in neutral Latin American Spanish" becomes "speaking in neutral Latin
+    American Spanish in neutral Latin American Spanish" (re_db8e7b4e91,
+    vd_295249)."""
+    attr = re.escape(spec.attribution)
+    return re.sub(rf"(?i)({attr})(?:\s+{attr})+", r"\1", text)
 
 # Memoize localized prompts so SERIAL re-renders (per-clip retries / crash
 # resumes / a later job reusing the same scene prompt) skip a redundant GPT-4o
@@ -971,8 +1113,24 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         # untouched.
         if not _has_foreign_speech_directive(prompt, lang):
             return prompt
-        return _cache_localized(lang, prompt,
-                                _force_language_speech(prompt, lang))
+        # The prompt ORDERS speech. If it also carries a sentence-length quote
+        # the extractor could not read, that quote IS the line (Hugo
+        # 2026-08-07) — the clip will talk, we cannot translate what it says,
+        # and video-QC gets no expected speech, so it renders unchecked with
+        # `qc_status="skipped"`. That is exactly how re_db8e7b4e91 scene 1
+        # shipped four verbatim-ENGLISH clips. Refuse instead of rendering
+        # blind; the directive gate above keeps genuinely silent shots out.
+        unparsed = _unparsed_dialogue_line(prompt, spec)
+        if unparsed:
+            logger.warning("localize_motion_prompt (%s): a quoted line is "
+                           "present but unreadable by the extractor (%r); "
+                           "failing the clip loudly", job_id, unparsed[:80])
+            raise LocalizationError(
+                f"the prompt carries a spoken line the extractor cannot read, "
+                f"so it can be neither translated to {spec.name_en} nor "
+                f"language-checked: “{unparsed[:80]}”")
+        return _cache_localized(
+            lang, prompt, _sanitized_language_prompt(prompt, lang, job_id))
 
     translated = translate_dialogue(phrases, language=lang, re_id=job_id)
     if translated is None:
@@ -995,8 +1153,33 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     # accent, another language's attribution, and an explicit "speaking
     # English…" order sitting right next to the line we just translated) and
     # enforce the target one.
-    localized = _force_language_speech(localized, lang)
+    localized = _sanitized_language_prompt(localized, lang, job_id)
     return _cache_localized(lang, prompt, localized)
+
+
+def _sanitized_language_prompt(text: str, language: str,
+                               job_id: str | None) -> str:
+    """`_force_language_speech` + a hard assertion that it actually worked.
+
+    The sanitizer matches SHAPES and the Director writes free-form English, so
+    it can only strip orders it has already met. Five unmet shapes leaked on
+    2026-08-06 (`Dialogue exact:`, `Voice: Male, American accent`, `Language:
+    English.`, `Accent: American.`, "speaking clearly and enthusiastically in
+    English") and every one of them failed SILENTLY. Verifying the output
+    turns the next unknown shape into a loud, pre-submit failure — Hugo's
+    standing "refuse loudly over silent partial" rule, at zero render cost."""
+    spec = SPOKEN_LANGUAGES[language]
+    out = _force_language_speech(text, language)
+    residual = _residual_english_order(out, spec)
+    if residual:
+        logger.warning("localize_motion_prompt (%s): an English speech order "
+                       "survived sanitization (%r); failing the clip loudly",
+                       job_id, residual[:80])
+        raise LocalizationError(
+            f"the prompt still orders English after localization to "
+            f"{spec.name_en} — “{residual[:80]}”. Reword that phrase in the "
+            f"clip's prompt and retry.")
+    return out
 
 
 def spanishize_plans(plans: list[ScenePlan], *,

@@ -1918,9 +1918,24 @@ DIALOGUE_RE = re.compile(
 # even-timed script fallback (both gate on a known line) — one character whose
 # Veo/Kling voice Whisper couldn't read shipped captions on only the first clip
 # (re_87e851d21f / Chang). Recognising the labeled form re-arms the whole net.
+#
+# A short QUALIFIER may sit between the label and the colon (Hugo 2026-08-07).
+# Requiring the colon to follow the label IMMEDIATELY missed two shapes that
+# together broke 20 of 76 language clips on 2026-08-06:
+#   • the Director's own `AUDIO — … Dialogue exact: "…"` — invisible, so the
+#     line was never translated AND video-QC had no expected speech, which is
+#     how 4 clips for 🇪🇸/🇩🇪 characters shipped speaking verbatim ENGLISH with
+#     `qc_status="skipped"` (re_db8e7b4e91 scene 1, all four characters);
+#   • our OWN `_inject_inline_attribution` output, `Dialogue in standard
+#     German: "…"` — the localizer blinded the extractor on the very prompt it
+#     had just repaired, so 16 correctly-translated clips also lost QC.
+# The body forbids `"`, `:`, `;` and `.` so it can never cross a sentence
+# boundary or a second colon — `Dialogue and ambient sounds. Voice: "…"` still
+# does NOT match, and a quoted PROP is still unreachable without the label.
 # Mirrored in app.js klingSpeechSecs; the JS-mirror sync test pins both.
 _LABELED_DIALOGUE_RE = re.compile(
-    r'\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]',
+    r'\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*'
+    r'["“]([^"”]+)["”]',
     re.IGNORECASE)
 
 # Speech introduced by a VERB OTHER than `says`, with no `Dialogue:` label to
