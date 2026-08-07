@@ -36,3 +36,41 @@ def test_voice_on_but_nothing_set_is_no_swap():
     assert _resolve_compile_voice(None, _char(None), True) is None
     assert _resolve_compile_voice("   ", _char(""), True) is None
     assert _resolve_compile_voice(None, None, True) is None
+
+
+# --- UI reachability ---------------------------------------------------------
+#
+# The resolver above is only reachable if the user can actually SET a preset
+# voice. The 🎤 picker shipped in 36b7b5e and was silently dropped from the
+# markup in 8131edf when the library card was rewritten — leaving the model
+# field, the PATCH endpoint, the SQLite column, `setCharacterVoice()` and this
+# very resolver all alive but unreachable from the UI. These tests lock the
+# whole chain, not just its last link.
+
+def _web(name: str) -> str:
+    from pathlib import Path
+    return (Path(__file__).resolve().parents[1] / "web" / name).read_text()
+
+
+def test_library_card_has_a_preset_voice_picker():
+    """A character's preset voice must be settable from the library card."""
+    html = _web("index.html")
+    assert "setCharacterVoice(ch.char_id" in html, (
+        "the 🎤 preset-voice picker is missing from the library card — "
+        "the preset becomes unreachable even though the backend still honors it"
+    )
+    # It must be populated from the loaded ElevenLabs voices, not hardcoded.
+    assert "elevenlabsVoices" in html
+    # ...and offer a way back to 'no preset' (keep the clip's own audio).
+    assert 'ingen preset' in html
+
+
+def test_set_character_voice_patches_the_character():
+    """The picker's handler must PATCH the character, clearing on empty."""
+    app_js = _web("app.js")
+    assert "async setCharacterVoice(charId, voiceId)" in app_js
+    body = app_js.split("async setCharacterVoice(charId, voiceId)")[1][:600]
+    assert "'/api/characters/' + charId" in body
+    assert "PATCH" in body
+    # Empty selection clears the preset rather than sending undefined.
+    assert "voiceId || ''" in body

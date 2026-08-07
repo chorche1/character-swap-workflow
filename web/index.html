@@ -4521,6 +4521,31 @@
                 <option value="de">🇩🇪 Tyska (Hochdeutsch)</option>
               </select>
             </label>
+            <!-- Presetröst (ElevenLabs). Auto-appliceras när den här karaktärens
+                 final byggs (Step 6-compile + Reengineer "Bygg ihop") och när du
+                 väljer karaktären i Editor-flikens Character-dropdown. En
+                 batch-övergripande röst-override i bygg-rutan slår presetet, och
+                 avbockad röstswitch behåller klippets egen röst
+                 (runner_compile._resolve_compile_voice). Fanns i 36b7b5e men
+                 tappades ur markupen i 8131edf när kortet skrevs om — resten av
+                 kedjan (PATCH, SQLite-kolumn, compile) levde kvar hela tiden. -->
+            <label class="flex items-center gap-1.5 text-[11px] text-neutral-600 dark:text-neutral-300 select-none"
+                   @click.stop=""
+                   title="Karaktärens presetröst (ElevenLabs). Används automatiskt när den här karaktärens final byggs och när du väljer karaktären i Editor-fliken. En röst-override i bygg-rutan slår presetet.">
+              <span :title="ch.voice_id ? 'Presetröst vald' : 'Ingen presetröst'">🎤 Röst</span>
+              <select class="flex-1 min-w-0 px-1.5 py-1 text-[11px] border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded focus:outline-none focus:ring-2 focus:ring-sky-500 disabled:opacity-50"
+                      :value="ch.voice_id || ''"
+                      :disabled="!elevenlabsVoices.length"
+                      @change="setCharacterVoice(ch.char_id, $event.target.value)">
+                <option value=""
+                        x-text="elevenlabsVoices.length ? '— ingen preset (behåll klippets röst) —'
+                                                        : '— ElevenLabs ej tillgängligt —'"></option>
+                <template x-for="v in elevenlabsVoices" :key="'cv-'+ch.char_id+'-'+v.voice_id">
+                  <option :value="v.voice_id" :selected="ch.voice_id === v.voice_id"
+                          x-text="`${v.name || v.voice_id}${v.category ? ' · ' + v.category : ''}`"></option>
+                </template>
+              </select>
+            </label>
             <label class="block text-[10px] text-neutral-500 dark:text-neutral-400"
                    @click.stop="">
               <span>Telegram-kanal för finaler</span>
