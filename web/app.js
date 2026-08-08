@@ -154,10 +154,11 @@ function studio() {
       error: '',
     },
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
+    rerunPickerChar: null,            // ditto, inside the ↻ re-run modal
     // "Använd bild N för alla" (Hugo 2026-08-08): last applied bulk pick, per
-    // form ('swap' | 'reengineer'). Text only — the actual picks live in each
-    // form's sourceOverrides, so individual ↕ tweaks afterwards still win.
-    bulkSourceNote: { swap: '', reengineer: '' },
+    // form ('swap' | 'reengineer' | 'rerun'). Text only — the actual picks live
+    // in each form's sourceOverrides, so individual ↕ tweaks afterwards still win.
+    bulkSourceNote: { swap: '', reengineer: '', rerun: '' },
     // Library image-reorder drag in flight: {charId, imageId}. Kept separate
     // from the existing drag-a-character-into-the-job payload so the two
     // gestures can't be confused for one another.
@@ -1347,7 +1348,12 @@ function studio() {
     // and the Reengineer form use these; `kind` picks which one.
 
     bulkSourceForm(kind) {
-      return kind === 'reengineer' ? this.reengineerGen : this.swapFromImages;
+      if (kind === 'reengineer') return this.reengineerGen;
+      // The ↻ re-run modal is where an 11-character cast is actually picked,
+      // so it gets the same two controls — it keeps its OWN sourceOverrides
+      // (submitRerun forwards it as character_source_image_ids).
+      if (kind === 'rerun') return this.rerunModal;
+      return this.swapFromImages;
     },
 
     // The selected characters, in library order.
@@ -1516,6 +1522,8 @@ function studio() {
       // same 9 characters at full cost. "↺ samma som förra" is one click away.
       m.charIds = [];
       m.sourceOverrides = {};
+      this.rerunPickerChar = null;
+      this.bulkSourceNote = { ...this.bulkSourceNote, rerun: '' };
       try {
         const r = await fetch(`/api/reengineer/${run.re_id}/rerun_plan`);
         if (!r.ok) {
@@ -1564,6 +1572,7 @@ function studio() {
       const m = this.rerunModal;
       const known = new Set((this.library || []).map(c => c.char_id));
       m.charIds = (m.parentCharIds || []).filter(cid => known.has(cid));
+      this.bulkSourceNote = { ...this.bulkSourceNote, rerun: '' };
     },
 
     rerunToggleChar(cid) {
@@ -1571,6 +1580,36 @@ function studio() {
       m.charIds = m.charIds.includes(cid)
         ? m.charIds.filter(x => x !== cid)
         : [...m.charIds, cid];
+      // Same reason as the upload forms: the note describes the SELECTION the
+      // bulk pick ran on, so it would claim characters it never touched.
+      this.bulkSourceNote = { ...this.bulkSourceNote, rerun: '' };
+    },
+
+    // Which of the character's gallery images this re-run swaps FROM. The
+    // modal keeps its own map — reading swapFromImages' would show whatever
+    // was staged on the always-visible upload card instead.
+    rerunCharThumb(ch) {
+      const picked = this.rerunModal.sourceOverrides[ch.char_id];
+      if (picked) {
+        const img = (ch.images || []).find(i => i.image_id === picked);
+        if (img) return img.url;
+      }
+      return ch.url;
+    },
+
+    pickRerunSource(charId, imageId) {
+      const ch = this.library.find(c => c.char_id === charId);
+      // Landing on the ★ primary means "no override" — the same convention
+      // the bulk picker uses, so the two controls can never disagree.
+      if (ch && imageId === ch.primary_image_id) {
+        const next = { ...this.rerunModal.sourceOverrides };
+        delete next[charId];
+        this.rerunModal.sourceOverrides = next;
+      } else {
+        this.rerunModal.sourceOverrides = {
+          ...this.rerunModal.sourceOverrides, [charId]: imageId };
+      }
+      this.rerunPickerChar = null;
     },
 
     rerunIncludedRows() {

@@ -4940,12 +4940,31 @@
 
         <!-- characters -->
         <div x-show="!rerunModal.loading">
-          <div class="flex items-center gap-2 mb-2">
+          <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mb-2">
             <div class="text-sm font-medium">Karaktärer <span class="text-neutral-400 font-normal">— en final-video var</span></div>
             <button class="text-xs px-2 py-0.5 rounded text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                     x-show="rerunModal.parentCharIds.length"
                     title="Fyll i samma karaktärer som den gamla körningen"
                     @click="rerunUseParentCast()">↺ samma som förra</button>
+            <!-- Same bulk reference-image pick the upload forms have — this is
+                 where a big cast is actually chosen, so picking one ↕ popover
+                 at a time is exactly the thing it exists to avoid. -->
+            <label x-show="bulkSourceMax('rerun') > 1"
+                   class="text-xs flex items-center gap-1.5 text-neutral-500 dark:text-neutral-400"
+                   title="Sätter referensbilden för alla valda karaktärer på en gång. Numret är bildens plats i biblioteket (📚, ordna om med ◀ ⠿ ▶). Har en karaktär färre bilder än så får den sin sista.">
+              <span>Använd bild för alla:</span>
+              <select @change="onBulkSourceSelect('rerun', $event)"
+                      class="px-2 py-1 rounded-lg text-xs border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+                <option value="">välj…</option>
+                <template x-for="n in bulkSourceMax('rerun')" :key="'rrbulk'+n">
+                  <option :value="n" x-text="'Bild ' + n"></option>
+                </template>
+                <option value="primary">★ Primär (återställ)</option>
+              </select>
+            </label>
+            <span x-show="bulkSourceNote.rerun"
+                  class="text-[11px] text-indigo-600 dark:text-indigo-400"
+                  x-text="bulkSourceNote.rerun"></span>
           </div>
           <div class="flex flex-wrap gap-2">
             <template x-for="ch in library" :key="'rr-ch-'+ch.char_id">
@@ -4955,7 +4974,7 @@
                                   ? 'border-indigo-500 ring-2 ring-indigo-200 dark:ring-indigo-900 bg-indigo-50 dark:bg-indigo-950'
                                   : 'border-neutral-200 dark:border-neutral-800 hover:border-neutral-400'"
                         @click="rerunToggleChar(ch.char_id)">
-                  <img :src="swapCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
+                  <img :src="rerunCharThumb(ch)" class="w-8 h-8 rounded object-cover" />
                   <span x-text="ch.name"></span>
                   <span x-show="charLanguageFlag(ch.language)" class="text-xs"
                         x-text="charLanguageFlag(ch.language)"
@@ -4966,6 +4985,21 @@
                   <span x-show="rerunModal.charIds.includes(ch.char_id)"
                         class="text-indigo-600 dark:text-indigo-400">✓</span>
                 </button>
+                <button x-show="(ch.images || []).length > 1 && rerunModal.charIds.includes(ch.char_id)"
+                        class="absolute -top-1.5 -right-1.5 bg-indigo-600 text-white text-[10px] px-1.5 py-0.5 rounded-full shadow"
+                        :title="`Välj vilken av ${ch.name}s ${ch.images.length} bilder som används som referens i omkörningen`"
+                        @click.stop="rerunPickerChar = (rerunPickerChar === ch.char_id ? null : ch.char_id)"
+                        x-text="(ch.images || []).length + ' ↕'"></button>
+                <div x-show="rerunPickerChar === ch.char_id" @click.outside="rerunPickerChar = null"
+                     class="absolute z-30 top-full mt-1 left-0 p-2 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 shadow-xl flex gap-2">
+                  <template x-for="img in (ch.images || [])" :key="'rr-src-'+img.image_id">
+                    <button class="relative" @click.stop="pickRerunSource(ch.char_id, img.image_id)">
+                      <img :src="img.url" class="w-14 h-20 rounded object-cover border-2"
+                           :class="(rerunModal.sourceOverrides[ch.char_id] || ch.primary_image_id) === img.image_id
+                                     ? 'border-indigo-500' : 'border-transparent hover:border-neutral-400'" />
+                    </button>
+                  </template>
+                </div>
               </div>
             </template>
           </div>
