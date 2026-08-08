@@ -2410,7 +2410,10 @@ function studio() {
         // Mirror of video_edit._LABELED_DIALOGUE_RE — structured Director
         // prompts carry the line as `Dialogue: "…"` / `Voice-over: "…"` with no
         // `says` verb (anchored to the label so quoted props aren't speech).
-        const lm = [...prompt.matchAll(/\b(?:dialogue|spoken\s+line|voice-?over)\s*:\s*["“]([^"”]+)["”]/gi)];
+        // A short qualifier may sit between label and colon (`Dialogue exact:`,
+        // `Dialogue in standard German:`); the body forbids `"` `:` `;` `.` so
+        // it can never cross a sentence boundary or a second colon.
+        const lm = [...prompt.matchAll(/\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*["“]([^"”]+)["”]/gi)];
         saysSpoken = lm.map(x => x[1]).join(' ').trim();
       }
       if (!saysSpoken) {

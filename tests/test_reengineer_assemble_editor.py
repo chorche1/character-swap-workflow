@@ -650,7 +650,8 @@ def test_kling_duration_js_mirror_in_sync():
     # prompts) is mirrored too — both must carry it or a Director run's clip
     # length under-estimates the same way captions used to drop (Hugo 06-30).
     from character_swap import video_edit as _ve
-    label_frag = r'(?:dialogue|spoken\s+line|voice-?over)\s*:\s*'
+    label_frag = (r'(?:dialogue|spoken\s+line|voice-?over)\b'
+                  r'[^"“”:;.]{0,60}?:\s*')
     assert label_frag in hint, "JS labeled-dialogue regex drifted"
     assert label_frag in _ve._LABELED_DIALOGUE_RE.pattern
     # …and the speech-VERB fallback (`AUDIO — … voice speaking English …: "…"`),
