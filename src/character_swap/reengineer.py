@@ -727,6 +727,12 @@ def with_accent(prompt: str, language: str = "en") -> str:
     if spec is not None:
         out = _INLINE_EN_ACCENT_RE.sub(f" {spec.attribution}", out)
         out = _EN_SPEECH_ORDER_RE.sub(spec.speech_order, out)
+        # Both substitutions above can land the attribution next to one the
+        # prompt already carried. `_force_language_speech` dedupes for the
+        # per-character path; this is the run-level 🗣 path, whose output is
+        # FINAL for an unflagged character — `localize_motion_prompt` returns
+        # those unchanged, so nothing downstream would collapse it.
+        out = _dedupe_attribution(out, spec)
         out = out.replace(ACCENT_CLAUSE["en"][0], "")
     clause, key = ACCENT_CLAUSE.get(language, ACCENT_CLAUSE["en"])
     if key not in out.lower():
@@ -746,8 +752,17 @@ def with_accent(prompt: str, language: str = "en") -> str:
 # "clear", "General", ...) before "American"; anchored so it never eats the
 # Spanish clause's "...Latin American Spanish accent" ("American" there is
 # followed by "Spanish", not "English"/"accent").
+#
+# The ARTICLE is optional (Hugo 2026-08-08): the Director's AUDIO fields write
+# the phrase without one — "Voice: Female with American accent", "addresses the
+# camera with American accent". Those used to fall through to the bare pattern
+# below, which then ate the preposition's OBJECT along with it ("Female", "the
+# camera"). Catching them here replaces the whole prepositional phrase, so the
+# result reads "Voice: Female in standard German" and the speaker's gender —
+# the very thing the 👥 agent exists to get right — survives.
 _INLINE_EN_ACCENT_RE = re.compile(
-    r"(?i)\s+(?:with|in)\s+an?\s+(?:\w+\s+){0,2}?American(?:\s+English)?\s+accent")
+    r"(?i)\s+(?:with|in)\s+(?:an?\s+)?(?:\w+\s+){0,2}?"
+    r"American(?:\s+English)?\s+accent")
 
 # An explicit ORDER to speak English — the Director's own AUDIO phrasing,
 # "Deep, clear male voice speaking English with a thick Texas accent". Neither
@@ -779,8 +794,23 @@ _EN_SPEECH_ORDER_RE = re.compile(
 # the two misses that let four 🇪🇸/🇩🇪 clips ship in verbatim English.
 # Replaced with the target language's own accent phrase (not deleted) for the
 # 2026-08-02 reason: a voice field that names NO language reads as English.
+#
+# The words it may absorb before "American" are restricted to genuine accent
+# QUALIFIERS (Hugo 2026-08-08). A bare `\w+` ate whatever preceded the phrase:
+# `Voice: Female, American accent` lost "Female" and `addresses the camera with
+# American accent` became "addresses the neutral Latin American Spanish
+# accent" — the gender the 👥 speaker-fix agent had just been paid to establish,
+# and a camera instruction, deleted on 18 of 997 real prompts. The qualifier
+# list still swallows the regional adjectives that must not survive the swap
+# ("thick Texas American accent"), because an orphan English-region accent is
+# the whole reason this replaces rather than deletes.
+_ACCENT_QUALIFIER = (
+    r"(?:American|English|British|General|Standard|Neutral|Natural|Clear|"
+    r"Thick|Strong|Slight|Mild|Heavy|Light|Soft|Deep|Warm|Crisp|Smooth|"
+    r"Subtle|Authentic|Regional|Southern|Northern|Midwest\w*|Texas|Texan|"
+    r"Californian?|Boston|Brooklyn|East\s+Coast|West\s+Coast|New\s+York)")
 _BARE_EN_ACCENT_RE = re.compile(
-    r"(?i)\b(?:\w+\s+){0,2}?American(?:\s+English)?\s+accent")
+    rf"(?i)\b(?:{_ACCENT_QUALIFIER}\s+){{0,2}}?American(?:\s+English)?\s+accent")
 
 # `Language: English.` as a labeled field in the same AUDIO block. Nothing
 # stripped it, so re_db8e7b4e91 shipped prompts ordering English and German at
@@ -887,7 +917,11 @@ def _unparsed_dialogue_line(prompt: str, spec: SpokenLanguage) -> str | None:
 
     The ≥5-word rule is what separates a LINE from a quoted PROP — `bottle
     labeled "Heinz White Vinegar"` (3) and `comment "Skin"` (1) stay below it,
-    so a wordless shot is never refused."""
+    so a short quoted prop stays below it. It is a heuristic, not a proof: a
+    five-word quoted SIGN in an otherwise silent prompt would be refused. No
+    dialogue-less prompt in Hugo's history contains a quote of any length, so
+    the rule has never been within reach of firing, and the refusal is loud,
+    names the quote, and is fixed by editing it."""
     stripped = _without_own_clauses(prompt, spec)
     if not _SPEECH_CONTEXT_RE.search(stripped):
         return None

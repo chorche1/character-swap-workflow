@@ -307,6 +307,47 @@ def test_a_legacy_half_localized_prompt_now_reads_bilingual():
     assert "Pon bicarbonato de sodio en una remolacha cruda." in got
 
 
+# ------------------- sanitizer damage, found by adversarial review
+@pytest.mark.parametrize("text,keep", [
+    # The bare-accent replacement used to absorb up to two words of ANY kind
+    # before the phrase, so the noun in front of it disappeared: 18 of 997 real
+    # prompts, 10 of them losing the speaker's gender or the camera.
+    ("AUDIO — Voice: Female with American accent, clear tone.", "Female"),
+    ("AUDIO — Voice: Female, American accent.", "Female"),
+    ('The man addresses the camera with American accent: "one two three four '
+     'five"', "the camera"),
+])
+def test_stripping_the_english_accent_keeps_the_words_around_it(text, keep):
+    """Deleting "Female" is the same defect the 👥 speaker-fix agent is paid to
+    prevent — and it happened AFTER that agent had got it right."""
+    out = reengineer._force_language_speech(text, "es")
+    assert keep in out
+    assert "American accent" not in out
+
+
+def test_a_regional_english_accent_is_still_swallowed():
+    """The qualifier list must not become so narrow that an orphan English
+    accent survives beside the translated line."""
+    out = reengineer._force_language_speech(
+        "AUDIO — Voice: Male, thick Texas American accent.", "es")
+    assert "Texas" not in out and "American accent" not in out
+    assert "Male" in out
+
+
+@pytest.mark.parametrize("code", ["es", "de"])
+def test_the_run_level_path_never_names_the_language_twice(code):
+    """`with_accent` is the run-level 🗣 path, and its output is FINAL for an
+    unflagged character — `localize_motion_prompt` returns those unchanged, so
+    nothing downstream would collapse a doubled attribution. 47 of 997 real
+    prompts came out saying it twice."""
+    spec = reengineer.SPOKEN_LANGUAGES[code]
+    out = reengineer.with_accent(
+        "He speaks to the camera. The person speaks fluent American English "
+        "with a natural American accent.", code)
+    assert f"{spec.attribution} {spec.attribution}" not in out
+    assert spec.attribution in out
+
+
 def test_short_lines_never_trip_the_backstop(monkeypatch):
     """A three-word line can legitimately reappear inside a translation."""
     assert reengineer._surviving_source_line(
