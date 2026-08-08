@@ -71,8 +71,13 @@ def start(timeout: float = 20.0) -> bool:
         logger.info("Telegram local API credentials are not configured")
         return False
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (DATA_DIR / "temp").mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temp_dir = DATA_DIR / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Bot-specific subdirectory names contain credentials. Keep the local
+    # storage tree private even when it predates these explicit modes.
+    os.chmod(DATA_DIR, 0o700)
+    os.chmod(temp_dir, 0o700)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     _log_handle = LOG_PATH.open("ab")
     env = os.environ.copy()
@@ -83,8 +88,10 @@ def start(timeout: float = 20.0) -> bool:
             str(BINARY_PATH),
             "--local",
             f"--http-port={LOCAL_API_PORT}",
+            "--http-ip-address=127.0.0.1",
+            "--http-stat-ip-address=127.0.0.1",
             f"--dir={DATA_DIR}",
-            f"--temp-dir={DATA_DIR / 'temp'}",
+            f"--temp-dir={temp_dir}",
         ],
         env=env,
         stdin=subprocess.DEVNULL,
