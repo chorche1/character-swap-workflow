@@ -33,3 +33,10 @@ WORKFLOWS_GUIDE.html
 
 # swap-engine eval outputs (scripts/swap_eval.py)
 eval_out/
+
+# A stray empty DB the test suite can drop in the repo root when STATE_DIR
+# resolves to "." — never a real artifact (the real one lives in state/ or
+# ~/character-swap-data/state/, see CLAUDE.md "Shared data store").
+state.sqlite3
+state.sqlite3-shm
+state.sqlite3-wal
