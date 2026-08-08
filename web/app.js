@@ -126,6 +126,33 @@ function studio() {
     },
     swapPickerChar: null,             // char_id whose reference-image popover is open
     _swapRowSeq: 0,
+
+    // ↻ Kör om en körning med ETT NYTT CAST (Hugo 2026-08-08). Its OWN state
+    // object, never swapFromImages: that one drives the always-visible upload
+    // card, and submitting it clears the rows — a shared object would wipe
+    // whatever the user had staged there.
+    rerunModal: {
+      open: false,
+      loading: false,
+      submitting: false,
+      reId: null,                     // the PARENT run
+      sourceName: '',
+      parentCharIds: [],
+      rows: [],                       // deep copies — the 5s poll splices the
+                                      // run object and would revert live edits
+      charIds: [],
+      sourceOverrides: {},
+      imageModel: 'gpt2-id-swap',
+      outfitMode: 'character',
+      outfitText: '',
+      backgroundSource: 'character',
+      hasBackgroundFile: false,
+      useDirector: true,
+      skipQc: false,
+      autoMode: false,
+      autoTelegramSend: true,
+      error: '',
+    },
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
@@ -1359,6 +1386,166 @@ function studio() {
         this._submitError('Swap', e);
       } finally {
         g.submitting = false;
+      }
+    },
+
+    // ---------------------------------------------------------------- ↻ kör om med nya karaktärer
+
+    // Any run with a scene plan can be re-run — including a failed one, whose
+    // plan is exactly what you want to retry on a different cast.
+    reCanRerun(run) {
+      return !!(run && (run.scenes || []).length);
+    },
+
+    async openRerunModal(run) {
+      const m = this.rerunModal;
+      m.open = true;
+      m.loading = true;
+      m.error = '';
+      m.reId = run.re_id;
+      m.sourceName = run.source_name || run.re_id;
+      m.rows = [];
+      // Starts EMPTY on purpose: the whole point is a new cast, and
+      // prefilling the parent's would make one stray click re-render the
+      // same 9 characters at full cost. "↺ samma som förra" is one click away.
+      m.charIds = [];
+      m.sourceOverrides = {};
+      try {
+        const r = await fetch(`/api/reengineer/${run.re_id}/rerun_plan`);
+        if (!r.ok) {
+          m.error = 'Kunde inte läsa körningen: ' + await r.text();
+          return;
+        }
+        const plan = await r.json();
+        m.parentCharIds = plan.character_ids || [];
+        m.sourceName = plan.source_name || m.sourceName;
+        const s = plan.settings || {};
+        m.imageModel = s.image_model || 'gpt2-id-swap';
+        m.outfitMode = s.outfit_mode || 'character';
+        m.outfitText = s.outfit_text || '';
+        m.backgroundSource = s.background_source || 'character';
+        m.hasBackgroundFile = !!s.has_background_file;
+        m.useDirector = !!s.use_director && !!this.health.anthropic_key;
+        m.skipQc = !!s.skip_qc;
+        m.autoMode = !!s.auto_mode;
+        m.autoTelegramSend = !!s.auto_telegram_send;
+        m.rows = (plan.scenes || []).map(sc => ({
+          idx: sc.idx,
+          include: !sc.missing_file,
+          summary: sc.summary,
+          frameUrl: sc.frame_url,
+          motion_prompt: sc.motion_prompt || '',
+          // The EFFECTIVE seconds the parent's clips used — not the card's
+          // displayed klingDuration(), which adds its own +2 margin.
+          secs: sc.secs,
+          direct: !!sc.direct,
+          twoPerson: !!sc.two_person,
+          videoModel: sc.video_model || '',
+          hasEndFrame: !!sc.has_end_frame,
+          keepEndFrame: true,
+          hasDirectClip: !!sc.has_direct_clip,
+          reuseDirectClip: true,
+          missingFile: !!sc.missing_file,
+        }));
+      } catch (e) {
+        m.error = 'Kunde inte läsa körningen: ' + (e && e.message ? e.message : e);
+      } finally {
+        m.loading = false;
+      }
+    },
+
+    rerunUseParentCast() {
+      const m = this.rerunModal;
+      const known = new Set((this.library || []).map(c => c.char_id));
+      m.charIds = (m.parentCharIds || []).filter(cid => known.has(cid));
+    },
+
+    rerunToggleChar(cid) {
+      const m = this.rerunModal;
+      m.charIds = m.charIds.includes(cid)
+        ? m.charIds.filter(x => x !== cid)
+        : [...m.charIds, cid];
+    },
+
+    rerunIncludedRows() {
+      return (this.rerunModal.rows || []).filter(r => r.include && !r.missingFile);
+    },
+
+    // The language models the picked cast will actually render on — shown in
+    // the modal so it is visible that a 🇪🇸/🇩🇪 character overrides the run's
+    // own video model (it does; see runner._eff_video_model_for_variant).
+    rerunLanguageNote() {
+      const flagged = (this.library || []).filter(
+        c => this.rerunModal.charIds.includes(c.char_id) && c.language
+             && c.language !== 'en');
+      if (!flagged.length) return '';
+      const names = flagged.map(c => `${this.charLanguageFlag(c.language)} ${c.name}`);
+      return `${names.join(', ')} renderas på ${
+        this.models.language_video_model || 'språkmodellen'} och får sina `
+        + 'repliker översatta — oavsett vilken videomodell körningen använder.';
+    },
+
+    async submitRerun() {
+      const m = this.rerunModal;
+      const rows = this.rerunIncludedRows();
+      if (m.submitting || !m.charIds.length || !rows.length) return;
+      if (m.outfitMode === 'custom' && !m.outfitText.trim()) {
+        m.error = 'Beskriv kläderna (eller välj ett annat klädval)';
+        return;
+      }
+      m.submitting = true;
+      m.error = '';
+      try {
+        const body = {
+          character_ids: m.charIds,
+          scenes: rows.map(r => ({
+            idx: r.idx,
+            motion_prompt: r.motion_prompt || '',
+            secs: Number(r.secs) || null,
+            direct: !!r.direct,
+            // 👥 is meaningless on a direct row (one shared clip, no
+            // per-character frame) — same mask the upload form applies.
+            two_person: !!r.twoPerson && !r.direct,
+            keep_end_frame: !!r.keepEndFrame,
+            reuse_direct_clip: !!r.reuseDirectClip,
+            video_model: r.videoModel || '',
+          })),
+          image_model: m.imageModel,
+          outfit_mode: m.outfitMode,
+          outfit_text: m.outfitText || '',
+          background_source: m.backgroundSource || 'character',
+          use_director: !!m.useDirector && !!this.health.anthropic_key,
+          skip_qc: !!m.skipQc,
+          auto_mode: !!m.autoMode,
+          auto_telegram_send: !!m.autoTelegramSend,
+        };
+        const picked = {};
+        for (const cid of m.charIds) {
+          if (m.sourceOverrides[cid]) picked[cid] = m.sourceOverrides[cid];
+        }
+        if (Object.keys(picked).length) body.character_source_image_ids = picked;
+
+        const r = await fetch(`/api/reengineer/${m.reId}/rerun`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) { m.error = await r.text(); return; }
+        const state = await r.json();
+        this.reengineerHistory = [
+          state, ...this.reengineerHistory.filter(x => x.re_id !== state.re_id)];
+        // A re-run is always an IMAGE run, so its card lives on the Swap tab
+        // even when the parent was a ♻️ Reengineer run.
+        this.activeTab = 'swap';
+        this.notifyInfo('Omkörning startad — swappar in de nya karaktärerna…');
+        // Without this the new card sits frozen at "queued": the WebSocket is
+        // only attached from refreshReengineer.
+        this._startReengineerPolling();
+        m.open = false;
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
       }
     },
 
