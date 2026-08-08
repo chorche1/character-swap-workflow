@@ -916,6 +916,46 @@ _QUOTE_CHARS = '"“”„«»'
 _QUOTED_LINE_RE = re.compile(
     '[' + _QUOTE_CHARS + ']([^' + _QUOTE_CHARS + ']{8,})[' + _QUOTE_CHARS + ']')
 
+# …but a PAIR is still a shape, and two shapes on disk right now do not have
+# one (Hugo 2026-08-09, measured after the widening above).
+#
+# (B) The line is wrapped in SINGLE quotes — `says … to the camera: 'Pour
+#     mouthwash on your feet and thank me later.'`. Four prompts do this, one
+#     of them a real German line. `'` cannot simply join `_QUOTE_CHARS`: it is
+#     the apostrophe in "don't", and 504 of the 1779 prompts on disk carry one
+#     inside a word, so an unguarded class would pair up two unrelated
+#     contractions and refuse prompts containing no quote at all. The
+#     lookarounds are what make it safe — an opener may not FOLLOW a word
+#     character and a closer may not PRECEDE one. Measured against exactly
+#     those 504 prompts: zero hits. It stays out of the extractor for the same
+#     reason it needs guarding here — reading it would mean putting `'` in the
+#     patterns' body classes, where the apostrophe in "I can't do it" would
+#     truncate every line that contains one.
+#
+# (C) The quote OPENS and never closes — `says …: "Number 5, tap water.
+#     Especially in older pipes.` (two prompts, verbatim). Nothing can read
+#     that: not the extractor, and not the pair-net above either, because
+#     there is no second quote to pair with. It is the same silent hole one
+#     shape further along, and the answer is the same — ask a question that
+#     does not assume the shape. A run of text that starts at a quote and
+#     reaches the END of the prompt without meeting another one is, by
+#     construction, an unterminated quotation.
+#
+# Both probes only ever run on a prompt the extractor already failed to read
+# AND that orders speech, so their cost is a loud refusal naming the quote —
+# never a silent English clip, and never anything at all on a readable prompt.
+#
+# The apostrophe guard belongs on BOTH probes. Written without it, (C) reads
+# the `'` in "can't reach you" as an opening quote and calls the whole rest of
+# the prompt an unterminated line — two such false refusals appeared the first
+# time this was measured ("t reach you. The person speaks fluent…" and "s
+# abdomen gently rising with breath. Shot on cinema camera…"). A double quote
+# needs no such guard; only the single ones do.
+_SINGLE_QUOTED_LINE_RE = re.compile(r"(?<!\w)['‘]([^'‘’]{8,})['’](?!\w)")
+_UNTERMINATED_LINE_RE = re.compile(
+    "(?:[" + _QUOTE_CHARS + r"]|(?<!\w)['‘])"
+    "([^" + _QUOTE_CHARS + "'‘’]{8,})$")
+
 # Deliberately wider than the extractor's own verb list — this one only has to
 # recognise that the prompt is TALKING ABOUT speech, and the shapes that broke
 # used "Spoken words are", "Voice:" and "Dialogue" with no verb at all. Run on
@@ -957,14 +997,22 @@ def _unparsed_dialogue_line(prompt: str, spec: SpokenLanguage) -> str | None:
     five-word quoted SIGN in an otherwise silent prompt would be refused. The
     longest non-dialogue quoted string in Hugo's history is 4 words, one below
     the rule — so the denial strip below is what keeps the margin honest, and
-    the refusal itself is loud, names the quote, and is fixed by editing it."""
+    the refusal itself is loud, names the quote, and is fixed by editing it.
+
+    Three probes, most to least conventional: a pair of double-ish quotes, a
+    pair of SINGLE quotes, and a quote that opens and never closes. The last
+    two exist because a PAIR is itself a shape — see the patterns above.
+    Measured over all 1779 prompts on disk they add 6 genuine hits and zero
+    false ones, and none of them can fire on a prompt the extractor read."""
     stripped = _NO_SPEECH_RE.sub(" ", _without_own_clauses(prompt, spec))
     if not _SPEECH_CONTEXT_RE.search(stripped):
         return None
-    for m in _QUOTED_LINE_RE.finditer(stripped):
-        line = m.group(1).strip()
-        if len(line.split()) >= 5:
-            return line
+    for rx in (_QUOTED_LINE_RE, _SINGLE_QUOTED_LINE_RE,
+               _UNTERMINATED_LINE_RE):
+        for m in rx.finditer(stripped):
+            line = m.group(1).strip()
+            if len(line.split()) >= 5:
+                return line
     return None
 
 
@@ -1132,8 +1180,17 @@ class LocalizationError(Exception):
 def _strip_quotes(text: str) -> str:
     """Drop double-quote chars from a translated phrase before it is spliced back
     BETWEEN the prompt's says-clause quotes — a stray quote would unbalance the
-    clause and corrupt a later DIALOGUE_RE re-parse (incl. video_qc)."""
-    return text.replace('"', '').replace('“', '').replace('”', '')
+    clause and corrupt a later DIALOGUE_RE re-parse (incl. video_qc).
+
+    Strips every character the extractor or its net treats as a quote, not the
+    three it used to (Hugo 2026-08-09). The translator is asked for German and
+    Spanish, and those languages quote with `„…“` and `«…»` — a model that
+    returns one inside the line would splice an unbalanced delimiter into a
+    says-clause that the very next reader has to re-parse. Cheap to prevent,
+    invisible to fix afterwards."""
+    for ch in _QUOTE_CHARS:
+        text = text.replace(ch, '')
+    return text
 
 
 def localize_motion_prompt(prompt: str, language: str | None, *,

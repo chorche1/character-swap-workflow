@@ -454,3 +454,43 @@ def test_do_repurpose_clears_stale_repurpose_error(monkeypatch, tmp_path):
     asyncio.run(runner_reengineer._do_repurpose("re_t", st2))
     assert updates[0]["repurposing"] is True
     assert "error" not in updates[0]                    # left alone
+
+
+def test_do_repurpose_passes_the_characters_language(monkeypatch, tmp_path):
+    """🗣 A repurpose re-transcribes the mirrored clips from scratch, so it
+    needs the same caption-language hint the assemble path does — this is the
+    copy that gets posted. Neither Reengineer call site passed it until
+    2026-08-09, while Step-6 compile had since 2026-08-03."""
+    job, _clips = _re_job(tmp_path)
+    run_dir = tmp_path / "run"; run_dir.mkdir(exist_ok=True)
+
+    class _Char:
+        voice_id = None
+        language = "es"
+
+    class _S:
+        def get_job(self, jid):
+            return job
+
+        def get_character(self, cid):
+            return _Char()
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.runner_compile, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer.reengineer, "reengineer_dir",
+                        lambda rid: run_dir)
+    monkeypatch.setattr(type(runner_reengineer.settings), "output_dir",
+                        property(lambda self: tmp_path / "out"), raising=False)
+
+    seen: dict = {}
+
+    async def fake_pipeline(paths, **kw):
+        seen.update(kw)
+        out = kw["edit_dir"] / "final.mp4"; out.write_bytes(b"mp4")
+        return EditorResult(final=out, voice_applied=False)
+    monkeypatch.setattr(runner_reengineer.runner_compile,
+                        "run_editor_pipeline", fake_pipeline)
+    monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
+
+    asyncio.run(runner_reengineer._do_repurpose("re_t", _re_state()))
+    assert seen["language"] == "es"
+    assert seen["mirror_h"] is True      # and the repurpose contract is intact

@@ -117,6 +117,22 @@ _KINDS: list[tuple[re.Pattern[str], tuple[str, str, str, str]]] = [
         "persons mun.",
         "↻ kör om klippet. Håller felet i sig: kolla ANTHROPIC_API_KEY.",
     )),
+    # MUST precede the localization_failed rule below — that one blames the
+    # translator and sends Hugo to check his OpenAI quota, which is exactly
+    # wrong here: nothing was ever sent to the translator, because the line
+    # could not be lifted out of the prompt in the first place. The fix is in
+    # the prompt, and it is one character (2026-08-09).
+    (re.compile(r"extractor cannot read", re.I), (
+        "unreadable_line",
+        "🗣 Repliken går inte att läsa ut ur prompten",
+        "Prompten beordrar tal, men citattecknen runt repliken går inte att "
+        "tolka — därför kunde repliken varken översättas till karaktärens "
+        "språk eller språkkontrolleras. Klippet stoppades innan någon kredit "
+        "spenderades.",
+        "Öppna scenens rörelseprompt och skriv repliken med RAKA dubbla "
+        'citattecken: "så här" — inte ”så här”, \'så här\' eller ett '
+        "citattecken som aldrig stängs. Kör sedan ↻ igen.",
+    )),
     (re.compile(r"localization failed", re.I), (
         "localization_failed",
         "🗣 Översättningen av repliken misslyckades",

@@ -180,3 +180,97 @@ def test_a_readable_line_never_reaches_the_net():
     assert [m.group(1).strip()
             for m in video_edit.dialogue_matches(readable)] == [
         "one two three four five six"]
+
+
+# --------------------------------------------------------------------------
+# A PAIR is also a shape. Two more forms are on disk right now and neither the
+# extractor nor the pair-net above can see them: a line in SINGLE quotes, and
+# a quote that opens and never closes. Both prompts below are verbatim from
+# Hugo's own history, and both would ship a 🇪🇸/🇩🇪 clip speaking English.
+# --------------------------------------------------------------------------
+
+# re_6f4fd… — the quote opens after the colon and the sentence just ends.
+UNCLOSED_PROMPT = (
+    'He says enthusiastically to the camera with an american accent: "Number 5, '
+    'tap water. Especially in older pipes. Every word is pronounced clearly, '
+    'correctly and distinctly.'
+)
+
+# The same shape a Swede types — nothing about it is closed either.
+UNCLOSED_SWEDISH = UNCLOSED_PROMPT.replace(': "Number', ': ”Number')
+
+SINGLE_QUOTED_PROMPT = (
+    "He says enthusiastically to the camera with an american accent: 'Pour "
+    "mouthwash on your feet and thank me later.' while he pours the bottle "
+    "over his foot."
+)
+
+
+@pytest.mark.parametrize("prompt, expected", [
+    (UNCLOSED_PROMPT, "Number 5, tap water."),
+    (UNCLOSED_SWEDISH, "Number 5, tap water."),
+    (SINGLE_QUOTED_PROMPT, "Pour mouthwash on your feet"),
+])
+def test_a_line_without_a_closing_pair_is_refused_not_shipped(prompt, expected):
+    """The pair-net cannot see either shape — there is no second quote to pair
+    with in one, and `'` is deliberately absent from `_QUOTE_CHARS` in the
+    other. Both must still refuse LOUDLY: this is the exact position the ”
+    opener was in before 4d2f12b, one shape further along."""
+    assert not video_edit.dialogue_matches(prompt)
+    hit = R._unparsed_dialogue_line(prompt, DE)
+    assert hit and expected in hit
+    with pytest.raises(R.LocalizationError) as err:
+        R.localize_motion_prompt(prompt, "de")
+    assert "cannot read" in str(err.value)
+
+
+def test_an_apostrophe_never_opens_an_unterminated_line():
+    """The single-quote probes must carry the apostrophe guard the pair-net
+    got for free by excluding `’`. Written without the `(?<!\\w)` lookbehind,
+    the `'` in "doesn't look away" is read as an opening quote and everything
+    after it becomes an unterminated line — measured, that produced two false
+    refusals on real prompts, one of them a pure camera description.
+
+    Both fixtures below are chosen to actually EXERCISE the guard: each has a
+    speech context AND ≥5 words after the apostrophe, so the ≥5-word rule and
+    the speech gate cannot be what saves them."""
+    for apos in (
+        "He says enthusiastically to the camera with an american accent while "
+        "he pours. He doesn't look away from the bright orange bowl on the "
+        "counter.",
+        "Medium shot. She speaks with an american accent while she works; the "
+        "dough isn't rushed and she keeps folding it over and over again.",
+    ):
+        # The guard is load-bearing here, not the word count or the gate.
+        unguarded = R.re.compile(
+            "[" + R._QUOTE_CHARS + "'‘]([^" + R._QUOTE_CHARS + "'‘’]{8,})$")
+        assert unguarded.search(apos), "fixture no longer probes the guard"
+        assert R._unparsed_dialogue_line(apos, DE) is None
+
+
+def test_a_prompt_that_orders_speech_but_supplies_no_line_still_renders():
+    """The refusals above must not swallow the IMPROVISATION pattern. Three
+    real Director prompts order an accent and deliberately give no words; they
+    work today (the accent clause swaps to the target language and the model
+    improvises in it), and refusing them would be a 75% false-refusal rate on
+    the population this branch fires on."""
+    improvised = (
+        "Medium close-up, static camera. He says enthusiastically to the "
+        "camera with an american accent while he continuously pours out all "
+        "the mouthwash onto his foot. Animated expression."
+    )
+    assert R._unparsed_dialogue_line(improvised, DE) is None
+    out = R.localize_motion_prompt(improvised, "de")
+    assert DE.marker in out.lower()          # the order was still swapped…
+    assert "american accent" not in out.lower()   # …and English removed
+
+
+def test_strip_quotes_removes_every_quote_the_net_knows():
+    """A translated line is spliced BETWEEN the prompt's own quotes, so any
+    quote character it brings unbalances the clause for the next reader. The
+    translator is asked for German and Spanish, whose native quotes are `„…“`
+    and `«…»` — exactly the characters the old three-way strip missed."""
+    for ch in R._QUOTE_CHARS:
+        assert ch not in R._strip_quotes(f"sag {ch}etwas{ch} bitte")
+    spliced = R._strip_quotes('Er sagt „Hallo“ und «tschüss»')
+    assert spliced == "Er sagt Hallo und tschüss"
