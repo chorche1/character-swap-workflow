@@ -60,3 +60,44 @@ def test_rerun_button_is_wired_to_the_predicate():
     html = (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
     assert 'x-show="reCanRerun(r)"' in html
     assert 'openRerunModal(r)' in html
+
+
+def test_rerun_model_select_does_not_use_x_model():
+    """Hugo 2026-08-09: the re-run modal's Swap-modell box displayed
+    "GPT Image" while the state held "gpt2-id-swap" (every one of his 122 runs
+    uses gpt2-id-swap).
+
+    Alpine sets an `x-model` select's value when the element initialises, but
+    these options come from an `x-for` over `swapImageModels()`, which can
+    still be empty at that moment — so the browser falls back to the FIRST
+    option and x-model never re-applies. The documented idiom here is
+    `@change` + `:selected` (the per-scene length select already uses it, and
+    repurposeModal works around the same trap with x-effect/$nextTick).
+
+    Not cosmetic: picking plain "GPT Image" silently loses the
+    character-background fix, which only covers the gpt2-id-swap branch of
+    `_dispatch_variant`.
+    """
+    html = (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    block = html.split('rerunModal.imageModel', 1)
+    assert len(block) > 1, "the re-run modal's model select vanished"
+    assert 'x-model="rerunModal.imageModel"' not in html
+    # …and the selected option must be driven off the state.
+    assert ':selected="m.slug === rerunModal.imageModel"' in html
+    assert '@change="rerunModal.imageModel = $event.target.value"' in html
+
+
+def test_every_xfor_select_in_the_rerun_modal_uses_the_change_idiom():
+    """Guard the whole modal, not just the one box that bit: any select whose
+    options are rendered by x-for must not be bound with x-model."""
+    import re
+    html = (_ROOT / "web" / "index.html").read_text(encoding="utf-8")
+    start = html.index("↻ Kör om med nya karaktärer")
+    end = html.index('x-show="repurposeModal.open"', start)
+    modal = html[start:end]
+    for m in re.finditer(r"<select\b[^>]*>(.*?)</select>", modal, re.S):
+        tag, body = m.group(0), m.group(1)
+        if "<template" in body and "x-for" in body:
+            assert "x-model" not in tag.split(">", 1)[0], (
+                "x-for-populated select bound with x-model — it will display "
+                f"the first option instead of the state: {tag[:120]}")

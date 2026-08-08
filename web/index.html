@@ -5061,10 +5061,19 @@
              class="flex items-center gap-4 flex-wrap border-t border-neutral-200 dark:border-neutral-800 pt-3">
           <label class="text-sm flex items-center gap-2">
             <span class="text-neutral-500 dark:text-neutral-400">Swap-modell:</span>
-            <select x-model="rerunModal.imageModel"
+            <!-- @change + :selected, NEVER x-model here: the options come from
+                 an x-for over swapImageModels(), so when Alpine initialises the
+                 select that list can still be empty and the browser falls back
+                 to the FIRST option. The state held gpt2-id-swap while the box
+                 displayed "GPT Image" (Hugo 2026-08-09) — a lie that also
+                 silently loses the character-background fix, which only covers
+                 gpt2-id-swap. Same idiom as the per-scene length select. -->
+            <select @change="rerunModal.imageModel = $event.target.value"
                     class="px-2 py-1 rounded-lg text-sm border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
               <template x-for="m in swapImageModels()" :key="'rrm'+m.slug">
-                <option :value="m.slug" :disabled="!m.available" x-text="m.label + (m.available ? '' : ' (locked)')"></option>
+                <option :value="m.slug" :selected="m.slug === rerunModal.imageModel"
+                        :disabled="!m.available"
+                        x-text="m.label + (m.available ? '' : ' (locked)')"></option>
               </template>
             </select>
           </label>
