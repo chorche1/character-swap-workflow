@@ -162,6 +162,12 @@ def test_no_audio_track_still_short_circuits(monkeypatch):
 def _passes(monkeypatch, by_language):
     """Stub transcribe_detailed to answer differently hinted vs unhinted."""
     seen = []
+    # `_transcribe` bails out early without an OpenAI key, so these four tests
+    # only ever ran on a checkout carrying a real `.env` — on a worktree or a
+    # fresh clone they failed on zero recorded passes, looking like a bug in
+    # the code under test. Pin the key so they test the two-pass logic and
+    # nothing about the developer's environment.
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
 
     def _tx(video, *, job_id=None, script_hint=None, language=None):
         seen.append(language)
