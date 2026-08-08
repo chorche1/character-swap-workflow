@@ -430,7 +430,16 @@ async def _generate_one_variant(
     scene_path = _scene_path_for_variant(job, variant)
     char_path = Path(jc.source_image_path)
     qc_on = _swap_qc_on(job)
-    max_attempts = 1 + (max(0, settings.swap_qc_max_retries) if qc_on else 0)
+    base_attempts = 1 + (max(0, settings.swap_qc_max_retries) if qc_on else 0)
+    # "BACKGROUND NOT REPLACED" gets its own, larger budget and its own ending
+    # (Hugo 2026-08-08): an image that kept the SCENE's room when the
+    # character's own environment was ordered is unusable, so an exhausted
+    # budget FAILS the slot loudly instead of shipping the last take with a ⚠.
+    # Only reachable in character mode — the flag that arms the judge's class
+    # is only sent there.
+    bg_attempts = 1 + (max(0, settings.swap_qc_background_max_retries)
+                       if (qc_on and bg_mode == "character") else 0)
+    max_attempts = max(base_attempts, bg_attempts)
     # Per-attempt inputs. After a QC failure the FIRST retry runs in
     # repair mode: the failed image itself becomes the scene input with a
     # fix-only-this instruction, so the result changes as little as
@@ -563,6 +572,13 @@ async def _generate_one_variant(
                 # (observed 2026-06-12, scene 1 of re_10fe66db8b). None in
                 # character-bg mode: the judge already sees the character ref.
                 background_image=extra_ref,
+                # Arms the BACKGROUND NOT REPLACED class — character mode
+                # ONLY (Hugo 2026-08-08). In every other mode the judge stays
+                # under the 2026-06-30 rule that a background must never fail
+                # an image. Costs no extra call or attachment: the character
+                # reference is already in the judge's context, and it IS the
+                # environment the result was supposed to take.
+                background_from_character=(bg_mode == "character"),
                 # Primary signal is the job's outfit_mode field; the prompt
                 # sniff survives only for legacy jobs created before the
                 # field existed (backlog #16 — the sniff alone was fragile).
@@ -603,53 +619,67 @@ async def _generate_one_variant(
                 break
             variant.qc_status = "failed"
             variant.qc_reason = verdict.reason
-            if attempt < max_attempts:
-                await _emit(job.job_id, "variant.qc_retry",
+            # Two endings, not one. Every historical class keeps the last take
+            # with a ⚠ chip when its budget runs out — a false-positive judge
+            # must not destroy a usable variant. BACKGROUND NOT REPLACED is
+            # the exception Hugo asked for: the image is in the wrong PLACE,
+            # which no downstream step can repair and which silently ships a
+            # broken reel, so it fails the slot loudly instead.
+            is_bg_failure = swap_qc.is_background_failure(verdict.reason)
+            budget = bg_attempts if is_bg_failure else base_attempts
+            if attempt >= budget:
+                if is_bg_failure and budget > 1:
+                    raise RuntimeError(
+                        f"BAKGRUND EJ ERSATT efter {attempt} försök — bilden "
+                        "visar scenens miljö i stället för karaktärens egna. "
+                        f"Domarens sista bedömning: {verdict.reason}")
+                break
+            await _emit(job.job_id, "variant.qc_retry",
+                        char_id=jc.char_id, variant_id=variant.variant_id,
+                        attempt=attempt, reason=verdict.reason)
+            # Preserve the rejected image before the next attempt overwrites
+            # `dest` — Hugo 2026-06-20 wants to SEE every image QC failed.
+            # The snapshot doubles as the repair-mode input below, so no
+            # second copy. Failure to copy must never block the retry.
+            # Number by the CUMULATIVE reject count (not the per-run
+            # `attempt`): retry_single_variant / ✎↻ / 🪄 re-run the SAME
+            # variant_id with attempt reset to 1, so an attempt-based name
+            # would clobber an earlier run's preserved reject + lose it.
+            reject_path: Path | None = dest.with_name(
+                f"{dest.stem}.qcreject{len(variant.qc_rejects) + 1}.png")
+            try:
+                await asyncio.to_thread(shutil.copyfile, dest, reject_path)
+            except OSError:
+                reject_path = None
+            else:
+                variant.qc_rejects.append(QCReject(
+                    path=str(reject_path), reason=verdict.reason,
+                    attempt=attempt, kind="swap"))
+                await asyncio.to_thread(_replace_variant, job, jc, variant)
+                await _emit(job.job_id, "variant.qc_reject",
                             char_id=jc.char_id, variant_id=variant.variant_id,
                             attempt=attempt, reason=verdict.reason)
-                # Preserve the rejected image before the next attempt overwrites
-                # `dest` — Hugo 2026-06-20 wants to SEE every image QC failed.
-                # The snapshot doubles as the repair-mode input below, so no
-                # second copy. Failure to copy must never block the retry.
-                # Number by the CUMULATIVE reject count (not the per-run
-                # `attempt`): retry_single_variant / ✎↻ / 🪄 re-run the SAME
-                # variant_id with attempt reset to 1, so an attempt-based name
-                # would clobber an earlier run's preserved reject + lose it.
-                reject_path: Path | None = dest.with_name(
-                    f"{dest.stem}.qcreject{len(variant.qc_rejects) + 1}.png")
-                try:
+            hint = (verdict.corrective_hint or verdict.reason or "").strip()
+            if (attempt == 1 and effective_model != "grok-image"
+                    and not swap_qc.needs_reroll(verdict.reason)):
+                # Repair mode: minimal-change edit of the failed image.
+                # Skipped for geometry/content-base failures (wrong
+                # background, wrong framing, broken image) — repair's
+                # keep-everything contract fights those corrections
+                # (backlog #12); they re-roll fresh below instead.
+                if reject_path is None:
+                    # Snapshot copy failed above — make a dedicated repair
+                    # copy so the failed image still feeds the edit.
+                    reject_path = dest.with_name(dest.stem + ".qcfail.png")
                     await asyncio.to_thread(shutil.copyfile, dest, reject_path)
-                except OSError:
-                    reject_path = None
-                else:
-                    variant.qc_rejects.append(QCReject(
-                        path=str(reject_path), reason=verdict.reason,
-                        attempt=attempt, kind="swap"))
-                    await asyncio.to_thread(_replace_variant, job, jc, variant)
-                    await _emit(job.job_id, "variant.qc_reject",
-                                char_id=jc.char_id, variant_id=variant.variant_id,
-                                attempt=attempt, reason=verdict.reason)
-                hint = (verdict.corrective_hint or verdict.reason or "").strip()
-                if (attempt == 1 and effective_model != "grok-image"
-                        and not swap_qc.needs_reroll(verdict.reason)):
-                    # Repair mode: minimal-change edit of the failed image.
-                    # Skipped for geometry/content-base failures (wrong
-                    # background, wrong framing, broken image) — repair's
-                    # keep-everything contract fights those corrections
-                    # (backlog #12); they re-roll fresh below instead.
-                    if reject_path is None:
-                        # Snapshot copy failed above — make a dedicated repair
-                        # copy so the failed image still feeds the edit.
-                        reject_path = dest.with_name(dest.stem + ".qcfail.png")
-                        await asyncio.to_thread(shutil.copyfile, dest, reject_path)
-                    attempt_scene = reject_path
-                    prompt = swap_qc.repair_prompt(hint)
-                else:
-                    # Fresh re-roll from the original scene + hint.
-                    attempt_scene = scene_path
-                    prompt = variant.prompt + (
-                        f"\nIMPORTANT — the previous attempt was rejected by "
-                        f"quality control: {hint}" if hint else "")
+                attempt_scene = reject_path
+                prompt = swap_qc.repair_prompt(hint)
+            else:
+                # Fresh re-roll from the original scene + hint.
+                attempt_scene = scene_path
+                prompt = variant.prompt + (
+                    f"\nIMPORTANT — the previous attempt was rejected by "
+                    f"quality control: {hint}" if hint else "")
     except Exception as e:
         variant.status = VariantStatus.FAILED
         variant.error = f"{type(e).__name__}: {e}"

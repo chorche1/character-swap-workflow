@@ -557,6 +557,41 @@ def with_cast_lock(prompt: str) -> str:
     return prompt.rstrip() + CAST_LOCK
 
 
+# BACKGROUND LOCK (Hugo 2026-08-08, re_feba7996a8). In "character" background
+# mode the output must take its environment from the character's own photo. It
+# frequently did not: over 32 blind-judged renders of the reported scene, only
+# 4/16 did on the current path. Handing the model an EXPLICIT background
+# reference — the character photo duplicated into the Image 3 slot — instead of
+# asking it to infer one from the identity reference took that to 9/16.
+#
+# Appended at DISPATCH for exactly the reason CAST_LOCK is: the failing runs use
+# AI Director prompts, which are CUSTOM, so the mode-aware stock rebuild never
+# reaches them (`prompt in _stock` is False) and today they get nothing but the
+# mechanical Image1↔Image2 flip. Idempotent on the exact clause.
+#
+# It deliberately does NOT tell the model to ignore the action reference: that
+# image still supplies the pose, the framing and every held prop. Only its
+# PLACE is overridden — including the doorway/window view, which was the single
+# most common partial failure (B's kitchen kept intact with the character's
+# hills substituted outside the window).
+BACKGROUND_LOCK = (
+    " The finished photo takes place in the SAME surroundings as Image 3 — "
+    "its location, its walls or open air, its ground, its furniture, and "
+    "whatever light that place actually has. Rebuild those surroundings "
+    "around the person and the objects they hold. The PLACE in the action "
+    "reference must not survive: none of its walls, floor, windows, doors, "
+    "cabinets, appliances, signage or scenery may appear, not even glimpsed "
+    "through a doorway or window."
+)
+
+
+def with_background_lock(prompt: str) -> str:
+    """Append `BACKGROUND_LOCK` to an engine-effective swap prompt, once."""
+    if BACKGROUND_LOCK.strip() in prompt:
+        return prompt
+    return prompt.rstrip() + BACKGROUND_LOCK
+
+
 def stock_swap_prompts(outfit_mode: str = "scene",
                        outfit_text: str | None = None) -> set[str]:
     """Every "stock" (non-user-customized) swap prompt for an outfit mode,
@@ -761,6 +796,16 @@ def _dispatch_variant(
         refs: list[Path] = [character_image, scene_image]
         if extra_reference_image is not None:
             refs.append(extra_reference_image)
+        elif bg_mode == "character":
+            # Hugo 2026-08-08: asking the model to INFER the target environment
+            # from the identity reference is what fails — it kept the action
+            # photo's room on 12 of 16 blind-judged renders. Duplicating the
+            # character photo into the explicit background slot (Image 3), the
+            # one replacement mode already uses successfully, took it to 9/16.
+            # The character photo IS the environment reference here; there is
+            # no person-free plate of it to send instead.
+            refs.append(character_image)
+            effective = with_background_lock(effective)
         image_bytes = openai_image.generate(
             prompt=with_cast_lock(effective),
             reference_images=refs,

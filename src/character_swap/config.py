@@ -394,6 +394,16 @@ class Settings(BaseSettings):
     swap_qc_model: str = Field(default="claude-sonnet-4-6",
                                validation_alias="SWAP_QC_MODEL")
     swap_qc_max_retries: int = Field(default=2, validation_alias="SWAP_QC_MAX_RETRIES")
+    # "BACKGROUND NOT REPLACED" re-rolls, in CHARACTER background mode only
+    # (Hugo 2026-08-08). Independent of swap_qc_max_retries because this class
+    # behaves differently from the rest: an image that kept the scene's room
+    # when the character's own environment was ordered is unusable, not a
+    # judgment call, and unlike every other class an exhausted budget FAILS
+    # THE SLOT LOUDLY instead of keeping the last take with a ⚠ chip — Hugo's
+    # explicit instruction ("3 omförsök, och om det fortfarande är fel så
+    # faila högt"). 0 = flag-only, never re-roll and never fail.
+    swap_qc_background_max_retries: int = Field(
+        default=3, validation_alias="SWAP_QC_BACKGROUND_MAX_RETRIES")
     # Speaker-attribution agent (speaker_fix.py, Hugo 2026-08-02): one vision
     # call per (FEMALE character × scene ticked 👥 two-person) that rewrites the
     # movement prompt so she — not the man beside her — says the line. Same

@@ -72,6 +72,20 @@ holds — when in any doubt, PASS:
   gender or age; replacing them anyway is CORRECT, and a named person left
   UNCHANGED is ALWAYS a failure — never call that correct. Without a
   `replace_person` flag, never judge which person was swapped.
+- BACKGROUND NOT REPLACED: ONLY when the context flags say
+  `background_from_character=true`. The finished photo was meant to take place
+  where the CHARACTER image was taken, not where SCENE was taken. FAIL when
+  RESULT still shows SCENE's own place — its room, walls, floor, fixtures,
+  appliances, signage or scenery — INCLUDING the common half-failure where
+  SCENE's room is left intact and only the view through a window or doorway
+  was swapped to CHARACTER's surroundings. PASS when the surroundings are
+  CHARACTER's own, and PASS when you genuinely cannot tell the two places
+  apart (a plain indoor CHARACTER photo against a plain indoor SCENE is
+  INDETERMINATE — pass). Judge the PLACE only: ignore the person, the clothing
+  and every held object or appliance, which are meant to carry over from
+  SCENE and say nothing about which place won; a worktop or counter at the
+  very bottom edge is a prop surface, not a place. Without the flag, never
+  judge the background at all.
 - BROKEN IMAGE: fully or mostly black / blank / censored / heavily corrupted
   output, or RESULT is just the unmodified SCENE or CHARACTER with no swap
   performed at all.
@@ -95,23 +109,27 @@ deliberate policy, not an oversight):
   or missing gloves, hats, jackets or other wardrobe pieces.
 - Background or environment differing from SCENE — a changed, replaced, or
   imperfectly-rendered background, including a logo, sign or flag that is
-  altered, incomplete or stylized.
+  altered, incomplete or stylized. (The ONE exception is the
+  `background_from_character` flag above: with it, a background that did NOT
+  change is the failure. Without the flag this bullet stands unchanged.)
 - "Pasted-in" / cutout look, hard edges or halos, lighting that doesn't
   perfectly match the environment, soft focus, grain, or style / color-grade
   drift.
 
 Context flags and a USER INTENT text block may appear before the images, and
-an extra BACKGROUND image may be attached. These are INFORMATIONAL ONLY now —
-never fail an image because of them; in particular never fail for a changed
-background, outfit, or gaze.
+an extra BACKGROUND image may be attached. Apart from the three flags that
+explicitly gate a rule above (`scene_people`, `replace_person`,
+`background_from_character`), these are INFORMATIONAL ONLY — never fail an
+image because of them; in particular never fail for a changed outfit or gaze.
 
 Be decisive and LENIENT. Only a genuinely unusable image fails. When you DO
 fail, START the reason with the violated rule's NAME in caps — exactly one of
 "WRONG PERSON", "MISSING/EXTRA PEOPLE", "PERSON COUNT", "WRONG PERSON SWAPPED",
-"BROKEN IMAGE" or "SEVERE ARTIFACTS" (the retry machinery routes repair vs full
-re-roll on it) — then give a one-sentence corrective instruction for the image
-model (e.g. "Make the face match the character reference exactly — do not
-retain the original person's facial features.").
+"BACKGROUND NOT REPLACED", "BROKEN IMAGE" or "SEVERE ARTIFACTS" (the retry
+machinery routes repair vs full re-roll on it) — then give a one-sentence
+corrective instruction for the image model (e.g. "Make the face match the
+character reference exactly — do not retain the original person's facial
+features.").
 
 The corrective instruction is appended verbatim to the prompt of the NEXT
 attempt, so make it concrete about the people: name who went missing or who was
@@ -253,7 +271,22 @@ _REROLL_MARKERS = (
     # Both re-roll from the scene with the judge's hint appended (2026-08-06).
     # Plain "WRONG PERSON" (identity didn't take) stays repairable in place.
     "person count", "wrong person swapped",
+    # The whole environment has to be rebuilt, and the repair contract's
+    # "keep the background unchanged" is the exact opposite of the correction
+    # (Hugo 2026-08-08). Re-roll from the scene with the hint appended.
+    "background not replaced",
 )
+
+
+_BACKGROUND_MARKER = "background not replaced"
+
+
+def is_background_failure(reason: str | None) -> bool:
+    """True for the CHARACTER-background class, which the runner treats
+    differently from every other verdict: its own retry budget, and a LOUD
+    slot failure when that budget is exhausted rather than keeping the last
+    take with a ⚠ chip (Hugo 2026-08-08)."""
+    return _BACKGROUND_MARKER in (reason or "").lower()
 
 
 def needs_reroll(reason: str | None) -> bool:
@@ -294,6 +327,7 @@ def inspect_variant(
     result_image: Path,
     background_replaced: bool = False,
     background_image: Path | None = None,
+    background_from_character: bool = False,
     outfit_from_character: bool = False,
     outfit_text: str | None = None,
     user_intent: str | None = None,
@@ -333,6 +367,14 @@ def inspect_variant(
             flags += f', custom_outfit="{outfit_text[:200]}"'
         if camera_gaze:
             flags += ", camera_gaze=true"
+        # Only ever sent in "character" background mode (Hugo 2026-08-08).
+        # Without it the judge is told — correctly, and deliberately since
+        # 2026-06-30 — never to fail on a background; with it, a background
+        # that did NOT change is the failure. The CHARACTER image is already
+        # in the judge's context, so this costs no extra call and no extra
+        # attachment.
+        if background_from_character:
+            flags += ", background_from_character=true"
         # Only ever sent for a MEASURED multi-person scene — a count of 1 (or
         # an unmeasured scene) must leave the judge as lenient as it was.
         if scene_people_count is not None and scene_people_count > 1:
