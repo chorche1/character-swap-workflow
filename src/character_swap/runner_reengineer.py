@@ -312,6 +312,31 @@ def _register_frame_as_scene(frame: Path) -> tuple[str, Path]:
     return scene_id, dest
 
 
+def scene_path(scene_id: str) -> Path:
+    """The scene's image on disk, resolved through its SceneAsset.
+
+    Job scene paths used to be derived as `scenes_dir/<scene_id>.png`,
+    hardcoded and unvalidated — which is wrong for two real populations in
+    the live store (Hugo 2026-08-08):
+
+      · a scene uploaded as .webp keeps that extension in
+        `SceneAsset.filename` (2 in the library), so the derived path did not
+        exist and EVERY variant for that scene failed at generation time, per
+        character, with no earlier signal;
+      · a ⧉-duplicated scene (`…__dup<hex>`, 245 rows) gets a SceneAsset
+        pointing at the SOURCE's file and never a file of its own.
+
+    Falls back to the old derivation when there is no SceneAsset or its file
+    is gone, so nothing that resolved before stops resolving now.
+    """
+    scene = store().get_scene(scene_id)
+    if scene is not None:
+        p = settings.scenes_dir / scene.filename
+        if p.exists():
+            return p
+    return settings.scenes_dir / f"{scene_id}.png"
+
+
 def register_scene_duplicate(src_scene_id: str, data: bytes,
                              original_name: str) -> tuple[str, Path]:
     """Register a NEW scene id for a byte-identical repeat row IN THE SAME
@@ -597,7 +622,7 @@ async def _create_job_and_swap(re_id: str, state: dict,
         names.append(ch.name)
 
     scene_ids = [e["scene_id"] for e in scene_entries]
-    scene_paths = [str(settings.scenes_dir / f"{sid}.png") for sid in scene_ids]
+    scene_paths = [str(scene_path(sid)) for sid in scene_ids]
     # Dedup guard: identical frames (static video) collapse to one scene_id —
     # keep order but drop duplicates so the job doesn't double-generate.
     seen: set[str] = set()

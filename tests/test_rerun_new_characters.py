@@ -477,42 +477,68 @@ def test_repeated_scene_id_gets_its_own_id_and_file(wired):
     assert (settings.scenes_dir / f"{ids[1]}.png").exists()
 
 
-def test_duplicated_scene_with_no_file_of_its_own_is_re_registered(wired):
-    """A ⧉-duplicated scene (`…__dup<hex>`) has NO file at
-    `scenes_dir/<sid>.png` — _apply_scene_duplicate points Job.scene_image_paths
-    at the SOURCE's path instead. 215 of 758 scenes in the real store are like
-    this. The child's job derives the canonical path, so inheriting the id
-    verbatim would hand it a path that does not exist and fail every variant,
-    per character, at generation time."""
+def test_duplicated_and_webp_scenes_are_re_runnable(wired):
+    """A scene id does not imply a file of that name. A ⧉-duplicated scene
+    (`…__dup<hex>`, 245 rows in the real store) gets a SceneAsset pointing at
+    the SOURCE's file and never one of its own; an uploaded .webp keeps its
+    extension (2 in the library). The old hardcoded `<sid>.png` derivation
+    reached neither, so the job got a path that does not exist and every
+    variant failed at generation time, per character, with no earlier signal.
+
+    The invariant that matters is mechanism-independent: whatever id the child
+    ends up with, the path its JOB resolves must exist."""
     base = wired["sids"][0]
     dup = f"{base}__dupabc123"
     wired["states"]["re_parent"]["scenes"][1]["scene_id"] = dup
-    job = wired["box"]["jobs"]["j_parent"]
-    job.scene_ids = [base, dup, wired["sids"][2]]
-    job.scene_image_paths = [str(settings.scenes_dir / f"{base}.png"),
-                             str(settings.scenes_dir / f"{base}.png"),
-                             str(settings.scenes_dir / f"{wired['sids'][2]}.png")]
-    assert not (settings.scenes_dir / f"{dup}.png").exists()
+    wired["box"]["scenes"][dup] = SceneAsset(
+        scene_id=dup, filename=f"{base}.png", original_name="kopia")
 
-    # The modal offers it rather than greying it out…
+    webp = "sc_webpscene"
+    (settings.scenes_dir / f"{webp}.webp").write_bytes(PNG + b"webp")
+    wired["box"]["scenes"][webp] = SceneAsset(
+        scene_id=webp, filename=f"{webp}.webp", original_name="uppladdad.webp")
+    wired["states"]["re_parent"]["scenes"][2]["scene_id"] = webp
+    assert not (settings.scenes_dir / f"{webp}.png").exists()
+
+    # Neither is greyed out in the modal…
     plan = _plan()
-    assert plan["scenes"][1]["missing_file"] is False
+    assert [s["missing_file"] for s in plan["scenes"]] == [False, False, False]
 
     view = _rerun("re_parent", {"character_ids": ["ch_new_en"],
                                 "scenes": _rows(plan)})
     st = wired["states"][view["re_id"]]
-    new_sid = st["scenes"][1]["scene_id"]
-    # …and the child gets a fresh id whose canonical file really exists,
-    # minted off the BASE so duplicate chains don't grow a __dupA__dupB tail.
-    assert new_sid != dup and new_sid.startswith(base + "__dup")
-    assert "__dupabc123" not in new_sid
-    assert (settings.scenes_dir / f"{new_sid}.png").read_bytes() == \
-        (settings.scenes_dir / f"{base}.png").read_bytes()
+    # …the ids ride along unchanged (no needless duplicate files written)…
+    assert [e["scene_id"] for e in st["scenes"]] == [base, dup, webp]
+    # …and the path the JOB will read exists for every one of them.
+    for e in st["scenes"]:
+        assert runner_reengineer.scene_path(e["scene_id"]).exists(), e["scene_id"]
+
+
+def test_job_creation_resolves_scene_paths_through_the_scene_asset(wired):
+    """The fix at its source: _create_job_and_swap's own derivation."""
+    base = wired["sids"][0]
+    dup = f"{base}__dupff0011"
+    wired["box"]["scenes"][dup] = SceneAsset(
+        scene_id=dup, filename=f"{base}.png", original_name="kopia")
+    assert runner_reengineer.scene_path(dup) == settings.scenes_dir / f"{base}.png"
+
+    webp = "sc_webp2"
+    (settings.scenes_dir / f"{webp}.webp").write_bytes(b"x")
+    wired["box"]["scenes"][webp] = SceneAsset(
+        scene_id=webp, filename=f"{webp}.webp", original_name="w.webp")
+    assert runner_reengineer.scene_path(webp) == settings.scenes_dir / f"{webp}.webp"
+
+    # No SceneAsset at all → the historical derivation, unchanged.
+    assert runner_reengineer.scene_path("sc_unknown") == \
+        settings.scenes_dir / "sc_unknown.png"
 
 
 def test_scene_file_falls_back_to_the_job_path_then_the_base_id(wired):
+    """Belt and braces for a scene the resolver cannot reach (no SceneAsset,
+    or its file gone): the parent job's recorded path, then the base id a
+    __dup chain was minted from."""
     base = wired["sids"][0]
-    dup = f"{base}__dupdeadbe"
+    dup = f"{base}__dupdeadbe"          # deliberately NOT registered
     job = wired["box"]["jobs"]["j_parent"]
     job.scene_ids = [dup]
     job.scene_image_paths = [str(settings.scenes_dir / f"{base}.png")]
@@ -521,6 +547,20 @@ def test_scene_file_falls_back_to_the_job_path_then_the_base_id(wired):
     assert rerun_mod.scene_file(dup, None) == settings.scenes_dir / f"{base}.png"
     # A genuinely unknown scene still resolves to nothing (→ loud refusal).
     assert rerun_mod.scene_file("sc_nope", job) is None
+
+
+def test_unreachable_scene_is_re_registered_with_its_own_file(wired):
+    """When only a fallback found the bytes, the child must NOT inherit that
+    id — its job would resolve a path it cannot read."""
+    base = wired["sids"][0]
+    dup = f"{base}__dupfeed01"          # no SceneAsset → resolver misses
+    wired["states"]["re_parent"]["scenes"][1]["scene_id"] = dup
+    view = _rerun("re_parent", {"character_ids": ["ch_new_en"],
+                                "scenes": _rows(_plan())})
+    st = wired["states"][view["re_id"]]
+    new_sid = st["scenes"][1]["scene_id"]
+    assert new_sid != dup and new_sid.startswith(base + "__dup")
+    assert runner_reengineer.scene_path(new_sid).exists()
 
 
 def test_empty_cast_and_empty_scenes_are_refused(wired):

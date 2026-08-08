@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import pathlib
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, UploadFile
@@ -311,6 +312,12 @@ def test_create_job_and_swap_populates_end_frames_by_scene(
             return "cA.png"
 
     class _S2:
+
+        # runner_reengineer.scene_path resolves job scene paths through the
+        # SceneAsset (a .webp upload / a ⧉-duplicated scene has no
+        # <scene_id>.png). None keeps the historical derivation.
+        def get_scene(self, sid):
+            return None
         def get_character(self, cid):
             return _Char() if cid == "cA" else None
 
@@ -409,6 +416,12 @@ def test_create_job_and_swap_populates_two_person_scenes(
             return "cA.png"
 
     class _S2:
+
+        # runner_reengineer.scene_path resolves job scene paths through the
+        # SceneAsset (a .webp upload / a ⧉-duplicated scene has no
+        # <scene_id>.png). None keeps the historical derivation.
+        def get_scene(self, sid):
+            return None
         def get_character(self, cid):
             return _Char() if cid == "cA" else None
 
@@ -454,3 +467,92 @@ def test_create_job_and_swap_populates_two_person_scenes(
         "re_2p", dict(state), scene_entries, "j_2p"))
 
     assert wired["jobs"]["j_2p"].two_person_scenes == ["sc_two"]
+
+
+def test_create_job_and_swap_resolves_scene_paths_through_the_scene_asset(
+        monkeypatch, tmp_path, wired):
+    """Job scene paths used to be derived as `scenes_dir/<scene_id>.png`,
+    hardcoded and unvalidated (Hugo 2026-08-08). Two real populations in the
+    live store are not at that path: a scene uploaded as .webp keeps its
+    extension (2 in the library), and a ⧉-duplicated scene (`…__dup<hex>`,
+    245 rows) gets a SceneAsset pointing at the SOURCE's file and never one of
+    its own. Both got a path that does not exist — and NOTHING validates it,
+    so every variant for that scene failed at generation time, per character,
+    with no earlier signal."""
+    from character_swap.models import SceneAsset
+
+    scenes_dir = api.settings.scenes_dir
+    scenes_dir.mkdir(parents=True, exist_ok=True)
+    (scenes_dir / "sc_base.png").write_bytes(b"base")
+    (scenes_dir / "sc_up.webp").write_bytes(b"webp")
+    lib = {
+        "sc_base": SceneAsset(scene_id="sc_base", filename="sc_base.png",
+                              original_name="b.png"),
+        # duplicate → points at the SOURCE's file
+        "sc_base__dupaa11": SceneAsset(scene_id="sc_base__dupaa11",
+                                       filename="sc_base.png",
+                                       original_name="kopia"),
+        "sc_up": SceneAsset(scene_id="sc_up", filename="sc_up.webp",
+                            original_name="u.webp"),
+    }
+
+    chars_dir = tmp_path / "characters3"
+    chars_dir.mkdir()
+    (chars_dir / "cA.png").write_bytes(b"char-bytes")
+    monkeypatch.setattr(type(api.settings), "characters_dir",
+                        property(lambda self: chars_dir), raising=False)
+
+    class _Char:
+        name = "Helene"
+
+        def resolve_source_filename(self, override):
+            return "cA.png"
+
+    class _S3:
+        def get_scene(self, sid):
+            return lib.get(sid)
+
+        def get_character(self, cid):
+            return _Char() if cid == "cA" else None
+
+        def add_job(self, job):
+            wired["jobs"][job.job_id] = job
+
+        def get_job(self, jid):
+            return wired["jobs"].get(jid)
+
+        def update_job(self, j):
+            wired["jobs"][j.job_id] = j
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S3())
+
+    scene_entries = [
+        {"idx": i, "scene_id": sid, "kling_secs": 5, "duration": 5.0,
+         "motion_prompt": "p"}
+        for i, sid in enumerate(["sc_base", "sc_base__dupaa11", "sc_up"])
+    ]
+    state = {"re_id": "re_paths", "from_images": True, "status": "swapping",
+             "job_id": "j_paths", "character_ids": ["cA"],
+             "image_model": "gpt2-id-swap", "video_model": "kling-v3",
+             "outfit_mode": "scene", "background_source": "character",
+             "scenes": scene_entries, "n_scenes": 3}
+    wired["states"]["re_paths"] = dict(state)
+
+    from character_swap import runner as runner_mod
+
+    async def _noop_rig(jid):
+        return None
+
+    async def _noop_watch(*a, **k):
+        return None
+    monkeypatch.setattr(runner_mod, "run_image_generation", _noop_rig)
+    monkeypatch.setattr(runner_reengineer, "_watch_swap_phase", _noop_watch)
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_paths", dict(state), scene_entries, "j_paths"))
+
+    paths = wired["jobs"]["j_paths"].scene_image_paths
+    assert [pathlib.Path(p).name for p in paths] == [
+        "sc_base.png", "sc_base.png", "sc_up.webp"]
+    # The invariant that actually matters: every path the job will read exists.
+    for p in paths:
+        assert pathlib.Path(p).exists(), p

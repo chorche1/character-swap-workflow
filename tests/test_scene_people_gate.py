@@ -473,6 +473,12 @@ def test_regen_uses_the_per_character_prompt(monkeypatch):
                                        status=CharStatus.APPROVED)})
 
     class _S:
+
+        # runner_reengineer.scene_path resolves job scene paths through the
+        # SceneAsset (a .webp upload / a ⧉-duplicated scene has no
+        # <scene_id>.png). None keeps the historical derivation.
+        def get_scene(self, sid):
+            return None
         def get_job(self, jid):
             return job
     monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
@@ -495,6 +501,12 @@ def offdirector(monkeypatch, tmp_path):
     box = {"job": None, "calls": []}
 
     class _S:
+
+        # runner_reengineer.scene_path resolves job scene paths through the
+        # SceneAsset (a .webp upload / a ⧉-duplicated scene has no
+        # <scene_id>.png). None keeps the historical derivation.
+        def get_scene(self, sid):
+            return None
         def get_character(self, cid):
             return ch if cid == "ch_a" else None
 
