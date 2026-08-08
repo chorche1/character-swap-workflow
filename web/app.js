@@ -127,6 +127,15 @@ function studio() {
     swapPickerChar: null,             // char_id whose reference-image popover is open
     _swapRowSeq: 0,
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
+    // "Använd bild N för alla" (Hugo 2026-08-08): last applied bulk pick, per
+    // form ('swap' | 'reengineer'). Text only — the actual picks live in each
+    // form's sourceOverrides, so individual ↕ tweaks afterwards still win.
+    bulkSourceNote: { swap: '', reengineer: '' },
+    // Library image-reorder drag in flight: {charId, imageId}. Kept separate
+    // from the existing drag-a-character-into-the-job payload so the two
+    // gestures can't be confused for one another.
+    imgReorder: null,
+    imgReorderOver: '',               // char_id + '|' + image_id being hovered
     reengineerHistory: [],            // [{re_id, status, scenes, job, finals, ...}]
     _reengineerPollTimer: null,
     _editorRepurposePollTimer: null,  // polls saved-reel repurpose status
@@ -1126,6 +1135,7 @@ function studio() {
       const ids = this.reengineerGen.charIds;
       const i = ids.indexOf(cid);
       if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+      this.bulkSourceNote = { ...this.bulkSourceNote, reengineer: '' };
     },
 
     // Surface a dropped/interrupted submit. fetch() THROWS (vs returning an
@@ -1296,6 +1306,89 @@ function studio() {
       const ids = this.swapFromImages.charIds;
       const i = ids.indexOf(cid);
       if (i >= 0) ids.splice(i, 1); else ids.push(cid);
+      // The bulk note describes an action taken over the SELECTION it ran on.
+      // Once that selection changes it would claim a character it never
+      // touched, so it is dropped rather than left to mislead.
+      this.bulkSourceNote = { ...this.bulkSourceNote, swap: '' };
+    },
+
+    // --- "Använd bild N för alla" (Hugo 2026-08-08) -------------------------
+    // The per-character ↕ picker handles one outfit swap; this handles "ta
+    // allas andra bild". It sets each SELECTED character's reference image by
+    // POSITION in the library gallery — which is why that gallery is
+    // reorderable (moveCharacterImage / dropImageReorder below). Both the Swap
+    // and the Reengineer form use these; `kind` picks which one.
+
+    bulkSourceForm(kind) {
+      return kind === 'reengineer' ? this.reengineerGen : this.swapFromImages;
+    },
+
+    // The selected characters, in library order.
+    bulkSourceChars(kind) {
+      const ids = this.bulkSourceForm(kind).charIds || [];
+      return (this.library || []).filter(c => ids.includes(c.char_id));
+    },
+
+    // Positions the dropdown offers = the largest gallery among the selected
+    // characters, so a 4-image character still exposes "bild 4".
+    bulkSourceMax(kind) {
+      return this.bulkSourceChars(kind)
+        .reduce((m, c) => Math.max(m, (c.images || []).length), 0);
+    },
+
+    // Apply position `n` (1-based) to every selected character. Hugo's call
+    // 2026-08-08: a character with FEWER images than n takes its LAST image
+    // rather than being skipped — everyone lands on a deliberate pick, and the
+    // note says how many were clamped so it is never a silent substitution.
+    applyBulkSourceImage(kind, n) {
+      const pos = parseInt(n, 10);
+      const chars = this.bulkSourceChars(kind);
+      if (!pos || pos < 1 || !chars.length) return;
+      const form = this.bulkSourceForm(kind);
+      const next = { ...form.sourceOverrides };
+      let exact = 0, clamped = 0;
+      for (const ch of chars) {
+        const imgs = ch.images || [];
+        if (!imgs.length) continue;
+        const idx = Math.min(pos, imgs.length) - 1;
+        if (imgs.length < pos) clamped++; else exact++;
+        // Matching the ★ primary means "no override" — same convention as the
+        // per-character picker, so the two controls can't disagree.
+        if (imgs[idx].image_id === ch.primary_image_id) delete next[ch.char_id];
+        else next[ch.char_id] = imgs[idx].image_id;
+      }
+      form.sourceOverrides = next;
+      this.bulkSourceNote = {
+        ...this.bulkSourceNote,
+        [kind]: `Bild ${pos} → ${exact} karaktär${exact === 1 ? '' : 'er'}`
+              + (clamped ? ` · ${clamped} hade färre bilder och fick sin sista`
+                         : ''),
+      };
+    },
+
+    // Drop every bulk/individual pick for the selected characters — back to
+    // each character's ★ primary.
+    clearBulkSourceImage(kind) {
+      const form = this.bulkSourceForm(kind);
+      const next = { ...form.sourceOverrides };
+      for (const ch of this.bulkSourceChars(kind)) delete next[ch.char_id];
+      form.sourceOverrides = next;
+      this.bulkSourceNote = {
+        ...this.bulkSourceNote,
+        [kind]: 'Tillbaka till varje karaktärs ★ primära bild',
+      };
+    },
+
+    // Called by the dropdown's change event: '' is the placeholder, 'primary'
+    // the reset row, anything else a 1-based position. Resets itself to the
+    // placeholder so the select never claims to describe current state — the
+    // note under it does that.
+    onBulkSourceSelect(kind, ev) {
+      const v = ev.target.value;
+      ev.target.value = '';
+      if (!v) return;
+      if (v === 'primary') this.clearBulkSourceImage(kind);
+      else this.applyBulkSourceImage(kind, v);
     },
 
     async submitSwapFromImages() {
@@ -5541,6 +5634,85 @@ function studio() {
       });
       if (!r.ok) { this.notifyError('Could not set primary image: ' + await r.text()); return; }
       await this.loadLibrary();
+    },
+
+    // --- reference-image ORDER (Hugo 2026-08-08) ----------------------------
+    // Position is meaningful: it is what "använd bild 2 för alla" counts. The
+    // ★ primary stays independent of it (Hugo's call) — reordering changes
+    // what the positions mean, never which image a job swaps from.
+
+    // Persist a new order, keeping the local library in step. The optimistic
+    // local reorder is what makes the arrows feel instant; a failed PATCH puts
+    // the old order back and resyncs rather than leaving the two disagreeing.
+    async saveImageOrder(charId, orderedIds) {
+      const ch = (this.library || []).find(c => c.char_id === charId);
+      const before = ch ? [...(ch.images || [])] : null;
+      if (ch) {
+        const byId = {};
+        for (const img of ch.images || []) byId[img.image_id] = img;
+        ch.images = orderedIds.map(id => byId[id]).filter(Boolean);
+      }
+      const r = await fetch('/api/characters/' + charId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_order: orderedIds }),
+      });
+      if (!r.ok) {
+        if (ch && before) ch.images = before;
+        this.notifyError('Kunde inte spara bildordningen: ' + await r.text());
+        await this.loadLibrary();
+      }
+    },
+
+    // ◀ ▶ on a tile: move one step. Out-of-range is a no-op (the buttons at
+    // either end are disabled, but a keyboard repeat can still land here).
+    moveCharacterImage(charId, imageId, delta) {
+      const ch = (this.library || []).find(c => c.char_id === charId);
+      const ids = ((ch || {}).images || []).map(i => i.image_id);
+      const from = ids.indexOf(imageId);
+      const to = from + delta;
+      if (from < 0 || to < 0 || to >= ids.length) return;
+      ids.splice(to, 0, ids.splice(from, 1)[0]);
+      return this.saveImageOrder(charId, ids);
+    },
+
+    // ⠿ handle drag. Carries its OWN dataTransfer type: the same tiles are
+    // already draggable to add the character to a job (onCharDragStart), and
+    // the two gestures must never be mistaken for one another.
+    startImageReorder(ev, charId, imageId) {
+      this.imgReorder = { charId, imageId };
+      try {
+        ev.dataTransfer.effectAllowed = 'move';
+        ev.dataTransfer.setData('text/x-charswap-img-order', imageId);
+      } catch (_) {}
+    },
+
+    onImageReorderOver(ev, charId, imageId) {
+      // Only a reorder drag from the SAME character may drop here. Without
+      // preventDefault the browser refuses the drop, so this doubles as the
+      // gate: an add-to-job drag simply never becomes droppable.
+      if (!this.imgReorder || this.imgReorder.charId !== charId) return;
+      ev.preventDefault();
+      this.imgReorderOver = charId + '|' + imageId;
+    },
+
+    dropImageReorder(ev, charId, imageId) {
+      const drag = this.imgReorder;
+      this.endImageReorder();
+      if (!drag || drag.charId !== charId || drag.imageId === imageId) return;
+      ev.preventDefault();
+      const ch = (this.library || []).find(c => c.char_id === charId);
+      const ids = ((ch || {}).images || []).map(i => i.image_id);
+      const from = ids.indexOf(drag.imageId);
+      const to = ids.indexOf(imageId);
+      if (from < 0 || to < 0) return;
+      ids.splice(to, 0, ids.splice(from, 1)[0]);
+      return this.saveImageOrder(charId, ids);
+    },
+
+    endImageReorder() {
+      this.imgReorder = null;
+      this.imgReorderOver = '';
     },
 
     // Per-character spoken languages (mirror of reengineer.SPOKEN_LANGUAGES —

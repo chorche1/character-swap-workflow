@@ -1105,6 +1105,13 @@ class RenameCharacterBody(BaseModel):
     # (the star in the library, the default swap source). Must be an image_id
     # already on this character.
     primary_image_id: str | None = None
+    # Reorder the character's reference images (Hugo 2026-08-08). Must be a
+    # PERMUTATION of this character's current image_ids — a partial list would
+    # silently drop images, so it is refused. Position is what the "use image
+    # N for every character" bulk picker counts; the ★ primary is deliberately
+    # NOT coupled to it (Hugo's call), so reordering never changes which image
+    # a job actually swaps from.
+    image_order: list[str] | None = None
 
 
 @app.patch("/api/characters/{char_id}")
@@ -1176,6 +1183,33 @@ async def rename_character(char_id: str, body: RenameCharacterBody) -> dict:
             raise HTTPException(404, "Image not found on this character")
         asset.primary_image_id = new_primary.image_id
         asset.filename = new_primary.filename
+    if body.image_order is not None:
+        # Reorder only — never add, drop or dedupe. Anything but a permutation
+        # of the current ids is a client bug that would cost the user images,
+        # so it fails loudly instead of reordering what it can.
+        current = [i.image_id for i in asset.images]
+        unknown = [i for i in body.image_order if i not in set(current)]
+        if unknown:
+            raise HTTPException(
+                404, f"Image not found on this character: {', '.join(unknown)}")
+        if len(body.image_order) != len(set(body.image_order)):
+            raise HTTPException(400, "image_order contains duplicate image ids")
+        missing = [i for i in current if i not in set(body.image_order)]
+        if missing:
+            raise HTTPException(
+                400,
+                "image_order must list every image of this character "
+                f"({len(current)}); missing: {', '.join(missing)}")
+        by_id = {i.image_id: i for i in asset.images}
+        asset.images = [by_id[i] for i in body.image_order]
+        # Pin the effective primary before the order can imply a different one.
+        # `_char_to_dict` falls back to images[0] when primary_image_id is None,
+        # so a reorder would otherwise move the ★ (and the library thumbnail)
+        # on a character that never had one set explicitly.
+        if asset.primary_image_id is None and asset.images:
+            first = next((i for i in asset.images if i.filename == asset.filename),
+                         asset.images[0])
+            asset.primary_image_id = first.image_id
     s.update_character(asset)
     for job in affected_jobs:
         s.update_job(job)

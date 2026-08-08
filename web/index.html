@@ -1322,7 +1322,30 @@
 
         <!-- characters -->
         <div>
-          <div class="text-sm font-medium mb-2">Karaktärer <span class="text-neutral-400 font-normal">— en final-video var</span></div>
+          <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mb-2">
+            <div class="text-sm font-medium">Karaktärer <span class="text-neutral-400 font-normal">— en final-video var</span></div>
+            <!-- Bulk reference-image pick (Hugo 2026-08-08): set EVERY selected
+                 character's source image at once, by its position in the
+                 library gallery (reorder it there with ◀ ⠿ ▶). Individual ↕
+                 picks afterwards still win — this only writes the same
+                 sourceOverrides map. -->
+            <label x-show="bulkSourceMax('swap') > 1"
+                   class="text-xs flex items-center gap-1.5 text-neutral-500 dark:text-neutral-400"
+                   title="Sätter referensbilden för alla valda karaktärer på en gång. Numret är bildens plats i biblioteket (📚, ordna om med ◀ ⠿ ▶). Har en karaktär färre bilder än så får den sin sista.">
+              <span>Använd bild för alla:</span>
+              <select @change="onBulkSourceSelect('swap', $event)"
+                      class="px-2 py-1 rounded-lg text-xs border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+                <option value="">välj…</option>
+                <template x-for="n in bulkSourceMax('swap')" :key="'swbulk'+n">
+                  <option :value="n" x-text="'Bild ' + n"></option>
+                </template>
+                <option value="primary">★ Primär (återställ)</option>
+              </select>
+            </label>
+            <span x-show="bulkSourceNote.swap"
+                  class="text-[11px] text-indigo-600 dark:text-indigo-400"
+                  x-text="bulkSourceNote.swap"></span>
+          </div>
           <div class="flex flex-wrap gap-2">
             <template x-for="ch in library" :key="'sw-ch-'+ch.char_id">
               <div class="relative">
@@ -1462,7 +1485,27 @@
 
         <!-- characters -->
         <div>
-          <div class="text-sm font-medium mb-2">Characters <span class="text-neutral-400 font-normal">— one final video each</span></div>
+          <div class="flex items-center flex-wrap gap-x-3 gap-y-1 mb-2">
+            <div class="text-sm font-medium">Characters <span class="text-neutral-400 font-normal">— one final video each</span></div>
+            <!-- Same bulk reference-image pick as the Swap form (Hugo
+                 2026-08-08); both write their own form's sourceOverrides. -->
+            <label x-show="bulkSourceMax('reengineer') > 1"
+                   class="text-xs flex items-center gap-1.5 text-neutral-500 dark:text-neutral-400"
+                   title="Sätter referensbilden för alla valda karaktärer på en gång. Numret är bildens plats i biblioteket (📚, ordna om med ◀ ⠿ ▶). Har en karaktär färre bilder än så får den sin sista.">
+              <span>Använd bild för alla:</span>
+              <select @change="onBulkSourceSelect('reengineer', $event)"
+                      class="px-2 py-1 rounded-lg text-xs border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-950">
+                <option value="">välj…</option>
+                <template x-for="n in bulkSourceMax('reengineer')" :key="'rebulk'+n">
+                  <option :value="n" x-text="'Bild ' + n"></option>
+                </template>
+                <option value="primary">★ Primär (återställ)</option>
+              </select>
+            </label>
+            <span x-show="bulkSourceNote.reengineer"
+                  class="text-[11px] text-indigo-600 dark:text-indigo-400"
+                  x-text="bulkSourceNote.reengineer"></span>
+          </div>
           <div class="flex flex-wrap gap-2">
             <template x-for="ch in library" :key="'re-ch-'+ch.char_id">
               <div class="relative">
@@ -4563,8 +4606,16 @@
                         @click.stop="openUploadModal({targetCharId: ch.char_id})">+ image</button>
               </div>
               <div class="grid grid-cols-2 gap-1.5">
-                <template x-for="img in (ch.images || [])" :key="'ref'+img.image_id">
-                  <div class="relative group">
+                <template x-for="(img, imgIdx) in (ch.images || [])" :key="'ref'+img.image_id">
+                  <!-- Drop target for a ⠿ reorder drag. onImageReorderOver only
+                       calls preventDefault for a reorder drag on THIS character,
+                       so the existing drag-into-a-job gesture never becomes a
+                       droppable reorder. -->
+                  <div class="relative group rounded"
+                       @dragover="onImageReorderOver($event, ch.char_id, img.image_id)"
+                       @drop="dropImageReorder($event, ch.char_id, img.image_id)"
+                       :class="imgReorderOver === ch.char_id + '|' + img.image_id
+                                 ? 'ring-2 ring-indigo-400' : ''">
                     <img :src="img.url" loading="lazy"
                          draggable="true"
                          @dragstart="onCharDragStart($event, ch, img)"
@@ -4585,6 +4636,32 @@
                     <button class="absolute top-0.5 right-0.5 bg-neutral-900/70 text-white text-[10px] w-4 h-4 rounded-full opacity-0 group-hover:opacity-100 leading-none"
                             title="Remove this image"
                             @click.stop="deleteCharacterImage(ch.char_id, img.image_id)">✕</button>
+                    <!-- Position (Hugo 2026-08-08). This number is exactly what
+                         "Använd bild N för alla" on the Swap/Reengineer forms
+                         counts — so it is always visible, while the reorder
+                         controls appear on hover. Order is independent of the
+                         ★ primary: moving an image never changes which one a
+                         job swaps from. -->
+                    <div x-show="(ch.images || []).length > 1"
+                         class="absolute bottom-0.5 left-0.5 bg-neutral-900/70 text-white text-[9px] px-1 py-0.5 rounded leading-none"
+                         :title="`Bild ${imgIdx + 1} — positionen som 'Använd bild N för alla' räknar`"
+                         x-text="imgIdx + 1"></div>
+                    <div x-show="(ch.images || []).length > 1"
+                         class="absolute bottom-0.5 right-0.5 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button class="bg-neutral-900/70 hover:bg-indigo-600 text-white text-[9px] w-4 h-4 rounded-full leading-none disabled:opacity-30"
+                              :disabled="imgIdx === 0"
+                              title="Flytta bilden ett steg bakåt"
+                              @click.stop="moveCharacterImage(ch.char_id, img.image_id, -1)">◀</button>
+                      <span class="bg-neutral-900/70 text-white text-[9px] w-4 h-4 rounded-full leading-none flex items-center justify-center cursor-grab active:cursor-grabbing"
+                            draggable="true"
+                            title="Dra för att flytta bilden dit du vill"
+                            @dragstart.stop="startImageReorder($event, ch.char_id, img.image_id)"
+                            @dragend="endImageReorder()">⠿</span>
+                      <button class="bg-neutral-900/70 hover:bg-indigo-600 text-white text-[9px] w-4 h-4 rounded-full leading-none disabled:opacity-30"
+                              :disabled="imgIdx === (ch.images || []).length - 1"
+                              title="Flytta bilden ett steg framåt"
+                              @click.stop="moveCharacterImage(ch.char_id, img.image_id, 1)">▶</button>
+                    </div>
                   </div>
                 </template>
               </div>
