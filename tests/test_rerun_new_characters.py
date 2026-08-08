@@ -477,6 +477,52 @@ def test_repeated_scene_id_gets_its_own_id_and_file(wired):
     assert (settings.scenes_dir / f"{ids[1]}.png").exists()
 
 
+def test_duplicated_scene_with_no_file_of_its_own_is_re_registered(wired):
+    """A ⧉-duplicated scene (`…__dup<hex>`) has NO file at
+    `scenes_dir/<sid>.png` — _apply_scene_duplicate points Job.scene_image_paths
+    at the SOURCE's path instead. 215 of 758 scenes in the real store are like
+    this. The child's job derives the canonical path, so inheriting the id
+    verbatim would hand it a path that does not exist and fail every variant,
+    per character, at generation time."""
+    base = wired["sids"][0]
+    dup = f"{base}__dupabc123"
+    wired["states"]["re_parent"]["scenes"][1]["scene_id"] = dup
+    job = wired["box"]["jobs"]["j_parent"]
+    job.scene_ids = [base, dup, wired["sids"][2]]
+    job.scene_image_paths = [str(settings.scenes_dir / f"{base}.png"),
+                             str(settings.scenes_dir / f"{base}.png"),
+                             str(settings.scenes_dir / f"{wired['sids'][2]}.png")]
+    assert not (settings.scenes_dir / f"{dup}.png").exists()
+
+    # The modal offers it rather than greying it out…
+    plan = _plan()
+    assert plan["scenes"][1]["missing_file"] is False
+
+    view = _rerun("re_parent", {"character_ids": ["ch_new_en"],
+                                "scenes": _rows(plan)})
+    st = wired["states"][view["re_id"]]
+    new_sid = st["scenes"][1]["scene_id"]
+    # …and the child gets a fresh id whose canonical file really exists,
+    # minted off the BASE so duplicate chains don't grow a __dupA__dupB tail.
+    assert new_sid != dup and new_sid.startswith(base + "__dup")
+    assert "__dupabc123" not in new_sid
+    assert (settings.scenes_dir / f"{new_sid}.png").read_bytes() == \
+        (settings.scenes_dir / f"{base}.png").read_bytes()
+
+
+def test_scene_file_falls_back_to_the_job_path_then_the_base_id(wired):
+    base = wired["sids"][0]
+    dup = f"{base}__dupdeadbe"
+    job = wired["box"]["jobs"]["j_parent"]
+    job.scene_ids = [dup]
+    job.scene_image_paths = [str(settings.scenes_dir / f"{base}.png")]
+    assert rerun_mod.scene_file(dup, job) == settings.scenes_dir / f"{base}.png"
+    # Even with no job at all, the __dup chain resolves to its base image.
+    assert rerun_mod.scene_file(dup, None) == settings.scenes_dir / f"{base}.png"
+    # A genuinely unknown scene still resolves to nothing (→ loud refusal).
+    assert rerun_mod.scene_file("sc_nope", job) is None
+
+
 def test_empty_cast_and_empty_scenes_are_refused(wired):
     with pytest.raises(HTTPException) as ei:
         _rerun("re_parent", {"character_ids": [], "scenes": _rows(_plan())})

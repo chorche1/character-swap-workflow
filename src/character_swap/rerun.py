@@ -111,18 +111,47 @@ class RerunError(ValueError):
 # --------------------------------------------------------------------------- reading the parent
 
 
-def scene_file(scene_id: str) -> Path | None:
-    """The file the child's JOB will actually read for this scene, or None.
+def canonical_scene_file(scene_id: str) -> Path:
+    """The path `_create_job_and_swap` will derive for this scene.
 
-    Deliberately checks `scenes_dir/<scene_id>.png` rather than the
-    SceneAsset's recorded filename: `_create_job_and_swap` derives every
-    scene path with that exact hardcoded pattern
-    (runner_reengineer.py, `scene_paths`), and nothing downstream validates
-    it. Checking the recorded name instead would let a re-run start happily
-    and then fail once per variant per character at generation time.
+    It builds every scene path as `scenes_dir/<scene_id>.png` with that exact
+    hardcoded pattern and nothing downstream validates it, so this — not the
+    SceneAsset's recorded filename — is what has to exist for the CHILD.
     """
-    p = settings.scenes_dir / f"{scene_id}.png"
-    return p if p.exists() else None
+    return settings.scenes_dir / f"{scene_id}.png"
+
+
+def scene_file(scene_id: str, parent_job: Job | None = None) -> Path | None:
+    """The scene's actual image bytes, wherever they live, or None.
+
+    Three sources, because a scene id does not imply a file. A ⧉-duplicated
+    scene (`…__dup<hex>`) has NO file of its own: `api._apply_scene_duplicate`
+    inserts the SOURCE's path into `Job.scene_image_paths` and never writes
+    one. Measured on the real store: 215 of 758 scenes across 87 of 121 runs
+    are in that state, so treating a missing canonical file as "this scene
+    cannot be re-run" would have excluded most duplicated scenes from the
+    modal — and, worse, an inherited `__dup` id would have given the child's
+    job a path that does not exist (see `build_scene_entries`, which
+    re-registers it a real file).
+    """
+    p = canonical_scene_file(scene_id)
+    if p.exists():
+        return p
+    if parent_job is not None:
+        ids = list(parent_job.scene_ids or [])
+        paths = list(parent_job.scene_image_paths or [])
+        if scene_id in ids:
+            i = ids.index(scene_id)
+            if i < len(paths) and paths[i] and Path(paths[i]).exists():
+                return Path(paths[i])
+    # Last resort: a __dup chain is by definition the same image as the id it
+    # was minted from.
+    base = scene_id.split("__dup")[0]
+    if base != scene_id:
+        q = canonical_scene_file(base)
+        if q.exists():
+            return q
+    return None
 
 
 def end_frame_source(entry: dict, parent_job: Job | None) -> Path | None:
@@ -161,7 +190,7 @@ def plan_for(state: dict, parent_job: Job | None) -> dict:
     scenes: list[dict] = []
     for idx, e in enumerate(state.get("scenes") or []):
         sid = e.get("scene_id") or ""
-        f = scene_file(sid)
+        f = scene_file(sid, parent_job)
         scenes.append({
             "idx": idx,
             "scene_id": sid,
@@ -266,19 +295,27 @@ def build_scene_entries(*, parent: dict, parent_job: Job | None,
             raise RerunError(f"Scenrad {pos + 1} pekar på en scen som inte finns")
         src = parent_scenes[idx]
         sid = src.get("scene_id") or ""
-        src_file = scene_file(sid)
+        src_file = scene_file(sid, parent_job)
         if src_file is None:
             raise RerunError(
                 f"Scen {idx + 1} ({src.get('summary') or sid}): bildfilen "
                 "saknas i scenbiblioteket — går inte att köra om.")
 
-        # A scene_id repeated inside ONE run silently merges the rows' flags
-        # (direct/two_person are last-wins dicts, end frames first-wins) and
-        # leaves a direct row waiting forever on a clip keyed to its twin.
-        # Give the repeat its own id + file, exactly as the upload path does.
-        if sid in seen_ids:
+        # Two cases need the scene re-registered under a FRESH id backed by
+        # its own file:
+        #   · the id repeats inside THIS run — flags would silently merge
+        #     (direct/two_person are last-wins dicts, end frames first-wins)
+        #     and a direct row would wait forever on a clip keyed to its twin;
+        #   · the image is not at `scenes_dir/<sid>.png` — a ⧉-duplicated
+        #     scene has no file of its own, and the child's job derives
+        #     exactly that path, so inheriting the id verbatim would hand it
+        #     a path that does not exist and fail every variant, per
+        #     character, at generation time.
+        # Mint off the BASE id so a chain of duplicates doesn't grow a
+        # `__dupA__dupB__dupC` tail.
+        if sid in seen_ids or src_file != canonical_scene_file(sid):
             sid, src_file = runner_reengineer.register_scene_duplicate(
-                sid, src_file.read_bytes(),
+                sid.split("__dup")[0], src_file.read_bytes(),
                 src.get("summary") or f"Scen {idx + 1} (dubblett)")
         seen_ids.add(sid)
 
