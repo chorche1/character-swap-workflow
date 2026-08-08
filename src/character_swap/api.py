@@ -5594,25 +5594,12 @@ async def reengineer_create(
 
 def _register_scene_duplicate(src_scene_id: str, data: bytes,
                               original_name: str) -> tuple[str, Path]:
-    """Register a NEW scene id for a byte-identical repeat upload IN THE SAME
-    run. Content-addressing (`_register_frame_as_scene`) collapses identical
-    bytes to ONE scene_id, but everything downstream — the job's scene dedupe,
-    the per-scene prompt/duration dicts, `_render_direct_clip`'s first-match
-    entry resolve and `_persist_direct`'s first-match write — is keyed by
-    scene_id ALONE, so the second row would silently lose its own prompt and
-    (for "ingen swap" rows) wait forever on a clip that never lands. Mint a
-    `__dup` id (the duplicate-scene machinery's scheme, so it never collides
-    with a content hash) backed by its OWN file on disk — job scene paths are
-    derived as `scenes_dir/<scene_id>.png` at job creation."""
-    new_sid = f"{src_scene_id}__dup{secrets.token_hex(3)}"
-    dest = settings.scenes_dir / f"{new_sid}.png"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(dest.suffix + ".tmp")
-    tmp.write_bytes(data)
-    tmp.replace(dest)
-    store().add_scene(SceneAsset(scene_id=new_sid, filename=dest.name,
-                                 original_name=original_name))
-    return new_sid, dest
+    """Thin alias — the implementation moved to runner_reengineer so the
+    re-run path (rerun.py) mints duplicate scene ids identically without
+    importing api. See `runner_reengineer.register_scene_duplicate`."""
+    from character_swap import runner_reengineer
+    return runner_reengineer.register_scene_duplicate(
+        src_scene_id, data, original_name)
 
 
 @app.post("/api/reengineer/from_images")
@@ -5869,6 +5856,146 @@ async def reengineer_from_images(
     background_tasks.add_task(_run_async,
                              runner_reengineer.run_reengineer_from_images, re_id)
     return _reengineer_view(initial_state)
+
+
+class RerunSceneBody(BaseModel):
+    """One scene row in the re-run modal. Keyed by the PARENT's list index —
+    scene_id is not unique inside `state.scenes`."""
+    idx: int
+    motion_prompt: str = ""
+    secs: float | None = None
+    direct: bool | None = None
+    two_person: bool | None = None
+    keep_end_frame: bool = True
+    reuse_direct_clip: bool = True
+    video_model: str | None = None
+
+
+class RerunBody(BaseModel):
+    """New cast + the (fully editable) inherited plan. Any setting left None
+    is inherited from the parent run verbatim."""
+    character_ids: list[str]
+    scenes: list[RerunSceneBody]
+    image_model: str | None = None
+    outfit_mode: str | None = None
+    outfit_text: str | None = None
+    background_source: str | None = None
+    use_director: bool | None = None
+    skip_qc: bool | None = None
+    auto_mode: bool | None = None
+    auto_telegram_send: bool | None = None
+    character_source_image_ids: dict[str, str] | None = None
+
+
+@app.get("/api/reengineer/{re_id}/rerun_plan")
+async def reengineer_rerun_plan(re_id: str) -> dict:
+    """Prefill for the "↻ nya karaktärer" modal: the parent's scenes with the
+    fields the user may edit, plus the two per-scene facts that do NOT live on
+    the scene entry (whether it has a shared 🎯 end pose, and whether its 📌
+    direct clip can be reused)."""
+    from character_swap import reengineer as reengineer_mod, rerun as rerun_mod
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "Run not found")
+    job = store().get_job(state["job_id"]) if state.get("job_id") else None
+    plan = rerun_mod.plan_for(state, job)
+    # Thumbnails: resolved here rather than in rerun.py, which stays free of
+    # the HTTP layer. Same mapping _reengineer_view uses for scene frames.
+    for sc in plan["scenes"]:
+        scene = store().get_scene(sc["scene_id"])
+        if scene:
+            sc["frame_url"] = _file_url(settings.scenes_dir / scene.filename)
+    return plan
+
+
+@app.post("/api/reengineer/{re_id}/rerun")
+async def reengineer_rerun(re_id: str, body: RerunBody,
+                           background_tasks: BackgroundTasks) -> dict:
+    """Start a NEW run from an existing one, with a new cast (Hugo
+    2026-08-08). The parent run is never written to — see rerun.py for what is
+    inherited, what is deliberately rebuilt, and why every inherited file is
+    copied rather than referenced."""
+    from character_swap import (reengineer as reengineer_mod,
+                                rerun as rerun_mod, runner_reengineer)
+    parent = reengineer_mod.load_state(re_id)
+    if not parent:
+        raise HTTPException(404, "Run not found")
+
+    char_ids = [c for c in (body.character_ids or []) if c]
+    if not char_ids:
+        raise HTTPException(400, "Pick at least one character")
+    for cid in char_ids:
+        if store().get_character(cid) is None:
+            raise HTTPException(404, f"Character not found: {cid}")
+
+    image_model = body.image_model or parent.get("image_model") or "gpt2-id-swap"
+    info = runner_media.IMAGE_MODELS.get(image_model)
+    if info is None:
+        raise HTTPException(400, f"Unknown image_model '{image_model}'")
+    if not settings.has_provider(info["provider"]):
+        raise HTTPException(503, f"{info['label']} is not configured. Add the API key to .env.")
+    outfit_mode = body.outfit_mode or parent.get("outfit_mode") or "character"
+    if outfit_mode not in ("scene", "character", "custom"):
+        raise HTTPException(400, f"Unknown outfit_mode '{outfit_mode}'")
+    outfit_text = (body.outfit_text if body.outfit_text is not None
+                   else parent.get("outfit_text")) or ""
+    if outfit_mode == "custom" and not outfit_text.strip():
+        raise HTTPException(400, "outfit_mode 'custom' requires a clothing description")
+    background_source = (body.background_source
+                         or parent.get("background_source") or "character")
+    if background_source not in ("character", "scene"):
+        raise HTTPException(400, f"Unknown background_source '{background_source}'")
+
+    # Preflight the model each clip will ACTUALLY be submitted on — for a
+    # 🇪🇸/🇩🇪 character that is the language redirect target, not the run's
+    # own model. Done before anything is written so a missing key costs a
+    # click, not an hour inside a worker thread.
+    parent_scenes = parent.get("scenes") or []
+    run_default = parent.get("video_model") or "kling-v3"
+    scene_models: list[str] = []
+    for row in body.scenes or []:
+        src = (parent_scenes[row.idx]
+               if isinstance(row.idx, int) and 0 <= row.idx < len(parent_scenes)
+               else {})
+        chosen = row.video_model if row.video_model is not None else src.get("video_model")
+        scene_models.append(chosen or "")
+    try:
+        rerun_mod.preflight_video_models(char_ids, run_default=run_default,
+                                         scene_models=scene_models)
+    except rerun_mod.RerunError as e:
+        raise HTTPException(503, str(e))
+
+    parent_job = store().get_job(parent["job_id"]) if parent.get("job_id") else None
+    new_re_id = "re_" + secrets.token_hex(5)
+    try:
+        state = rerun_mod.build_state(
+            parent=parent, parent_job=parent_job, new_re_id=new_re_id,
+            character_ids=char_ids,
+            requested_scenes=[r.model_dump() for r in (body.scenes or [])],
+            overrides={
+                "image_model": image_model,
+                "outfit_mode": outfit_mode,
+                "outfit_text": outfit_text,
+                "background_source": background_source,
+                "use_director": body.use_director,
+                "skip_qc": body.skip_qc,
+                "auto_mode": body.auto_mode,
+                "auto_telegram_send": body.auto_telegram_send,
+                "character_source_image_ids": body.character_source_image_ids,
+            })
+    except rerun_mod.RerunError as e:
+        # A row that failed validation may have copied earlier rows' files
+        # already — drop the half-built dir so it never shows up as a ghost
+        # run (list_states skips it anyway, but an empty dir lingers).
+        shutil.rmtree(settings.output_dir / "reengineer" / new_re_id,
+                      ignore_errors=True)
+        raise HTTPException(400, str(e))
+
+    reengineer_mod.save_state(state)
+    background_tasks.add_task(_run_async,
+                              runner_reengineer.run_reengineer_from_images,
+                              new_re_id)
+    return _reengineer_view(state)
 
 
 @app.get("/api/reengineer")

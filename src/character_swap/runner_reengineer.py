@@ -312,6 +312,34 @@ def _register_frame_as_scene(frame: Path) -> tuple[str, Path]:
     return scene_id, dest
 
 
+def register_scene_duplicate(src_scene_id: str, data: bytes,
+                             original_name: str) -> tuple[str, Path]:
+    """Register a NEW scene id for a byte-identical repeat row IN THE SAME
+    run. Content-addressing (`_register_frame_as_scene`) collapses identical
+    bytes to ONE scene_id, but everything downstream — the job's scene dedupe,
+    the per-scene prompt/duration dicts, `_render_direct_clip`'s first-match
+    entry resolve and `_persist_direct`'s first-match write — is keyed by
+    scene_id ALONE, so the second row would silently lose its own prompt and
+    (for "ingen swap" rows) wait forever on a clip that never lands. Mint a
+    `__dup` id (the duplicate-scene machinery's scheme, so it never collides
+    with a content hash) backed by its OWN file on disk — job scene paths are
+    derived as `scenes_dir/<scene_id>.png` at job creation.
+
+    Lives here rather than in api.py because BOTH the upload path
+    (POST /api/reengineer/from_images) and the re-run path (rerun.py) have to
+    mint these the same way; api keeps a thin alias for its own call sites.
+    """
+    new_sid = f"{src_scene_id}__dup{secrets.token_hex(3)}"
+    dest = settings.scenes_dir / f"{new_sid}.png"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    store().add_scene(SceneAsset(scene_id=new_sid, filename=dest.name,
+                                 original_name=original_name))
+    return new_sid, dest
+
+
 async def run_reengineer(re_id: str) -> None:
     """Phase 1: analyze the source video and kick off the swap job."""
     state = reengineer.load_state(re_id)
@@ -1096,6 +1124,42 @@ async def _persist_direct(re_id: str, scene_id: str, **fields) -> None:
         reengineer.save_state(st)
 
 
+def _clear_direct_clip(entry: dict) -> None:
+    """Mark one 📌 direct scene as needing a fresh shared clip.
+
+    Nulling the path (rather than just deleting the key) is load-bearing: the
+    crash-resume revival condition is `is_direct and not shared_clip_path`, so
+    leaving a stale path made a restarted render silently ship the pre-edit
+    clip. `direct_clip_reused` goes with it — once this run renders its own
+    clip, the clip is no longer inherited from the run it was cloned from.
+    """
+    entry["shared_clip_path"] = None
+    entry.pop("direct_error", None)
+    entry.pop("direct_clip_reused", None)
+
+
+def _reset_direct_clips(scenes: list[dict]) -> None:
+    """Prepare every direct scene for a FULL (re)animate, which re-renders the
+    shared clip — except one INHERITED from the run this one was cloned from
+    (rerun.py, Hugo 2026-08-08).
+
+    A direct scene's clip is character-independent by construction: every
+    character's final gets the identical file. So re-rendering an inherited
+    one would spend a video credit purely to get a different take of the same
+    shot. The marker is honoured only while the file is actually there — a
+    vanished clip degrades to a normal re-render rather than to a permanent
+    waitable coverage gap that blocks the build forever.
+    """
+    for e in scenes:
+        if not e.get("is_direct"):
+            continue
+        if e.get("direct_clip_reused") and Path(
+                e.get("shared_clip_path") or "").exists():
+            e.pop("direct_error", None)
+            continue
+        _clear_direct_clip(e)
+
+
 async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     """Render ONE shared Kling clip for a 'direct image — no swap' scene and
     store its path on the scene. Reused by EVERY character in assembly, so it
@@ -1226,14 +1290,13 @@ async def _do_animate(re_id: str, state: dict) -> None:
     current = reengineer.load_state(re_id) or state
     for e in current.get("scenes") or []:
         e.pop("dirty", None)
-        if e.get("is_direct"):       # full (re)animate re-renders the shared clip
-            e["shared_clip_path"] = None
-            e.pop("direct_error", None)
+    _reset_direct_clips(current.get("scenes") or [])
     _update(re_id, status="animating", scenes=current.get("scenes") or [])
 
     # ONE shared Kling clip per direct scene (no swap), reused by all characters.
     direct_tasks = [asyncio.create_task(_render_direct_clip(re_id, e["scene_id"]))
-                    for e in (current.get("scenes") or []) if e.get("is_direct")]
+                    for e in (current.get("scenes") or [])
+                    if e.get("is_direct") and not e.get("direct_clip_reused")]
     # Per-character clips only when there are swap scenes (skip for all-direct).
     swap_present = bool(set(job.scene_ids) - set(job.direct_scene_ids or []))
     video_task = (asyncio.create_task(runner.run_video_synthesis(job.job_id))
@@ -2560,7 +2623,11 @@ async def _do_reanimate(re_id: str, idxs: list[int], *,
             # at phase start): the crash-resume's revival condition is
             # `is_direct and not shared_clip_path`, so leaving the old path in
             # place made a restarted redo silently ship the pre-edit clip.
-            entries[i]["shared_clip_path"] = None
+            # An explicit redo is the user asking for a NEW take, so a clip
+            # inherited from a cloned-from run stops being inherited here —
+            # otherwise the marker would survive and make a later full
+            # animate skip re-rendering this run's own clip (rerun.py).
+            _clear_direct_clip(entries[i])
             reengineer.save_state(state)
             tasks.append(_render_direct_clip(re_id, sid))
             acted.append(i)
