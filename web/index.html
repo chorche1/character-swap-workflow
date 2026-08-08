@@ -5219,6 +5219,23 @@
                    class="ml-1 w-16 px-1 py-0.5 border border-neutral-300 dark:border-neutral-700 bg-white dark:bg-neutral-950 rounded" />
           </label>
         </div>
+        <!-- Telegram auto-send (Hugo 2026-08-09): ON = what every repurpose did
+             before this checkbox existed. OFF builds the mirrored copy and
+             leaves it on the card for the manual ➤ Telegram button. Persisted
+             per run/job/reel in repurpose_settings, so re-opening the modal for
+             the same one shows the last choice. -->
+        <div class="pt-1 border-t border-neutral-200 dark:border-neutral-800">
+          <label class="flex items-center gap-1">
+            <input type="checkbox" x-model="repurposeSettings.autoTelegramSend" class="accent-fuchsia-500">
+            ➤ Skicka automatiskt till Telegram
+          </label>
+          <div class="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400"
+               x-text="repurposeSettings.autoTelegramSend
+                 ? (repurposeModal.kind === 'editor'
+                     ? 'Den spegelvända reel:en skickas till Editor-kanalen när den är klar.'
+                     : 'Varje spegelvänd final skickas till karaktärens kanal så fort den är klar.')
+                 : 'Kopian byggs men skickas inte — använd ➤ Telegram på kortet när du vill skicka.'"></div>
+        </div>
         <label class="block" :class="repurposeSettings.enableVoiceSwap ? '' : 'opacity-40'"><span x-text="repurposeModal.kind === 'editor' ? 'Röstbyte (ElevenLabs)' : 'Röst-override (alla karaktärer)'"></span>
           <select x-model="repurposeSettings.voiceOverride"
                   :disabled="!repurposeSettings.enableVoiceSwap || !elevenlabsAvailable()"

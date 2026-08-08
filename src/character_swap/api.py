@@ -3568,6 +3568,10 @@ class RepurposeVideosBody(CompileVideosBody):
     output. Same field set as CompileVideosBody plus `playback_speed` (the
     Editor Speed control), persisted to `job.repurpose_settings`."""
     playback_speed: float = Field(default=1.0, ge=0.5, le=2.0)
+    # Ship each finished mirrored final to its character's Telegram channel as
+    # soon as it's built (Hugo 2026-08-09 — the ✓ in the Repurpose modal).
+    # Defaults TRUE: that's what every repurpose did before the toggle existed.
+    auto_telegram_send: bool = True
 
 
 @app.post("/api/jobs/{job_id}/repurpose_videos")
@@ -3627,6 +3631,7 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
         voice_override=body.voice_override,
         enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
         playback_speed=body.playback_speed,
+        auto_telegram_send=body.auto_telegram_send,
     )
     return _job_to_dict(job)
 
@@ -4828,6 +4833,10 @@ class EditorRepurposeBody(BaseModel):
     playback_speed: float = Field(default=1.0, ge=0.5, le=2.0)
     enable_voice_swap: bool = False
     voice_override: str = ""
+    # Send the finished mirrored reel to the Editor Telegram channel right away
+    # (Hugo 2026-08-09 — the ✓ in the Repurpose modal). Defaults TRUE: what
+    # every Editor repurpose did before the toggle existed.
+    auto_telegram_send: bool = True
 
 
 @app.post("/api/editor/{edit_id}/repurpose")
@@ -4871,6 +4880,7 @@ async def editor_repurpose(edit_id: str, body: EditorRepurposeBody,
         gap_max_secs=body.gap_max_secs, playback_speed=body.playback_speed,
         enable_voice_swap=body.enable_voice_swap, voice_override=body.voice_override,
         settings_snapshot=body.model_dump(),
+        auto_telegram_send=body.auto_telegram_send,
     )
     return _gen_to_dict(gen)
 
@@ -6080,6 +6090,13 @@ class ReAssembleSettingsBody(BaseModel):
     # persisted setting — it's a per-click filter, so _store_assemble_settings
     # never writes it into the run's `assemble_settings`.
     char_ids: list[str] | None = None
+    # REPURPOSE ONLY (Hugo 2026-08-09 — the ✓ in the Repurpose modal): send each
+    # finished mirrored final to its character's Telegram channel automatically.
+    # Persisted per run in `repurpose_settings`; `_store_assemble_settings`
+    # drops it, since the ORIGINAL finals have their own run-level
+    # `auto_telegram_send` flag chosen at upload time. None = keep what's
+    # stored, and an unset stored value means True (the pre-toggle behavior).
+    auto_telegram_send: bool | None = None
 
 
 def _store_assemble_settings(state: dict,
@@ -6091,6 +6108,11 @@ def _store_assemble_settings(state: dict,
         return False
     sent = {k: v for k, v in body.model_dump().items() if v is not None}
     sent.pop("char_ids", None)          # per-click filter, never a setting
+    # Repurpose-only control flag — the original finals' auto-delivery is the
+    # run-level state["auto_telegram_send"], set at upload; letting the ⚙
+    # assemble panel write a same-named key into assemble_settings would read
+    # like it governs that, and it doesn't.
+    sent.pop("auto_telegram_send", None)
     # voice_override="" means "clear the override" — store it as None.
     if body.voice_override is not None:
         sent["voice_override"] = body.voice_override.strip() or None

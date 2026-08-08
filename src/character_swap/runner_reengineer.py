@@ -2242,6 +2242,20 @@ def _repurpose_settings(state: dict) -> dict:
     return cfg
 
 
+def _repurpose_auto_send(state: dict) -> bool:
+    """Should the finished repurpose copies be shipped to Telegram on their own?
+
+    The ✓ in the Repurpose modal, stored per run in `repurpose_settings`
+    (Hugo 2026-08-09). DEFAULTS TO TRUE — every repurpose before this flag
+    existed auto-sent, and Hugo kept that as the default. Deliberately NOT the
+    run-level `state["auto_telegram_send"]`, which governs the ORIGINAL finals
+    after a successful assemble: the two are chosen at different moments and a
+    repurpose is always an explicit per-click request."""
+    stored = state.get("repurpose_settings") or {}
+    value = stored.get("auto_telegram_send")
+    return True if value is None else bool(value)
+
+
 async def repurpose(re_id: str) -> None:
     """Build the mirror-flipped Repurpose variant of every character's final."""
     state = reengineer.load_state(re_id)
@@ -2272,6 +2286,16 @@ async def repurpose(re_id: str) -> None:
         _REPURPOSING.discard(re_id)
 
     if not built:
+        return
+    if not _repurpose_auto_send(state):
+        # The modal's "skicka automatiskt" was unticked (Hugo 2026-08-09): the
+        # mirrored finals are built and sit on the card, and the manual ➤
+        # Telegram button is the only way they go out. Read off the state as
+        # loaded at entry — the endpoint persists the setting BEFORE scheduling
+        # this task and refuses a second repurpose while one is in flight, so
+        # it cannot change under us.
+        _log.info("reengineer %s: repurpose Telegram auto-send off — built "
+                  "only", re_id)
         return
     # Auto-send the repurpose copies to Telegram — runs AFTER the _REPURPOSING
     # guard is cleared, exactly like assemble() (Hugo 2026-08-03). It used to

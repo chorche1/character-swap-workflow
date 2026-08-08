@@ -407,6 +407,10 @@ function studio() {
         gapMaxSecs: 0.35,
         targetWpm: 190,
         playbackSpeed: 1.0,     // Hugo 2026-07-19 (was 1.05)
+        // Ship each finished mirrored final to Telegram on its own (Hugo
+        // 2026-08-09). TRUE = what every repurpose did before the toggle
+        // existed; unticking builds the copy and leaves it for the manual ➤.
+        autoTelegramSend: true,
       };
       try {
         const saved = JSON.parse(localStorage.getItem('repurpose.settings.v1') || '{}');
@@ -2260,6 +2264,12 @@ function studio() {
         o.captionSize = s.overrides.size;
       }
       if (s && 'playback_speed' in s) o.playbackSpeed = s.playback_speed;
+      // Repurpose-only (Hugo 2026-08-09): rehydrates the "skicka automatiskt
+      // till Telegram" ✓ from the run's/job's/reel's stored repurpose_settings.
+      // Never present in assemble_settings — the server drops it there.
+      if (s && 'auto_telegram_send' in s) {
+        o.autoTelegramSend = !!s.auto_telegram_send;
+      }
       return o;
     },
     // Active job's Step-6 settings (one object per job_id, lazily seeded from
@@ -2450,6 +2460,11 @@ function studio() {
         gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
         enable_voice_swap: !!s.enableVoiceSwap,
         voice_override: s.voiceOverride || '',
+        // Undefined (a seed built before this field existed) must mean the
+        // pre-toggle behavior — auto-send — not a silent "no", so default to
+        // true instead of coercing with !!.
+        auto_telegram_send: s.autoTelegramSend === undefined
+          ? true : !!s.autoTelegramSend,
       };
     },
 
@@ -2508,7 +2523,12 @@ function studio() {
           this._startReengineerPolling();
         }
         this.repurposeModal.open = false;
-        this.notifyInfo('Repurpose startad — spegelvänder reel:en…');
+        // Name the delivery choice in the toast — an unticked auto-send must
+        // never look like a failed send later on.
+        this.notifyInfo('Repurpose startad — spegelvänder reel:en… '
+          + (body.auto_telegram_send
+              ? 'Skickas till Telegram när den är klar.'
+              : 'Skickas INTE automatiskt — använd ➤ Telegram på kortet.'));
       } catch (e) {
         // fetch() THROWS on a dropped connection (mobile/Tailscale) — without
         // this catch the submit was a silent no-op: spinner stops, no run,

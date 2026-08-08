@@ -788,6 +788,7 @@ async def _compile_one_character(
     gap_max_secs: float = 0.35,
     playback_speed: float = 1.0,
     slot: _CompileSlot = _COMPILE_SLOT,
+    auto_telegram_send: bool = True,
 ) -> None:
     """Compile one character's per-scene videos into a single final MP4.
 
@@ -801,6 +802,12 @@ async def _compile_one_character(
     build writes to (compile vs. the mirror-flipped Repurpose variant); when
     `slot.mirror_h` is True the source clips are horizontally mirrored before
     everything else (captions stay upright).
+
+    `auto_telegram_send` (repurpose slot only — the compile slot's delivery is
+    the auto-finalize chain's) governs whether a finished copy is shipped to the
+    character's Telegram channel right away. False = build it and stop; the
+    manual ➤ Telegram button on the card is then the only way it goes out
+    (Hugo 2026-08-09, the ✓ in the Repurpose modal).
     """
     s = store()
     job = s.get_job(job_id)
@@ -911,9 +918,11 @@ async def _compile_one_character(
                     voice_id=effective_voice_id,
                     voice_applied=result.voice_applied,
                     warning=combined_warning)
-        if slot is _REPURPOSE_SLOT:
+        if slot is _REPURPOSE_SLOT and auto_telegram_send:
             # Repurpose is an independently requested final, so ship it as
-            # soon as this character's copy is ready. The original final is
+            # soon as this character's copy is ready — unless the modal's
+            # "skicka automatiskt" was unticked, in which case the copy is
+            # built and left for the manual ➤ button. The original final is
             # sent by the all-clips-success auto-finalize chain.
             try:
                 from character_swap import telegram_delivery
@@ -1007,6 +1016,7 @@ async def compile_job_videos(
     gap_max_secs: float = 0.35,
     playback_speed: float = 1.0,
     slot: _CompileSlot = _COMPILE_SLOT,
+    auto_telegram_send: bool = True,
 ) -> None:
     """Fan out compile across every (or selected) approved character. All M
     chars compile in parallel via asyncio.gather. Settings apply uniformly
@@ -1048,6 +1058,7 @@ async def compile_job_videos(
             enable_transcribe=enable_transcribe,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
             playback_speed=playback_speed, slot=slot,
+            auto_telegram_send=auto_telegram_send,
         )
         for cid in targets
     ])
@@ -1097,6 +1108,7 @@ async def repurpose_editor_job(
     enable_voice_swap: bool = False,
     voice_override: str | None = None,
     settings_snapshot: dict | None = None,
+    auto_telegram_send: bool = True,
 ) -> None:
     """Editor-tab 🔁 Repurpose: build a HORIZONTALLY-MIRRORED copy of a SAVED
     multi-clip reel (captions upright) from its ORIGINAL source clips — the
@@ -1108,6 +1120,10 @@ async def repurpose_editor_job(
     Fails LOUDLY (status=failed, named reason) if a source clip went missing or
     the pipeline errors — never ships a half-built reel. Non-destructive: the
     original saved reel + its files are untouched, so the user just retries.
+
+    `auto_telegram_send=False` (the modal's ✓ unticked) builds the copy and
+    stops — the manual ➤ Telegram button on the reel card is then the only way
+    it goes out (Hugo 2026-08-09).
     """
     s = store()
     gen = s.get_generation(gen_id)
@@ -1171,28 +1187,31 @@ async def repurpose_editor_job(
     _set_repurpose(status="done", edit_id=new_edit_id,
                    video_path=str(result.final), error=None)
     # Standalone Editor repurposes use the Editor Telegram identity/channel,
-    # exactly like their original Single/Multi-clip reel.
-    try:
-        from character_swap import telegram_delivery
-        receipt = await telegram_delivery.send_editor_final(
-            result.final,
-            base=(gen.prompt or "Editor")[:80],
-            variant="repurpose",
-            edit_id=new_edit_id,
-        )
-        fresh = store().get_generation(gen_id)
-        if fresh is not None:
-            meta = dict(fresh.editor_meta or {})
-            telegram_receipts = dict(meta.get("telegram") or {})
-            telegram_receipts["repurpose"] = receipt
-            meta["telegram"] = telegram_receipts
-            fresh.editor_meta = meta
-            store().update_generation(fresh)
-    except Exception as exc:  # noqa: BLE001 — final remains valid; fail loud
-        logger.warning("repurpose_editor_job %s Telegram send failed: %s: %s",
-                       gen_id, type(exc).__name__, exc)
-        push.notify("Telegram misslyckades",
-                    f"Repurpose klar men kunde inte skickas: {str(exc)[:180]}",
-                    priority=5, tags=["rotating_light"])
+    # exactly like their original Single/Multi-clip reel — unless the modal's
+    # "skicka automatiskt" was unticked, in which case the built copy waits for
+    # the manual ➤ button.
+    if auto_telegram_send:
+        try:
+            from character_swap import telegram_delivery
+            receipt = await telegram_delivery.send_editor_final(
+                result.final,
+                base=(gen.prompt or "Editor")[:80],
+                variant="repurpose",
+                edit_id=new_edit_id,
+            )
+            fresh = store().get_generation(gen_id)
+            if fresh is not None:
+                meta = dict(fresh.editor_meta or {})
+                telegram_receipts = dict(meta.get("telegram") or {})
+                telegram_receipts["repurpose"] = receipt
+                meta["telegram"] = telegram_receipts
+                fresh.editor_meta = meta
+                store().update_generation(fresh)
+        except Exception as exc:  # noqa: BLE001 — final remains valid; fail loud
+            logger.warning("repurpose_editor_job %s Telegram send failed: %s: %s",
+                           gen_id, type(exc).__name__, exc)
+            push.notify("Telegram misslyckades",
+                        f"Repurpose klar men kunde inte skickas: {str(exc)[:180]}",
+                        priority=5, tags=["rotating_light"])
     push.notify("Repurpose klar", "Spegelvänd reel byggd",
                 priority=3, tags=["white_check_mark"])
