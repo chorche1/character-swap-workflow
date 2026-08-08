@@ -122,6 +122,22 @@ def test_runner_written_reasons_are_classified():
         "'https://api.x.ai/v1/videos/generations'")["kind"] == "rate_limit"
 
 
+def test_an_unreadable_line_blames_the_prompt_not_the_api_key():
+    """The 2026-08-09 refusal. `localization_failed` tells Hugo to check his
+    OpenAI key and quota, which is exactly wrong here — nothing was ever sent
+    to the translator, because the line could not be lifted out of the prompt.
+    The rule must therefore win over the broader `localization failed` one,
+    and the advice must name the character to change."""
+    real = ("German localization failed: the prompt carries a spoken line the "
+            "extractor cannot read, so it can be neither translated to German "
+            "nor language-checked: “Put baking soda on oranges”")
+    got = clip_failure.explain(real)
+    assert got["kind"] == "unreadable_line"
+    assert "OPENAI_API_KEY" not in got["fix"]
+    assert '"' in got["fix"]                      # it shows a straight quote
+    assert "citattecken" in got["fix"].lower()
+
+
 def test_unknown_error_still_shows_the_text_verbatim():
     d = clip_failure.explain("KaboomError: something entirely new")
     assert d["kind"] == "unknown"

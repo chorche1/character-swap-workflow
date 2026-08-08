@@ -171,6 +171,44 @@ def test_assemble_voice_swap_uses_character_preset(tmp_path, monkeypatch):
     assert calls[0]["voice_id"] == "v-preset"
 
 
+def test_assemble_passes_the_characters_language_to_the_transcriber(
+        tmp_path, monkeypatch):
+    """🗣 The caption transcription hint. Step-6 compile has passed `language=`
+    since 2026-08-03 and `run_editor_pipeline`'s own docstring says "Step-6
+    compile + Reengineer assemble do" — but 3ccc89c only touched
+    runner_compile.py, so THIS path (which builds essentially every final Hugo
+    has) ran unhinted for six days. Measured cost: Scribe reads 3 of 20 German
+    clips as Dutch or English, burning captions in the wrong language over
+    audio that is perfectly correct."""
+    clip = tmp_path / "kling.mp4"
+    clip.write_bytes(b"x")
+    job = _job(clip=str(clip))
+
+    class _Char:
+        voice_id = None
+        language = "de"
+    _, calls = _wire_assemble(monkeypatch, tmp_path, job, character=_Char())
+
+    asyncio.run(runner_reengineer._do_assemble("re_t", _state()))
+    assert calls[0]["language"] == "de"
+
+
+def test_an_english_character_sends_no_language_hint(tmp_path, monkeypatch):
+    """The unflagged path must be untouched — `None`, not "en", exactly as
+    Step-6 compile resolves it."""
+    clip = tmp_path / "kling.mp4"
+    clip.write_bytes(b"x")
+    job = _job(clip=str(clip))
+
+    class _Char:
+        voice_id = None
+        language = None
+    _, calls = _wire_assemble(monkeypatch, tmp_path, job, character=_Char())
+
+    asyncio.run(runner_reengineer._do_assemble("re_t", _state()))
+    assert calls[0]["language"] is None
+
+
 # ------------------------------------------------- endpoint settings plumbing
 
 def _wire_api(monkeypatch, status: str = "awaiting_approval",
@@ -646,6 +684,21 @@ def test_kling_duration_js_mirror_in_sync():
     assert f"/ {wps} + {margin}" in hint, "speech pace constants drifted"
     assert 'says[^"“”]{0,160}?' in hint, "JS dialogue regex drifted"
     assert 'says[^"“”]{0,160}?' in runner_reengineer._DIALOGUE_RE.pattern
+    # The OPENING class, in BOTH languages. Nothing pinned it until 2026-08-09
+    # — the assertions around it all pin BODY classes — and an opener narrowed
+    # on one side only is precisely the bug: `”` fell out of the Python class
+    # and nine German clips shipped speaking English with nothing warning. One
+    # occurrence per pattern, three patterns, both files.
+    from character_swap import video_edit as _ve0
+    assert _ve0._OPEN_QUOTE == r'["“”]', (
+        "the extractor stopped opening lines on ” — a Swedish-quoted prompt "
+        "goes silently untranslated again (4d2f12b)")
+    # Four openers in the JS: two in the says-clause (the clause itself and
+    # its inner balanced pair), one each in the labeled and speech-verb
+    # patterns. `[^"“”]` does not contain the literal, so this counts openers
+    # only.
+    assert hint.count(_ve0._OPEN_QUOTE) == 4, (
+        "app.js klingSpeechSecs no longer mirrors the widened opening class")
     # The labeled-dialogue fallback (`Dialogue: "…"` from structured Director
     # prompts) is mirrored too — both must carry it or a Director run's clip
     # length under-estimates the same way captions used to drop (Hugo 06-30).

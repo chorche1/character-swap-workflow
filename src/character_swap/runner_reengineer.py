@@ -2156,9 +2156,20 @@ async def _do_assemble(re_id: str, state: dict, *,
             edit_id = "ed_" + secrets.token_hex(5)
             edit_dir = settings.output_dir / "editor" / edit_id
             edit_dir.mkdir(parents=True, exist_ok=True)
+            _lib_char = store().get_character(cid)
             voice_id = runner_compile._resolve_compile_voice(
-                cfg["voice_override"], store().get_character(cid),
-                cfg["enable_voice_swap"])
+                cfg["voice_override"], _lib_char, cfg["enable_voice_swap"])
+            # 🗣 The character's spoken language, read live from the library —
+            # the transcription hint that turns the CAPTIONS on a German or
+            # Spanish final into that language. Step-6 compile has passed this
+            # since 2026-08-03 (runner_compile.py) and `run_editor_pipeline`'s
+            # own docstring claims Reengineer does too; it never did — commit
+            # 3ccc89c added the hint to runner_compile.py and never touched
+            # this file, so the path that builds essentially every final Hugo
+            # has ran unhinted. Measured cost of no hint: Scribe reads 3 of 20
+            # German clips as Dutch or English, which burns captions in the
+            # wrong language over audio that is perfectly correct.
+            caption_language = getattr(_lib_char, "language", None) or None
 
             # Non-fatal step failures (caption render is the known one) must
             # be LOUD: logged + surfaced on the final's card via finals[cid].
@@ -2194,6 +2205,7 @@ async def _do_assemble(re_id: str, state: dict, *,
                 warn=_warn,
                 script_hint=script_hint,
                 clip_dialogues=dialogues,
+                language=caption_language,
             )
             final = run_dir / f"final_{cid}.mp4"
             await asyncio.to_thread(shutil.copyfile, result.final, final)
@@ -2378,9 +2390,14 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
             edit_id = "ed_" + secrets.token_hex(5)
             edit_dir = settings.output_dir / "editor" / edit_id
             edit_dir.mkdir(parents=True, exist_ok=True)
+            _lib_char = store().get_character(cid)
             voice_id = runner_compile._resolve_compile_voice(
-                cfg["voice_override"], store().get_character(cid),
-                cfg["enable_voice_swap"])
+                cfg["voice_override"], _lib_char, cfg["enable_voice_swap"])
+            # Same 🗣 caption-language hint as the assemble path above — a
+            # repurpose re-transcribes the mirrored clips from scratch, so
+            # leaving it off would put German audio under Dutch captions on
+            # exactly the copy that gets posted.
+            caption_language = getattr(_lib_char, "language", None) or None
             warnings: list[str] = []
 
             async def _warn(message: str) -> None:
@@ -2408,6 +2425,7 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
                 warn=_warn,
                 script_hint=script_hint,
                 clip_dialogues=dialogues,
+                language=caption_language,
             )
             final = run_dir / f"repurpose_{cid}.mp4"
             await asyncio.to_thread(shutil.copyfile, result.final, final)
