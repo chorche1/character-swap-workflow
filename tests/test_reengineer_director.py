@@ -277,3 +277,145 @@ def test_create_job_falls_back_when_director_fails(monkeypatch, tmp_path):
     job: Job = box["job"]
     assert job.use_director is False
     assert job.director_prompts_json is None
+
+
+# ----------------------------------------------------- duplicate-scene dedup
+
+
+def test_duplicate_scenes_get_one_director_call_and_an_identical_prompt(
+        monkeypatch, tmp_path):
+    """Hugo 2026-08-09, from the app: a run with a scene duplicated 3x asked
+    whether a rerun would still generate one image per (character × unique
+    image). It did not, reliably.
+
+    A ⧉-duplicated scene shares its image byte-for-byte with the scene it was
+    duplicated from. Sending the Director all copies of that image and
+    trusting it to describe each one with byte-identical text is not safe:
+    measured on a real duplicated-scene run, the Director's own tool call
+    simply OMITTED 3 of 4 duplicate entries from its response — they only
+    ended up sharing a prompt because both fell back to the same job-wide
+    stock string, an accident of that run, not a guarantee. The fix dedupes
+    by image CONTENT before the call and copies the one answer onto every
+    scene_id sharing that image, so `_kick_char`'s (image, prompt) dedup
+    always has byte-identical text to match on for a duplicate group."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "scenes_dir",
+                        property(lambda self: tmp_path), raising=False)
+    box, states = _wire_create(monkeypatch, tmp_path, director_result=None)
+
+    # s1 and s1dup are BYTE-IDENTICAL (the duplicate); s2 is a different shot.
+    (tmp_path / "s1.png").write_bytes(b"identical-frame-bytes")
+    (tmp_path / "s1dup.png").write_bytes(b"identical-frame-bytes")
+    (tmp_path / "s2.png").write_bytes(b"a completely different frame")
+    entries = [
+        {"idx": 0, "scene_id": "s1", "start": 0.0, "end": 2.0, "duration": 2.0,
+         "motion_prompt": "m1", "speech": "", "summary": "one"},
+        {"idx": 1, "scene_id": "s1dup", "start": 2.0, "end": 4.0, "duration": 2.0,
+         "motion_prompt": "m1 but a different line", "speech": "",
+         "summary": "one (kopia)"},
+        {"idx": 2, "scene_id": "s2", "start": 4.0, "end": 6.0, "duration": 2.0,
+         "motion_prompt": "m2", "speech": "", "summary": "two"},
+    ]
+
+    seen_scenes = {}
+
+    def fake_director(*, scenes, **kw):
+        seen_scenes["scenes"] = list(scenes)
+        # Simulate the REAL failure mode: the Director writes its OWN
+        # (non-identical, but semantically equivalent) text for whichever
+        # scene ids it was actually asked about. If the dedup below did not
+        # already collapse s1/s1dup to one representative, this stub would
+        # happily hand back two DIFFERENT prompt strings for the same image —
+        # exactly what broke the naive per-scene approach.
+        return ("intent!", {sid: f"director text for {sid}" for sid, _ in scenes}, {})
+    monkeypatch.setattr(prompt_director, "direct_reengineer_swap", fake_director)
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_t", dict(states["re_t"]), entries, "j_dir"))
+
+    # The Director was asked about the duplicate group ONCE, not twice.
+    asked_ids = [sid for sid, _ in seen_scenes["scenes"]]
+    assert asked_ids.count("s1") + asked_ids.count("s1dup") == 1
+    assert "s2" in asked_ids
+
+    job: Job = box["job"]
+    plan = prompt_director.SwapDirectorPlan.model_validate_json(
+        job.director_prompts_json)
+    p1 = plan.lookup("ch_a", "s1")
+    p1dup = plan.lookup("ch_a", "s1dup")
+    p2 = plan.lookup("ch_a", "s2")
+    assert p1 and p1 == p1dup, (
+        "duplicate scenes must get the IDENTICAL prompt — copied from one "
+        "Director answer, not two independently-generated ones")
+    assert p2 != p1                 # the genuinely different scene is untouched
+
+
+def test_three_way_duplicate_all_collapse_to_the_first(monkeypatch, tmp_path):
+    """The reported case exactly: one original plus THREE ⧉ copies."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "scenes_dir",
+                        property(lambda self: tmp_path), raising=False)
+    box, states = _wire_create(monkeypatch, tmp_path, director_result=None)
+
+    ids = ["base", "dup1", "dup2", "dup3"]
+    for sid in ids:
+        (tmp_path / f"{sid}.png").write_bytes(b"same-bytes-every-time")
+    entries = [
+        {"idx": i, "scene_id": sid, "start": float(i), "end": float(i + 1),
+         "duration": 1.0, "motion_prompt": f"line {i}", "speech": "",
+         "summary": sid}
+        for i, sid in enumerate(ids)
+    ]
+
+    seen_scenes = {}
+
+    def fake_director(*, scenes, **kw):
+        seen_scenes["scenes"] = list(scenes)
+        return ("intent!", {sid: f"unique text {sid}" for sid, _ in scenes}, {})
+    monkeypatch.setattr(prompt_director, "direct_reengineer_swap", fake_director)
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_t", dict(states["re_t"]), entries, "j_dir"))
+
+    assert len(seen_scenes["scenes"]) == 1     # ONE representative for all 4
+
+    job: Job = box["job"]
+    plan = prompt_director.SwapDirectorPlan.model_validate_json(
+        job.director_prompts_json)
+    prompts = {sid: plan.lookup("ch_a", sid) for sid in ids}
+    assert len(set(tuple(v) for v in prompts.values())) == 1, prompts
+
+
+def test_director_omitting_a_duplicate_from_its_own_answer_still_copies_it(
+        monkeypatch, tmp_path):
+    """The EXACT failure measured on the live run: the Director's tool call
+    left 3 of 4 duplicate entries out of its response entirely. Since the
+    dedup now only ever asks about ONE representative, there is nothing left
+    for the Director to omit — but pin the degenerate case (a stub that
+    returns an empty dict) to prove the duplicate still gets nothing rather
+    than crashing, and does not silently inherit some OTHER scene's text."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "scenes_dir",
+                        property(lambda self: tmp_path), raising=False)
+    box, states = _wire_create(monkeypatch, tmp_path, director_result=None)
+
+    (tmp_path / "s1.png").write_bytes(b"xx")
+    (tmp_path / "s1dup.png").write_bytes(b"xx")
+    entries = [
+        {"idx": 0, "scene_id": "s1", "start": 0.0, "end": 1.0, "duration": 1.0,
+         "motion_prompt": "m1", "speech": "", "summary": "one"},
+        {"idx": 1, "scene_id": "s1dup", "start": 1.0, "end": 2.0,
+         "duration": 1.0, "motion_prompt": "m1", "speech": "",
+         "summary": "one (kopia)"},
+    ]
+    monkeypatch.setattr(prompt_director, "direct_reengineer_swap",
+                        lambda **kw: ("intent!", {}, {}))
+
+    asyncio.run(runner_reengineer._create_job_and_swap(
+        "re_t", dict(states["re_t"]), entries, "j_dir"))
+
+    job: Job = box["job"]
+    plan = prompt_director.SwapDirectorPlan.model_validate_json(
+        job.director_prompts_json)
+    assert plan.lookup("ch_a", "s1") == []
+    assert plan.lookup("ch_a", "s1dup") == []

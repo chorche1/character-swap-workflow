@@ -700,9 +700,41 @@ async def _create_job_and_swap(re_id: str, state: dict,
     people_detected = False
     if state.get("use_director"):
         from character_swap import prompt_director
+
+        # A ⧉-duplicated scene shares its image byte-for-byte with the scene
+        # it was duplicated from — that is the entire point of duplicating
+        # (Hugo 2026-08-09: "det ska bara genereras en bild för scener som är
+        # duplicerade från samma bild"). Asking the Director to describe the
+        # SAME image twice is redundant AND unsafe to rely on downstream: the
+        # Director writes free-text per scene, and two independent
+        # descriptions of an identical photo are not guaranteed word-for-word
+        # identical — measured on a real duplicated-scene run, the Director
+        # simply omitted 3 of 4 duplicate entries from its own response,
+        # which happened to fall back to a shared prompt by ACCIDENT, not by
+        # any guarantee. `_kick_char`'s image-generation dedup keys on the
+        # PROMPT TEXT matching too (a deliberate per-scene rewrite must not be
+        # silently merged), so it can only be trusted to collapse duplicates
+        # when the prompt is IDENTICAL BY CONSTRUCTION — which means this
+        # dedup has to happen before the text is written, not after.
+        #
+        # So: send the Director only ONE representative per distinct image
+        # (first-seen wins), then copy its answer onto every scene_id that
+        # shares that image. This also makes the Director's own vision call
+        # cheaper — fewer images to describe — for every run with duplicated
+        # scenes, not just a re-run.
+        seen_images: dict[str, str] = {}       # content hash -> representative scene_id
+        representative_of: dict[str, str] = {} # every scene_id -> its representative
+        director_scenes: list[tuple[str, Path]] = []
+        for sid, p in zip(uniq_ids, uniq_paths):
+            fp = runner._image_fingerprint(Path(p))
+            rep = seen_images.setdefault(fp, sid)
+            representative_of[sid] = rep
+            if rep == sid:
+                director_scenes.append((sid, Path(p)))
+
         result = await asyncio.to_thread(
             prompt_director.direct_reengineer_swap,
-            scenes=[(sid, Path(p)) for sid, p in zip(uniq_ids, uniq_paths)],
+            scenes=director_scenes,
             outfit_mode=outfit_mode,
             outfit_text=state.get("outfit_text"),
             background_path=Path(background_path) if background_path else None,
@@ -710,7 +742,17 @@ async def _create_job_and_swap(re_id: str, state: dict,
             job_id=job_id,
         )
         if result is not None:
-            intent, prompts, meta = result
+            intent, rep_prompts, rep_meta = result
+            # Expand back out: every duplicate scene_id gets its
+            # representative's prompt/meta VERBATIM, so `_kick_char`'s
+            # (image, prompt) dedup matches them by construction rather than
+            # by hoping the Director happened to repeat itself.
+            prompts = {sid: rep_prompts[rep]
+                      for sid, rep in representative_of.items()
+                      if rep in rep_prompts}
+            meta = {sid: rep_meta[rep]
+                   for sid, rep in representative_of.items()
+                   if rep in rep_meta}
             director_json = prompt_director.plan_from_scene_prompts(
                 intent, prompts,
                 [(cid, jc.name) for cid, jc in chars.items()],
