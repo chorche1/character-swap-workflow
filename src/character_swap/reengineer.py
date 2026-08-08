@@ -904,6 +904,20 @@ _SPEECH_CONTEXT_RE = re.compile(
     r"said|speaks?|speaking|narrat\w*|utter\w*|recites?|announces|declares|"
     r"proclaims)\b")
 
+# A prompt DENYING speech says "dialogue" too, and the gate above cannot tell
+# the two apart (Hugo 2026-08-08, adversarial review). `SHOT — … No dialogue,
+# ambient room tone only. A bottle labeled "Certified Organic Extra Virgin
+# Olive Oil" …` is a silent B-roll shot whose only quote is a PRODUCT LABEL —
+# yet it read as "orders speech, carries a line we cannot parse" and the clip
+# was refused. The margin was one word: the longest non-dialogue quoted string
+# in Hugo's history is 4 words, against a ≥5-word rule. Deleting the denial
+# before the scan cannot weaken the guard — a prompt that also ORDERS speech
+# still matches on that order.
+_NO_SPEECH_RE = re.compile(
+    r"(?i)\b(?:no|without|zero)\s+(?:audible\s+)?"
+    r"(?:dialogue|dialog|speech|spoken\s+\w+|talking|narration|voice-?over|"
+    r"words|lines)\b")
+
 
 def _unparsed_dialogue_line(prompt: str, spec: SpokenLanguage) -> str | None:
     """A quoted LINE the extractor missed, or None.
@@ -918,11 +932,11 @@ def _unparsed_dialogue_line(prompt: str, spec: SpokenLanguage) -> str | None:
     The ≥5-word rule is what separates a LINE from a quoted PROP — `bottle
     labeled "Heinz White Vinegar"` (3) and `comment "Skin"` (1) stay below it,
     so a short quoted prop stays below it. It is a heuristic, not a proof: a
-    five-word quoted SIGN in an otherwise silent prompt would be refused. No
-    dialogue-less prompt in Hugo's history contains a quote of any length, so
-    the rule has never been within reach of firing, and the refusal is loud,
-    names the quote, and is fixed by editing it."""
-    stripped = _without_own_clauses(prompt, spec)
+    five-word quoted SIGN in an otherwise silent prompt would be refused. The
+    longest non-dialogue quoted string in Hugo's history is 4 words, one below
+    the rule — so the denial strip below is what keeps the margin honest, and
+    the refusal itself is loud, names the quote, and is fixed by editing it."""
+    stripped = _NO_SPEECH_RE.sub(" ", _without_own_clauses(prompt, spec))
     if not _SPEECH_CONTEXT_RE.search(stripped):
         return None
     for m in _QUOTED_LINE_RE.finditer(stripped):

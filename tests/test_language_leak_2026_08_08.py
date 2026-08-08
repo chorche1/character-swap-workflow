@@ -348,6 +348,28 @@ def test_the_run_level_path_never_names_the_language_twice(code):
     assert spec.attribution in out
 
 
+def test_a_prompt_that_denies_speech_is_not_a_speech_context(stub_translate):
+    """A silent B-roll shot says "dialogue" too — in the phrase saying there is
+    none. The loud refusal read that as "orders speech, carries a line we
+    cannot parse" and failed the clip over a PRODUCT LABEL. The margin was one
+    word: the longest non-dialogue quote in Hugo's history is 4, the rule is 5.
+    """
+    silent = ('SHOT — Slow push-in on the counter. No dialogue, ambient room '
+              'tone only. A bottle labeled "Certified Organic Extra Virgin '
+              'Olive Oil" stands beside the bowl. The person speaks fluent '
+              'American English with a natural American accent.')
+    reengineer.localize_motion_prompt(silent, "es")      # must not raise
+
+
+def test_a_prompt_that_orders_speech_is_still_refused(stub_translate):
+    """...and stripping the denial must not disarm the net where it matters."""
+    speaking = ('AUDIO — Deep male voice, American accent, delivering with '
+                'energy. Spoken words are "Drop your frozen shrimp in warm '
+                'water and watch". STYLE — realistic.')
+    with pytest.raises(reengineer.LocalizationError):
+        reengineer.localize_motion_prompt(speaking, "es")
+
+
 def test_short_lines_never_trip_the_backstop(monkeypatch):
     """A three-word line can legitimately reappear inside a translation."""
     assert reengineer._surviving_source_line(
