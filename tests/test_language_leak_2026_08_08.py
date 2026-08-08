@@ -239,6 +239,54 @@ def test_a_line_already_in_the_target_language_is_not_a_leak(monkeypatch):
     assert spanish in out
 
 
+# ---------------------- the mixed prompt the 👥 agent produced
+# Verbatim structure of vd_2670d7 — Susanne (🇩🇪), re_8e87b525b2 scene 1, as
+# actually submitted. The speaker-fix agent rewrote the scene prompt for a
+# female character and emitted an ENGLISH line in the ACTION block beside the
+# GERMAN translation in the AUDIO block. `localized_movement_prompt` on that
+# row is EMPTY: the marker short-circuit saw "standard German" and returned the
+# whole prompt untouched, so the clip spoke the English line.
+MIXED = (
+    "SUBJECT — A woman facing the camera.\n\n"
+    f'ACTION AND CAMERA MOTION — The woman enthusiastically addresses the '
+    f'camera: "{LINE}" She then pours.\n\n'
+    "AUDIO — Voice: enthusiastic; Dialogue in standard German: "
+    '"Streue Natron auf eine rohe Rote Bete und sieh, was passiert." '
+    "Primary sounds: natural voice.\n\n"
+    "STYLE — Realistic documentary style."
+)
+
+
+def test_the_marker_cannot_vouch_for_a_prompt_that_says_two_things():
+    """THE Susanne regression.
+
+    One marker phrase was taken as proof the WHOLE prompt was German. That
+    inference only holds while a prompt says one thing — and the 👥 speaker-fix
+    agent produces prompts that say two.
+    """
+    assert reengineer._states_more_than_one_line(MIXED)
+    # ...while a prompt stating ONE line twice is still vouched for, so the
+    # ordinary run-level 🗣 path is not re-billed.
+    localized_twin = TWICE_STATED.replace(LINE, "Streue Natron auf eine rohe "
+                                          "Rote Bete und sieh, was passiert.")
+    assert not reengineer._states_more_than_one_line(localized_twin)
+
+
+def test_the_mixed_prompt_is_localized_instead_of_waved_through(stub_translate):
+    out = reengineer.localize_motion_prompt(MIXED, "de")
+    assert out != MIXED, "the prompt was waved through untranslated again"
+    assert "Put baking soda on a raw beet" not in out
+
+
+def test_an_already_localized_prompt_is_still_never_re_billed(stub_translate):
+    """The short-circuit must still hold for the normal case, or every clip on
+    a run-level 🗣 run pays a translate call it does not need."""
+    spanish = ('He says to the camera in neutral Latin American Spanish: '
+               '"Pon bicarbonato de sodio en una remolacha cruda."')
+    assert reengineer.localize_motion_prompt(spanish, "es") == spanish
+    assert stub_translate == [], "a translate call was billed for nothing"
+
+
 def test_a_legacy_half_localized_prompt_now_reads_bilingual():
     """Known, accepted consequence on OLD data — pinned so it stays a choice.
 

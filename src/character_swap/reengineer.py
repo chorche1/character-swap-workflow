@@ -1106,8 +1106,11 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         return prompt
     # Already in the target language (run-level picker localized it upstream,
     # or this exact prompt came back through a redo) — unless the caller says
-    # the text is user-typed and the marker can no longer be trusted (`force`).
-    if spec.marker in prompt.lower() and not force:
+    # the text is user-typed and the marker can no longer be trusted (`force`),
+    # or the prompt states more than one DISTINCT line and so cannot be
+    # vouched for as a whole.
+    if (spec.marker in prompt.lower() and not force
+            and not _states_more_than_one_line(prompt)):
         return prompt
     cached = _LOCALIZE_CACHE.get((lang, prompt))
     if cached is not None:
@@ -1182,6 +1185,29 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
             f"after localization to {spec.name_en} — the clip would speak "
             f"English. Reword or remove that copy of the line and retry.")
     return _cache_localized(lang, prompt, localized)
+
+
+def _states_more_than_one_line(prompt: str) -> bool:
+    """True when the prompt carries two or more DIFFERENT spoken lines.
+
+    The "already in the target language" short-circuit reads one marker phrase
+    and concludes the WHOLE prompt is localized. That inference is only sound
+    while a prompt says one thing. Measured on vd_2670d7 (Susanne, 🇩🇪,
+    re_8e87b525b2 scene 1) it was not: the 👥 speaker-fix agent produced a
+    MIXED prompt — an English line in the ACTION block and the German
+    translation in the AUDIO block — so the marker was present, the
+    short-circuit returned it untouched (`localized_movement_prompt` empty),
+    and the clip spoke the English line. Same false inference the 2026-08-03
+    retry fix found for user-typed prompts and answered with `force`; this is
+    the machine-written half of it, where no caller knows to pass `force`.
+
+    Falling through costs one cheap translate call whose no-op case is
+    explicit in every `translate_system` ("a line ALREADY in this language is
+    returned EXACTLY as given"), and the copy that IS already translated comes
+    back unchanged."""
+    lines = {phrase_key(m.group(1)) for m in dialogue_matches(prompt)}
+    lines.discard("")
+    return len(lines) > 1
 
 
 def _translate_each_line_once(phrases: list[str], language: str,
