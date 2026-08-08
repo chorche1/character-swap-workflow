@@ -2401,30 +2401,71 @@ function studio() {
     // the clip length, so the user can bump the Kling field deliberately.
     klingSpeechSecs(run, sc) {
       const prompt = String(this.reSceneVal(run, sc, 'motion_prompt') || '');
-      // Mirror of video_edit.DIALOGUE_RE — the body spans inner quote pairs
-      // (e.g. `comment "skin" …`) so CTAs aren't truncated, while the inner
-      // pair forbids `says` so two separate says-clauses don't merge.
-      const m = [...prompt.matchAll(/says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]/gi)];
-      let saysSpoken = m.map(x => x[1]).join(' ').trim();
-      if (!saysSpoken) {
-        // Mirror of video_edit._LABELED_DIALOGUE_RE — structured Director
-        // prompts carry the line as `Dialogue: "…"` / `Voice-over: "…"` with no
-        // `says` verb (anchored to the label so quoted props aren't speech).
-        // A short qualifier may sit between label and colon (`Dialogue exact:`,
+      // Mirror of video_edit.dialogue_matches + extract_dialogue. All three
+      // patterns run and their GROUP-1 SPANS are UNIONED — not
+      // first-pattern-wins (Hugo 2026-08-08) — then overlapping spans drop
+      // most-specific-first, stage directions are stripped, and the lines are
+      // de-duplicated by normalized text. A structured Director prompt states
+      // the same line twice, once in its ACTION block and once in its AUDIO
+      // block; counting both would double this estimate and warn that an 8 s
+      // clip needs 22 s of speech.
+      //
+      // The `d` flag is required: overlap must be judged on the GROUP-1 span
+      // (`m.indices[1]`), exactly as Python overlaps on `m.span(1)`. Full-match
+      // spans differ per pattern and would not agree — measured over 988 real
+      // prompts, a union without the span check disagrees with Python on 52 of
+      // them, and a text-containment stand-in on 12.
+      const patterns = [
+        // video_edit.DIALOGUE_RE — the body spans inner quote pairs (e.g.
+        // `comment "skin" …`) so CTAs aren't truncated, while the inner pair
+        // forbids `says` so two separate says-clauses don't merge.
+        /says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]/gid,
+        // video_edit._LABELED_DIALOGUE_RE — structured Director prompts carry
+        // the line as `Dialogue: "…"` / `Voice-over: "…"` with no `says` verb
+        // (anchored to the label so quoted props aren't speech). A short
+        // qualifier may sit between label and colon (`Dialogue exact:`,
         // `Dialogue in standard German:`); the body forbids `"` `:` `;` `.` so
         // it can never cross a sentence boundary or a second colon.
-        const lm = [...prompt.matchAll(/\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*["“]([^"”]+)["”]/gi)];
-        saysSpoken = lm.map(x => x[1]).join(' ').trim();
+        /\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*["“]([^"”]+)["”]/gid,
+        // video_edit._SPOKEN_VERB_DIALOGUE_RE — the line is introduced by a
+        // speech VERB instead of a label (`… voice speaking English …: "…"`,
+        // `The man … addresses the camera: "…"`). The colon-or-comma before
+        // the quote is what keeps quoted props out; verbs that introduce
+        // SIGNAGE (`reads`, `states`, `labeled`) are deliberately absent.
+        /\b(?:speaks?|speaking|saying|narrates?|narrating|voice-?over|announces|declares|proclaims|addresses|addressing|tells|telling|asks|asking|whispers|shouts|exclaims|urges|recites|delivers|delivering)\b[^"“”]{0,160}?[:,]\s*["“]([^"”]+)["”]/gid,
+      ];
+      // Mirror of video_edit._strip_stage_directions — a parenthetical inside
+      // the quotes is an instruction, never spoken, so it is not timed. Python
+      // builds its dedup key AFTER this strip, so an ACTION copy carrying one
+      // must still collapse against the clean AUDIO copy.
+      const strip = s => String(s || '').replace(/\s*[\(\[][^)\]]*[)\]]/g, ' ')
+        .replace(/\s+([,.;:!?])/g, '$1').replace(/\s{2,}/g, ' ')
+        .trim().replace(/^[,;:. ]+/, '').trim();
+      // Mirror of video_edit.phrase_key. Python's `\w` is UNICODE — the ASCII
+      // form would fold every accented letter of a 🇪🇸/🇩🇪 line to a space and
+      // break the dedup on exactly the clips this all exists for.
+      const key = s => String(s || '').toLowerCase()
+        .replace(/[^\p{L}\p{N}_\s]+/gu, ' ').replace(/\s+/g, ' ').trim();
+      const spans = [];
+      for (const rx of patterns) {
+        for (const m of prompt.matchAll(rx)) {
+          if (!String(m[1] || '').trim()) continue;
+          const [s, e] = m.indices[1];
+          // Overlap → the more specific pattern (earlier in the list) wins.
+          if (spans.some(p => s < p.e && p.s < e)) continue;
+          spans.push({ s, e, line: strip(String(m[1]).trim()) });
+        }
       }
-      if (!saysSpoken) {
-        // Mirror of video_edit._SPOKEN_VERB_DIALOGUE_RE — the Director's AUDIO
-        // block introduces the line with a speech VERB plus a voice
-        // DESCRIPTION instead of a label (`… voice speaking English …: "…"`).
-        // The colon before the quote is what keeps quoted props out.
-        const vm = [...prompt.matchAll(/\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|announces|declares|proclaims)\b[^"“”]{0,160}?:\s*["“]([^"”]+)["”]/gi)];
-        saysSpoken = vm.map(x => x[1]).join(' ').trim();
+      spans.sort((a, b) => a.s - b.s);        // position order, like dialogue_matches
+      const seen = new Set();
+      const lines = [];
+      for (const sp of spans) {
+        const k = key(sp.line);
+        if (!k || seen.has(k)) continue;
+        seen.add(k);
+        lines.push(sp.line);
       }
-      const spoken = (saysSpoken || String(sc.speech || '').trim());
+      const spoken = (lines.join(' ').trim() || strip(String(sc.speech || '')));
       const words = spoken ? spoken.split(/\s+/).length : 0;
       return words ? words / 2.2 + 1.0 : 0;
     },

@@ -655,11 +655,37 @@ def test_kling_duration_js_mirror_in_sync():
     assert label_frag in hint, "JS labeled-dialogue regex drifted"
     assert label_frag in _ve._LABELED_DIALOGUE_RE.pattern
     # …and the speech-VERB fallback (`AUDIO — … voice speaking English …: "…"`),
-    # the shape that shipped English clips for 🇪🇸 characters (Hugo 07-31).
-    verb_frag = (r'\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|'
-                 r'announces|declares|proclaims)\b')
-    assert verb_frag in hint, "JS speech-verb dialogue regex drifted"
-    assert verb_frag in _ve._SPOKEN_VERB_DIALOGUE_RE.pattern
+    # the shape that shipped English clips for 🇪🇸 characters (Hugo 07-31),
+    # widened on 08-08 with `addresses` and friends. DERIVED from the Python
+    # pattern rather than spelled out again: the list lived in three places,
+    # and a third copy is a third thing to forget.
+    verb_alt = re.search(r"\(\?:([a-z|?\-]+)\)",
+                         _ve._SPOKEN_VERB_DIALOGUE_RE.pattern)
+    assert verb_alt, "speech-verb alternation not found in the Python pattern"
+    assert "addresses" in verb_alt.group(1), (
+        "the widened verb list lost `addresses` — the ACTION copy of a "
+        "Director line becomes invisible again (re_8e87b525b2)")
+    assert f"(?:{verb_alt.group(1)})" in hint, "JS speech-verb regex drifted"
+    # The JS must UNION the patterns, drop OVERLAPPING GROUP-1 spans (what
+    # dialogue_matches overlaps on), strip stage directions BEFORE keying, and
+    # de-duplicate (Hugo 2026-08-08). First-pattern-wins under-counts a
+    # Director prompt; a union without the dedup doubles the line it states
+    # twice. `tests/test_kling_speech_secs_mirror.py` proves the BEHAVIOR —
+    # these pins just fail fast, and cover the machine with no Node.
+    assert "for (const rx of patterns)" in hint, \
+        "JS must union all dialogue patterns, not fall through them"
+    assert "if (!saysSpoken)" not in hint, "JS is still first-pattern-wins"
+    assert "m.indices[1]" in hint, \
+        "JS must overlap on the GROUP-1 span like video_edit.dialogue_matches"
+    assert r"[\(\[][^)\]]*[)\]]" in hint, \
+        "JS lost the _strip_stage_directions mirror — a parenthetical in one " \
+        "copy of a twice-stated line defeats the dedup"
+    assert r"[^\p{L}\p{N}_\s]+/gu" in hint, \
+        "JS phrase_key mirror drifted from video_edit.phrase_key: Python's " \
+        "\\w is UNICODE, and the ASCII form folds every accented letter of a " \
+        "🇪🇸/🇩🇪 line to a space"
+    assert _ve.phrase_key("Hey, THERE!  you") == "hey there you"
+    assert _ve.phrase_key("¿Qué pasa, señor?") == "qué pasa señor"
 
 
 def test_speech_secs_parses_descriptor_attribution():

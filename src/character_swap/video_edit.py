@@ -1957,16 +1957,45 @@ _LABELED_DIALOGUE_RE = re.compile(
 # "Heinz White Vinegar"` has no speech verb, and `Voice: male, American accent`
 # has no quote. Bare `voice` is deliberately NOT a verb here — only `voice-over`
 # — because "Voice:" alone precedes descriptions far more often than speech.
+#
+# The verb list also carries the plain ways a Director narrates someone TALKING
+# to the lens (Hugo 2026-08-08): `ACTION AND CAMERA MOTION — The man
+# enthusiastically addresses the camera: "…"` (re_8e87b525b2 scene 1), plus the
+# bare infinitive (`beginning to speak with an enthusiastic American accent:`)
+# and `delivering his line clearly:`. A COMMA is accepted in place of the colon
+# — `enthusiastically declares with a confident American accent, "…"`.
+#
+# Measured over all 1021 distinct movement prompts in Hugo's history: these
+# additions capture 2 further genuine spoken lines, capture ZERO quoted props,
+# and take the number of prompts carrying a sentence-length quote NO pattern
+# can read from 4 to 0. Verbs that routinely introduce SIGNAGE rather than
+# speech — `reads`, `states`, `labeled`, `marked` — are deliberately absent:
+# they fire nowhere in the corpus, so they buy nothing, and with a comma now
+# allowed the punctuation guard alone could not tell `a jar labeled, "…"` from
+# a spoken line.
 # Mirrored in app.js klingSpeechSecs; the JS-mirror sync test pins it.
 _SPOKEN_VERB_DIALOGUE_RE = re.compile(
-    r'\b(?:speaking|speaks|saying|narrating|narrates|voice-?over|'
-    r'announces|declares|proclaims)\b[^"“”]{0,160}?:\s*["“]([^"”]+)["”]',
+    r'\b(?:speaks?|speaking|saying|narrates?|narrating|voice-?over|'
+    r'announces|declares|proclaims|addresses|addressing|tells|telling|'
+    r'asks|asking|whispers|shouts|exclaims|urges|recites|delivers|delivering)'
+    r'\b[^"“”]{0,160}?[:,]\s*["“]([^"”]+)["”]',
     re.IGNORECASE)
 
-# Ordered most→least specific. The FIRST pattern that finds anything wins, so a
-# prompt carrying an explicit says-clause never double-counts an AUDIO block.
+# Ordered most→least specific. Every pattern is run and the results UNIONED —
+# see `dialogue_matches` for why first-pattern-wins was not enough.
 _DIALOGUE_PATTERNS = (DIALOGUE_RE, _LABELED_DIALOGUE_RE,
                       _SPOKEN_VERB_DIALOGUE_RE)
+
+# Case/punctuation/whitespace-insensitive form of a spoken line, for asking
+# "is this the same line?" — dedup in `extract_dialogue`, and the
+# surviving-source-line assertion in reengineer.localize_motion_prompt.
+_PHRASE_KEY_RE = re.compile(r"[^\w\s]+", re.UNICODE)
+
+
+def phrase_key(text: str) -> str:
+    """Normalized comparison key for a spoken line."""
+    out = _PHRASE_KEY_RE.sub(" ", (text or "").lower())
+    return re.sub(r"\s+", " ", out).strip()
 
 # Stage directions written INSIDE the dialogue quotes — `"This is store-bought
 # honey (while he points at the jar), and this is raw honey"` — are NOT spoken;
@@ -1996,24 +2025,66 @@ def extract_dialogue(text: str) -> str:
     (`AUDIO — … Dialogue: "…"`, `Voice-over: "…"`), then to a speech VERB with
     no label (`AUDIO — … voice speaking English …: "…"`). Parenthetical stage
     directions inside the quotes are stripped — they're never spoken, so they
-    must never reach captions / the bias hint / the QC check."""
-    parts = [m.group(1).strip() for m in dialogue_matches(text)]
-    return _strip_stage_directions(" ".join(parts).strip())
+    must never reach captions / the bias hint / the QC check.
+
+    A line the prompt states MORE THAN ONCE (the Director writes it in both its
+    ACTION and its AUDIO block) is reported ONCE: `dialogue_matches` returns
+    every span so the localizer can rewrite them all, but a reader must not see
+    the sentence twice — that would double the caption script, the Whisper bias
+    hint, the QC expected speech and the Kling duration estimate."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for m in dialogue_matches(text):
+        line = _strip_stage_directions(m.group(1).strip())
+        key = phrase_key(line)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        parts.append(line)
+    return " ".join(parts).strip()
 
 
 def dialogue_matches(text: str) -> list[re.Match]:
-    """Every spoken span in a motion prompt, as MATCH objects (group 1 = the
-    line) so callers that must rewrite the dialogue in place — Spanish
+    """EVERY spoken span in a motion prompt, as MATCH objects (group 1 = the
+    line) so callers that must rewrite the dialogue in place — 🇪🇸/🇩🇪
     localization — share the exact extraction the readers use.
 
-    `extract_dialogue` is the text-only view of this; both must stay on the
-    same patterns or a prompt shape gets localized but not captioned, or vice
-    versa (Hugo 2026-07-31)."""
+    `extract_dialogue` is the deduplicated text-only view of this; both must
+    stay on the same patterns or a prompt shape gets localized but not
+    captioned, or vice versa (Hugo 2026-07-31).
+
+    UNION, not first-pattern-wins (Hugo 2026-08-08). A structured Director
+    prompt states the same spoken line TWICE, under two different shapes:
+
+        ACTION AND CAMERA MOTION — The man … addresses the camera: "<line>"
+        AUDIO — … Language: English; … Dialogue: "<line>"
+
+    `_LABELED_DIALOGUE_RE` matched the AUDIO copy, so under first-pattern-wins
+    the ACTION copy was never returned — the localizer translated one of the
+    two and the ENGLISH sentence went to the video model verbatim, sitting
+    EARLIER in the prompt than the translation. That is how four 🇪🇸/🇩🇪
+    characters opened their reel speaking English (re_8e87b525b2 scene 1 /
+    j_7c2ff95032). Returning only the most specific pattern's matches can never
+    be right for a rewriter: it must see every occurrence or it leaves one
+    behind.
+
+    Spans that OVERLAP are collapsed to the most specific pattern's (the tuple
+    is ordered says-clause → labeled → speech-verb), so a single line matched
+    by two patterns is still one span. Result is ordered by position in the
+    text, which is also the order the localizer rewrites in."""
+    out: list[re.Match] = []
+    taken: list[tuple[int, int]] = []
     for rx in _DIALOGUE_PATTERNS:
-        found = [m for m in rx.finditer(text or "") if (m.group(1) or "").strip()]
-        if found:
-            return found
-    return []
+        for m in rx.finditer(text or ""):
+            if not (m.group(1) or "").strip():
+                continue
+            start, end = m.span(1)
+            if any(start < t_end and t_start < end for t_start, t_end in taken):
+                continue
+            taken.append((start, end))
+            out.append(m)
+    out.sort(key=lambda m: m.span(1))
+    return out
 
 
 def remap_words_through_keeps(

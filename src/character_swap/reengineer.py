@@ -36,6 +36,7 @@ from character_swap.video_edit import (
     Word,
     _probe_duration,
     dialogue_matches,
+    phrase_key,
 )
 
 # Scene-detection knobs. UGC reference videos cut between SIMILAR-looking
@@ -915,6 +916,11 @@ def _has_foreign_speech_directive(prompt: str, language: str) -> bool:
 # between the colon and the quote.
 _PRE_QUOTE_PUNCT_RE = re.compile(r"[\s:,\-–—]*$")
 
+# How far back from a quoted line still counts as "this line's clause" when
+# asking whether the language is already named next to it. One clause, not the
+# whole prompt — see `_inject_inline_attribution`.
+_ATTRIBUTION_SCOPE = 160
+
 
 def _inject_inline_attribution(text: str, spec: SpokenLanguage) -> str:
     """Put "<attribution>" immediately before the FIRST quoted line.
@@ -928,9 +934,19 @@ def _inject_inline_attribution(text: str, spec: SpokenLanguage) -> str:
     exactly what the per-character localizer used to DELETE without replacing.
 
     No-ops when the prompt carries no quoted line (nothing to attribute) or
-    already names the language inline (idempotent — a redo re-localizes the
-    same text)."""
-    if not text or spec.attribution.lower() in text.lower():
+    THAT line is already attributed (idempotent — a redo re-localizes the same
+    text).
+
+    "Already attributed" is judged on the clause introducing THIS line, not on
+    the whole prompt (Hugo 2026-08-08). The old whole-prompt guard broke as
+    soon as a prompt stated its line twice: `_force_language_speech` rewrites
+    the inline American-accent phrase into the attribution BEFORE calling here,
+    so if that phrase sat in the SECOND copy (the Director's AUDIO block), the
+    attribution already existed somewhere in the text and injection at the
+    first copy was skipped — leaving the sentence the model reads FIRST naming
+    no language at all. That is precisely the 2026-08-02 failure it exists to
+    prevent, reintroduced one layer up."""
+    if not text:
         return text
     matches = dialogue_matches(text)
     if not matches:
@@ -939,6 +955,8 @@ def _inject_inline_attribution(text: str, spec: SpokenLanguage) -> str:
     if quote_at <= 0:
         return text
     head, tail = text[:quote_at], text[quote_at:]
+    if spec.attribution.lower() in head[-_ATTRIBUTION_SCOPE:].lower():
+        return text
     cut = _PRE_QUOTE_PUNCT_RE.search(head).start()
     if cut <= 0:                               # nothing but punctuation before
         return text                            # the quote — leave it alone
@@ -1132,7 +1150,7 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
         return _cache_localized(
             lang, prompt, _sanitized_language_prompt(prompt, lang, job_id))
 
-    translated = translate_dialogue(phrases, language=lang, re_id=job_id)
+    translated = _translate_each_line_once(phrases, lang, job_id)
     if translated is None:
         logger.warning("localize_motion_prompt (%s): dialogue translation "
                        "failed; failing the clip loudly", job_id)
@@ -1154,7 +1172,82 @@ def localize_motion_prompt(prompt: str, language: str | None, *,
     # English…" order sitting right next to the line we just translated) and
     # enforce the target one.
     localized = _sanitized_language_prompt(localized, lang, job_id)
+    leaked = _surviving_source_line(localized, phrases, translated)
+    if leaked:
+        logger.warning("localize_motion_prompt (%s): the English source line "
+                       "survived localization (%r); failing the clip loudly",
+                       job_id, leaked[:80])
+        raise LocalizationError(
+            f"the prompt still contains the untranslated line “{leaked[:80]}” "
+            f"after localization to {spec.name_en} — the clip would speak "
+            f"English. Reword or remove that copy of the line and retry.")
     return _cache_localized(lang, prompt, localized)
+
+
+def _translate_each_line_once(phrases: list[str], language: str,
+                              job_id: str | None) -> list[str] | None:
+    """`translate_dialogue`, but a line repeated in the prompt is translated
+    ONCE and the single result reused for every occurrence.
+
+    Two reasons, both about the same prompt shape — the Director stating one
+    line in its ACTION block and again in its AUDIO block. Sending it twice
+    bills a longer call, and (worse) GPT-4o can return two slightly different
+    translations of the same sentence, so the finished prompt would order the
+    model to say two different things."""
+    order: dict[str, int] = {}
+    unique: list[str] = []
+    slot: list[int] = []
+    for phrase in phrases:
+        key = phrase_key(phrase)
+        if key not in order:
+            order[key] = len(unique)
+            unique.append(phrase)
+        slot.append(order[key])
+    out = translate_dialogue(unique, language=language, re_id=job_id)
+    if out is None:
+        return None
+    return [out[i] for i in slot]
+
+
+# A line short enough that finding it again proves nothing — a two-word phrase
+# ("Save this") can legitimately survive inside a translation or a prop label.
+_MIN_LEAK_WORDS = 4
+
+
+def _surviving_source_line(localized: str, phrases: list[str],
+                           translated: list[str]) -> str | None:
+    """The ENGLISH source line still standing in the localized prompt, or None.
+
+    The last line of defence, and the one that does not depend on knowing the
+    prompt's shape (Hugo 2026-08-08). Every earlier layer recognises SHAPES —
+    which regex reads the line, which regex strips an English order — and the
+    Director writes free-form English, so each new shape has silently shipped
+    an English clip: 2026-06-30, 2026-07-31, 2026-08-02, 2026-08-06, and again
+    on 2026-08-08 when it stated the line twice and only one copy was
+    rewritten. This check asks the question those all failed to ask: after all
+    the rewriting, is the English sentence still in the prompt? If it is, the
+    model can still read it, and a flagged character will speak it.
+
+    Everything we WROTE is subtracted from the text before the search, so the
+    question asked is strictly "is the English line somewhere we did NOT
+    rewrite?". Without that subtraction the check would fire on a translation
+    that happens to contain its own source — which is the documented no-op for
+    a line already in the target language (every `translate_system` orders
+    "return it EXACTLY as given"), exactly what a run-level 🗣 prompt hands
+    us."""
+    haystack = phrase_key(localized)
+    for target in translated:
+        key = phrase_key(target or "")
+        if key:
+            haystack = haystack.replace(key, " ")
+    for source in phrases:
+        line = (source or "").strip()
+        if len(line.split()) < _MIN_LEAK_WORDS:
+            continue
+        key = phrase_key(line)
+        if key and key in haystack:
+            return line
+    return None
 
 
 def _sanitized_language_prompt(text: str, language: str,
