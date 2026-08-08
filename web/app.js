@@ -1486,8 +1486,21 @@ function studio() {
 
     // Any run with a scene plan can be re-run — including a failed one, whose
     // plan is exactly what you want to retry on a different cast.
+    //
+    // Must NOT gate on `run.scenes` alone. The light history row
+    // (GET /api/reengineer) omits `scenes` entirely and only the newest 8 runs
+    // plus the ones parked at a gate get hydrated, so every older FINISHED run
+    // — exactly the ones worth re-running — had an empty array here and the
+    // button vanished. `n_scenes` is the same fallback the card's own
+    // "N scenes" label uses. Runs old enough to predate `n_scenes` fall
+    // through to showing the button: the modal loads the plan from the server,
+    // so it never depends on the client-side copy, and an empty plan just
+    // leaves ▶ Kör om disabled.
     reCanRerun(run) {
-      return !!(run && (run.scenes || []).length);
+      if (!run) return false;
+      if ((run.scenes || []).length) return true;
+      return run.n_scenes === undefined || run.n_scenes === null
+        ? true : !!run.n_scenes;
     },
 
     async openRerunModal(run) {
