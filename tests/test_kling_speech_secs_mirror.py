@@ -70,6 +70,12 @@ FIXTURES: dict[str, str] = {
         'ACTION — El hombre addresses the camera: "Pon bicarbonato de sodio '
         'en una remolacha cruda y mira qué pasa."\n\nAUDIO — Dialogue: "Pon '
         'bicarbonato de sodio en una remolacha cruda y mira qué pasa."',
+    # A line OPENED with `”` (U+201D). Hugo's prompts are written this way and
+    # reading only `"`/`“` is what let re_8183e63223 ship nine English clips
+    # (2026-08-09) — a JS still carrying the old opening class reads this whole
+    # scene as SILENT and under-reports the badge by the length of the line.
+    "right_double_quote_opener":
+        f'He says enthusiastically to the camera: ”{LINE}" while he pours.',
     # Guards: props are not speech, and a plain says-clause is unaffected.
     "quoted_prop_is_not_speech":
         'A bottle labeled "Heinz White Vinegar" sits on the counter.',

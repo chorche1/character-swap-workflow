@@ -1900,8 +1900,21 @@ def filter_and_shift_words(words: list[Word], *, start: float, end: float) -> li
 #     two-clause / CTA / multiline shapes: 3 CTAs fixed, 0 regressions.
 # Mirrored in app.js klingSpeechSecs; a sync test asserts the
 # `says[^"“”]{0,160}?` prefix.
+#
+# The OPENING quote accepts `”` (U+201D) as well (Hugo 2026-08-09). A right
+# double quote used to OPEN a line is not a typo we can dismiss: it is how
+# Hugo's own prompts are written, and it accounted for 52 of the 1772 distinct
+# prompts on disk — every single one of the corpus's unreadable spoken lines,
+# with no second opener behind it. Reading only `"` and `“` is what let
+# re_8183e63223 render nine clips in verbatim ENGLISH inside a prompt that
+# ordered "The person speaks ONLY German": `dialogue_matches` returned nothing,
+# so the localizer had nothing to translate and rewrote only the accent clause.
+# The CLOSING class already accepted both, which is why `”…"` half-matched
+# nothing rather than failing loudly.
+_OPEN_QUOTE = r'["“”]'
 DIALOGUE_RE = re.compile(
-    r'says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]',
+    r'says[^"“”]{0,160}?' + _OPEN_QUOTE +
+    r'((?:[^"“”]|' + _OPEN_QUOTE + r'(?:(?!says)[^"“”]){0,200}["”])*)["”]',
     re.IGNORECASE)
 
 # LABELED spoken lines from STRUCTURED / cinematic prompts that carry no `says`
@@ -1935,7 +1948,7 @@ DIALOGUE_RE = re.compile(
 # Mirrored in app.js klingSpeechSecs; the JS-mirror sync test pins both.
 _LABELED_DIALOGUE_RE = re.compile(
     r'\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*'
-    r'["“]([^"”]+)["”]',
+    + _OPEN_QUOTE + r'([^"”]+)["”]',
     re.IGNORECASE)
 
 # Speech introduced by a VERB OTHER than `says`, with no `Dialogue:` label to
@@ -1978,7 +1991,7 @@ _SPOKEN_VERB_DIALOGUE_RE = re.compile(
     r'\b(?:speaks?|speaking|saying|narrates?|narrating|voice-?over|'
     r'announces|declares|proclaims|addresses|addressing|tells|telling|'
     r'asks|asking|whispers|shouts|exclaims|urges|recites|delivers|delivering)'
-    r'\b[^"“”]{0,160}?[:,]\s*["“]([^"”]+)["”]',
+    r'\b[^"“”]{0,160}?[:,]\s*' + _OPEN_QUOTE + r'([^"”]+)["”]',
     re.IGNORECASE)
 
 # Ordered most→least specific. Every pattern is run and the results UNIONED —

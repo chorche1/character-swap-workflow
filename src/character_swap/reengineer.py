@@ -892,7 +892,29 @@ def _residual_english_order(text: str, spec: SpokenLanguage) -> str | None:
 # not read. A quoted PROP — `bottle labeled "Heinz White Vinegar"`, `comment
 # "Skin"` — is shorter than that, which is what keeps a silent scene from
 # tripping the loud refusal below.
-_QUOTED_LINE_RE = re.compile(r'["“]([^"”]{8,})["”]')
+#
+# THIS PATTERN MUST NEVER SHARE THE EXTRACTOR'S IDEA OF A QUOTE (Hugo
+# 2026-08-09). It used to be `["“]([^"”]{8,})["”]` — the same opening class
+# `dialogue_matches` used — so a quote shape the extractor could not read was
+# equally invisible to the net whose whole job is to catch that case. That is
+# not a second failure of the 2026-08-06 lesson, it IS the lesson, one level
+# down: the guard was written in the same alphabet as the thing it guards.
+# re_8183e63223 shipped nine English clips through a prompt ordering German and
+# nothing anywhere said a word.
+#
+# So the net asks the shape-independent question instead: a long run of text
+# between ANY two quote-like characters, whichever way round they face. It is
+# deliberately WIDER than every extractor pattern — it must be, or it cannot
+# see the extractor's blind spots — and being wider is free, because a false
+# hit here costs a loud refusal naming the quote, never a silent English clip.
+#
+# `‘’` are excluded on purpose: `’` is the ordinary apostrophe in "I can't",
+# so admitting it would pair up two unrelated contractions and refuse prompts
+# containing no quote at all. Measured over the 1772 distinct prompts on disk,
+# the class below yields ZERO false refusals.
+_QUOTE_CHARS = '"“”„«»'
+_QUOTED_LINE_RE = re.compile(
+    '[' + _QUOTE_CHARS + ']([^' + _QUOTE_CHARS + ']{8,})[' + _QUOTE_CHARS + ']')
 
 # Deliberately wider than the extractor's own verb list — this one only has to
 # recognise that the prompt is TALKING ABOUT speech, and the shapes that broke

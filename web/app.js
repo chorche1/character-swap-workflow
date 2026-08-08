@@ -2728,24 +2728,28 @@ function studio() {
       // spans differ per pattern and would not agree — measured over 988 real
       // prompts, a union without the span check disagrees with Python on 52 of
       // them, and a text-containment stand-in on 12.
+      // The OPENING quote accepts `”` (U+201D) as well as `"` and `“` — Hugo's
+      // own prompts open lines with it, and reading only the other two is what
+      // let re_8183e63223 render nine clips in English inside a German-only
+      // prompt (video_edit._OPEN_QUOTE carries the same class).
       const patterns = [
         // video_edit.DIALOGUE_RE — the body spans inner quote pairs (e.g.
         // `comment "skin" …`) so CTAs aren't truncated, while the inner pair
         // forbids `says` so two separate says-clauses don't merge.
-        /says[^"“”]{0,160}?["“]((?:[^"“”]|["“](?:(?!says)[^"“”]){0,200}["”])*)["”]/gid,
+        /says[^"“”]{0,160}?["“”]((?:[^"“”]|["“”](?:(?!says)[^"“”]){0,200}["”])*)["”]/gid,
         // video_edit._LABELED_DIALOGUE_RE — structured Director prompts carry
         // the line as `Dialogue: "…"` / `Voice-over: "…"` with no `says` verb
         // (anchored to the label so quoted props aren't speech). A short
         // qualifier may sit between label and colon (`Dialogue exact:`,
         // `Dialogue in standard German:`); the body forbids `"` `:` `;` `.` so
         // it can never cross a sentence boundary or a second colon.
-        /\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*["“]([^"”]+)["”]/gid,
+        /\b(?:dialogue|spoken\s+line|voice-?over)\b[^"“”:;.]{0,60}?:\s*["“”]([^"”]+)["”]/gid,
         // video_edit._SPOKEN_VERB_DIALOGUE_RE — the line is introduced by a
         // speech VERB instead of a label (`… voice speaking English …: "…"`,
         // `The man … addresses the camera: "…"`). The colon-or-comma before
         // the quote is what keeps quoted props out; verbs that introduce
         // SIGNAGE (`reads`, `states`, `labeled`) are deliberately absent.
-        /\b(?:speaks?|speaking|saying|narrates?|narrating|voice-?over|announces|declares|proclaims|addresses|addressing|tells|telling|asks|asking|whispers|shouts|exclaims|urges|recites|delivers|delivering)\b[^"“”]{0,160}?[:,]\s*["“]([^"”]+)["”]/gid,
+        /\b(?:speaks?|speaking|saying|narrates?|narrating|voice-?over|announces|declares|proclaims|addresses|addressing|tells|telling|asks|asking|whispers|shouts|exclaims|urges|recites|delivers|delivering)\b[^"“”]{0,160}?[:,]\s*["“”]([^"”]+)["”]/gid,
       ];
       // Mirror of video_edit._strip_stage_directions — a parenthetical inside
       // the quotes is an instruction, never spoken, so it is not timed. Python
