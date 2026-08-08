@@ -6,6 +6,8 @@ WebSocket layer can broadcast them.
 from __future__ import annotations
 
 import asyncio
+import functools
+import hashlib
 import logging
 import secrets
 import shutil
@@ -293,6 +295,93 @@ def _image_concurrency_for_model(slug: str) -> int:
         "gemini": settings.image_concurrency_gemini,
     }.get(_model_provider(slug))
     return max(1, per or settings.image_concurrency)
+
+
+@functools.lru_cache(maxsize=1024)
+def _file_fingerprint(path_str: str, size: int, mtime_ns: int) -> str:
+    return hashlib.sha256(Path(path_str).read_bytes()).hexdigest()
+
+
+def _image_fingerprint(path: Path) -> str:
+    """Content hash of an image, cached on (path, size, mtime) so a run with
+    many characters hashes each scene file once rather than once per
+    character. A missing file gets a unique key — it must never collide with
+    another slot and be silently treated as a duplicate."""
+    try:
+        st = path.stat()
+    except OSError:
+        return f"missing:{path}"
+    return _file_fingerprint(str(path), st.st_size, st.st_mtime_ns)
+
+
+def _identical_generation_key(job: Job, variant: GeneratedImage,
+                              take: int) -> tuple[str, str, int]:
+    """Identifies slots across DIFFERENT scenes whose generation is the same
+    request: identical scene image CONTENT, identical prompt, same take index.
+
+    Content, not path: `api._apply_scene_duplicate` gives its copy the source's
+    path, while `runner_reengineer.register_scene_duplicate` writes a separate
+    file with identical bytes. Both are "the same shot" and must group.
+
+    The PROMPT is part of the key, so a duplicate whose prompt was edited (🪄
+    "ändra bild", a per-image ✎↻, a Director prompt that differs per scene)
+    still renders on its own — only genuinely identical work is collapsed.
+
+    `take` — the variant index within its scene — is what keeps
+    "images_per_character = N" intact. Those N slots ARE the same request on
+    purpose: they exist so the user can pick between N random takes of one
+    scene. Without the index in the key they would collapse into one and the
+    multi-variant chooser would silently render a single image (caught by
+    tests/e2e/test_swap_flow.py, which asserts 4 image calls for 2 scenes × 2).
+    Take i of a duplicated scene mirrors take i of its leader, so the chooser
+    keeps offering N distinct options on every copy.
+    """
+    return (_image_fingerprint(_scene_path_for_variant(job, variant)),
+            variant.prompt or "", take)
+
+
+async def _mirror_duplicate_slots(
+    job: Job, jc: JobCharacter,
+    followers: list[tuple[GeneratedImage, GeneratedImage]],
+) -> list[GeneratedImage]:
+    """Point each duplicated slot at the image its twin already generated.
+
+    A ⧉-duplicated scene exists to let the SAME shot say a different line, so
+    every copy wants the same swapped image — measured on j_94c3258684, five
+    copies of one scene ran one identical prompt against one identical frame
+    and produced five DIFFERENT renders: four wasted generations per
+    character (36 across its nine), and a reel whose "same" shot visibly
+    jumps between clips. Sharing the leader's file is the established shape
+    here — `_apply_scene_duplicate` already clones variants with `path=v.path`,
+    `delete_variant` refcounts before unlinking, and `retry_single_variant`
+    re-points a shared slot to its own path before regenerating, so a later
+    ↻ on one copy still only affects that copy.
+
+    Returns the slots whose leader produced nothing usable; those still have
+    to render normally, so a failed leader costs its copies nothing worse
+    than today's behaviour.
+    """
+    stragglers: list[GeneratedImage] = []
+    for follower, leader in followers:
+        if leader.status != VariantStatus.READY or not Path(leader.path).exists():
+            stragglers.append(follower)
+            continue
+        follower.path = leader.path
+        follower.status = VariantStatus.READY
+        follower.error = None
+        # QC judged this exact image once; carry the verdict so the copy shows
+        # the same ⚠ chip. `qc_rejects` is deliberately NOT copied — the
+        # rejected takes belong to the slot that actually rendered them.
+        follower.qc_status = leader.qc_status
+        follower.qc_reason = leader.qc_reason
+        follower.qc_attempts = leader.qc_attempts
+        follower.fallback_model = leader.fallback_model
+        follower.moderation_rewritten = leader.moderation_rewritten
+        await asyncio.to_thread(_replace_variant, job, jc, follower)
+        await _emit(job.job_id, "variant.ready",
+                    char_id=jc.char_id, variant_id=follower.variant_id,
+                    path=follower.path, reused_from=leader.variant_id)
+    return stragglers
 
 
 def _scene_path_for_variant(job: Job, variant: GeneratedImage) -> Path:
@@ -772,9 +861,34 @@ async def _kick_char(job: Job, jc: JobCharacter, n: int, sem: asyncio.Semaphore)
                 n_scenes=len(scene_ids),
                 director_applied=bool(director_plan))
 
+    # A DUPLICATED scene costs ONE image, not one per copy (Hugo 2026-08-08).
+    # Slots whose scene image AND prompt are identical are the same request;
+    # the first renders and the rest reuse its result. See
+    # `_identical_generation_key` / `_mirror_duplicate_slots`.
+    leaders: list[GeneratedImage] = []
+    followers: list[tuple[GeneratedImage, GeneratedImage]] = []
+    first_of: dict[tuple[str, str, int], GeneratedImage] = {}
+    takes: dict[str, int] = {}          # per-scene running variant index
+    for v in placeholders:
+        sid = v.scene_id or ""
+        take = takes.get(sid, 0)
+        takes[sid] = take + 1
+        lead = first_of.setdefault(_identical_generation_key(job, v, take), v)
+        if lead is v:
+            leaders.append(v)
+        else:
+            followers.append((v, lead))
+
     await asyncio.gather(
-        *[_generate_one_variant(job, jc, v, sem) for v in placeholders]
+        *[_generate_one_variant(job, jc, v, sem) for v in leaders]
     )
+    stragglers = await _mirror_duplicate_slots(job, jc, followers)
+    if stragglers:
+        # Their leader failed — render them the normal way rather than
+        # leaving copies stuck on a slot that never produced an image.
+        await asyncio.gather(
+            *[_generate_one_variant(job, jc, v, sem) for v in stragglers]
+        )
 
     # End frames: for each scene with an uploaded end-pose ref, swap THIS
     # character into the pose so the scene's Kling 3.0 end frame features the
