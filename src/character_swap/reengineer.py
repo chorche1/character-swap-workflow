@@ -700,18 +700,45 @@ ACCENT_CLAUSE: dict[str, tuple[str, str]] = {
 _PRONOUNCE_CLAUSE = (" Every word is pronounced clearly, correctly and "
                      "distinctly.")
 _NO_MUSIC_CLAUSE = (" No background music — natural ambient room sound only.")
+# Hugo 2026-08-10: "ibland gör karaktären små ljud innan eller efter det den
+# ska säga". Same class of defect as the music bed — every video model
+# SYNTHESIZES the audio from the prompt, so it pads the scripted line with
+# little vocal noises unless told not to. Suppression is prompt-level; no API
+# has a switch for it.
+#
+# Deliberately carries no speech VERB ("says"/"speaks"): `_SPEECH_CONTEXT_RE`
+# matches those, and this clause is appended to EVERY scene, silent ones
+# included — see `_without_own_clauses`, which must subtract it.
+_NO_ADLIB_CLAUSE = (" No ad-libbed sounds — no hums, sighs, laughs, "
+                    "throat-clearing, audible breaths or extra words before "
+                    "or after the scripted line.")
+
+
+def with_no_adlib(prompt: str) -> str:
+    """`prompt` with the ad-lib lock appended, idempotently.
+
+    Its own function because two paths need it and the clause must never drift
+    between them: `with_accent` (every Reengineer / Swap-from-images scene
+    prompt, which is also what the gate UI mirrors) and
+    `runner._animate_one_video` (the universal backstop — the plain Swap /
+    🎬 Animate prompts never pass through `with_accent` at all)."""
+    out = prompt or ""
+    if "ad-lib" in out.lower():
+        return out
+    return out.rstrip() + _NO_ADLIB_CLAUSE
 
 
 def with_accent(prompt: str, language: str = "en") -> str:
-    """Kling synthesizes voice AND ambience from the prompt — enforce three
+    """Kling synthesizes voice AND ambience from the prompt — enforce four
     guarantees centrally, even if a scene's agent-written prompt forgot them:
     the run's spoken-language accent + clear pronunciation (Hugo 2026-06-11;
-    garbled words like "baking goda" observed) and NO music bed (research
+    garbled words like "baking goda" observed), NO music bed (research
     2026-06-12: generate_audio invents background music unless told otherwise;
-    there is no API switch, suppression is prompt-level). The pronunciation +
-    no-music directives stay English (they are instructions, not speech). Each
-    clause is skipped when the prompt already covers it. Mirrored in app.js
-    klingSuffix().
+    there is no API switch, suppression is prompt-level) and NO ad-libbed
+    sounds around the line (Hugo 2026-08-10 — same defect class as the music
+    bed). The pronunciation + no-music + no-ad-lib directives stay English
+    (they are instructions, not speech). Each clause is skipped when the prompt
+    already covers it. Mirrored in app.js klingSuffix().
 
     For a NON-English target the English accent order is rewritten to this
     language's own attribution FIRST (Hugo 2026-08-02: "alla videoprompts för
@@ -741,7 +768,7 @@ def with_accent(prompt: str, language: str = "en") -> str:
         out = out.rstrip() + _PRONOUNCE_CLAUSE
     if "music" not in out.lower():
         out = out.rstrip() + _NO_MUSIC_CLAUSE
-    return out
+    return with_no_adlib(out)
 
 
 # The analyst (and the English fallback) write the speaking accent INLINE inside
@@ -862,10 +889,17 @@ def _without_own_clauses(text: str, spec: SpokenLanguage) -> str:
     over words we ourselves appended — `speak_only_clause` ends with "No
     English is spoken at any point.", and `with_accent` appends the English
     accent clause ("The person speaks fluent American English…") to EVERY
-    scene, silent ones included."""
+    scene, silent ones included.
+
+    `_NO_ADLIB_CLAUSE` is in the list for the same reason and is load-bearing:
+    without it a SILENT shot would gain the word "line" plus a denial the
+    speech gate cannot read, and `_unparsed_dialogue_line` would refuse a
+    B-roll prompt whose only quote is a product label — the exact
+    false-refusal the 2026-08-08 `_NO_SPEECH_RE` fix removed."""
     out = text or ""
     for clause in (spec.speak_only_clause, spec.accent_clause,
-                   ACCENT_CLAUSE["en"][0], _PRONOUNCE_CLAUSE, _NO_MUSIC_CLAUSE):
+                   ACCENT_CLAUSE["en"][0], _PRONOUNCE_CLAUSE, _NO_MUSIC_CLAUSE,
+                   _NO_ADLIB_CLAUSE):
         out = out.replace(clause, " ")
     return _ATTRIBUTION_RES[spec.code].sub(" ", out)
 

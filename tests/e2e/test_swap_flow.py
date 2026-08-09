@@ -174,7 +174,12 @@ def test_full_swap_flow_six_steps(client, ledger):
     assert len(ledger.video_submits) == 2
     assert all(s["model"] == "grok-imagine" for s in ledger.video_submits)
     assert all(s["duration_secs"] == 5 for s in ledger.video_submits)
-    assert {s["prompt"] for s in ledger.video_submits} == set(prompts.values())
+    # Plain-Swap prompts never pass through `reengineer.with_accent`, so the
+    # ad-lib lock reaches them via runner._animate_one_video's backstop (Hugo
+    # 2026-08-10) — this flow is exactly why that backstop exists.
+    from character_swap import reengineer as _re
+    assert {s["prompt"] for s in ledger.video_submits} == {
+        p + _re._NO_ADLIB_CLAUSE for p in prompts.values()}
     # ...and the downloaded clips are REAL playable mp4s on disk.
     assert len(ledger.video_waits) == 2
     for w in ledger.video_waits:

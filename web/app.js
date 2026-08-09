@@ -2833,6 +2833,11 @@ function studio() {
       }
       if (!out.toLowerCase().includes('music')) {
         const clause = ' No background music — natural ambient room sound only.';
+        out = out.replace(/\s+$/, '') + clause;
+        suffix += clause;
+      }
+      if (!out.toLowerCase().includes('ad-lib')) {
+        const clause = ' No ad-libbed sounds — no hums, sighs, laughs, throat-clearing, audible breaths or extra words before or after the scripted line.';
         suffix += clause;
       }
       return suffix.trim();

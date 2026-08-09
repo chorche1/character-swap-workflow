@@ -1646,6 +1646,18 @@ async def _animate_one_video(
             if src_line and src_line != video_qc.expected_speech(localized):
                 original_speech = src_line
             movement_prompt = localized
+    # Ad-lib lock (Hugo 2026-08-10: "ibland gör karaktären små ljud innan eller
+    # efter det den ska säga"). Applied HERE, not only in
+    # `reengineer.with_accent`, because the plain Swap / 🎬 Animate prompts
+    # never pass through that function — this is the one point EVERY Swap-side
+    # clip funnels through, on every model. Idempotent, so a Reengineer prompt
+    # that already carries the clause is not doubled.
+    #
+    # AFTER localization on purpose: it is an instruction, not speech, so it
+    # stays English like the pronounce / no-music clauses, and the translator
+    # never sees it. It carries no quotes, so `video_qc.expected_speech` and
+    # every dialogue extractor read it as nothing at all.
+    movement_prompt = reengineer.with_no_adlib(movement_prompt)
     prompt_text = movement_prompt
     phase = "submit"
     # Content-policy / NSFW fallback — resolved per (CHOSEN MODEL, LANGUAGE).

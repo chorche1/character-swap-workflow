@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from character_swap import content_policy, runner, runner_media
+from character_swap import content_policy, reengineer, runner, runner_media
 from character_swap.models import (
     CharStatus, GeneratedImage, Job, JobCharacter, VariantStatus, VideoStatus,
     VideoVariant,
@@ -259,7 +259,9 @@ def test_fallback_take_uses_clean_prompt(monkeypatch, tmp_path):
 
     _run(runner._animate_one_video(job, jc, video, "he waves"))
 
-    assert seen[1] == (FALLBACK, "he waves")      # clean prompt on the retry
+    # Clean prompt on the retry — no QC hint. The ad-lib lock is PART of the
+    # clean prompt (appended before the submit loop), so it rides along.
+    assert seen[1] == (FALLBACK, "he waves" + reengineer._NO_ADLIB_CLAUSE)
 
 
 # --- 6. Reengineer direct (no-swap) clip gets the same fallback --------------

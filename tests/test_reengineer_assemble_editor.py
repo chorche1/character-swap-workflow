@@ -785,23 +785,28 @@ def test_kling_suffix_js_mirrors_with_accent():
     es_accent = runner_reengineer._ACCENT_CLAUSE["es"][0]
     pronounce = " Every word is pronounced clearly, correctly and distinctly."
     music = " No background music — natural ambient room sound only."
-    for clause in (en_accent, es_accent, pronounce, music):
+    adlib = (" No ad-libbed sounds — no hums, sighs, laughs, throat-clearing, "
+             "audible breaths or extra words before or after the scripted line.")
+    for clause in (en_accent, es_accent, pronounce, music, adlib):
         assert clause in found, f"missing JS clause: {clause!r}"
 
     # Byte-identical with the Python source of truth, BOTH languages:
-    assert runner_reengineer._with_accent("x", "en") == "x" + en_accent + pronounce + music
-    assert runner_reengineer._with_accent("x", "es") == "x" + es_accent + pronounce + music
-    assert runner_reengineer._with_accent("") == en_accent + pronounce + music
+    tail = pronounce + music + adlib
+    assert runner_reengineer._with_accent("x", "en") == "x" + en_accent + tail
+    assert runner_reengineer._with_accent("x", "es") == "x" + es_accent + tail
+    assert runner_reengineer._with_accent("") == en_accent + tail
     # Same guards (case-insensitive substring checks) on both sides.
-    assert all(k in body for k in ("american", "spanish", "pronounc", "music"))
+    assert all(k in body for k in ("american", "spanish", "pronounc", "music",
+                                   "ad-lib"))
     p = runner_reengineer._with_accent(
-        "An American narrator pronounces this. No music.")
-    assert p == "An American narrator pronounces this. No music."
+        "An American narrator pronounces this. No music. No ad-libbed sounds.")
+    assert p == ("An American narrator pronounces this. No music. "
+                 "No ad-libbed sounds.")
     # The analyst attribution already covers accent+pronunciation… the central
     # layer still adds ONLY the music guarantee.
     attributed = ('The person says, in a casual conversational tone with a '
                   'natural American accent: "hi there folks, pronounced well"')
-    assert runner_reengineer._with_accent(attributed) == attributed + music
+    assert runner_reengineer._with_accent(attributed) == attributed + music + adlib
 
 
 def test_do_animate_uses_freshest_scenes_not_snapshot(monkeypatch, tmp_path):

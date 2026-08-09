@@ -98,8 +98,12 @@ def test_forcing_an_untouched_localized_prompt_is_a_no_op(monkeypatch):
     an already-German line unchanged (its system prompt says so), and the
     directive layers are idempotent — so the text comes back identical."""
     _translator(monkeypatch, "Nimm jeden Morgen einen Löffel auf nüchternen Magen.")
-    assert reengineer.localize_motion_prompt(
-        GERMAN_PROMPT, "de", force=True) == GERMAN_PROMPT
+    # One-time addition: the directive layer also appends the ad-lib lock
+    # (Hugo 2026-08-10) to a prompt that predates it.
+    once = reengineer.localize_motion_prompt(GERMAN_PROMPT, "de", force=True)
+    assert once == GERMAN_PROMPT + reengineer._NO_ADLIB_CLAUSE
+    # The invariant under test — no DRIFT on repeat — holds from there on.
+    assert reengineer.localize_motion_prompt(once, "de", force=True) == once
 
 
 def test_translator_is_told_to_return_an_already_translated_line_verbatim():
@@ -215,7 +219,7 @@ def test_untyped_prompt_keeps_the_marker_short_circuit(monkeypatch, tmp_path):
 
     asyncio.run(runner._animate_one_video(job, jc, video, GERMAN_PROMPT))
 
-    assert takes == [GERMAN_PROMPT]
+    assert takes == [GERMAN_PROMPT + reengineer._NO_ADLIB_CLAUSE]
 
 
 def test_unchanged_dialogue_never_arms_the_wrong_language_check(

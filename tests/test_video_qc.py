@@ -529,7 +529,7 @@ def test_animate_passes_through_for_unflagged_character(monkeypatch, tmp_path):
     p = 'He waves. The person says: "Hello friends."'
     submits, _ = _animate_capture(monkeypatch, tmp_path, p, char_id="cA_unflagged")
     assert len(submits) == 1
-    assert submits[0]["movement_prompt"] == p
+    assert submits[0]["movement_prompt"] == p + reengineer._NO_ADLIB_CLAUSE
 
 
 def test_animate_keeps_spanish_through_qc_retry(monkeypatch, tmp_path):

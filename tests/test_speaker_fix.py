@@ -37,6 +37,12 @@ FIXED = ('The woman on the left in the beige blazer says to the camera with a '
          'hand. The man beside her listens silently and does not move his '
          'lips. No background music — natural ambient room sound only.')
 
+# The ad-lib lock `runner._animate_one_video` appends to EVERY submitted prompt
+# (Hugo 2026-08-10) — after the speaker fix and after localization, so it lands
+# at the very end of whatever those produced. Asserted explicitly rather than
+# loosened to `startswith` so these tests keep pinning the exact submitted text.
+ADLIB = reengineer._NO_ADLIB_CLAUSE
+
 
 # --- fixtures ----------------------------------------------------------------
 
@@ -232,7 +238,7 @@ def test_female_on_ticked_scene_submits_the_rewritten_prompt(monkeypatch, tmp_pa
 
     _run(runner._animate_one_video(job, jc, video, BASE))
 
-    assert submits == [FIXED]
+    assert submits == [FIXED + ADLIB]
     assert video.speaker_fix_prompt == FIXED
     assert video.status == VideoStatus.DONE
 
@@ -247,7 +253,7 @@ def test_male_character_on_ticked_scene_never_calls_the_agent(monkeypatch, tmp_p
     _run(runner._animate_one_video(job, jc, video, BASE))
 
     assert not called                      # no credits spent on the men
-    assert submits == [BASE]
+    assert submits == [BASE + ADLIB]
     assert video.speaker_fix_prompt is None
 
 
@@ -265,7 +271,7 @@ def test_unticked_scene_still_fixes_the_pronoun(monkeypatch, tmp_path):
 
     _run(runner._animate_one_video(job, jc, video, BASE))
 
-    assert submits == [FIXED]
+    assert submits == [FIXED + ADLIB]
     # The tick still travels — as the second-person HINT, not as the gate.
     assert hints == [False]
     assert video.speaker_fix_prompt == FIXED
@@ -351,6 +357,6 @@ def test_speaker_fix_runs_before_localization(monkeypatch, tmp_path):
     _run(runner._animate_one_video(job, jc, video, BASE))
 
     assert seen == [FIXED]                       # localizer saw the FIXED text
-    assert submits == [FIXED + " [ES]"]
+    assert submits == [FIXED + " [ES]" + ADLIB]
     assert video.speaker_fix_prompt == FIXED
     assert video.localized_movement_prompt == FIXED + " [ES]"
