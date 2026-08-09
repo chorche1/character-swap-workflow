@@ -6809,6 +6809,101 @@ async def reengineer_version_duplicate_row(
             "scene_id": new_sid, "idx": len(entries) - 1}
 
 
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/rows/import_clip")
+async def reengineer_version_import_clip(
+    re_id: str, version_id: str,
+    file: UploadFile = File(...),
+    summary: str = Form(""),
+) -> dict:
+    """Drop a FINISHED clip into a version — no generation, no credits.
+
+    Modelled as a 📌 direct scene, which is the app's existing shape for "one
+    clip, character-independent, identical in every character's final": the
+    uploaded file becomes the scene's `shared_clip_path` and is marked
+    `direct_clip_reused` so a full re-animate never re-renders over it (the
+    file is the user's, there is nothing to regenerate it from).
+
+    A mid-frame is extracted purely so the scene has a thumbnail in the strip.
+    """
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import video_edit
+
+    state = _editable_reengineer_state(re_id)
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    _version_or_404(state, version_id)
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    ext = _safe_ext(file.filename or "clip.mp4", allow_video=True)
+    if ext not in {".mp4", ".mov", ".webm"}:
+        raise HTTPException(400, "Ladda upp en videofil (.mp4/.mov/.webm).")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tok = secrets.token_hex(4)
+    clip = run_dir / f"import_{tok}{ext}"
+    clip.write_bytes(data)
+    duration = await asyncio.to_thread(video_edit._probe_duration, clip)
+    frame = run_dir / f"import_{tok}.png"
+    await asyncio.to_thread(reengineer_mod.extract_frame, clip,
+                            max(0.0, (duration or 2.0) / 2.0), frame)
+    scene_id, frame_path = runner_reengineer._register_frame_as_scene(frame)
+
+    state = _reload_reengineer_state_after_await(re_id)
+    entries = state.get("scenes") or []
+    # Content-addressing collapses an identical frame onto an existing id, and
+    # a shared id would flip the sibling's mode to direct too — mint our own.
+    if any(e.get("scene_id") == scene_id for e in entries):
+        scene_id, frame_path = _register_scene_duplicate(
+            scene_id, Path(frame_path).read_bytes(),
+            file.filename or "Eget klipp")
+
+    entry = {
+        "idx": 0,                                   # renumbered below
+        "scene_id": scene_id,
+        "start": 0.0, "end": round(duration or 0.0, 3),
+        "duration": round(duration or 0.0, 3),
+        "motion_prompt": "", "speech": "",
+        "summary": (summary or file.filename or "Eget klipp")[:80],
+        "source": "version_import",
+        "is_direct": True,
+        "direct_image_path": str(frame_path),
+        "shared_clip_path": str(clip),
+        # Never re-render over the user's own file.
+        "direct_clip_reused": True,
+        versions_mod.OWNER_KEY: version_id,
+    }
+    entries.append(entry)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+
+    if scene_id not in (job.scene_ids or []):
+        job.scene_ids = list(job.scene_ids or [job.scene_id]) + [scene_id]
+        job.scene_image_paths = (list(job.scene_image_paths
+                                      or [job.scene_image_path])
+                                 + [str(frame_path)])
+    if scene_id not in (job.direct_scene_ids or []):
+        job.direct_scene_ids = list(job.direct_scene_ids or []) + [scene_id]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+
+    all_versions = dict(state.get("versions") or {})
+    version = dict(all_versions.get(version_id) or {})
+    version["rows"] = list(version.get("rows") or []) + [
+        {"row_id": versions_mod.new_row_id(), "scene_id": scene_id}]
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "scene_id": scene_id, "idx": len(entries) - 1}
+
+
 @app.post("/api/reengineer/{re_id}/versions/{version_id}/animate")
 async def reengineer_version_animate(re_id: str, version_id: str,
                                      background_tasks: BackgroundTasks) -> dict:
@@ -7158,16 +7253,31 @@ async def reengineer_add_scene(
     whisper: bool = Form(False),
     position: int = Form(-1),
     direct: bool = Form(False),       # use the image as-is, no swap, shared clip
+    version_id: str = Form(""),       # add to a 🎞 version instead of the run
 ) -> dict:
     """Add a scene from an uploaded IMAGE or VIDEO. Video → mid-frame becomes
     the scene image (+ optional Whisper dialogue prefill into the prompt).
     Swap images for EVERY character generate in the background (normal QC);
-    the new variants need manual approval before the scene can animate."""
+    the new variants need manual approval before the scene can animate.
+
+    With `version_id` the scene belongs to that 🎞 version instead of the run:
+    it is APPENDED (so base indices stay contiguous), tagged so no base-cut
+    reader sees it, and the original final is NOT marked stale — it cannot
+    contain a scene it will never be built from. Everything else is identical,
+    which is the point of putting it here rather than in a parallel endpoint:
+    the multi-person gate, the Whisper dialogue prefill, QC and the approval
+    gate all come along unchanged."""
     from character_swap import reengineer as reengineer_mod, runner_reengineer
     from character_swap import video_edit
     state = _editable_reengineer_state(re_id)
     if not state.get("job_id"):
         raise HTTPException(409, "run has no underlying job yet")
+    # Direct callers (the tests, and any internal use) leave an unsupplied
+    # Form parameter as its FastAPI sentinel rather than a string — only HTTP
+    # requests get it resolved. Treat anything non-str as "not supplied".
+    version_id = version_id.strip() if isinstance(version_id, str) else ""
+    if version_id:
+        _version_or_404(state, version_id)
     s = store()
     job = s.get_job(state["job_id"])
     if job is None:
@@ -7243,11 +7353,22 @@ async def reengineer_add_scene(
         entry["scene_id"] = scene_id
         if direct:
             entry["direct_image_path"] = str(_path)
-    pos = position if 0 <= position <= len(entries) else len(entries)
-    entries.insert(pos, entry)
+    if version_id:
+        # Version scenes are ALWAYS appended, never inserted at `position`:
+        # base entries keep contiguous indices that way, so the run card's
+        # numbering and every stored idx are untouched. Where the scene sits in
+        # the reel is decided by its row in the version's cut.
+        entry[versions_mod.OWNER_KEY] = version_id
+        entries.append(entry)
+    else:
+        pos = position if 0 <= position <= len(entries) else len(entries)
+        entries.insert(pos, entry)
     state["scenes"] = entries
     _renumber_scenes(state)
-    _mark_finals_stale(state)
+    if not version_id:
+        # A version's scene can never enter the original reel, so claiming that
+        # reel is out of date would be a lie.
+        _mark_finals_stale(state)
 
     # Extend the underlying job so variant generation accepts the scene.
     # (Append is fine — assembly order follows state.scenes, not the job.)
@@ -7263,6 +7384,13 @@ async def reengineer_add_scene(
         job.updated_at = datetime.utcnow()
         s.update_job(job)
 
+    if version_id:
+        all_versions = dict(state.get("versions") or {})
+        version = dict(all_versions.get(version_id) or {})
+        version["rows"] = list(version.get("rows") or []) + [
+            {"row_id": versions_mod.new_row_id(), "scene_id": scene_id}]
+        all_versions[version_id] = version
+        state["versions"] = all_versions
     _save_reengineer_state(state)
     if not direct:
         # Swap the new scene for every character. Direct scenes use the image

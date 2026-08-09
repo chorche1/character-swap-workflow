@@ -1819,6 +1819,69 @@ function studio() {
       }
     },
 
+    // + Lägg till scen: an uploaded image (or video → mid-frame) that gets
+    // swapped for every character and then needs approval, exactly like the
+    // run's own "+ egen scen". The scene belongs to the version alone.
+    async addVersionScene(fileList) {
+      const file = (fileList || [])[0];
+      if (!file) return;
+      const m = this.versionModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('version_id', versionId);
+        fd.append('motion_prompt', '');
+        const r = await fetch(`/api/reengineer/${m.reId}/scenes`,
+                              { method: 'POST', body: fd });
+        if (!r.ok) { m.error = await r.text(); return; }
+        m.open = false;
+        this.refreshReengineer(m.reId);
+        this._startReengineerPolling();
+        this.notifyInfo('Scenen läggs till — godkänn bilderna när de är klara.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // 📥 A finished clip: no generation at all. It becomes ONE shared clip,
+    // identical in every character's version.
+    async importVersionClip(fileList) {
+      const file = (fileList || [])[0];
+      if (!file) return;
+      const m = this.versionModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/rows/import_clip`,
+          { method: 'POST', body: fd });
+        if (!r.ok) { m.error = await r.text(); return; }
+        const out = await r.json();
+        m.rows.push({
+          uid: ++this._versionRowSeq,
+          rowId: null,
+          sceneId: out.scene_id,
+          summary: file.name + ' (eget klipp)',
+          frameUrl: '',
+          missing: false,
+        });
+        this.refreshReengineer(m.reId);
+        this.notifyInfo('Klippet tillagt — det används som det är.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
     // Scenes a version owns that still need their first clip.
     versionPendingScenes(run, version) {
       return (run.scenes || []).filter(

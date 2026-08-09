@@ -529,6 +529,68 @@ def test_reanimating_a_base_scene_still_stales_the_original(monkeypatch):
     assert written["finals_stale"] is True
 
 
+def test_adding_a_scene_to_a_version_appends_and_tags_it(wired, tmp_path,
+                                                         monkeypatch):
+    """The run's own "+ egen scen" endpoint, scoped to a version: same person
+    gate, same Whisper prefill, same QC — only the ownership differs."""
+    from fastapi import BackgroundTasks
+    api, _s = _dup_setup(wired, tmp_path)
+    monkeypatch.setattr(api, "_register_scene_duplicate",
+                        lambda sid, data, name: (sid + "__dup", "/p.png"))
+    monkeypatch.setattr(runner_reengineer, "_register_frame_as_scene",
+                        lambda p: ("s_new", str(p)))
+    monkeypatch.setattr(api, "_reload_reengineer_state_after_await",
+                        lambda rid: wired["states"][rid])
+
+    class _Upload:
+        filename = "extra.png"
+
+        async def read(self, n=-1):
+            return b"img"
+
+    monkeypatch.setattr(api, "_read_capped",
+                        lambda f: asyncio.sleep(0, result=b"img"))
+    asyncio.run(api.reengineer_add_scene(
+        "re_t", BackgroundTasks(), file=_Upload(), motion_prompt="ny scen",
+        duration=5.0, whisper=False, position=-1, direct=False,
+        version_id="v_test"))
+    saved = wired["states"]["re_t"]
+    added = saved["scenes"][-1]
+    assert added[versions.OWNER_KEY] == "v_test"
+    assert [e["scene_id"] for e in versions.base_scenes(saved)] == ["s1", "s2"]
+    # It joined the version's cut...
+    assert saved["versions"]["v_test"]["rows"][-1]["scene_id"] == \
+        added["scene_id"]
+    # ...and did NOT declare the original reel out of date.
+    assert not saved.get("finals_stale")
+
+
+def test_adding_a_scene_without_a_version_still_stales_the_original(
+        wired, tmp_path, monkeypatch):
+    """The run's own path is untouched by the version parameter."""
+    from fastapi import BackgroundTasks
+    api, _s = _dup_setup(wired, tmp_path)
+    # _mark_finals_stale only fires when a final actually exists to go stale.
+    wired["states"]["re_t"]["finals"] = {
+        "cA": {"status": "done", "final_path": "/f.mp4"}}
+    monkeypatch.setattr(runner_reengineer, "_register_frame_as_scene",
+                        lambda p: ("s_new", str(p)))
+    monkeypatch.setattr(api, "_reload_reengineer_state_after_await",
+                        lambda rid: wired["states"][rid])
+    monkeypatch.setattr(api, "_read_capped",
+                        lambda f: asyncio.sleep(0, result=b"img"))
+
+    class _Upload:
+        filename = "extra.png"
+
+    asyncio.run(api.reengineer_add_scene(
+        "re_t", BackgroundTasks(), file=_Upload(), motion_prompt="ny scen",
+        duration=5.0, whisper=False, position=-1, direct=False))
+    saved = wired["states"]["re_t"]
+    assert saved["finals_stale"] is True
+    assert versions.OWNER_KEY not in saved["scenes"][-1]
+
+
 def test_a_mixed_reanimate_stales_the_original(monkeypatch):
     scenes = [{"idx": 0, "scene_id": "s1", "dirty": True},
               {"idx": 1, "scene_id": "s1__dupa", versions.OWNER_KEY: "v_test",
