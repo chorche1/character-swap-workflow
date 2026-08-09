@@ -77,10 +77,12 @@ class _FakeStore:
 def _patch_telegram(monkeypatch):
     calls = {"sends": []}
 
-    async def fake_send(source, *, chat_id, char_name, base, variant, run_id):
+    async def fake_send(source, *, chat_id, char_name, base, variant, run_id,
+                        label=None):
         calls["sends"].append({
             "file": Path(source), "chat_id": chat_id, "char_name": char_name,
             "base": base, "variant": variant, "run_id": run_id,
+            "label": label,
         })
         return {"ok": True, "message_id": len(calls["sends"]),
                 "chat_id": chat_id, "file_id": f"tg-{char_name}"}

@@ -217,7 +217,8 @@ def _run_repurpose_char(monkeypatch, tmp_path, *, auto_send, slot=_REPURPOSE_SLO
 
     from character_swap import telegram_delivery
 
-    async def fake_send(path, *, chat_id, char_name, base, variant, run_id):
+    async def fake_send(path, *, chat_id, char_name, base, variant, run_id,
+                        label=None):
         sent.append({"path": str(path), "chat_id": chat_id, "variant": variant})
         return {"ok": True, "message_id": 1}
     monkeypatch.setattr(telegram_delivery, "send_character_final", fake_send)

@@ -26,7 +26,13 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import events, push, runner_compile, telegram_delivery
+from character_swap import (
+    deliverables,
+    events,
+    push,
+    runner_compile,
+    telegram_delivery,
+)
 from character_swap.models import Job, VideoStatus
 from character_swap.state import store
 
@@ -301,8 +307,11 @@ async def _send_reengineer_bucket(
     # Only when the whole run succeeded — mirrors "alla videor blir lyckade".
     if variant == "final" and state.get("status") != "done":
         return
-    bucket = "finals" if variant == "final" else "repurposed"
-    finals = state.get(bucket) or {}
+    # One resolver decides which bucket this variant reads — the old binary
+    # `"finals" if variant == "final" else "repurposed"` filed a 🎞 version's
+    # receipts into the repurpose copy's bucket, silently.
+    finals = deliverables.char_entries(state, variant)
+    name_label = deliverables.label_for(state, variant)
     only = {c for c in (char_ids or []) if c}
     ready = {cid: e for cid, e in finals.items()
              if e.get("status") == "done" and e.get("final_path")
@@ -333,7 +342,7 @@ async def _send_reengineer_bucket(
                 sent[cid] = await telegram_delivery.send_character_final(
                     Path(entry["final_path"]), chat_id=chat_id,
                     char_name=char_name, base=base, variant=variant,
-                    run_id=re_id)
+                    run_id=re_id, label=name_label)
         except telegram_delivery.AlreadySending:
             # Manual ➤ click owns this upload right now — skip, don't
             # duplicate. It writes its own receipt.
@@ -349,19 +358,25 @@ async def _send_reengineer_bucket(
         # during the multi-minute upload; write only the receipts.
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
-            fbucket = fresh.get(bucket) or {}
+            # char_entries returns the STORED dict, so this writes through for
+            # all three deliverables — including a version's nested
+            # state["versions"][vid]["chars"].
+            fbucket = deliverables.char_entries(fresh, variant)
             changed = False
             for cid, receipt in sent.items():
                 if fbucket.get(cid):
                     fbucket[cid]["telegram"] = receipt
                     changed = True
             if changed:
-                fresh[bucket] = fbucket
                 reengineer_mod.save_state(fresh)
     await _emit(job_id, "job.auto_telegram_sent",
                 sent=list(sent), failed=failed)
-    label = ("Reengineer-finaler" if variant == "final"
-             else "Reengineer-repurpose")
+    if variant == deliverables.FINAL:
+        label = "Reengineer-finaler"
+    elif variant == deliverables.REPURPOSE:
+        label = "Reengineer-repurpose"
+    else:
+        label = f"Version {name_label or deliverables.version_id(variant)}"
     _notify_telegram_result(label, len(sent), len(failed))
 
 
@@ -377,6 +392,19 @@ async def send_reengineer_repurposed(re_id: str) -> None:
     """Send every newly built Reengineer repurpose copy."""
     await _send_reengineer_bucket(
         re_id, variant="repurpose", require_opt_in=False)
+
+
+async def send_reengineer_version(re_id: str, version_id: str) -> None:
+    """Send every newly built video of ONE 🎞 version.
+
+    `require_opt_in=False` for the same reason as the repurpose: the run-level
+    "skicka automatiskt" governs the ORIGINAL finals, chosen at upload. A
+    version carries its own ✓, checked by `runner_versions.build` before this
+    is ever called.
+    """
+    await _send_reengineer_bucket(
+        re_id, variant=deliverables.version_variant(version_id),
+        require_opt_in=False)
 
 
 def _notify_telegram_result(label: str, n_ok: int, n_fail: int) -> None:

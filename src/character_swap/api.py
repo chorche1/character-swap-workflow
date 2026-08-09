@@ -40,6 +40,9 @@ from character_swap import (
     runner_media,
     telegram_local_server,
 )
+# Pure, dependency-free cut helpers — safe at module scope. The runners that
+# consume them stay function-local imports like the rest of this file.
+from character_swap import versions as versions_mod
 from character_swap.clients import ProviderNotConfigured
 from character_swap.config import (
     TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT,
@@ -5439,10 +5442,24 @@ def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
     for cid, f in repurposed.items():
         if f.get("final_path"):
             f["final_url"] = _file_url(Path(f["final_path"]))
+    # 🎞 versions — each carries the same per-character entry shape under
+    # `chars`, so the card renders through the same component as the two
+    # buckets above. Without this loop a version arrives with no `final_url`:
+    # no player, no thumbnail (the third occurrence of that bug class).
+    for version in (out.get("versions") or {}).values():
+        for f in (version.get("chars") or {}).values():
+            if f.get("final_path"):
+                f["final_url"] = _file_url(Path(f["final_path"]))
     if state.get("job_id"):
         job = store().get_job(state["job_id"])
         if job is not None:
             out["job"] = _job_to_dict(job)
+            if out.get("versions"):
+                from character_swap import runner_versions
+                for version in out["versions"].values():
+                    # Derived, never stored — see runner_versions.is_stale.
+                    version["stale"] = runner_versions.is_stale(
+                        state, job, version)
             if slim:
                 for jc in out["job"]["characters"].values():
                     for img in jc["images"]:
@@ -6535,6 +6552,201 @@ async def reengineer_repurpose(re_id: str, background_tasks: BackgroundTasks,
     # skipped by _do_repurpose, and the drop must be visible, never silent.
     return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"],
             "excluded": gaps.get("excluded", [])}
+
+
+class VersionRowBody(BaseModel):
+    """One row of a 🎞 version's cut.
+
+    `row_id` is the STABLE key: the client keeps it across edits so a
+    duplicated row never shares an identity with the row it came from. Omitted
+    on a new row — the server mints one.
+    """
+    row_id: str | None = None
+    scene_id: str
+
+
+class VersionBody(BaseModel):
+    """Create/edit a version. Every field optional = "leave as it is"."""
+    name: str | None = None
+    rows: list[VersionRowBody] | None = None
+    settings: ReAssembleSettingsBody | None = None
+    # Both ✓ boxes ship PRE-TICKED, so None must resolve to True downstream
+    # (runner_versions.mirrored / .auto_telegram_send) — never to False.
+    mirror: bool | None = None
+    auto_telegram_send: bool | None = None
+
+
+def _load_run_for_version(re_id: str) -> tuple[dict, Job]:
+    from character_swap import reengineer as reengineer_mod
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    return state, job
+
+
+def _version_or_404(state: dict, version_id: str) -> dict:
+    version = versions_mod.get(state, version_id)
+    if version is None:
+        raise HTTPException(404, f"Version {version_id!r} not found")
+    return version
+
+
+def _merge_version_settings(version: dict, body: VersionBody) -> None:
+    """Fold the body's settings into the version, dropping unset fields.
+
+    Only keys the build actually reads are kept (ASSEMBLE_DEFAULTS), plus the
+    two ✓ flags — so an unrelated field can never ride into the editor config,
+    the same filter `runner_reengineer._repurpose_settings` applies.
+    """
+    from character_swap import runner_reengineer
+
+    stored = dict(version.get("settings") or {})
+    if body.settings is not None:
+        stored.update({
+            k: v for k, v in body.settings.model_dump().items()
+            if v is not None and k in runner_reengineer.ASSEMBLE_DEFAULTS})
+    if body.mirror is not None:
+        stored["mirror"] = bool(body.mirror)
+    if body.auto_telegram_send is not None:
+        stored["auto_telegram_send"] = bool(body.auto_telegram_send)
+    version["settings"] = stored
+
+
+@app.post("/api/reengineer/{re_id}/versions")
+async def reengineer_create_version(re_id: str,
+                                    body: VersionBody | None = None) -> dict:
+    """Create a 🎞 version — another video per character from an edited cut.
+
+    Seeded with the run's own scenes in their own order, so creating one and
+    building it straight away reproduces the original reel. The original
+    final is never read or written by any of this.
+    """
+    from character_swap import runner_reengineer
+
+    state, _job = _load_run_for_version(re_id)
+    body = body or VersionBody()
+    all_versions = dict(state.get("versions") or {})
+    version_id = versions_mod.new_version_id()
+    rows = ([{"row_id": r.row_id or versions_mod.new_row_id(),
+              "scene_id": r.scene_id} for r in body.rows]
+            if body.rows is not None
+            else versions_mod.rows_for_scenes(versions_mod.base_scenes(state)))
+    version = {
+        "id": version_id,
+        # The run itself is "version 1" in Hugo's head, so the first extra cut
+        # is "Version 2".
+        "name": (body.name or "").strip() or f"Version {len(all_versions) + 2}",
+        "created_at": runner_reengineer._now(),
+        "rows": rows,
+        "chars": {},
+        "building": False,
+    }
+    _merge_version_settings(version, body)
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version": version}
+
+
+@app.patch("/api/reengineer/{re_id}/versions/{version_id}")
+async def reengineer_patch_version(re_id: str, version_id: str,
+                                   body: VersionBody) -> dict:
+    """Rename a version, replace its cut, or change its build settings."""
+    state, _job = _load_run_for_version(re_id)
+    version = dict(_version_or_404(state, version_id))
+    if version.get("building"):
+        raise HTTPException(409, "Versionen byggs just nu — vänta tills den "
+                                 "är klar innan du ändrar den.")
+    if body.name is not None and body.name.strip():
+        version["name"] = body.name.strip()
+    if body.rows is not None:
+        # Mint a row_id for any row the client didn't carry one for, and never
+        # reuse one twice — two rows sharing an identity cross-wire in the
+        # Alpine list the moment a row is duplicated.
+        seen: set[str] = set()
+        rows = []
+        for r in body.rows:
+            rid = r.row_id or versions_mod.new_row_id()
+            while rid in seen:
+                rid = versions_mod.new_row_id()
+            seen.add(rid)
+            rows.append({"row_id": rid, "scene_id": r.scene_id})
+        version["rows"] = rows
+    _merge_version_settings(version, body)
+    all_versions = dict(state.get("versions") or {})
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version": version}
+
+
+@app.delete("/api/reengineer/{re_id}/versions/{version_id}")
+async def reengineer_delete_version(re_id: str, version_id: str) -> dict:
+    """Delete a version and the videos it built. The run is untouched."""
+    state, _job = _load_run_for_version(re_id)
+    version = _version_or_404(state, version_id)
+    if version.get("building"):
+        raise HTTPException(409, "Versionen byggs just nu — vänta tills den "
+                                 "är klar innan du tar bort den.")
+    for entry in (version.get("chars") or {}).values():
+        path = entry.get("final_path")
+        if path:
+            with contextlib.suppress(OSError):
+                Path(path).unlink()
+    all_versions = dict(state.get("versions") or {})
+    all_versions.pop(version_id, None)
+    # The whole container goes back: a reengineer state write merges and can
+    # never delete a key on its own.
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "deleted": version_id}
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/build")
+async def reengineer_build_version(re_id: str, version_id: str,
+                                   background_tasks: BackgroundTasks,
+                                   body: VersionBody | None = None) -> dict:
+    """Build this version's video for every involved character.
+
+    Refuses LOUDLY and BEFORE billing anything when the cut can't produce
+    complete videos — a clip that failed, an image never approved, a row whose
+    scene was deleted from the run. A merely edited-but-not-re-animated scene
+    does NOT block (Hugo 2026-06-24), same as "Bygg ihop igen".
+    """
+    from character_swap import runner_reengineer, runner_versions
+
+    state, job = _load_run_for_version(re_id)
+    version = dict(_version_or_404(state, version_id))
+    if (re_id, version_id) in runner_reengineer._BUILDING_VERSIONS:
+        raise HTTPException(409, "Versionen byggs redan.")
+    if body is not None:
+        _merge_version_settings(version, body)
+        all_versions = dict(state.get("versions") or {})
+        all_versions[version_id] = version
+        state["versions"] = all_versions
+    if runner_reengineer.clear_resolved_dirty(state, job):
+        pass                       # persisted by the save below
+    try:
+        stale_scenes = runner_versions.preflight(state, job, version)
+    except runner_versions.VersionBuildRefused as exc:
+        raise HTTPException(409, detail={
+            "code": "incomplete_version",
+            "message": str(exc),
+            **exc.detail,
+        }) from exc
+    # Show the spinner immediately + persist the settings in one write.
+    version["building"] = True
+    state.setdefault("versions", {})[version_id] = version
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_versions.build, re_id,
+                              version_id)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "stale_scenes": stale_scenes}
 
 
 def _assembly_refusal_message(gaps: dict) -> str:

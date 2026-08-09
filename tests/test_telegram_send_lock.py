@@ -199,7 +199,8 @@ def test_auto_send_skips_a_target_being_sent_manually(monkeypatch, tmp_path):
                         lambda *a, **k: None)
     sent: list[str] = []
 
-    async def fake_send(path, *, chat_id, char_name, base, variant, run_id):
+    async def fake_send(path, *, chat_id, char_name, base, variant, run_id,
+                        label=None):
         sent.append(char_name)
         return {"ok": True, "message_id": 2}
 

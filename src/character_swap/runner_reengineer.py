@@ -56,6 +56,7 @@ from character_swap import (
     runner_media,
     scene_people,
     swap_qc,
+    versions,
     video_edit,
 )
 from character_swap.config import settings
@@ -1420,7 +1421,7 @@ def _char_is_uninvolved(state: dict, jc: JobCharacter) -> bool:
     run (every scene is_direct → no per-character variants exist) has zero
     approvals by construction, so it is never uninvolved: the shared direct
     clips ARE that character's build."""
-    swap_scenes = [e for e in (state.get("scenes") or [])
+    swap_scenes = [e for e in versions.base_scenes(state)
                    if not e.get("is_direct")]
     if not swap_scenes:
         return False
@@ -1721,7 +1722,10 @@ def _collect_clips(
     dialogues: list[str] = []
     missing: list[str] = []
     waitable = False
-    for e in state["scenes"]:
+    # base_scenes drops every 🎞 version-owned scene, so the ORIGINAL final can
+    # never grow a scene a version added. Given a version's own cut it drops
+    # nothing — a cut's entries carry no owner tag (versions.resolve_rows).
+    for e in versions.base_scenes(state):
         if e.get("is_direct"):
             # "Direct image — no swap": ONE shared clip, identical for every
             # character. Append it here (no per-character variant lookup).
@@ -2030,7 +2034,9 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
     actual build never disagree. dirty/hard/pending all empty ⇒ a clean rebuild;
     `excluded` (never-approved characters skipped from the build, see
     _char_is_uninvolved) is a SOFT note only — it never blocks."""
-    entries = state.get("scenes") or []
+    # Same cut as _collect_clips — the "mirror exactly" invariant now holds
+    # for the scene LIST too, not just the per-scene rules.
+    entries = versions.base_scenes(state)
     dirty = []
     for e in entries:
         if not e.get("dirty"):
