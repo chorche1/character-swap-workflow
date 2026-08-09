@@ -2307,8 +2307,18 @@ def _repurpose_auto_send(state: dict) -> bool:
     return True if value is None else bool(value)
 
 
-async def repurpose(re_id: str) -> None:
-    """Build the mirror-flipped Repurpose variant of every character's final."""
+async def repurpose(re_id: str, *,
+                    char_ids: list[str] | None = None) -> None:
+    """Build the mirror-flipped Repurpose variant of every character's final.
+
+    `char_ids` narrows the build to those characters (Hugo 2026-08-10 — the
+    character picker in the Repurpose modal). None = the whole cast, exactly as
+    before. It is a per-click FILTER, never a stored setting, so
+    `_store_repurpose_settings` drops it the way it drops the assemble one.
+    It rides all the way to the Telegram send: the copies of the characters
+    this click did NOT rebuild are still sitting in the bucket, and re-posting
+    them to their channels is the same defect `send_reengineer_finals` grew a
+    `char_ids` for on 2026-07-31."""
     state = reengineer.load_state(re_id)
     if not state or not state.get("job_id"):
         return
@@ -2318,7 +2328,7 @@ async def repurpose(re_id: str) -> None:
     _REPURPOSING.add(re_id)
     built = False
     try:
-        await _do_repurpose(re_id, state)
+        await _do_repurpose(re_id, state, char_ids=char_ids)
         built = True
     except Exception as e:
         _log.exception("reengineer %s repurpose failed", re_id)
@@ -2358,12 +2368,14 @@ async def repurpose(re_id: str) -> None:
     # per character by telegram_delivery's in-flight registry instead.
     try:
         from character_swap import auto_finalize
-        await auto_finalize.send_reengineer_repurposed(re_id)
+        await auto_finalize.send_reengineer_repurposed(
+            re_id, char_ids=char_ids)
     except Exception:
         _log.exception("reengineer %s repurpose Telegram send failed", re_id)
 
 
-async def _do_repurpose(re_id: str, state: dict) -> None:
+async def _do_repurpose(re_id: str, state: dict, *,
+                        char_ids: list[str] | None = None) -> None:
     job = store().get_job(state["job_id"])
     if job is None:
         raise RuntimeError("underlying job disappeared")
@@ -2463,9 +2475,22 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
     # gap check just declared them excluded, so running them here produced a
     # spurious {status: failed, error: "no finished clips"} card on runs whose
     # assemble is clean (re_3bedfe62d3: Silas).
+    only = {c for c in (char_ids or []) if c}
     await asyncio.gather(*[_one_character(cid, jc)
                            for cid, jc in job.characters.items()
-                           if not _char_is_uninvolved(state, jc)])
+                           if not _char_is_uninvolved(state, jc)
+                           and (not only or cid in only)])
+    # A FILTERED repurpose must MERGE, never replace: `repurposed` only holds
+    # the characters this click rebuilt, so writing it whole would delete the
+    # earlier copies of everyone else from the run card — the files would still
+    # be on disk with nothing pointing at them. Read the bucket back from DISK
+    # (not the `state` snapshot taken at entry, which a concurrent write may
+    # have outdated) and let the new entries win per character. The unfiltered
+    # path keeps its exact previous behaviour: a full replacement, so a stale
+    # entry for a character no longer in the run still disappears.
+    if only:
+        existing = (reengineer.load_state(re_id) or {}).get("repurposed") or {}
+        repurposed = {**existing, **repurposed}
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
     # NOTE: the Telegram auto-send lives in repurpose(), after the

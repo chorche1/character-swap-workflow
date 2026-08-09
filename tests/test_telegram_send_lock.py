@@ -38,10 +38,10 @@ def test_repurpose_releases_build_guard_before_telegram_send(monkeypatch):
                         lambda rid: {"re_id": rid, "job_id": "j1"})
     seen: dict = {}
 
-    async def fake_build(re_id, state):
+    async def fake_build(re_id, state, **kw):
         seen["guard_during_build"] = re_id in runner_reengineer._REPURPOSING
 
-    async def fake_send(re_id):
+    async def fake_send(re_id, **kw):
         seen["guard_during_send"] = re_id in runner_reengineer._REPURPOSING
 
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)

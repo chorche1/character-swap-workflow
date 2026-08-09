@@ -3591,11 +3591,16 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
+    # Which characters this click rebuilds (Hugo 2026-08-10 — the picker in the
+    # Repurpose modal). Validated before the eligibility check below so an
+    # empty or stale pick says so, instead of falling through to that check's
+    # "finish Step 5 first", which would be plainly wrong.
+    picked = _repurpose_char_ids(body, job)
     # In-flight guard — same rationale as compile_job_videos above (the twin
     # race writes output/<job_id>/compiled/<char_id>__repurpose.mp4).
     busy = [jc.name or cid for cid, jc in job.characters.items()
             if jc.repurpose_status == "compiling"
-            and (body.char_ids is None or cid in body.char_ids)]
+            and (picked is None or cid in picked)]
     if busy:
         raise HTTPException(
             409, "Repurpose already running for: " + ", ".join(busy)
@@ -3605,11 +3610,13 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
         if (jc.approved_variant_ids or jc.approved_variant_id)
         and any(v.status == VideoStatus.DONE and v.final_video_path
                 for v in jc.videos)
-        and (body.char_ids is None or cid in body.char_ids)
+        and (picked is None or cid in picked)
     ]
     if not eligible:
         raise HTTPException(
             409,
+            ("De valda karaktärerna har ingen godkänd bild + färdig video — "
+             "välj andra karaktärer eller gör klart steg 5.") if picked else
             "No characters with both an approved variant AND a done video — "
             "finish Step 5 before repurposing.",
         )
@@ -3635,7 +3642,7 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
         pad_end_secs=body.pad_end_secs,
         enable_gap_trim=body.enable_gap_trim, gap_max_secs=body.gap_max_secs,
         voice_override=body.voice_override,
-        enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
+        enable_voice_swap=body.enable_voice_swap, char_ids=picked,
         playback_speed=body.playback_speed,
         auto_telegram_send=body.auto_telegram_send,
     )
@@ -6167,6 +6174,27 @@ def _store_repurpose_settings(state: dict,
     return True
 
 
+def _repurpose_char_ids(body, job) -> list[str] | None:
+    """Validate the Repurpose modal's character pick (Hugo 2026-08-10).
+
+    Returns None for "the whole cast" (no pick sent) or the cleaned id list.
+    Refuses loudly rather than silently building a subset the user didn't
+    choose: an EMPTY pick and an id that isn't in this run are both mistakes
+    whose silent form is a repurpose that appears to run and produces nothing.
+    """
+    if body is None or body.char_ids is None:
+        return None
+    picked = [c for c in body.char_ids if c]
+    if not picked:
+        raise HTTPException(
+            400, "Välj minst en karaktär att repurposa.")
+    unknown = [c for c in picked if c not in (job.characters or {})]
+    if unknown:
+        raise HTTPException(
+            400, "Okänd(a) karaktär(er) i körningen: " + ", ".join(unknown))
+    return picked
+
+
 class ResolvePeopleSceneBody(BaseModel):
     idx: int
     swap_person_idx: int = 0
@@ -6545,11 +6573,18 @@ async def reengineer_repurpose(re_id: str, background_tasks: BackgroundTasks,
             "dirty": gaps["dirty"], "hard": gaps["hard"],
             "pending": gaps["pending"],
         })
+    # Which characters this click rebuilds (Hugo 2026-08-10 — the picker in the
+    # Repurpose modal). None = the whole cast, as before. Refuse a pick that
+    # would build nothing LOUDLY here: _do_repurpose would otherwise gather
+    # zero characters, write an unchanged bucket and land `repurposing: False`
+    # with no card, no error and no clue why.
+    char_ids = _repurpose_char_ids(body, job)
     _store_repurpose_settings(state, body)
     # Show the spinner immediately + persist the settings in one write.
     state["repurposing"] = True
     _save_reengineer_state(state)
-    background_tasks.add_task(_run_async, runner_reengineer.repurpose, re_id)
+    background_tasks.add_task(_run_async, runner_reengineer.repurpose, re_id,
+                              char_ids=char_ids)
     # `excluded` mirrors the assemble endpoint: never-approved characters are
     # skipped by _do_repurpose, and the drop must be visible, never silent.
     return {"ok": True, "re_id": re_id, "stale_scenes": gaps["dirty"],

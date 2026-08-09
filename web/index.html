@@ -5203,6 +5203,45 @@
                 @click="repurposeModal.open = false">✕</button>
       </div>
       <div class="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+        <!-- Character picker (Hugo 2026-08-10): which characters this click
+             repurposes. Seeded with ALL ticked on every open — a per-click
+             filter, never a remembered setting, so an unticked character can't
+             carry silently into a later repurpose of the same run. Hidden for
+             Editor reels, which have no cast. Untouched characters keep the
+             mirrored copies they already have; they are NOT rebuilt and NOT
+             re-sent to Telegram. -->
+        <div x-show="repurposeModal.kind !== 'editor' && repurposeModal.chars.length"
+             class="pb-2 border-b border-neutral-200 dark:border-neutral-800">
+          <div class="flex items-center justify-between mb-1.5">
+            <span class="font-medium">Karaktärer
+              <span class="text-neutral-500 dark:text-neutral-400"
+                    x-text="`(${repurposeModal.charIds.length}/${repurposeModal.chars.length})`"></span>
+            </span>
+            <span class="flex items-center gap-2">
+              <button class="px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                      @click="repurposeSelectAllChars(true)">Alla</button>
+              <button class="px-2 py-0.5 rounded border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                      @click="repurposeSelectAllChars(false)">Ingen</button>
+            </span>
+          </div>
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1 max-h-40 overflow-y-auto">
+            <template x-for="c in repurposeModal.chars" :key="'rp-ch-'+c.id">
+              <label class="flex items-center gap-1.5 truncate"
+                     :title="c.hasRepurpose ? c.name + ' — har redan en spegelvänd kopia; den skrivs över' : c.name">
+                <input type="checkbox" class="accent-fuchsia-500 shrink-0"
+                       :checked="repurposeModal.charIds.includes(c.id)"
+                       @change="repurposeToggleChar(c.id)">
+                <span class="truncate" x-text="c.name"></span>
+                <span x-show="c.hasRepurpose" class="shrink-0 text-fuchsia-500"
+                      title="Har redan en spegelvänd kopia — den skrivs över">🔁</span>
+              </label>
+            </template>
+          </div>
+          <div x-show="!repurposeModal.charIds.length"
+               class="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+            Välj minst en karaktär.
+          </div>
+        </div>
         <div class="grid grid-cols-2 gap-2">
           <label>Caption-mall
             <select x-model="repurposeSettings.template"
@@ -5295,9 +5334,17 @@
       <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
         <button class="text-xs px-3 py-1.5 rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
                 @click="repurposeModal.open = false">Avbryt</button>
+        <!-- Zero picked characters would build nothing; the server refuses it
+             too (400), but there's no reason to let the click leave at all. -->
         <button class="text-xs px-4 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-700 text-white font-medium disabled:opacity-40"
-                :disabled="repurposeModal.busy" @click="submitRepurpose()">
-          <span x-show="!repurposeModal.busy">🔁 Repurpose (spegelvänd)</span>
+                :disabled="repurposeModal.busy || !!(repurposeModal.kind !== 'editor'
+                            && repurposeModal.chars.length && !repurposeModal.charIds.length)"
+                @click="submitRepurpose()">
+          <span x-show="!repurposeModal.busy"
+                x-text="repurposeModal.kind !== 'editor' && repurposeModal.chars.length
+                          && repurposeModal.charIds.length < repurposeModal.chars.length
+                          ? `🔁 Repurpose (${repurposeModal.charIds.length} valda)`
+                          : '🔁 Repurpose (spegelvänd)'"></span>
           <span x-show="repurposeModal.busy">Startar…</span>
         </button>
       </div>
