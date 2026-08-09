@@ -2700,6 +2700,14 @@
                     <button class="text-xs text-neutral-500 hover:text-sky-600 dark:hover:text-sky-400"
                             title="Ändra scenlistan eller inställningarna"
                             @click="openVersionModal(r, v)">✎ ändra</button>
+                    <!-- A ⧉ copy has no clip until it is rendered. Shown only
+                         while such a scene exists, so the credit spend is
+                         always an explicit click. -->
+                    <button x-show="versionPendingScenes(r, v)"
+                            class="text-xs text-amber-600 dark:text-amber-400 hover:underline"
+                            :title="'Rendera klipp för versionens nya scener (kostar ett klipp per karaktär)'"
+                            @click="animateVersionScenes(r, v)"
+                            x-text="`▶ Rendera nya klipp (${versionPendingScenes(r, v)})`"></button>
                     <button class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-40"
                             :disabled="!!v.building"
                             title="Bygg om den här versionen med de klipp som finns nu"
@@ -5399,6 +5407,10 @@
                 </div>
               </div>
               <div class="flex items-center gap-1 shrink-0">
+                <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-sky-600 disabled:opacity-30"
+                        :disabled="row.missing || versionModal.submitting"
+                        title="Duplicera scenen: samma bild, ny videoprompt → ett nytt klipp. Bilderna kopieras gratis, bara klippet kostar."
+                        @click="duplicateVersionRow(i)">⧉</button>
                 <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-sky-600 disabled:opacity-30"
                         :disabled="i === 0" title="Flytta upp"
                         @click="versionRowMove(i, -1)">▲</button>

@@ -1746,6 +1746,98 @@ function studio() {
       this.versionModal.rows.splice(index, 1);
     },
 
+    // A version must exist server-side before a row can be duplicated: the
+    // copy is a REAL scene on the job (cloned images, its own id), not a
+    // client-side row. Creating it here keeps that invisible to the user.
+    async _ensureVersionSaved() {
+      const m = this.versionModal;
+      if (m.versionId) {
+        const saved = await fetch(
+          `/api/reengineer/${m.reId}/versions/${m.versionId}`,
+          { method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this._versionBody()) });
+        if (!saved.ok) throw new Error(await saved.text());
+        return m.versionId;
+      }
+      const created = await fetch(
+        `/api/reengineer/${m.reId}/versions`,
+        { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this._versionBody()) });
+      if (!created.ok) throw new Error(await created.text());
+      const version = (await created.json()).version;
+      m.versionId = version.id;
+      // Adopt the server's row_ids so the next save doesn't mint new ones.
+      version.rows.forEach((row, i) => {
+        if (m.rows[i]) m.rows[i].rowId = row.row_id;
+      });
+      return version.id;
+    },
+
+    // ⧉ Duplicate: same image, NEW movement prompt, therefore a new clip.
+    // Zero image cost (every ready image is cloned with its approval
+    // mirrored); one video credit per character when it is rendered.
+    async duplicateVersionRow(index) {
+      const m = this.versionModal;
+      const row = m.rows[index];
+      if (!row || row.missing) return;
+      const prompt = window.prompt(
+        'Ny videoprompt för kopian (samma bild, nytt klipp):', '');
+      if (prompt === null) return;
+      if (!prompt.trim()) {
+        m.error = 'Kopian behöver en ny videoprompt — det är hela poängen.';
+        return;
+      }
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/rows/duplicate`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ row_id: row.rowId,
+                                   motion_prompt: prompt }) });
+        if (!r.ok) { m.error = await r.text(); return; }
+        const out = await r.json();
+        m.rows.splice(index + 1, 0, {
+          uid: ++this._versionRowSeq,
+          rowId: null,                 // re-read on the next open
+          sceneId: out.scene_id,
+          summary: (row.summary || '') + ' (kopia)',
+          frameUrl: row.frameUrl,
+          missing: false,
+          needsClip: true,
+        });
+        this.refreshReengineer(m.reId);
+        this.notifyInfo('Kopian skapad — rendera dess klipp innan du bygger.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Scenes a version owns that still need their first clip.
+    versionPendingScenes(run, version) {
+      return (run.scenes || []).filter(
+        s => s.owner_version === version.id && s.dirty).length;
+    },
+
+    async animateVersionScenes(run, version) {
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}/animate`,
+          { method: 'POST' });
+        if (!r.ok) { this.notify('error', await r.text()); return; }
+        this.notifyInfo('Renderar versionens nya klipp…');
+        this._startReengineerPolling();
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
+      }
+    },
+
     _versionBody() {
       const m = this.versionModal;
       return {

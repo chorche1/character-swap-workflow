@@ -2820,18 +2820,26 @@ def _finalize_reanimate(re_id: str, *, clear_dirty: bool,
                         error: str | None = None) -> None:
     state = reengineer.load_state(re_id) or {"re_id": re_id}
     entries = state.get("scenes") or []
+    touched = [i for i in (state.get("reanimate_idxs") or [])
+               if 0 <= i < len(entries)]
     if clear_dirty:
-        for i in state.get("reanimate_idxs") or []:
-            if 0 <= i < len(entries):
-                entries[i].pop("dirty", None)
-                entries[i].pop("dirty_at", None)
-    _update(re_id,
-            scenes=entries,
-            finals_stale=True,
-            status=state.get("resume_status") or "done",
-            error=error,
-            resume_status=None, reanimate_idxs=None,
-            reanimate_clear_dirty=None)
+        for i in touched:
+            entries[i].pop("dirty", None)
+            entries[i].pop("dirty_at", None)
+    # `finals_stale` says the ORIGINAL final is out of date. A re-animate that
+    # only touched 🎞 version-owned scenes changed nothing the original reel
+    # is built from, so claiming otherwise would put a "bygg ihop igen" prompt
+    # on a reel that is perfectly current. The read is UNFILTERED on purpose:
+    # this function writes the whole `scenes` list back, and a filtered copy
+    # would delete the other cut's scenes.
+    changes: dict = {"scenes": entries,
+                     "status": state.get("resume_status") or "done",
+                     "error": error,
+                     "resume_status": None, "reanimate_idxs": None,
+                     "reanimate_clear_dirty": None}
+    if any(not entries[i].get(versions.OWNER_KEY) for i in touched) or not touched:
+        changes["finals_stale"] = True
+    _update(re_id, **changes)
 
 
 async def _resume_reanimating(re_id: str, state: dict) -> None:

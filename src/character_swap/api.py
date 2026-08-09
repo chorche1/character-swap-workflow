@@ -6713,6 +6713,132 @@ async def reengineer_delete_version(re_id: str, version_id: str) -> dict:
     return {"ok": True, "re_id": re_id, "deleted": version_id}
 
 
+class VersionDuplicateBody(BaseModel):
+    """⧉ Duplicate one row of a version's cut.
+
+    Hugo's definition (2026-08-10): the SAME scene image, a NEW movement
+    prompt, therefore a NEW clip. Zero image cost — every character's ready
+    image is cloned with its approval mirrored — and one video credit each.
+    """
+    row_id: str
+    motion_prompt: str
+    secs: int | None = Field(default=None, ge=3, le=15)
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/rows/duplicate")
+async def reengineer_version_duplicate_row(
+        re_id: str, version_id: str, body: VersionDuplicateBody) -> dict:
+    """Duplicate a scene INTO a version: same image, new prompt, new clip.
+
+    The copy is a real scene on the job (so generation, QC and every per-clip
+    tool work on it untouched) but is tagged as this version's, which makes it
+    invisible to the original reel's build. It is APPENDED to state["scenes"],
+    never inserted: base entries then keep contiguous indices, so the run
+    card's scene numbering and every stored idx are exactly as they were.
+    """
+    from character_swap import runner_reengineer
+
+    state = _editable_reengineer_state(re_id)
+    version = dict(_version_or_404(state, version_id))
+    rows = list(version.get("rows") or [])
+    position = next((i for i, r in enumerate(rows)
+                     if r.get("row_id") == body.row_id), None)
+    if position is None:
+        raise HTTPException(404, f"Row {body.row_id!r} not in this version")
+    prompt = (body.motion_prompt or "").strip()
+    if not prompt:
+        raise HTTPException(422, "Duplicerade scener behöver en ny videoprompt "
+                                 "— det är hela poängen med kopian.")
+    source_sid = rows[position]["scene_id"]
+    entries = state.get("scenes") or []
+    source = next((e for e in entries if e.get("scene_id") == source_sid), None)
+    if source is None:
+        raise HTTPException(409, "Scenen finns inte kvar i körningen.")
+
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    new_sid = _apply_scene_duplicate(job, source_sid)
+    s.update_job(job)
+    # The strip resolves thumbnails via store().get_scene — register the new id
+    # against the SAME file as the source (no copy), exactly as the edit-mode
+    # duplicate does. Deriving the path by hand is what broke every variant of
+    # a .webp or already-duplicated scene (2026-08-08).
+    src_scene = s.get_scene(source_sid)
+    filename = (src_scene.filename if src_scene
+                else Path(job.scene_image_paths[
+                    job.scene_ids.index(new_sid)]).name)
+    if s.get_scene(new_sid) is None:
+        s.add_scene(SceneAsset(
+            scene_id=new_sid, filename=filename,
+            original_name=f"{source.get('summary', new_sid)} (version)"))
+
+    copy = dict(source)
+    copy.update({
+        "scene_id": new_sid,
+        "summary": f"{source.get('summary', '')} (kopia)".strip(),
+        "motion_prompt": prompt,
+        "dirty": True,
+        "dirty_at": runner_reengineer._now(),
+        "source": "version_duplicate",
+        versions_mod.OWNER_KEY: version_id,
+    })
+    copy.pop("transcribing", None)
+    if body.secs is not None:
+        copy["kling_secs"] = int(body.secs)
+    entries.append(copy)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    # Push the new prompt/length into the job so the clip actually renders with
+    # it — retry_one_video / generate_more_videos resolve off job.movement_prompts.
+    runner_reengineer._sync_movement_from_state(job, state, [len(entries) - 1])
+    s.update_job(job)
+
+    rows.insert(position + 1, {"row_id": versions_mod.new_row_id(),
+                               "scene_id": new_sid})
+    version["rows"] = rows
+    all_versions = dict(state.get("versions") or {})
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    # Deliberately NOT _mark_finals_stale: the copy is invisible to the
+    # original reel, so nothing about that reel changed.
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "scene_id": new_sid, "idx": len(entries) - 1}
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/animate")
+async def reengineer_version_animate(re_id: str, version_id: str,
+                                     background_tasks: BackgroundTasks) -> dict:
+    """Render the clips for this version's OWN scenes (its ⧉ duplicates).
+
+    Delegates to the same `reanimate` engine the edit-mode "▶ Animera om
+    ändrade" uses — a scene with no clip yet gets its first there. The idxs are
+    computed SERVER-side so the client never has to know how a version's
+    scenes are stored.
+    """
+    from character_swap import runner_reengineer
+
+    state = _editable_reengineer_state(
+        re_id, statuses={"awaiting_assembly", "done", "partial_success",
+                         "failed"})
+    _version_or_404(state, version_id)
+    entries = state.get("scenes") or []
+    idxs = [i for i, e in enumerate(entries)
+            if e.get(versions_mod.OWNER_KEY) == version_id and e.get("dirty")]
+    if not idxs:
+        raise HTTPException(400, "Inga nya scener att rendera i den här "
+                                 "versionen.")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
+                              re_id, idxs)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "idxs": idxs}
+
+
 @app.post("/api/reengineer/{re_id}/versions/{version_id}/build")
 async def reengineer_build_version(re_id: str, version_id: str,
                                    background_tasks: BackgroundTasks,

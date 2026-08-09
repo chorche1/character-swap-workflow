@@ -380,3 +380,158 @@ def test_an_unbuilt_version_is_not_stale(tmp_path):
     state = _state()
     assert runner_versions.is_stale(
         state, job, state["versions"]["v_test"]) is False
+
+
+# ------------------------------------------------- 7. ⧉ duplicate into a version
+
+@pytest.fixture
+def wired(monkeypatch, tmp_path):
+    """Fake store + state IO for the api-level endpoints."""
+    from character_swap import api, reengineer as reengineer_mod
+    box = {"job": None, "states": {}, "scenes": {}}
+
+    class _S:
+        def get_job(self, jid):
+            return box["job"] if jid == "j1" else None
+
+        def update_job(self, j):
+            box["job"] = j
+
+        def get_scene(self, sid):
+            return box["scenes"].get(sid)
+
+        def add_scene(self, scene):
+            box["scenes"][scene.scene_id] = scene
+
+        def get_character(self, cid):
+            return None
+
+    monkeypatch.setattr(api, "store", lambda: _S())
+    monkeypatch.setattr(runner_reengineer, "store", lambda: _S())
+
+    def load_state(re_id):
+        s = box["states"].get(re_id)
+        return dict(s) if s else None
+
+    def save_state(s):
+        box["states"][s["re_id"]] = dict(s)
+
+    monkeypatch.setattr(reengineer_mod, "load_state", load_state)
+    monkeypatch.setattr(reengineer_mod, "save_state", save_state)
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state", load_state)
+    monkeypatch.setattr(runner_reengineer.reengineer, "save_state", save_state)
+    box["api"] = api
+    return box
+
+
+def _dup_setup(wired, tmp_path):
+    job, _paths = _job(tmp_path)
+    job.movement_prompts = {"s1": "one", "s2": "two"}
+    job.durations_by_scene = {"s1": 5, "s2": 5}
+    wired["job"] = job
+    state = _state()
+    state["scenes"][0]["summary"] = "one"
+    wired["states"]["re_t"] = state
+    return wired["api"], state
+
+
+def test_duplicating_a_row_appends_rather_than_inserts(wired, tmp_path):
+    """Base entries must keep CONTIGUOUS indices: the run card's scene
+    numbering and every stored idx depend on the raw list position."""
+    api, _state_in = _dup_setup(wired, tmp_path)
+    out = asyncio.run(api.reengineer_version_duplicate_row(
+        "re_t", "v_test",
+        api.VersionDuplicateBody(row_id="r1", motion_prompt="ny replik")))
+    saved = wired["states"]["re_t"]
+    scenes = saved["scenes"]
+    assert len(scenes) == 3
+    assert out["idx"] == 2                      # appended, not inserted at 1
+    assert [e["scene_id"] for e in scenes[:2]] == ["s1", "s2"]
+    assert [e["idx"] for e in scenes] == [0, 1, 2]
+    copy = scenes[2]
+    assert copy[versions.OWNER_KEY] == "v_test"
+    assert copy["motion_prompt"] == "ny replik"
+    assert copy["dirty"] is True                # needs its first clip
+    assert copy["scene_id"].startswith("s1__dup")
+
+
+def test_the_duplicate_is_invisible_to_the_original_reel(wired, tmp_path):
+    api, _s = _dup_setup(wired, tmp_path)
+    asyncio.run(api.reengineer_version_duplicate_row(
+        "re_t", "v_test",
+        api.VersionDuplicateBody(row_id="r1", motion_prompt="ny replik")))
+    saved = wired["states"]["re_t"]
+    assert [e["scene_id"] for e in versions.base_scenes(saved)] == ["s1", "s2"]
+    # ...and the original final is NOT marked out of date by a copy it will
+    # never contain.
+    assert not saved.get("finals_stale")
+
+
+def test_the_duplicate_lands_next_to_its_source_in_the_cut(wired, tmp_path):
+    api, _s = _dup_setup(wired, tmp_path)
+    asyncio.run(api.reengineer_version_duplicate_row(
+        "re_t", "v_test",
+        api.VersionDuplicateBody(row_id="r1", motion_prompt="ny replik")))
+    saved = wired["states"]["re_t"]
+    cut = versions.version_cut(saved, saved["versions"]["v_test"])
+    ids = [e["scene_id"] for e in cut["scenes"]]
+    assert ids[0] == "s1" and ids[1].startswith("s1__dup") and ids[2] == "s2"
+
+
+def test_the_new_prompt_reaches_the_job(wired, tmp_path):
+    """retry_one_video / generate_more_videos resolve off job.movement_prompts —
+    without the sync the copy would render the SOURCE's line."""
+    api, _s = _dup_setup(wired, tmp_path)
+    out = asyncio.run(api.reengineer_version_duplicate_row(
+        "re_t", "v_test",
+        api.VersionDuplicateBody(row_id="r1", motion_prompt="ny replik")))
+    assert "ny replik" in wired["job"].movement_prompts[out["scene_id"]]
+
+
+def test_a_duplicate_without_a_new_prompt_is_refused(wired, tmp_path):
+    api, _s = _dup_setup(wired, tmp_path)
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(api.reengineer_version_duplicate_row(
+            "re_t", "v_test",
+            api.VersionDuplicateBody(row_id="r1", motion_prompt="   ")))
+    assert err.value.status_code == 422
+
+
+# ------------------------------------- 8. re-animating a version scene
+
+def _finalize(monkeypatch, scenes, touched):
+    state = {"re_id": "re_t", "scenes": scenes, "reanimate_idxs": touched}
+    monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
+                        lambda rid: state)
+    written: dict = {}
+    monkeypatch.setattr(runner_reengineer, "_update",
+                        lambda rid, **kw: written.update(kw))
+    runner_reengineer._finalize_reanimate("re_t", clear_dirty=True)
+    return written
+
+
+def test_reanimating_only_version_scenes_leaves_the_original_current(
+        monkeypatch):
+    """finals_stale claims the ORIGINAL reel is out of date. A clip rendered
+    for a version changed nothing that reel is built from."""
+    scenes = [{"idx": 0, "scene_id": "s1"},
+              {"idx": 1, "scene_id": "s1__dupa", versions.OWNER_KEY: "v_test",
+               "dirty": True}]
+    written = _finalize(monkeypatch, scenes, [1])
+    assert "finals_stale" not in written
+
+
+def test_reanimating_a_base_scene_still_stales_the_original(monkeypatch):
+    scenes = [{"idx": 0, "scene_id": "s1", "dirty": True},
+              {"idx": 1, "scene_id": "s1__dupa", versions.OWNER_KEY: "v_test"}]
+    written = _finalize(monkeypatch, scenes, [0])
+    assert written["finals_stale"] is True
+
+
+def test_a_mixed_reanimate_stales_the_original(monkeypatch):
+    scenes = [{"idx": 0, "scene_id": "s1", "dirty": True},
+              {"idx": 1, "scene_id": "s1__dupa", versions.OWNER_KEY: "v_test",
+               "dirty": True}]
+    written = _finalize(monkeypatch, scenes, [0, 1])
+    assert written["finals_stale"] is True
