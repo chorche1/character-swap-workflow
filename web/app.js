@@ -153,6 +153,27 @@ function studio() {
       autoTelegramSend: true,
       error: '',
     },
+    // 🎞 Ny version (Hugo 2026-08-10): another video per character from an
+    // EDITED cut of the same run — like 🔁 repurpose, but the scene list is
+    // yours. Its own state object for the same reason rerunModal has one.
+    versionModal: {
+      open: false,
+      submitting: false,
+      reId: null,
+      runName: '',
+      versionId: null,                // null = creating a new one
+      name: '',
+      rows: [],                       // deep copies; the 5s poll splices the
+                                      // run object and would revert live edits
+      mirror: true,                   // both ✓ ship PRE-TICKED
+      autoTelegramSend: true,
+      error: '',
+    },
+    // Row identity must be UNIQUE and STABLE. Keying an x-for on the array
+    // index breaks the moment a row can be duplicated — two rows share a key,
+    // Alpine reuses the DOM node, and the rows cross-wire. Same monotonic
+    // counter `swapFromImages` uses.
+    _versionRowSeq: 0,
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     // "Använd bild N för alla" (Hugo 2026-08-08): last applied bulk pick, per
     // form ('swap' | 'reengineer'). Text only — the actual picks live in each
@@ -1656,6 +1677,167 @@ function studio() {
         m.error = (e && e.message) ? e.message : String(e);
       } finally {
         m.submitting = false;
+      }
+    },
+
+    // ------------------------------------------------------ 🎞 versions
+
+    // Gated on n_scenes, NOT run.scenes: the light history row omits `scenes`
+    // and only the newest 8 runs get hydrated, so gating on the array hides
+    // the button on every older finished run — the exact bug that hit the
+    // approval gate, the multi-person chooser and ↻ Kör om in turn.
+    reCanVersion(run) {
+      if (!run) return false;
+      if ((run.scenes || []).length) return true;
+      return run.n_scenes === undefined || run.n_scenes === null
+        ? true : !!run.n_scenes;
+    },
+
+    reVersionList(run) {
+      return Object.values((run && run.versions) || {})
+        .sort((a, b) => String(a.created_at || '')
+          .localeCompare(String(b.created_at || '')));
+    },
+
+    openVersionModal(run, version = null) {
+      const m = this.versionModal;
+      m.open = true;
+      m.error = '';
+      m.submitting = false;
+      m.reId = run.re_id;
+      m.runName = run.name || run.title || run.re_id;
+      m.versionId = version ? version.id : null;
+      m.name = version ? (version.name || '') : '';
+      const settings = (version && version.settings) || {};
+      // A MISSING value means ticked — an unticked box is the opt-in thing.
+      m.mirror = settings.mirror === undefined ? true : !!settings.mirror;
+      m.autoTelegramSend = settings.auto_telegram_send === undefined
+        ? true : !!settings.auto_telegram_send;
+      const scenes = (run.scenes || []).filter(s => !s.owner_version);
+      const byId = {};
+      for (const s of scenes) if (!(s.scene_id in byId)) byId[s.scene_id] = s;
+      const rows = version
+        ? (version.rows || [])
+        : scenes.map(s => ({ row_id: null, scene_id: s.scene_id }));
+      m.rows = rows.map(row => {
+        const scene = byId[row.scene_id] || {};
+        return {
+          uid: ++this._versionRowSeq,
+          rowId: row.row_id || null,
+          sceneId: row.scene_id,
+          summary: scene.summary || '',
+          frameUrl: scene.frame_url || '',
+          // A row whose scene is gone is shown, never silently dropped — the
+          // server refuses the build on it and names the position.
+          missing: !(row.scene_id in byId),
+        };
+      });
+    },
+
+    versionRowMove(index, delta) {
+      const rows = this.versionModal.rows;
+      const target = index + delta;
+      if (target < 0 || target >= rows.length) return;
+      const [row] = rows.splice(index, 1);
+      rows.splice(target, 0, row);
+    },
+
+    versionRowRemove(index) {
+      this.versionModal.rows.splice(index, 1);
+    },
+
+    _versionBody() {
+      const m = this.versionModal;
+      return {
+        name: (m.name || '').trim() || null,
+        rows: m.rows.map(r => ({ row_id: r.rowId, scene_id: r.sceneId })),
+        mirror: !!m.mirror,
+        auto_telegram_send: !!m.autoTelegramSend,
+      };
+    },
+
+    async saveAndBuildVersion() {
+      const m = this.versionModal;
+      if (!m.rows.length) { m.error = 'Versionen behöver minst en scen.'; return; }
+      m.submitting = true;
+      m.error = '';
+      try {
+        let versionId = m.versionId;
+        if (!versionId) {
+          const created = await fetch(
+            `/api/reengineer/${m.reId}/versions`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this._versionBody()) });
+          if (!created.ok) { m.error = await created.text(); return; }
+          versionId = (await created.json()).version.id;
+        } else {
+          const saved = await fetch(
+            `/api/reengineer/${m.reId}/versions/${versionId}`,
+            { method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this._versionBody()) });
+          if (!saved.ok) { m.error = await saved.text(); return; }
+        }
+        const built = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/build`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}) });
+        if (!built.ok) {
+          // The 409 names the scene to fix — surface it verbatim rather than
+          // a generic failure.
+          let detail = await built.text();
+          try {
+            const parsed = JSON.parse(detail);
+            detail = parsed?.detail?.message || parsed?.detail || detail;
+          } catch (_) { /* plain text */ }
+          m.error = detail;
+          return;
+        }
+        this.notifyInfo('Versionen byggs…');
+        this._startReengineerPolling();
+        m.open = false;
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    async rebuildVersion(run, version) {
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}/build`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}) });
+        if (!r.ok) {
+          let detail = await r.text();
+          try {
+            const parsed = JSON.parse(detail);
+            detail = parsed?.detail?.message || parsed?.detail || detail;
+          } catch (_) { /* plain text */ }
+          this.notify('error', detail);
+          return;
+        }
+        this.notifyInfo('Versionen byggs om…');
+        this._startReengineerPolling();
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
+      }
+    },
+
+    async deleteVersion(run, version) {
+      if (!confirm(`Ta bort "${version.name}" och dess videor?`)) return;
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}`,
+          { method: 'DELETE' });
+        if (!r.ok) { this.notify('error', await r.text()); return; }
+        this.refreshReengineer(run.re_id);
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
       }
     },
 
@@ -4550,8 +4732,23 @@ function studio() {
       ).length;
     },
     // Count of ready finals/repurposes in a Reengineer run object.
+    // Which bucket a variant reads — the client-side mirror of
+    // deliverables.char_entries. The old form was a binary
+    // `variant === 'final' ? r.finals : r.repurposed`, which counts the
+    // REPURPOSE copies for a 🎞 version and would offer "skicka alla" for
+    // videos that don't exist.
+    reVariantEntries(r, variant) {
+      if (!r) return {};
+      if (variant === 'final') return r.finals || {};
+      if (variant === 'repurpose') return r.repurposed || {};
+      if (String(variant || '').startsWith('version:')) {
+        const id = String(variant).slice('version:'.length);
+        return ((r.versions || {})[id] || {}).chars || {};
+      }
+      return {};
+    },
     telegramReReadyCount(r, variant) {
-      const m = (variant === 'final' ? r.finals : r.repurposed) || {};
+      const m = this.reVariantEntries(r, variant);
       return Object.values(m).filter(f => f.status === 'done' && f.final_url).length;
     },
     async telegramSendAll(url, idPrefix, variant) {

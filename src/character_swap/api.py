@@ -6645,6 +6645,12 @@ async def reengineer_create_version(re_id: str,
         "rows": rows,
         "chars": {},
         "building": False,
+        # Seeded from the run's OWN assemble settings, not the bare defaults:
+        # a version is another cut of this reel, so it should come out looking
+        # like the reel — same template, same voice, same pacing.
+        "settings": {k: v for k, v in (state.get("assemble_settings")
+                                       or {}).items()
+                     if k in runner_reengineer.ASSEMBLE_DEFAULTS},
     }
     _merge_version_settings(version, body)
     all_versions[version_id] = version
