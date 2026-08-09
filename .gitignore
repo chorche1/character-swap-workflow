@@ -40,3 +40,6 @@ eval_out/
 state.sqlite3
 state.sqlite3-shm
 state.sqlite3-wal
+db.sqlite3
+db.sqlite3-shm
+db.sqlite3-wal
