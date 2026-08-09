@@ -412,7 +412,13 @@ function studio() {
     // default for EVERY repurpose (Editor + Swap + Reengineer) — plus the
     // per-kind VOICE, plus a prior repurpose of the same run (which wins).
     // Mirroring is ALWAYS applied.
-    repurposeModal: { open: false, kind: '', id: '', busy: false },
+    // `chars` = [{id, name, hasRepurpose}] for the character picker (Swap +
+    // Reengineer; Editor reels have no cast). `charIds` = the ticked subset,
+    // seeded with ALL of them on every open — Hugo 2026-08-10 chose a per-click
+    // filter over a remembered one, so an unticked character can never carry
+    // silently into a later repurpose of the same run.
+    repurposeModal: { open: false, kind: '', id: '', busy: false,
+                      chars: [], charIds: [] },
     repurposeSettings: {},
     // Hugo's repurpose preset (2026-07-19): the NON-VOICE defaults every
     // repurpose modal opens with, regardless of what the source run was built
@@ -2757,8 +2763,11 @@ function studio() {
           ...preset,
           ...this._mapStoredToReAsm(rs),
         };
+        // An Editor reel has no cast — but the keys must still EXIST, since
+        // _repurposeBody() reads them on every kind.
         this.repurposeModal = { open: true, kind: 'editor',
-                                id: run.gen_id, busy: false };
+                                id: run.gen_id, busy: false,
+                                chars: [], charIds: [] };
         this.repurposeSettings = seed;
         return;
       }
@@ -2769,8 +2778,10 @@ function studio() {
                  voiceOverride: base.voiceOverride || '',
                  ...preset,
                  ...this._mapStoredToReAsm(run.repurpose_settings) };
+        const chars = this._reRepurposeChars(run);
         this.repurposeModal = { open: true, kind: 'reengineer',
-                                id: run.re_id, busy: false };
+                                id: run.re_id, busy: false,
+                                chars, charIds: chars.map(c => c.id) };
       } else {
         // Keep the job's per-character preset voice; everything else = preset.
         const base = this.compileFor(this.job);
@@ -2778,10 +2789,52 @@ function studio() {
                  voiceOverride: base.voiceOverride || '',
                  ...preset,
                  ...this._mapStoredToReAsm(this.job && this.job.repurpose_settings) };
+        const chars = Object.entries(this.compilableCharacters()).map(
+          ([cid, jc]) => ({ id: cid, name: jc.name || cid,
+                            hasRepurpose: jc.repurpose_status === 'done' }));
         this.repurposeModal = { open: true, kind: 'swap',
-                                id: this.job && this.job.job_id, busy: false };
+                                id: this.job && this.job.job_id, busy: false,
+                                chars, charIds: chars.map(c => c.id) };
       }
       this.repurposeSettings = seed;
+    },
+
+    // The cast offered in the Repurpose modal for a Reengineer / Swap-from-
+    // images run. Built from the run's OWN finals so the picker lists exactly
+    // the characters whose cards sit above it, falling back to the character-
+    // name map for a run whose finals aren't hydrated yet. Both `job.characters`
+    // (detail view) and `char_names` (light history row) are consulted for the
+    // name — gating on only one of them is what has repeatedly hidden controls
+    // on older runs (reCanRerun, the approval gate, the person chooser).
+    _reRepurposeChars(run) {
+      if (!run) return [];
+      const names = {};
+      for (const [cid, jc] of Object.entries(run.job?.characters || {})) {
+        names[cid] = jc.name || cid;
+      }
+      for (const [cid, n] of Object.entries(run.char_names || {})) {
+        if (!names[cid]) names[cid] = n || cid;
+      }
+      const finals = run.finals || {};
+      const ids = Object.keys(finals).length
+        ? Object.keys(finals) : Object.keys(names);
+      const repurposed = run.repurposed || {};
+      return ids.map(cid => ({
+        id: cid,
+        name: names[cid] || cid,
+        hasRepurpose: (repurposed[cid] || {}).status === 'done',
+      }));
+    },
+
+    repurposeToggleChar(cid) {
+      const m = this.repurposeModal;
+      m.charIds = m.charIds.includes(cid)
+        ? m.charIds.filter(c => c !== cid) : [...m.charIds, cid];
+    },
+
+    repurposeSelectAllChars(all) {
+      this.repurposeModal.charIds =
+        all ? this.repurposeModal.chars.map(c => c.id) : [];
     },
 
     // Build the POST body from the modal's settings (mirroring is server-side,
@@ -2789,7 +2842,17 @@ function studio() {
     // RepurposeVideosBody both take these fields incl. playback_speed).
     _repurposeBody() {
       const s = this.repurposeSettings || {};
+      const m = this.repurposeModal;
+      // Character pick (Hugo 2026-08-10) — Swap + Reengineer only; an Editor
+      // reel has no cast, and its endpoint's body model doesn't carry the
+      // field. Sent only when it's a real SUBSET: the whole cast is exactly
+      // what omitting it means server-side, so an unfiltered click keeps
+      // hitting the same code path it always did.
+      const charIds = (m.kind !== 'editor' && m.chars.length
+                       && m.charIds.length < m.chars.length)
+        ? [...m.charIds] : null;
       return {
+        ...(charIds ? { char_ids: charIds } : {}),
         template: s.template,
         overrides: { size: Math.min(200, Math.max(24, Number(s.captionSize) || 56)) },
         enable_trim: !!s.enableTrim,
@@ -2858,8 +2921,14 @@ function studio() {
               + 'befintliga (äldre) klipp används.');
           }
           // Never-approved characters are skipped from the repurpose, exactly
-          // like the assemble — the drop is noted, never silent.
-          const excluded = (data && data.excluded) || [];
+          // like the assemble — the drop is noted, never silent. `excluded` is
+          // computed run-wide, so narrow it to the characters this click
+          // actually asked for: naming one he deliberately left unticked reads
+          // as a problem with the build he just started.
+          let excluded = (data && data.excluded) || [];
+          if (body.char_ids) {
+            excluded = excluded.filter(c => body.char_ids.includes(c.char_id));
+          }
           if (excluded.length) {
             const names = excluded.map(c => c.name).join(', ');
             this.notifyInfo('Hoppar över ' + excluded.length + ' karaktär(er) utan '
@@ -2872,7 +2941,10 @@ function studio() {
         this.repurposeModal.open = false;
         // Name the delivery choice in the toast — an unticked auto-send must
         // never look like a failed send later on.
-        this.notifyInfo('Repurpose startad — spegelvänder reel:en… '
+        this.notifyInfo('Repurpose startad — '
+          + (body.char_ids
+              ? `spegelvänder ${body.char_ids.length} karaktär(er)… `
+              : 'spegelvänder reel:en… ')
           + (body.auto_telegram_send
               ? 'Skickas till Telegram när den är klar.'
               : 'Skickas INTE automatiskt — använd ➤ Telegram på kortet.'));

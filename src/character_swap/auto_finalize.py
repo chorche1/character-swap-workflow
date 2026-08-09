@@ -390,10 +390,17 @@ async def send_reengineer_finals(re_id: str,
         re_id, variant="final", require_opt_in=True, char_ids=char_ids)
 
 
-async def send_reengineer_repurposed(re_id: str) -> None:
-    """Send every newly built Reengineer repurpose copy."""
+async def send_reengineer_repurposed(
+        re_id: str, *, char_ids: list[str] | None = None) -> None:
+    """Send every newly built Reengineer repurpose copy.
+
+    `char_ids` narrows the send to the characters the repurpose actually
+    rebuilt (Hugo 2026-08-10 — the modal's character picker). Load-bearing: a
+    filtered repurpose MERGES its results into the bucket, so without this the
+    untouched copies of every other character would be re-posted to their
+    channels on each partial run."""
     await _send_reengineer_bucket(
-        re_id, variant="repurpose", require_opt_in=False)
+        re_id, variant="repurpose", require_opt_in=False, char_ids=char_ids)
 
 
 async def send_reengineer_version(re_id: str, version_id: str) -> None:

@@ -73,14 +73,14 @@ def _wire_reengineer(monkeypatch, state):
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
                         lambda rid: dict(state))
 
-    async def fake_build(re_id, st):
+    async def fake_build(re_id, st, **kw):
         return None
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
     monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
 
     sent: list[str] = []
 
-    async def fake_send(re_id):
+    async def fake_send(re_id, **kw):
         sent.append(re_id)
     monkeypatch.setattr(auto_finalize, "send_reengineer_repurposed", fake_send)
     return sent
@@ -118,11 +118,11 @@ def test_reengineer_repurpose_still_builds_when_send_is_off(monkeypatch):
     monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
     built: list[str] = []
 
-    async def fake_build(re_id, st):
+    async def fake_build(re_id, st, **kw):
         built.append(re_id)
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
 
-    async def boom(re_id):
+    async def boom(re_id, **kw):
         raise AssertionError("delivery must not run when the box is unticked")
     monkeypatch.setattr(auto_finalize, "send_reengineer_repurposed", boom)
 
@@ -138,11 +138,11 @@ def test_reengineer_failed_build_never_sends(monkeypatch):
                             repurpose_settings={"auto_telegram_send": True}))
     monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
 
-    async def fake_build(re_id, st):
+    async def fake_build(re_id, st, **kw):
         raise RuntimeError("boom")
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
 
-    async def boom(re_id):
+    async def boom(re_id, **kw):
         raise AssertionError("a failed build must not deliver")
     monkeypatch.setattr(auto_finalize, "send_reengineer_repurposed", boom)
 
