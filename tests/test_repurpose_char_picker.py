@@ -74,7 +74,7 @@ def _job(*char_ids: str) -> Job:
 # --- 1. the filter reaches the build ---------------------------------------
 
 
-def _run_do_repurpose(monkeypatch, state, *, char_ids, tmp_path):
+def _run_do_repurpose(monkeypatch, state, *, char_ids, tmp_path, copies=None):
     """Run the real `_do_repurpose` with the per-character editor pipeline
     stubbed out, so only the SELECTION and the bucket write are under test.
     Returns (characters actually built, the kwargs handed to `_update`)."""
@@ -106,8 +106,11 @@ def _run_do_repurpose(monkeypatch, state, *, char_ids, tmp_path):
                         fake_pipeline)
     monkeypatch.setattr(runner_reengineer.runner_compile,
                         "_resolve_compile_voice", lambda *a, **k: None)
-    monkeypatch.setattr(runner_reengineer.shutil, "copyfile",
-                        lambda src, dst: None)
+    # `copies` lets a caller inspect which files the build actually wrote.
+    monkeypatch.setattr(
+        runner_reengineer.shutil, "copyfile",
+        lambda src, dst: None if copies is None
+        else copies.append((str(src), str(dst))))
 
     asyncio.run(runner_reengineer._do_repurpose("re_t", dict(state),
                                                 char_ids=char_ids))
@@ -187,16 +190,59 @@ def test_unfiltered_build_still_replaces_the_bucket(monkeypatch, tmp_path):
     assert "gone" not in written["repurposed"]
 
 
+# --- 2b. the ORIGINAL finals are never touched ------------------------------
+#
+# Hugo 2026-08-10: "de nya repurpose videorna [ska inte] ersätta några icke
+# repurpose videor". A repurpose writes a SEPARATE bucket and a SEPARATE file;
+# nothing asserted either, so a future refactor could quietly make the mirrored
+# copy overwrite the real final — and the only symptom would be an upside-down
+# reel where the original used to be.
+
+
+def test_repurpose_leaves_the_finals_bucket_alone(monkeypatch, tmp_path):
+    finals = {"c1": {"status": "done", "final_path": "/tmp/final_c1.mp4"},
+              "c2": {"status": "done", "final_path": "/tmp/final_c2.mp4"}}
+    _, written = _run_do_repurpose(
+        monkeypatch, _state(finals=dict(finals)), char_ids=["c2"],
+        tmp_path=tmp_path)
+    # `_update` is given ONLY the repurpose keys — `finals` is never written,
+    # so the stored originals cannot be replaced or reordered.
+    assert "finals" not in written
+    assert set(written) == {"repurposed", "repurposing", "repurposed_at"}
+
+
+def test_repurpose_writes_a_separate_file_from_the_final(monkeypatch,
+                                                         tmp_path):
+    """`repurpose_<cid>.mp4` vs `final_<cid>.mp4` in the SAME run dir — one
+    shared name would make every mirrored copy destroy its own original."""
+    copies: list[tuple[str, str]] = []
+    _run_do_repurpose(monkeypatch, _state(), char_ids=["c2"],
+                      tmp_path=tmp_path, copies=copies)
+    dests = [Path(d).name for _, d in copies]
+    assert dests == ["repurpose_c2.mp4"]
+    assert not any(d.startswith("final_") for d in dests)
+
+
+def test_swap_repurpose_slot_writes_its_own_fields_and_file():
+    """The Swap side of the same guarantee: the repurpose slot must share NO
+    state field and NO output filename with the Step-6 compile slot."""
+    from character_swap.runner_compile import _COMPILE_SLOT, _REPURPOSE_SLOT
+    for field in ("status_field", "edit_field", "path_field", "error_field",
+                  "warning_field", "filename", "event_prefix"):
+        assert getattr(_COMPILE_SLOT, field) != getattr(_REPURPOSE_SLOT, field), \
+            f"{field} is shared — a repurpose would overwrite the real final"
+
+
 # --- 3. the filter reaches Telegram -----------------------------------------
 
 
-def _wire_send(monkeypatch, state):
+def _wire_send(monkeypatch, state, *, rebuilt):
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
                         lambda rid: dict(state))
     monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
 
     async def fake_build(re_id, st, **kw):
-        return None
+        return list(rebuilt)
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
 
     seen: list = []
@@ -210,15 +256,34 @@ def _wire_send(monkeypatch, state):
 def test_send_is_narrowed_to_the_rebuilt_characters(monkeypatch):
     """The bucket now holds everyone (merge), so an unfiltered send would
     re-post the copies this click never touched to their channels."""
-    seen = _wire_send(monkeypatch, _state())
+    seen = _wire_send(monkeypatch, _state(), rebuilt=["c2"])
     asyncio.run(runner_reengineer.repurpose("re_t", char_ids=["c2"]))
     assert seen == [["c2"]]
 
 
 def test_send_covers_everyone_when_nothing_was_picked(monkeypatch):
-    seen = _wire_send(monkeypatch, _state())
+    seen = _wire_send(monkeypatch, _state(), rebuilt=["c1", "c2", "c3"])
     asyncio.run(runner_reengineer.repurpose("re_t"))
-    assert seen == [None]
+    assert seen == [["c1", "c2", "c3"]]
+
+
+def test_send_follows_what_was_BUILT_not_what_was_PICKED(monkeypatch):
+    """Hugo 2026-08-10: "bara de nya repurpose videorna skickas". A picked
+    character that `_char_is_uninvolved` skips is never rebuilt — if an older
+    repurpose left a `done` entry for it in the bucket, sending by the PICK
+    would re-post that stale copy to its channel."""
+    seen = _wire_send(monkeypatch, _state(), rebuilt=["c2"])
+    asyncio.run(runner_reengineer.repurpose("re_t", char_ids=["c2", "skipped"]))
+    assert seen == [["c2"]]
+
+
+def test_nothing_built_sends_NOTHING(monkeypatch):
+    """The landmine: `_send_reengineer_bucket` reads an EMPTY char_ids list as
+    "no filter at all", so a build that produced nothing must return BEFORE the
+    send — handing it [] would re-post the run's whole existing bucket."""
+    seen = _wire_send(monkeypatch, _state(), rebuilt=[])
+    asyncio.run(runner_reengineer.repurpose("re_t", char_ids=["gone"]))
+    assert seen == []
 
 
 def test_bucket_send_honours_char_ids(monkeypatch, tmp_path):

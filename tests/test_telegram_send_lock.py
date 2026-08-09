@@ -40,6 +40,7 @@ def test_repurpose_releases_build_guard_before_telegram_send(monkeypatch):
 
     async def fake_build(re_id, state, **kw):
         seen["guard_during_build"] = re_id in runner_reengineer._REPURPOSING
+        return ["c1"]   # what it BUILT — the caller delivers exactly these
 
     async def fake_send(re_id, **kw):
         seen["guard_during_send"] = re_id in runner_reengineer._REPURPOSING

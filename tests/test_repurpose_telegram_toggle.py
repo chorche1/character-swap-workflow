@@ -73,8 +73,10 @@ def _wire_reengineer(monkeypatch, state):
     monkeypatch.setattr(runner_reengineer.reengineer, "load_state",
                         lambda rid: dict(state))
 
+    # _do_repurpose returns the characters it built; the caller delivers
+    # exactly those, and an empty list means "nothing to send".
     async def fake_build(re_id, st, **kw):
-        return None
+        return ["c1"]
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
     monkeypatch.setattr(runner_reengineer, "_update", lambda re_id, **kw: None)
 
@@ -120,6 +122,7 @@ def test_reengineer_repurpose_still_builds_when_send_is_off(monkeypatch):
 
     async def fake_build(re_id, st, **kw):
         built.append(re_id)
+        return ["c1"]
     monkeypatch.setattr(runner_reengineer, "_do_repurpose", fake_build)
 
     async def boom(re_id, **kw):
