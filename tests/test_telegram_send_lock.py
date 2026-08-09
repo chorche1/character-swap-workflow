@@ -128,7 +128,8 @@ def _wire_manual_send(monkeypatch):
                        telegram_chat_id="@chang")))
     sent: list[str] = []
 
-    async def fake_send(path, *, chat_id, char_name, base, variant, run_id):
+    async def fake_send(path, *, chat_id, char_name, base, variant, run_id,
+                        label=None):
         sent.append(f"{char_name}:{variant}")
         return {"ok": True, "message_id": 1}
 

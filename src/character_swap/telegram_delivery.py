@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from character_swap import video_edit
+from character_swap import deliverables, video_edit
 from character_swap.clients import telegram
 from character_swap.config import settings
 
@@ -77,13 +77,19 @@ def safe_name(name: str) -> str:
 
 
 def character_final_name(char_name: str, base: str, variant: str,
-                         run_id: str) -> str:
-    suffix = " — repurpose" if variant == "repurpose" else ""
+                         run_id: str, *, label: str | None = None) -> str:
+    """Telegram filename for one character's deliverable.
+
+    `label` names a 🎞 version (its suffix is the version's own name). It is
+    ignored for the final and the repurpose, whose names are unchanged — the
+    channel's existing files must keep reading the same."""
+    suffix = deliverables.name_suffix(variant, label=label)
     return f"{safe_name(char_name)} — {safe_name(base)}{suffix} [{run_id}].mp4"
 
 
-def editor_final_name(base: str, variant: str, edit_id: str) -> str:
-    suffix = " — repurpose" if variant == "repurpose" else ""
+def editor_final_name(base: str, variant: str, edit_id: str, *,
+                      label: str | None = None) -> str:
+    suffix = deliverables.name_suffix(variant, label=label)
     return f"{safe_name(base)}{suffix} [{edit_id}].mp4"
 
 
@@ -278,8 +284,9 @@ async def send_file_core(source: Path, *, bot_token: str, chat_id: str,
 
 async def send_character_final(source: Path, *, chat_id: str,
                                char_name: str, base: str, variant: str,
-                               run_id: str) -> dict:
-    filename = character_final_name(char_name, base, variant, run_id)
+                               run_id: str, label: str | None = None) -> dict:
+    filename = character_final_name(char_name, base, variant, run_id,
+                                    label=label)
     caption = filename.removesuffix(".mp4")
     return await send_file_core(
         source,
@@ -292,8 +299,8 @@ async def send_character_final(source: Path, *, chat_id: str,
 
 
 async def send_editor_final(source: Path, *, base: str, variant: str,
-                            edit_id: str) -> dict:
-    filename = editor_final_name(base, variant, edit_id)
+                            edit_id: str, label: str | None = None) -> dict:
+    filename = editor_final_name(base, variant, edit_id, label=label)
     caption = filename.removesuffix(".mp4")
     return await send_file_core(
         source,

@@ -2277,6 +2277,14 @@ async def _do_assemble(re_id: str, state: dict, *,
 # repurpose_<cid>.mp4 paths.
 _REPURPOSING: set[str] = set()
 
+# The same guard for 🎞 versions, keyed (re_id, version_id) rather than re_id:
+# two versions of one run are independent deliverables writing different files,
+# so building both at once is legitimate — only building the SAME one twice is
+# not. A run-wide set would serialize them and, worse, make a manual ➤ on
+# version A refuse while version B builds (the 2026-08-03 "Bygget pågår" lie,
+# one deliverable further down).
+_BUILDING_VERSIONS: set[tuple[str, str]] = set()
+
 
 def _repurpose_settings(state: dict) -> dict:
     """Editor settings for the Repurpose build — like `_assemble_settings` but

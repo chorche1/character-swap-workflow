@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from character_swap import (
     call_log,
     clip_failure,
+    deliverables,
     events,
     push,
     runner,
@@ -8056,6 +8057,20 @@ _drive_safe_name = _drive_push_mod.drive_safe_name
 _drive_final_name = _drive_push_mod.drive_final_name
 
 
+def _variant(raw: str, state: dict | None = None) -> str:
+    """Validate a deliverable variant name, 422 on anything unknown.
+
+    `state` is a Reengineer run's state when the surface HAS one — that is
+    what makes a 🎞 `version:<vid>` acceptable, and only for a version that
+    actually exists. Omitting it (the Swap-job and Editor endpoints) leaves
+    exactly the historical pair "final" | "repurpose" valid.
+    """
+    try:
+        return deliverables.validate(raw, state)
+    except deliverables.UnknownVariant as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _exc_detail(exc: BaseException) -> str:
     """HTTPException → its .detail, anything else → str(). Used to fold a
     per-item push failure into a batch response without aborting the batch."""
@@ -8138,8 +8153,7 @@ async def job_char_drive_push(job_id: str, char_id: str,
     jc = job.characters.get(char_id)
     if jc is None:
         raise HTTPException(404, "Character not in this job")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     path = (jc.compiled_video_path if body.variant == "final"
             else jc.repurposed_video_path)
     status = (jc.compile_status if body.variant == "final"
@@ -8163,30 +8177,25 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
                                      body: DrivePushBody) -> dict:
     """Push a Reengineer character final (or repurposed variant) to Drive
     under Character Swap/<character name>/."""
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    entry = (state.get(bucket) or {}).get(char_id)
+    try:
+        variant = deliverables.validate(body.variant, state)
+    except deliverables.UnknownVariant as exc:
+        raise HTTPException(422, str(exc)) from exc
+    entry = deliverables.char_entries(state, variant).get(char_id)
     if not entry or entry.get("status") != "done" or not entry.get("final_path"):
         raise HTTPException(
             409, "No finished video to push — build the final first.")
-    # The final_/repurpose_<cid>.mp4 files are overwritten IN PLACE by a
-    # rebuild while the bucket entry stays "done" — an upload streaming that
-    # path as _do_assemble/_do_repurpose copies over it would land a torn
-    # file on Drive with an ok receipt. Refuse while the owning build is in
-    # flight; the snapshot in _drive_push_file covers a rebuild that STARTS
-    # mid-upload.
-    if body.variant == "final":
-        building = (state.get("status") == "assembling"
-                    or re_id in runner_reengineer._ASSEMBLING)
-    else:
-        building = (bool(state.get("repurposing"))
-                    or re_id in runner_reengineer._REPURPOSING)
-    if building:
+    # The final_/repurpose_/version_<cid>.mp4 files are overwritten IN PLACE by
+    # a rebuild while the bucket entry stays "done" — an upload streaming that
+    # path as its builder copies over it would land a torn file on Drive with
+    # an ok receipt. Refuse while THIS deliverable's build is in flight (never
+    # a sibling's — see deliverables.is_building); the snapshot in
+    # _drive_push_file covers a rebuild that STARTS mid-upload.
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår för den här körningen — vänta tills det är "
                  "klart innan du pushar till Drive.")
@@ -8199,7 +8208,8 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
         linked = store().get_job(state["job_id"])
         base_src = linked.title if linked else None
     base = _drive_safe_name(base_src or re_id)
-    filename = _drive_final_name(char_name, base, body.variant, re_id)
+    filename = _drive_final_name(char_name, base, variant, re_id,
+                                 label=deliverables.label_for(state, variant))
     prior = (entry.get("drive") or {}).get("file_id")
     receipt = await _drive_push_file(
         Path(entry["final_path"]), [char_name], filename,
@@ -8208,8 +8218,12 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
     # state changes persisted meanwhile (another push finishing, a repurpose
     # writing its results) with our stale pre-upload snapshot.
     fresh = reengineer_mod.load_state(re_id)
-    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
-        fresh[bucket][char_id]["drive"] = receipt
+    fresh_entry = (deliverables.char_entries(fresh, variant).get(char_id)
+                   if fresh is not None else None)
+    if fresh_entry:
+        # char_entries returns the STORED dict when it exists, so this writes
+        # through — for a version that is state["versions"][vid]["chars"][cid].
+        fresh_entry["drive"] = receipt
         reengineer_mod.save_state(fresh)
     else:
         # The run was deleted mid-upload (fresh is None) or a rebuild that
@@ -8243,8 +8257,7 @@ async def job_drive_push_all(job_id: str, body: DrivePushBody) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     base = _drive_safe_name(job.title or "swap")
     # (char_id, jc, snapshot-source path, sanitized char name) per ready final.
     targets: list[tuple[str, JobCharacter, Path, str]] = []
@@ -8293,22 +8306,15 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     ONE click. Same per-character resilience + 409-preflight as the Swap batch;
     all receipts are persisted in ONE reload-before-save (a rebuild or another
     push landing during the multi-minute upload must not be clobbered)."""
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
+    variant = _variant(body.variant, state)
+    label = deliverables.label_for(state, variant)
     # Refuse while the owning build is in flight — same guard the single push
     # uses; a streaming upload of an in-place-overwritten file lands torn bytes.
-    if body.variant == "final":
-        building = (state.get("status") == "assembling"
-                    or re_id in runner_reengineer._ASSEMBLING)
-    else:
-        building = (bool(state.get("repurposing"))
-                    or re_id in runner_reengineer._REPURPOSING)
-    if building:
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår för den här körningen — vänta tills det är "
                  "klart innan du pushar till Drive.")
@@ -8319,7 +8325,7 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     base = _drive_safe_name(base_src or re_id)
     # (char_id, final path, sanitized name, prior file_id) per ready final.
     targets: list[tuple[str, Path, str, str | None]] = []
-    for cid, entry in (state.get(bucket) or {}).items():
+    for cid, entry in deliverables.char_entries(state, variant).items():
         fp = entry.get("final_path")
         if entry.get("status") == "done" and fp and Path(fp).is_file():
             char = store().get_character(cid)
@@ -8332,7 +8338,8 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     await _ensure_drive_authorized()
 
     async def _one(path: Path, char_name: str, prior: str | None):
-        filename = _drive_final_name(char_name, base, body.variant, re_id)
+        filename = _drive_final_name(char_name, base, variant, re_id,
+                                     label=label)
         return await _drive_push_file(path, [char_name], filename,
                                       prior_file_id=prior)
 
@@ -8356,9 +8363,10 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
             changed = False
+            fresh_entries = deliverables.char_entries(fresh, variant)
             for cid, receipt in pushed.items():
-                if (fresh.get(bucket) or {}).get(cid):
-                    fresh[bucket][cid]["drive"] = receipt
+                if fresh_entries.get(cid):
+                    fresh_entries[cid]["drive"] = receipt
                     changed = True
                 else:
                     receipt["persisted"] = False
@@ -8626,7 +8634,8 @@ def _character_telegram_target(char_id: str, fallback_name: str) -> tuple[str, s
 
 async def _telegram_character_file(source: Path, *, char_id: str,
                                    char_name: str, base: str, variant: str,
-                                   run_id: str) -> dict:
+                                   run_id: str,
+                                   label: str | None = None) -> dict:
     from character_swap import telegram_delivery
     _require_character_telegram()
     name, chat_id = _character_telegram_target(char_id, char_name)
@@ -8634,11 +8643,12 @@ async def _telegram_character_file(source: Path, *, char_id: str,
         # One upload at a time per (run, character, variant): the automatic
         # post-build delivery runs for minutes, and without this a manual
         # click mid-upload posts the same video twice in the channel. Only
-        # THIS target is blocked — other characters stay sendable.
+        # THIS target is blocked — other characters stay sendable, and so is
+        # the same character's OTHER deliverable (the variant is in the key).
         with telegram_delivery.sending(run_id, char_id, variant):
             return await telegram_delivery.send_character_final(
                 source, chat_id=chat_id, char_name=name, base=base,
-                variant=variant, run_id=run_id)
+                variant=variant, run_id=run_id, label=label)
     except telegram_delivery.AlreadySending as exc:
         raise HTTPException(409, str(exc)) from exc
     except FileNotFoundError as exc:
@@ -8657,8 +8667,7 @@ async def job_char_telegram_send(job_id: str, char_id: str,
     jc = job.characters.get(char_id)
     if jc is None:
         raise HTTPException(404, "Character not in this job")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     path = (jc.compiled_video_path if body.variant == "final"
             else jc.repurposed_video_path)
     status = (jc.compile_status if body.variant == "final"
@@ -8677,25 +8686,16 @@ async def job_char_telegram_send(job_id: str, char_id: str,
 @app.post("/api/reengineer/{re_id}/chars/{char_id}/telegram_send")
 async def reengineer_char_telegram_send(re_id: str, char_id: str,
                                         body: TelegramSendBody) -> dict:
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    entry = (state.get(bucket) or {}).get(char_id)
+    variant = _variant(body.variant, state)
+    entry = deliverables.char_entries(state, variant).get(char_id)
     if not entry or entry.get("status") != "done" or not entry.get("final_path"):
         raise HTTPException(
             409, "Ingen färdig video att skicka — bygg finalen först.")
-    building = (
-        state.get("status") == "assembling"
-        or re_id in runner_reengineer._ASSEMBLING
-        if body.variant == "final"
-        else bool(state.get("repurposing"))
-             or re_id in runner_reengineer._REPURPOSING
-    )
-    if building:
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår — vänta tills finalen är klar.")
     base = state.get("title") or state.get("name")
@@ -8704,10 +8704,13 @@ async def reengineer_char_telegram_send(re_id: str, char_id: str,
         base = linked.title if linked else None
     receipt = await _telegram_character_file(
         Path(entry["final_path"]), char_id=char_id, char_name=char_id,
-        base=base or re_id, variant=body.variant, run_id=re_id)
+        base=base or re_id, variant=variant, run_id=re_id,
+        label=deliverables.label_for(state, variant))
     fresh = reengineer_mod.load_state(re_id)
-    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
-        fresh[bucket][char_id]["telegram"] = receipt
+    fresh_entry = (deliverables.char_entries(fresh, variant).get(char_id)
+                   if fresh is not None else None)
+    if fresh_entry:
+        fresh_entry["telegram"] = receipt
         reengineer_mod.save_state(fresh)
     else:
         receipt["persisted"] = False
@@ -8720,8 +8723,7 @@ async def job_telegram_send_all(job_id: str, body: TelegramSendBody) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     _require_character_telegram()
     targets = []
     for cid, jc in job.characters.items():
@@ -8759,22 +8761,14 @@ async def job_telegram_send_all(job_id: str, body: TelegramSendBody) -> dict:
 @app.post("/api/reengineer/{re_id}/telegram_send_all")
 async def reengineer_telegram_send_all(
         re_id: str, body: TelegramSendBody) -> dict:
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    variant = _variant(body.variant, state)
     _require_character_telegram()
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    building = (
-        state.get("status") == "assembling"
-        or re_id in runner_reengineer._ASSEMBLING
-        if body.variant == "final"
-        else bool(state.get("repurposing"))
-             or re_id in runner_reengineer._REPURPOSING
-    )
-    if building:
+    label = deliverables.label_for(state, variant)
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(409, "Bygget pågår — vänta tills finalerna är klara.")
     base = state.get("title") or state.get("name")
     if not base and state.get("job_id"):
@@ -8782,7 +8776,7 @@ async def reengineer_telegram_send_all(
         base = linked.title if linked else None
     targets = [
         (cid, Path(entry["final_path"]))
-        for cid, entry in (state.get(bucket) or {}).items()
+        for cid, entry in deliverables.char_entries(state, variant).items()
         if entry.get("status") == "done" and entry.get("final_path")
         and Path(entry["final_path"]).is_file()
     ]
@@ -8792,7 +8786,7 @@ async def reengineer_telegram_send_all(
     async def _one(cid: str, path: Path):
         return await _telegram_character_file(
             path, char_id=cid, char_name=cid, base=base or re_id,
-            variant=body.variant, run_id=re_id)
+            variant=variant, run_id=re_id, label=label)
 
     results = await asyncio.gather(
         *[_one(cid, path) for cid, path in targets],
@@ -8809,9 +8803,10 @@ async def reengineer_telegram_send_all(
     if sent:
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
+            fresh_entries = deliverables.char_entries(fresh, variant)
             for cid, receipt in sent.items():
-                if (fresh.get(bucket) or {}).get(cid):
-                    fresh[bucket][cid]["telegram"] = receipt
+                if fresh_entries.get(cid):
+                    fresh_entries[cid]["telegram"] = receipt
                 else:
                     receipt["persisted"] = False
                     persisted = False
@@ -8829,8 +8824,7 @@ async def editor_telegram_send(edit_id: str,
                                body: TelegramSendBody) -> dict:
     from character_swap import telegram_delivery
     _require_editor_telegram()
-    if body.slot not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown slot {body.slot!r}")
+    _variant(body.slot)
     edit_dir = settings.output_dir / "editor" / edit_id
     if not edit_dir.is_dir():
         raise HTTPException(404, f"Edit {edit_id!r} not found")
