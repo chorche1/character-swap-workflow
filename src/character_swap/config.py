@@ -224,8 +224,13 @@ class Settings(BaseSettings):
     # fingers") and says nothing about Veo's own signature defect: burned-in,
     # often garbled SUBTITLES on dialogue clips. Those terms lead here because
     # earlier terms weigh more (same research as the Kling set: 5-8 terms beats
-    # a long list). Empty → the field is omitted and fal applies its own
-    # default.
+    # a long list).
+    #
+    # This is only the CONFIGURABLE tail: clients/fal_veo._negative_prompt()
+    # always LEADS with "camera cuts, background music, animal sounds" (Hugo
+    # 2026-08-10), so those three can't be lost by setting this in .env — and
+    # an empty value no longer omits the field, it just sends that clause
+    # alone.
     veo_negative_prompt: str = Field(
         default=("subtitles, captions, burned-in text, on-screen text, "
                  "watermark, blur, distorted face, extra limbs"),

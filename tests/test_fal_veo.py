@@ -373,3 +373,93 @@ def test_env_can_still_tighten_it(monkeypatch):
         aspect_ratio="9:16", generate_audio=True,
     )
     assert captured["arguments"]["safety_tolerance"] == "2"
+
+
+# --- always-on negative clause -------------------------------------------
+# Hugo 2026-08-10: "automatiskt lägg till 'No cuts, no music, no animal
+# sounds.' i varje veo prompt" — resolved to the NEGATIVE prompt (his choice
+# after we discussed that a positive-prompt directive carries continuity
+# instructions better; he wanted it in the negative field only). Worded as
+# "camera cuts, …" because a negative prompt lists what to avoid (a leading
+# "no" is a double negative) and bare "cuts" reads as skin wounds.
+
+def test_always_negative_leads_the_configured_value(monkeypatch):
+    monkeypatch.setattr(fal_veo.settings, "veo_negative_prompt",
+                        "subtitles, watermark")
+    assert fal_veo._negative_prompt() == (
+        "camera cuts, background music, animal sounds, subtitles, watermark")
+
+
+def test_always_negative_survives_an_empty_env_value(monkeypatch):
+    """Regression: VEO_NEGATIVE_PROMPT= used to omit the field entirely and let
+    fal apply its own default. The three always-on terms must still be sent."""
+    for empty in ("", "   ", None, ","):
+        monkeypatch.setattr(fal_veo.settings, "veo_negative_prompt", empty)
+        assert fal_veo._negative_prompt() == fal_veo._ALWAYS_NEGATIVE
+
+
+def test_always_negative_is_idempotent(monkeypatch):
+    """A configured value that already carries the clause must not double it."""
+    monkeypatch.setattr(
+        fal_veo.settings, "veo_negative_prompt",
+        "camera cuts, background music, animal sounds, subtitles")
+    out = fal_veo._negative_prompt()
+    assert out.lower().count("animal sounds") == 1
+    assert out == "camera cuts, background music, animal sounds, subtitles"
+
+
+def test_default_config_still_carries_veos_own_terms(monkeypatch):
+    """The always-on clause must PREPEND to Veo's own set, never replace it —
+    the burned-in-subtitle terms are why VEO_NEGATIVE_PROMPT exists."""
+    out = fal_veo._negative_prompt()
+    assert out.startswith("camera cuts, background music, animal sounds, ")
+    assert "subtitles" in out
+
+
+def test_submit_sends_the_always_negative_clause(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    fal_veo.submit_image_to_video(
+        image=Path("/frame.png"), prompt="she nods", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True,
+    )
+    neg = captured["arguments"]["negative_prompt"]
+    assert neg.startswith("camera cuts, background music, animal sounds")
+    # The POSITIVE prompt is untouched — nothing the dialogue extractor, the
+    # language nets or video QC's expected speech reads may change here.
+    assert captured["arguments"]["prompt"] == "she nods"
+
+
+def test_submit_sends_the_always_negative_clause_on_end_frame_endpoint(monkeypatch):
+    """The 🎯 end-pose path submits to a DIFFERENT fal endpoint — it must carry
+    the clause too."""
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    fal_veo.submit_image_to_video(
+        image=Path("/start.png"), prompt="she turns", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True, end_image=Path("/end.png"),
+    )
+    assert captured["endpoint"] == "fal-ai/veo3.1/fast/first-last-frame-to-video"
+    assert captured["arguments"]["negative_prompt"].startswith(
+        "camera cuts, background music, animal sounds")
+
+
+def test_submit_sends_it_even_with_env_cleared(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(fal_veo, "_client", lambda: _fake_fal(captured))
+    monkeypatch.setattr(fal_veo, "_check_account_block", lambda: None)
+    monkeypatch.setattr(fal_veo.settings, "veo_negative_prompt", "")
+    fal_veo.submit_image_to_video(
+        image=Path("/frame.png"), prompt="x", duration_secs=8,
+        aspect_ratio="9:16", generate_audio=True,
+    )
+    assert captured["arguments"]["negative_prompt"] == fal_veo._ALWAYS_NEGATIVE
+
+
+def test_only_veo_is_affected(monkeypatch):
+    """Kling's negative set is tuned for Kling's own failure modes — Hugo asked
+    for Veo, so kling_negative_prompt must be untouched."""
+    from character_swap.config import settings as cfg
+    assert "animal sounds" not in (cfg.kling_negative_prompt or "").lower()

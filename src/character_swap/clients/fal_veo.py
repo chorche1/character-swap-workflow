@@ -137,6 +137,36 @@ def _safety_tolerance() -> str:
     return v if v in _ALLOWED_SAFETY_TOLERANCE else "6"
 
 
+# Three things Hugo wants suppressed on EVERY Veo clip (2026-08-10): a mid-clip
+# camera cut, a music bed, and the animal noises Veo's native audio invents.
+#
+# WORDING — deliberately not Hugo's spoken "No cuts, no music, no animal
+# sounds.": a negative prompt is a list of what to AVOID, so a leading "no"
+# reads as a double negative, and the bare word "cuts" is ambiguous with skin
+# wounds. "camera cuts" says the thing meant.
+#
+# It LEADS the negative prompt because earlier terms weigh more (same research
+# as the Kling/Veo sets), and it lives here rather than in the config default
+# so that a VEO_NEGATIVE_PROMPT set in .env can never silently drop it.
+_ALWAYS_NEGATIVE = "camera cuts, background music, animal sounds"
+
+
+def _negative_prompt() -> str:
+    """Effective negative prompt for both Veo endpoints: the always-on clause
+    first, then whatever VEO_NEGATIVE_PROMPT carries. Idempotent — a configured
+    value that already contains the clause is not doubled.
+
+    NOTE: this is never empty, so `VEO_NEGATIVE_PROMPT=` no longer means "omit
+    the field and let fal apply its own default" — the clause is sent
+    regardless (Hugo 2026-08-10: "automatiskt … i varje veo prompt")."""
+    neg = (settings.veo_negative_prompt or "").strip().strip(",").strip()
+    if not neg:
+        return _ALWAYS_NEGATIVE
+    if _ALWAYS_NEGATIVE.lower() in neg.lower():
+        return neg
+    return f"{_ALWAYS_NEGATIVE}, {neg}"
+
+
 def _aspect_ratio(aspect_ratio: str | None) -> str:
     """Veo accepts auto/16:9/9:16. Pass a portrait/landscape request straight
     through; anything else (1:1, None, …) → 'auto' (Veo derives it from the
@@ -205,10 +235,9 @@ def submit_image_to_video(
             arguments["image_url"] = start_url
         # Veo's OWN negative set — not Kling's (2026-08-03). Kling's terms
         # describe Kling's failure modes and omit the burned-in-subtitle
-        # artefact Veo is known for on dialogue clips. Empty → field omitted.
-        neg = (settings.veo_negative_prompt or "").strip()
-        if neg:
-            arguments["negative_prompt"] = neg[:2500]
+        # artefact Veo is known for on dialogue clips. Always led by
+        # _ALWAYS_NEGATIVE, so the field is never omitted (see _negative_prompt).
+        arguments["negative_prompt"] = _negative_prompt()[:2500]
         try:
             handler = fal.submit(endpoint, arguments=arguments)
         except Exception as e:
