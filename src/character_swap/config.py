@@ -518,12 +518,17 @@ class Settings(BaseSettings):
     # narrower rule. If a fal invoice ever shows overhead against the count of
     # FINISHED clips, drop this to 0 — that is the number to watch.)
     #
-    # 2 is Hugo's pick: at the measured ~50% per-attempt pass rate two extra
-    # takes recover ~75% of the stochastic refusals. It does NOT help the hard
-    # blocks (`no_media_generated` sits on the IMAGE and the scene, refused 6/6
-    # in the 2026-08-03 probe) — those just fail ~26s later. 0 disables.
+    # 4 is Hugo's pick (2026-08-10), raised from the original 2 because the
+    # refusal rate kept climbing: measured per Veo call over calls.jsonl,
+    # 42%/60%/53%/32%/69% on 08-03…08-07 but 79% on 08-08 and 70% on 08-09. At
+    # ~70% per take, 3 takes still lose ~34% of clips (0.70³) while 5 takes lose
+    # ~17% (0.70⁵) — the extra two roughly HALVE the manual ↻ clicking, they do
+    # not end it. It does NOT help the hard blocks (`no_media_generated` sits on
+    # the IMAGE and the scene, refused 6/6 in the 2026-08-03 probe; some faces
+    # are refused permanently) — those now burn ~5 takes × ~60s before failing,
+    # which is the cost side of this number. 0 disables.
     video_refusal_retries: int = Field(
-        default=2, validation_alias="VIDEO_REFUSAL_RETRIES")
+        default=4, validation_alias="VIDEO_REFUSAL_RETRIES")
 
     stt_engine: str = Field(default="scribe", validation_alias="STT_ENGINE")
     stt_scribe_model: str = Field(default="scribe_v2",
