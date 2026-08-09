@@ -153,6 +153,27 @@ function studio() {
       autoTelegramSend: true,
       error: '',
     },
+    // 🎞 Ny version (Hugo 2026-08-10): another video per character from an
+    // EDITED cut of the same run — like 🔁 repurpose, but the scene list is
+    // yours. Its own state object for the same reason rerunModal has one.
+    versionModal: {
+      open: false,
+      submitting: false,
+      reId: null,
+      runName: '',
+      versionId: null,                // null = creating a new one
+      name: '',
+      rows: [],                       // deep copies; the 5s poll splices the
+                                      // run object and would revert live edits
+      mirror: true,                   // both ✓ ship PRE-TICKED
+      autoTelegramSend: true,
+      error: '',
+    },
+    // Row identity must be UNIQUE and STABLE. Keying an x-for on the array
+    // index breaks the moment a row can be duplicated — two rows share a key,
+    // Alpine reuses the DOM node, and the rows cross-wire. Same monotonic
+    // counter `swapFromImages` uses.
+    _versionRowSeq: 0,
     reengineerPickerChar: null,       // char_id whose reference-image popover is open
     // "Använd bild N för alla" (Hugo 2026-08-08): last applied bulk pick, per
     // form ('swap' | 'reengineer'). Text only — the actual picks live in each
@@ -1663,6 +1684,322 @@ function studio() {
         m.error = (e && e.message) ? e.message : String(e);
       } finally {
         m.submitting = false;
+      }
+    },
+
+    // ------------------------------------------------------ 🎞 versions
+
+    // Gated on n_scenes, NOT run.scenes: the light history row omits `scenes`
+    // and only the newest 8 runs get hydrated, so gating on the array hides
+    // the button on every older finished run — the exact bug that hit the
+    // approval gate, the multi-person chooser and ↻ Kör om in turn.
+    reCanVersion(run) {
+      if (!run) return false;
+      if ((run.scenes || []).length) return true;
+      return run.n_scenes === undefined || run.n_scenes === null
+        ? true : !!run.n_scenes;
+    },
+
+    reVersionList(run) {
+      return Object.values((run && run.versions) || {})
+        .sort((a, b) => String(a.created_at || '')
+          .localeCompare(String(b.created_at || '')));
+    },
+
+    openVersionModal(run, version = null) {
+      const m = this.versionModal;
+      m.open = true;
+      m.error = '';
+      m.submitting = false;
+      m.reId = run.re_id;
+      m.runName = run.name || run.title || run.re_id;
+      m.versionId = version ? version.id : null;
+      m.name = version ? (version.name || '') : '';
+      const settings = (version && version.settings) || {};
+      // A MISSING value means ticked — an unticked box is the opt-in thing.
+      m.mirror = settings.mirror === undefined ? true : !!settings.mirror;
+      m.autoTelegramSend = settings.auto_telegram_send === undefined
+        ? true : !!settings.auto_telegram_send;
+      const scenes = (run.scenes || []).filter(s => !s.owner_version);
+      const byId = {};
+      for (const s of scenes) if (!(s.scene_id in byId)) byId[s.scene_id] = s;
+      const rows = version
+        ? (version.rows || [])
+        : scenes.map(s => ({ row_id: null, scene_id: s.scene_id }));
+      m.rows = rows.map(row => {
+        const scene = byId[row.scene_id] || {};
+        return {
+          uid: ++this._versionRowSeq,
+          rowId: row.row_id || null,
+          sceneId: row.scene_id,
+          summary: scene.summary || '',
+          frameUrl: scene.frame_url || '',
+          // A row whose scene is gone is shown, never silently dropped — the
+          // server refuses the build on it and names the position.
+          missing: !(row.scene_id in byId),
+        };
+      });
+    },
+
+    versionRowMove(index, delta) {
+      const rows = this.versionModal.rows;
+      const target = index + delta;
+      if (target < 0 || target >= rows.length) return;
+      const [row] = rows.splice(index, 1);
+      rows.splice(target, 0, row);
+    },
+
+    versionRowRemove(index) {
+      this.versionModal.rows.splice(index, 1);
+    },
+
+    // A version must exist server-side before a row can be duplicated: the
+    // copy is a REAL scene on the job (cloned images, its own id), not a
+    // client-side row. Creating it here keeps that invisible to the user.
+    async _ensureVersionSaved() {
+      const m = this.versionModal;
+      if (m.versionId) {
+        const saved = await fetch(
+          `/api/reengineer/${m.reId}/versions/${m.versionId}`,
+          { method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(this._versionBody()) });
+        if (!saved.ok) throw new Error(await saved.text());
+        return m.versionId;
+      }
+      const created = await fetch(
+        `/api/reengineer/${m.reId}/versions`,
+        { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this._versionBody()) });
+      if (!created.ok) throw new Error(await created.text());
+      const version = (await created.json()).version;
+      m.versionId = version.id;
+      // Adopt the server's row_ids so the next save doesn't mint new ones.
+      version.rows.forEach((row, i) => {
+        if (m.rows[i]) m.rows[i].rowId = row.row_id;
+      });
+      return version.id;
+    },
+
+    // ⧉ Duplicate: same image, NEW movement prompt, therefore a new clip.
+    // Zero image cost (every ready image is cloned with its approval
+    // mirrored); one video credit per character when it is rendered.
+    async duplicateVersionRow(index) {
+      const m = this.versionModal;
+      const row = m.rows[index];
+      if (!row || row.missing) return;
+      const prompt = window.prompt(
+        'Ny videoprompt för kopian (samma bild, nytt klipp):', '');
+      if (prompt === null) return;
+      if (!prompt.trim()) {
+        m.error = 'Kopian behöver en ny videoprompt — det är hela poängen.';
+        return;
+      }
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/rows/duplicate`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ row_id: row.rowId,
+                                   motion_prompt: prompt }) });
+        if (!r.ok) { m.error = await r.text(); return; }
+        const out = await r.json();
+        m.rows.splice(index + 1, 0, {
+          uid: ++this._versionRowSeq,
+          rowId: null,                 // re-read on the next open
+          sceneId: out.scene_id,
+          summary: (row.summary || '') + ' (kopia)',
+          frameUrl: row.frameUrl,
+          missing: false,
+          needsClip: true,
+        });
+        this.refreshReengineer(m.reId);
+        this.notifyInfo('Kopian skapad — rendera dess klipp innan du bygger.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // + Lägg till scen: an uploaded image (or video → mid-frame) that gets
+    // swapped for every character and then needs approval, exactly like the
+    // run's own "+ egen scen". The scene belongs to the version alone.
+    async addVersionScene(fileList) {
+      const file = (fileList || [])[0];
+      if (!file) return;
+      const m = this.versionModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('version_id', versionId);
+        fd.append('motion_prompt', '');
+        const r = await fetch(`/api/reengineer/${m.reId}/scenes`,
+                              { method: 'POST', body: fd });
+        if (!r.ok) { m.error = await r.text(); return; }
+        m.open = false;
+        this.refreshReengineer(m.reId);
+        this._startReengineerPolling();
+        this.notifyInfo('Scenen läggs till — godkänn bilderna när de är klara.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // 📥 A finished clip: no generation at all. It becomes ONE shared clip,
+    // identical in every character's version.
+    async importVersionClip(fileList) {
+      const file = (fileList || [])[0];
+      if (!file) return;
+      const m = this.versionModal;
+      m.submitting = true;
+      m.error = '';
+      try {
+        const versionId = await this._ensureVersionSaved();
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/rows/import_clip`,
+          { method: 'POST', body: fd });
+        if (!r.ok) { m.error = await r.text(); return; }
+        const out = await r.json();
+        m.rows.push({
+          uid: ++this._versionRowSeq,
+          rowId: null,
+          sceneId: out.scene_id,
+          summary: file.name + ' (eget klipp)',
+          frameUrl: '',
+          missing: false,
+        });
+        this.refreshReengineer(m.reId);
+        this.notifyInfo('Klippet tillagt — det används som det är.');
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    // Scenes a version owns that still need their first clip.
+    versionPendingScenes(run, version) {
+      return (run.scenes || []).filter(
+        s => s.owner_version === version.id && s.dirty).length;
+    },
+
+    async animateVersionScenes(run, version) {
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}/animate`,
+          { method: 'POST' });
+        if (!r.ok) { this.notify('error', await r.text()); return; }
+        this.notifyInfo('Renderar versionens nya klipp…');
+        this._startReengineerPolling();
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
+      }
+    },
+
+    _versionBody() {
+      const m = this.versionModal;
+      return {
+        name: (m.name || '').trim() || null,
+        rows: m.rows.map(r => ({ row_id: r.rowId, scene_id: r.sceneId })),
+        mirror: !!m.mirror,
+        auto_telegram_send: !!m.autoTelegramSend,
+      };
+    },
+
+    async saveAndBuildVersion() {
+      const m = this.versionModal;
+      if (!m.rows.length) { m.error = 'Versionen behöver minst en scen.'; return; }
+      m.submitting = true;
+      m.error = '';
+      try {
+        let versionId = m.versionId;
+        if (!versionId) {
+          const created = await fetch(
+            `/api/reengineer/${m.reId}/versions`,
+            { method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this._versionBody()) });
+          if (!created.ok) { m.error = await created.text(); return; }
+          versionId = (await created.json()).version.id;
+        } else {
+          const saved = await fetch(
+            `/api/reengineer/${m.reId}/versions/${versionId}`,
+            { method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(this._versionBody()) });
+          if (!saved.ok) { m.error = await saved.text(); return; }
+        }
+        const built = await fetch(
+          `/api/reengineer/${m.reId}/versions/${versionId}/build`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}) });
+        if (!built.ok) {
+          // The 409 names the scene to fix — surface it verbatim rather than
+          // a generic failure.
+          let detail = await built.text();
+          try {
+            const parsed = JSON.parse(detail);
+            detail = parsed?.detail?.message || parsed?.detail || detail;
+          } catch (_) { /* plain text */ }
+          m.error = detail;
+          return;
+        }
+        this.notifyInfo('Versionen byggs…');
+        this._startReengineerPolling();
+        m.open = false;
+      } catch (e) {
+        m.error = (e && e.message) ? e.message : String(e);
+      } finally {
+        m.submitting = false;
+      }
+    },
+
+    async rebuildVersion(run, version) {
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}/build`,
+          { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}) });
+        if (!r.ok) {
+          let detail = await r.text();
+          try {
+            const parsed = JSON.parse(detail);
+            detail = parsed?.detail?.message || parsed?.detail || detail;
+          } catch (_) { /* plain text */ }
+          this.notify('error', detail);
+          return;
+        }
+        this.notifyInfo('Versionen byggs om…');
+        this._startReengineerPolling();
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
+      }
+    },
+
+    async deleteVersion(run, version) {
+      if (!confirm(`Ta bort "${version.name}" och dess videor?`)) return;
+      try {
+        const r = await fetch(
+          `/api/reengineer/${run.re_id}/versions/${version.id}`,
+          { method: 'DELETE' });
+        if (!r.ok) { this.notify('error', await r.text()); return; }
+        this.refreshReengineer(run.re_id);
+      } catch (e) {
+        this.notify('error', (e && e.message) ? e.message : String(e));
       }
     },
 
@@ -4570,8 +4907,23 @@ function studio() {
       ).length;
     },
     // Count of ready finals/repurposes in a Reengineer run object.
+    // Which bucket a variant reads — the client-side mirror of
+    // deliverables.char_entries. The old form was a binary
+    // `variant === 'final' ? r.finals : r.repurposed`, which counts the
+    // REPURPOSE copies for a 🎞 version and would offer "skicka alla" for
+    // videos that don't exist.
+    reVariantEntries(r, variant) {
+      if (!r) return {};
+      if (variant === 'final') return r.finals || {};
+      if (variant === 'repurpose') return r.repurposed || {};
+      if (String(variant || '').startsWith('version:')) {
+        const id = String(variant).slice('version:'.length);
+        return ((r.versions || {})[id] || {}).chars || {};
+      }
+      return {};
+    },
     telegramReReadyCount(r, variant) {
-      const m = (variant === 'final' ? r.finals : r.repurposed) || {};
+      const m = this.reVariantEntries(r, variant);
       return Object.values(m).filter(f => f.status === 'done' && f.final_url).length;
     },
     async telegramSendAll(url, idPrefix, variant) {

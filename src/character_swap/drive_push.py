@@ -26,6 +26,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from character_swap import deliverables
+
 DRIVE_ROOT_FOLDER = "Character Swap"
 
 
@@ -34,13 +36,18 @@ def drive_safe_name(name: str) -> str:
 
 
 def drive_final_name(char_name: str, base: str, variant: str,
-                     run_id: str) -> str:
+                     run_id: str, *, label: str | None = None) -> str:
     """Drive filename for a per-character final, CHARACTER NAME FIRST (Hugo
     2026-07-03 — so the folder listing sorts by character). `base` = job/run
     title; `run_id` keeps different runs' finals distinct and, together with
     the persisted file_id, is the overwrite key. Single-, batch- and
-    auto-push paths share this so the three never drift apart."""
-    suffix = " — repurpose" if variant == "repurpose" else ""
+    auto-push paths share this so the three never drift apart.
+
+    The suffix comes from `deliverables.name_suffix`, which guarantees a
+    DISTINCT name per variant. That is load-bearing here and nowhere else:
+    `google_drive.upload_or_replace` keys on the filename, so a deliverable
+    that produced the final's name would overwrite the final itself."""
+    suffix = deliverables.name_suffix(variant, label=label)
     return f"{char_name} — {base}{suffix} [{run_id}].mp4"
 
 

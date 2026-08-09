@@ -56,6 +56,7 @@ from character_swap import (
     runner_media,
     scene_people,
     swap_qc,
+    versions,
     video_edit,
 )
 from character_swap.config import settings
@@ -1420,7 +1421,7 @@ def _char_is_uninvolved(state: dict, jc: JobCharacter) -> bool:
     run (every scene is_direct → no per-character variants exist) has zero
     approvals by construction, so it is never uninvolved: the shared direct
     clips ARE that character's build."""
-    swap_scenes = [e for e in (state.get("scenes") or [])
+    swap_scenes = [e for e in versions.base_scenes(state)
                    if not e.get("is_direct")]
     if not swap_scenes:
         return False
@@ -1725,7 +1726,10 @@ def _collect_clips(
     dialogues: list[str] = []
     missing: list[str] = []
     waitable = False
-    for e in state["scenes"]:
+    # base_scenes drops every 🎞 version-owned scene, so the ORIGINAL final can
+    # never grow a scene a version added. Given a version's own cut it drops
+    # nothing — a cut's entries carry no owner tag (versions.resolve_rows).
+    for e in versions.base_scenes(state):
         if e.get("is_direct"):
             # "Direct image — no swap": ONE shared clip, identical for every
             # character. Append it here (no per-character variant lookup).
@@ -2034,7 +2038,9 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
     actual build never disagree. dirty/hard/pending all empty ⇒ a clean rebuild;
     `excluded` (never-approved characters skipped from the build, see
     _char_is_uninvolved) is a SOFT note only — it never blocks."""
-    entries = state.get("scenes") or []
+    # Same cut as _collect_clips — the "mirror exactly" invariant now holds
+    # for the scene LIST too, not just the per-scene rules.
+    entries = versions.base_scenes(state)
     dirty = []
     for e in entries:
         if not e.get("dirty"):
@@ -2281,6 +2287,14 @@ async def _do_assemble(re_id: str, state: dict, *,
 # (+ optional ElevenLabs/Remotion) per character and writes the same
 # repurpose_<cid>.mp4 paths.
 _REPURPOSING: set[str] = set()
+
+# The same guard for 🎞 versions, keyed (re_id, version_id) rather than re_id:
+# two versions of one run are independent deliverables writing different files,
+# so building both at once is legitimate — only building the SAME one twice is
+# not. A run-wide set would serialize them and, worse, make a manual ➤ on
+# version A refuse while version B builds (the 2026-08-03 "Bygget pågår" lie,
+# one deliverable further down).
+_BUILDING_VERSIONS: set[tuple[str, str]] = set()
 
 
 def _repurpose_settings(state: dict) -> dict:
@@ -2812,18 +2826,26 @@ def _finalize_reanimate(re_id: str, *, clear_dirty: bool,
                         error: str | None = None) -> None:
     state = reengineer.load_state(re_id) or {"re_id": re_id}
     entries = state.get("scenes") or []
+    touched = [i for i in (state.get("reanimate_idxs") or [])
+               if 0 <= i < len(entries)]
     if clear_dirty:
-        for i in state.get("reanimate_idxs") or []:
-            if 0 <= i < len(entries):
-                entries[i].pop("dirty", None)
-                entries[i].pop("dirty_at", None)
-    _update(re_id,
-            scenes=entries,
-            finals_stale=True,
-            status=state.get("resume_status") or "done",
-            error=error,
-            resume_status=None, reanimate_idxs=None,
-            reanimate_clear_dirty=None)
+        for i in touched:
+            entries[i].pop("dirty", None)
+            entries[i].pop("dirty_at", None)
+    # `finals_stale` says the ORIGINAL final is out of date. A re-animate that
+    # only touched 🎞 version-owned scenes changed nothing the original reel
+    # is built from, so claiming otherwise would put a "bygg ihop igen" prompt
+    # on a reel that is perfectly current. The read is UNFILTERED on purpose:
+    # this function writes the whole `scenes` list back, and a filtered copy
+    # would delete the other cut's scenes.
+    changes: dict = {"scenes": entries,
+                     "status": state.get("resume_status") or "done",
+                     "error": error,
+                     "resume_status": None, "reanimate_idxs": None,
+                     "reanimate_clear_dirty": None}
+    if any(not entries[i].get(versions.OWNER_KEY) for i in touched) or not touched:
+        changes["finals_stale"] = True
+    _update(re_id, **changes)
 
 
 async def _resume_reanimating(re_id: str, state: dict) -> None:

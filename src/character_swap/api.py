@@ -33,12 +33,16 @@ from pydantic import BaseModel, Field
 from character_swap import (
     call_log,
     clip_failure,
+    deliverables,
     events,
     push,
     runner,
     runner_media,
     telegram_local_server,
 )
+# Pure, dependency-free cut helpers — safe at module scope. The runners that
+# consume them stay function-local imports like the rest of this file.
+from character_swap import versions as versions_mod
 from character_swap.clients import ProviderNotConfigured
 from character_swap.config import (
     TELEGRAM_CHARACTER_KEYCHAIN_ACCOUNT,
@@ -5455,10 +5459,24 @@ def _reengineer_view(state: dict, *, slim: bool = False) -> dict:
     for cid, f in repurposed.items():
         if f.get("final_path"):
             f["final_url"] = _file_url(Path(f["final_path"]))
+    # 🎞 versions — each carries the same per-character entry shape under
+    # `chars`, so the card renders through the same component as the two
+    # buckets above. Without this loop a version arrives with no `final_url`:
+    # no player, no thumbnail (the third occurrence of that bug class).
+    for version in (out.get("versions") or {}).values():
+        for f in (version.get("chars") or {}).values():
+            if f.get("final_path"):
+                f["final_url"] = _file_url(Path(f["final_path"]))
     if state.get("job_id"):
         job = store().get_job(state["job_id"])
         if job is not None:
             out["job"] = _job_to_dict(job)
+            if out.get("versions"):
+                from character_swap import runner_versions
+                for version in out["versions"].values():
+                    # Derived, never stored — see runner_versions.is_stale.
+                    version["stale"] = runner_versions.is_stale(
+                        state, job, version)
             if slim:
                 for jc in out["job"]["characters"].values():
                     for img in jc["images"]:
@@ -6556,6 +6574,428 @@ async def reengineer_repurpose(re_id: str, background_tasks: BackgroundTasks,
             "excluded": gaps.get("excluded", [])}
 
 
+class VersionRowBody(BaseModel):
+    """One row of a 🎞 version's cut.
+
+    `row_id` is the STABLE key: the client keeps it across edits so a
+    duplicated row never shares an identity with the row it came from. Omitted
+    on a new row — the server mints one.
+    """
+    row_id: str | None = None
+    scene_id: str
+
+
+class VersionBody(BaseModel):
+    """Create/edit a version. Every field optional = "leave as it is"."""
+    name: str | None = None
+    rows: list[VersionRowBody] | None = None
+    settings: ReAssembleSettingsBody | None = None
+    # Both ✓ boxes ship PRE-TICKED, so None must resolve to True downstream
+    # (runner_versions.mirrored / .auto_telegram_send) — never to False.
+    mirror: bool | None = None
+    auto_telegram_send: bool | None = None
+
+
+def _load_run_for_version(re_id: str) -> tuple[dict, Job]:
+    from character_swap import reengineer as reengineer_mod
+    state = reengineer_mod.load_state(re_id)
+    if not state:
+        raise HTTPException(404, "re_id not found")
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    job = store().get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+    return state, job
+
+
+def _version_or_404(state: dict, version_id: str) -> dict:
+    version = versions_mod.get(state, version_id)
+    if version is None:
+        raise HTTPException(404, f"Version {version_id!r} not found")
+    return version
+
+
+def _merge_version_settings(version: dict, body: VersionBody) -> None:
+    """Fold the body's settings into the version, dropping unset fields.
+
+    Only keys the build actually reads are kept (ASSEMBLE_DEFAULTS), plus the
+    two ✓ flags — so an unrelated field can never ride into the editor config,
+    the same filter `runner_reengineer._repurpose_settings` applies.
+    """
+    from character_swap import runner_reengineer
+
+    stored = dict(version.get("settings") or {})
+    if body.settings is not None:
+        stored.update({
+            k: v for k, v in body.settings.model_dump().items()
+            if v is not None and k in runner_reengineer.ASSEMBLE_DEFAULTS})
+    if body.mirror is not None:
+        stored["mirror"] = bool(body.mirror)
+    if body.auto_telegram_send is not None:
+        stored["auto_telegram_send"] = bool(body.auto_telegram_send)
+    version["settings"] = stored
+
+
+@app.post("/api/reengineer/{re_id}/versions")
+async def reengineer_create_version(re_id: str,
+                                    body: VersionBody | None = None) -> dict:
+    """Create a 🎞 version — another video per character from an edited cut.
+
+    Seeded with the run's own scenes in their own order, so creating one and
+    building it straight away reproduces the original reel. The original
+    final is never read or written by any of this.
+    """
+    from character_swap import runner_reengineer
+
+    state, _job = _load_run_for_version(re_id)
+    body = body or VersionBody()
+    all_versions = dict(state.get("versions") or {})
+    version_id = versions_mod.new_version_id()
+    rows = ([{"row_id": r.row_id or versions_mod.new_row_id(),
+              "scene_id": r.scene_id} for r in body.rows]
+            if body.rows is not None
+            else versions_mod.rows_for_scenes(versions_mod.base_scenes(state)))
+    version = {
+        "id": version_id,
+        # The run itself is "version 1" in Hugo's head, so the first extra cut
+        # is "Version 2".
+        "name": (body.name or "").strip() or f"Version {len(all_versions) + 2}",
+        "created_at": runner_reengineer._now(),
+        "rows": rows,
+        "chars": {},
+        "building": False,
+        # Seeded from the run's OWN assemble settings, not the bare defaults:
+        # a version is another cut of this reel, so it should come out looking
+        # like the reel — same template, same voice, same pacing.
+        "settings": {k: v for k, v in (state.get("assemble_settings")
+                                       or {}).items()
+                     if k in runner_reengineer.ASSEMBLE_DEFAULTS},
+    }
+    _merge_version_settings(version, body)
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version": version}
+
+
+@app.patch("/api/reengineer/{re_id}/versions/{version_id}")
+async def reengineer_patch_version(re_id: str, version_id: str,
+                                   body: VersionBody) -> dict:
+    """Rename a version, replace its cut, or change its build settings."""
+    state, _job = _load_run_for_version(re_id)
+    version = dict(_version_or_404(state, version_id))
+    if version.get("building"):
+        raise HTTPException(409, "Versionen byggs just nu — vänta tills den "
+                                 "är klar innan du ändrar den.")
+    if body.name is not None and body.name.strip():
+        version["name"] = body.name.strip()
+    if body.rows is not None:
+        # Mint a row_id for any row the client didn't carry one for, and never
+        # reuse one twice — two rows sharing an identity cross-wire in the
+        # Alpine list the moment a row is duplicated.
+        seen: set[str] = set()
+        rows = []
+        for r in body.rows:
+            rid = r.row_id or versions_mod.new_row_id()
+            while rid in seen:
+                rid = versions_mod.new_row_id()
+            seen.add(rid)
+            rows.append({"row_id": rid, "scene_id": r.scene_id})
+        version["rows"] = rows
+    _merge_version_settings(version, body)
+    all_versions = dict(state.get("versions") or {})
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version": version}
+
+
+@app.delete("/api/reengineer/{re_id}/versions/{version_id}")
+async def reengineer_delete_version(re_id: str, version_id: str) -> dict:
+    """Delete a version and the videos it built. The run is untouched."""
+    state, _job = _load_run_for_version(re_id)
+    version = _version_or_404(state, version_id)
+    if version.get("building"):
+        raise HTTPException(409, "Versionen byggs just nu — vänta tills den "
+                                 "är klar innan du tar bort den.")
+    for entry in (version.get("chars") or {}).values():
+        path = entry.get("final_path")
+        if path:
+            with contextlib.suppress(OSError):
+                Path(path).unlink()
+    all_versions = dict(state.get("versions") or {})
+    all_versions.pop(version_id, None)
+    # The whole container goes back: a reengineer state write merges and can
+    # never delete a key on its own.
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "deleted": version_id}
+
+
+class VersionDuplicateBody(BaseModel):
+    """⧉ Duplicate one row of a version's cut.
+
+    Hugo's definition (2026-08-10): the SAME scene image, a NEW movement
+    prompt, therefore a NEW clip. Zero image cost — every character's ready
+    image is cloned with its approval mirrored — and one video credit each.
+    """
+    row_id: str
+    motion_prompt: str
+    secs: int | None = Field(default=None, ge=3, le=15)
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/rows/duplicate")
+async def reengineer_version_duplicate_row(
+        re_id: str, version_id: str, body: VersionDuplicateBody) -> dict:
+    """Duplicate a scene INTO a version: same image, new prompt, new clip.
+
+    The copy is a real scene on the job (so generation, QC and every per-clip
+    tool work on it untouched) but is tagged as this version's, which makes it
+    invisible to the original reel's build. It is APPENDED to state["scenes"],
+    never inserted: base entries then keep contiguous indices, so the run
+    card's scene numbering and every stored idx are exactly as they were.
+    """
+    from character_swap import runner_reengineer
+
+    state = _editable_reengineer_state(re_id)
+    version = dict(_version_or_404(state, version_id))
+    rows = list(version.get("rows") or [])
+    position = next((i for i, r in enumerate(rows)
+                     if r.get("row_id") == body.row_id), None)
+    if position is None:
+        raise HTTPException(404, f"Row {body.row_id!r} not in this version")
+    prompt = (body.motion_prompt or "").strip()
+    if not prompt:
+        raise HTTPException(422, "Duplicerade scener behöver en ny videoprompt "
+                                 "— det är hela poängen med kopian.")
+    source_sid = rows[position]["scene_id"]
+    entries = state.get("scenes") or []
+    source = next((e for e in entries if e.get("scene_id") == source_sid), None)
+    if source is None:
+        raise HTTPException(409, "Scenen finns inte kvar i körningen.")
+
+    s = store()
+    job = s.get_job(state.get("job_id") or "")
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    new_sid = _apply_scene_duplicate(job, source_sid)
+    s.update_job(job)
+    # The strip resolves thumbnails via store().get_scene — register the new id
+    # against the SAME file as the source (no copy), exactly as the edit-mode
+    # duplicate does. Deriving the path by hand is what broke every variant of
+    # a .webp or already-duplicated scene (2026-08-08).
+    src_scene = s.get_scene(source_sid)
+    filename = (src_scene.filename if src_scene
+                else Path(job.scene_image_paths[
+                    job.scene_ids.index(new_sid)]).name)
+    if s.get_scene(new_sid) is None:
+        s.add_scene(SceneAsset(
+            scene_id=new_sid, filename=filename,
+            original_name=f"{source.get('summary', new_sid)} (version)"))
+
+    copy = dict(source)
+    copy.update({
+        "scene_id": new_sid,
+        "summary": f"{source.get('summary', '')} (kopia)".strip(),
+        "motion_prompt": prompt,
+        "dirty": True,
+        "dirty_at": runner_reengineer._now(),
+        "source": "version_duplicate",
+        versions_mod.OWNER_KEY: version_id,
+    })
+    copy.pop("transcribing", None)
+    if body.secs is not None:
+        copy["kling_secs"] = int(body.secs)
+    entries.append(copy)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+    # Push the new prompt/length into the job so the clip actually renders with
+    # it — retry_one_video / generate_more_videos resolve off job.movement_prompts.
+    runner_reengineer._sync_movement_from_state(job, state, [len(entries) - 1])
+    s.update_job(job)
+
+    rows.insert(position + 1, {"row_id": versions_mod.new_row_id(),
+                               "scene_id": new_sid})
+    version["rows"] = rows
+    all_versions = dict(state.get("versions") or {})
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    # Deliberately NOT _mark_finals_stale: the copy is invisible to the
+    # original reel, so nothing about that reel changed.
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "scene_id": new_sid, "idx": len(entries) - 1}
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/rows/import_clip")
+async def reengineer_version_import_clip(
+    re_id: str, version_id: str,
+    file: UploadFile = File(...),
+    summary: str = Form(""),
+) -> dict:
+    """Drop a FINISHED clip into a version — no generation, no credits.
+
+    Modelled as a 📌 direct scene, which is the app's existing shape for "one
+    clip, character-independent, identical in every character's final": the
+    uploaded file becomes the scene's `shared_clip_path` and is marked
+    `direct_clip_reused` so a full re-animate never re-renders over it (the
+    file is the user's, there is nothing to regenerate it from).
+
+    A mid-frame is extracted purely so the scene has a thumbnail in the strip.
+    """
+    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import video_edit
+
+    state = _editable_reengineer_state(re_id)
+    if not state.get("job_id"):
+        raise HTTPException(409, "run has no underlying job yet")
+    _version_or_404(state, version_id)
+    s = store()
+    job = s.get_job(state["job_id"])
+    if job is None:
+        raise HTTPException(409, "underlying job disappeared")
+
+    ext = _safe_ext(file.filename or "clip.mp4", allow_video=True)
+    if ext not in {".mp4", ".mov", ".webm"}:
+        raise HTTPException(400, "Ladda upp en videofil (.mp4/.mov/.webm).")
+    data = await _read_capped(file)
+    if not data:
+        raise HTTPException(400, "Empty upload")
+
+    run_dir = reengineer_mod.reengineer_dir(re_id) / "added"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    tok = secrets.token_hex(4)
+    clip = run_dir / f"import_{tok}{ext}"
+    clip.write_bytes(data)
+    duration = await asyncio.to_thread(video_edit._probe_duration, clip)
+    frame = run_dir / f"import_{tok}.png"
+    await asyncio.to_thread(reengineer_mod.extract_frame, clip,
+                            max(0.0, (duration or 2.0) / 2.0), frame)
+    scene_id, frame_path = runner_reengineer._register_frame_as_scene(frame)
+
+    state = _reload_reengineer_state_after_await(re_id)
+    entries = state.get("scenes") or []
+    # Content-addressing collapses an identical frame onto an existing id, and
+    # a shared id would flip the sibling's mode to direct too — mint our own.
+    if any(e.get("scene_id") == scene_id for e in entries):
+        scene_id, frame_path = _register_scene_duplicate(
+            scene_id, Path(frame_path).read_bytes(),
+            file.filename or "Eget klipp")
+
+    entry = {
+        "idx": 0,                                   # renumbered below
+        "scene_id": scene_id,
+        "start": 0.0, "end": round(duration or 0.0, 3),
+        "duration": round(duration or 0.0, 3),
+        "motion_prompt": "", "speech": "",
+        "summary": (summary or file.filename or "Eget klipp")[:80],
+        "source": "version_import",
+        "is_direct": True,
+        "direct_image_path": str(frame_path),
+        "shared_clip_path": str(clip),
+        # Never re-render over the user's own file.
+        "direct_clip_reused": True,
+        versions_mod.OWNER_KEY: version_id,
+    }
+    entries.append(entry)
+    state["scenes"] = entries
+    _renumber_scenes(state)
+
+    if scene_id not in (job.scene_ids or []):
+        job.scene_ids = list(job.scene_ids or [job.scene_id]) + [scene_id]
+        job.scene_image_paths = (list(job.scene_image_paths
+                                      or [job.scene_image_path])
+                                 + [str(frame_path)])
+    if scene_id not in (job.direct_scene_ids or []):
+        job.direct_scene_ids = list(job.direct_scene_ids or []) + [scene_id]
+    job.updated_at = datetime.utcnow()
+    s.update_job(job)
+
+    all_versions = dict(state.get("versions") or {})
+    version = dict(all_versions.get(version_id) or {})
+    version["rows"] = list(version.get("rows") or []) + [
+        {"row_id": versions_mod.new_row_id(), "scene_id": scene_id}]
+    all_versions[version_id] = version
+    state["versions"] = all_versions
+    _save_reengineer_state(state)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "scene_id": scene_id, "idx": len(entries) - 1}
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/animate")
+async def reengineer_version_animate(re_id: str, version_id: str,
+                                     background_tasks: BackgroundTasks) -> dict:
+    """Render the clips for this version's OWN scenes (its ⧉ duplicates).
+
+    Delegates to the same `reanimate` engine the edit-mode "▶ Animera om
+    ändrade" uses — a scene with no clip yet gets its first there. The idxs are
+    computed SERVER-side so the client never has to know how a version's
+    scenes are stored.
+    """
+    from character_swap import runner_reengineer
+
+    state = _editable_reengineer_state(
+        re_id, statuses={"awaiting_assembly", "done", "partial_success",
+                         "failed"})
+    _version_or_404(state, version_id)
+    entries = state.get("scenes") or []
+    idxs = [i for i, e in enumerate(entries)
+            if e.get(versions_mod.OWNER_KEY) == version_id and e.get("dirty")]
+    if not idxs:
+        raise HTTPException(400, "Inga nya scener att rendera i den här "
+                                 "versionen.")
+    if re_id in runner_reengineer._ANIMATING:
+        raise HTTPException(409, "animation already running for this run")
+    background_tasks.add_task(_run_async, runner_reengineer.reanimate,
+                              re_id, idxs)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "idxs": idxs}
+
+
+@app.post("/api/reengineer/{re_id}/versions/{version_id}/build")
+async def reengineer_build_version(re_id: str, version_id: str,
+                                   background_tasks: BackgroundTasks,
+                                   body: VersionBody | None = None) -> dict:
+    """Build this version's video for every involved character.
+
+    Refuses LOUDLY and BEFORE billing anything when the cut can't produce
+    complete videos — a clip that failed, an image never approved, a row whose
+    scene was deleted from the run. A merely edited-but-not-re-animated scene
+    does NOT block (Hugo 2026-06-24), same as "Bygg ihop igen".
+    """
+    from character_swap import runner_reengineer, runner_versions
+
+    state, job = _load_run_for_version(re_id)
+    version = dict(_version_or_404(state, version_id))
+    if (re_id, version_id) in runner_reengineer._BUILDING_VERSIONS:
+        raise HTTPException(409, "Versionen byggs redan.")
+    if body is not None:
+        _merge_version_settings(version, body)
+        all_versions = dict(state.get("versions") or {})
+        all_versions[version_id] = version
+        state["versions"] = all_versions
+    if runner_reengineer.clear_resolved_dirty(state, job):
+        pass                       # persisted by the save below
+    try:
+        stale_scenes = runner_versions.preflight(state, job, version)
+    except runner_versions.VersionBuildRefused as exc:
+        raise HTTPException(409, detail={
+            "code": "incomplete_version",
+            "message": str(exc),
+            **exc.detail,
+        }) from exc
+    # Show the spinner immediately + persist the settings in one write.
+    version["building"] = True
+    state.setdefault("versions", {})[version_id] = version
+    _save_reengineer_state(state)
+    background_tasks.add_task(_run_async, runner_versions.build, re_id,
+                              version_id)
+    return {"ok": True, "re_id": re_id, "version_id": version_id,
+            "stale_scenes": stale_scenes}
+
+
 def _assembly_refusal_message(gaps: dict) -> str:
     """Human, actionable one-liner for the 409 'Bygg ihop igen' refusal —
     names which scenes/characters block a complete rebuild and what to do."""
@@ -6833,16 +7273,31 @@ async def reengineer_add_scene(
     whisper: bool = Form(False),
     position: int = Form(-1),
     direct: bool = Form(False),       # use the image as-is, no swap, shared clip
+    version_id: str = Form(""),       # add to a 🎞 version instead of the run
 ) -> dict:
     """Add a scene from an uploaded IMAGE or VIDEO. Video → mid-frame becomes
     the scene image (+ optional Whisper dialogue prefill into the prompt).
     Swap images for EVERY character generate in the background (normal QC);
-    the new variants need manual approval before the scene can animate."""
+    the new variants need manual approval before the scene can animate.
+
+    With `version_id` the scene belongs to that 🎞 version instead of the run:
+    it is APPENDED (so base indices stay contiguous), tagged so no base-cut
+    reader sees it, and the original final is NOT marked stale — it cannot
+    contain a scene it will never be built from. Everything else is identical,
+    which is the point of putting it here rather than in a parallel endpoint:
+    the multi-person gate, the Whisper dialogue prefill, QC and the approval
+    gate all come along unchanged."""
     from character_swap import reengineer as reengineer_mod, runner_reengineer
     from character_swap import video_edit
     state = _editable_reengineer_state(re_id)
     if not state.get("job_id"):
         raise HTTPException(409, "run has no underlying job yet")
+    # Direct callers (the tests, and any internal use) leave an unsupplied
+    # Form parameter as its FastAPI sentinel rather than a string — only HTTP
+    # requests get it resolved. Treat anything non-str as "not supplied".
+    version_id = version_id.strip() if isinstance(version_id, str) else ""
+    if version_id:
+        _version_or_404(state, version_id)
     s = store()
     job = s.get_job(state["job_id"])
     if job is None:
@@ -6918,11 +7373,22 @@ async def reengineer_add_scene(
         entry["scene_id"] = scene_id
         if direct:
             entry["direct_image_path"] = str(_path)
-    pos = position if 0 <= position <= len(entries) else len(entries)
-    entries.insert(pos, entry)
+    if version_id:
+        # Version scenes are ALWAYS appended, never inserted at `position`:
+        # base entries keep contiguous indices that way, so the run card's
+        # numbering and every stored idx are untouched. Where the scene sits in
+        # the reel is decided by its row in the version's cut.
+        entry[versions_mod.OWNER_KEY] = version_id
+        entries.append(entry)
+    else:
+        pos = position if 0 <= position <= len(entries) else len(entries)
+        entries.insert(pos, entry)
     state["scenes"] = entries
     _renumber_scenes(state)
-    _mark_finals_stale(state)
+    if not version_id:
+        # A version's scene can never enter the original reel, so claiming that
+        # reel is out of date would be a lie.
+        _mark_finals_stale(state)
 
     # Extend the underlying job so variant generation accepts the scene.
     # (Append is fine — assembly order follows state.scenes, not the job.)
@@ -6938,6 +7404,13 @@ async def reengineer_add_scene(
         job.updated_at = datetime.utcnow()
         s.update_job(job)
 
+    if version_id:
+        all_versions = dict(state.get("versions") or {})
+        version = dict(all_versions.get(version_id) or {})
+        version["rows"] = list(version.get("rows") or []) + [
+            {"row_id": versions_mod.new_row_id(), "scene_id": scene_id}]
+        all_versions[version_id] = version
+        state["versions"] = all_versions
     _save_reengineer_state(state)
     if not direct:
         # Swap the new scene for every character. Direct scenes use the image
@@ -8076,6 +8549,20 @@ _drive_safe_name = _drive_push_mod.drive_safe_name
 _drive_final_name = _drive_push_mod.drive_final_name
 
 
+def _variant(raw: str, state: dict | None = None) -> str:
+    """Validate a deliverable variant name, 422 on anything unknown.
+
+    `state` is a Reengineer run's state when the surface HAS one — that is
+    what makes a 🎞 `version:<vid>` acceptable, and only for a version that
+    actually exists. Omitting it (the Swap-job and Editor endpoints) leaves
+    exactly the historical pair "final" | "repurpose" valid.
+    """
+    try:
+        return deliverables.validate(raw, state)
+    except deliverables.UnknownVariant as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 def _exc_detail(exc: BaseException) -> str:
     """HTTPException → its .detail, anything else → str(). Used to fold a
     per-item push failure into a batch response without aborting the batch."""
@@ -8158,8 +8645,7 @@ async def job_char_drive_push(job_id: str, char_id: str,
     jc = job.characters.get(char_id)
     if jc is None:
         raise HTTPException(404, "Character not in this job")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     path = (jc.compiled_video_path if body.variant == "final"
             else jc.repurposed_video_path)
     status = (jc.compile_status if body.variant == "final"
@@ -8183,30 +8669,25 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
                                      body: DrivePushBody) -> dict:
     """Push a Reengineer character final (or repurposed variant) to Drive
     under Character Swap/<character name>/."""
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    entry = (state.get(bucket) or {}).get(char_id)
+    try:
+        variant = deliverables.validate(body.variant, state)
+    except deliverables.UnknownVariant as exc:
+        raise HTTPException(422, str(exc)) from exc
+    entry = deliverables.char_entries(state, variant).get(char_id)
     if not entry or entry.get("status") != "done" or not entry.get("final_path"):
         raise HTTPException(
             409, "No finished video to push — build the final first.")
-    # The final_/repurpose_<cid>.mp4 files are overwritten IN PLACE by a
-    # rebuild while the bucket entry stays "done" — an upload streaming that
-    # path as _do_assemble/_do_repurpose copies over it would land a torn
-    # file on Drive with an ok receipt. Refuse while the owning build is in
-    # flight; the snapshot in _drive_push_file covers a rebuild that STARTS
-    # mid-upload.
-    if body.variant == "final":
-        building = (state.get("status") == "assembling"
-                    or re_id in runner_reengineer._ASSEMBLING)
-    else:
-        building = (bool(state.get("repurposing"))
-                    or re_id in runner_reengineer._REPURPOSING)
-    if building:
+    # The final_/repurpose_/version_<cid>.mp4 files are overwritten IN PLACE by
+    # a rebuild while the bucket entry stays "done" — an upload streaming that
+    # path as its builder copies over it would land a torn file on Drive with
+    # an ok receipt. Refuse while THIS deliverable's build is in flight (never
+    # a sibling's — see deliverables.is_building); the snapshot in
+    # _drive_push_file covers a rebuild that STARTS mid-upload.
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår för den här körningen — vänta tills det är "
                  "klart innan du pushar till Drive.")
@@ -8219,7 +8700,8 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
         linked = store().get_job(state["job_id"])
         base_src = linked.title if linked else None
     base = _drive_safe_name(base_src or re_id)
-    filename = _drive_final_name(char_name, base, body.variant, re_id)
+    filename = _drive_final_name(char_name, base, variant, re_id,
+                                 label=deliverables.label_for(state, variant))
     prior = (entry.get("drive") or {}).get("file_id")
     receipt = await _drive_push_file(
         Path(entry["final_path"]), [char_name], filename,
@@ -8228,8 +8710,12 @@ async def reengineer_char_drive_push(re_id: str, char_id: str,
     # state changes persisted meanwhile (another push finishing, a repurpose
     # writing its results) with our stale pre-upload snapshot.
     fresh = reengineer_mod.load_state(re_id)
-    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
-        fresh[bucket][char_id]["drive"] = receipt
+    fresh_entry = (deliverables.char_entries(fresh, variant).get(char_id)
+                   if fresh is not None else None)
+    if fresh_entry:
+        # char_entries returns the STORED dict when it exists, so this writes
+        # through — for a version that is state["versions"][vid]["chars"][cid].
+        fresh_entry["drive"] = receipt
         reengineer_mod.save_state(fresh)
     else:
         # The run was deleted mid-upload (fresh is None) or a rebuild that
@@ -8263,8 +8749,7 @@ async def job_drive_push_all(job_id: str, body: DrivePushBody) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     base = _drive_safe_name(job.title or "swap")
     # (char_id, jc, snapshot-source path, sanitized char name) per ready final.
     targets: list[tuple[str, JobCharacter, Path, str]] = []
@@ -8313,22 +8798,15 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     ONE click. Same per-character resilience + 409-preflight as the Swap batch;
     all receipts are persisted in ONE reload-before-save (a rebuild or another
     push landing during the multi-minute upload must not be clobbered)."""
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
+    variant = _variant(body.variant, state)
+    label = deliverables.label_for(state, variant)
     # Refuse while the owning build is in flight — same guard the single push
     # uses; a streaming upload of an in-place-overwritten file lands torn bytes.
-    if body.variant == "final":
-        building = (state.get("status") == "assembling"
-                    or re_id in runner_reengineer._ASSEMBLING)
-    else:
-        building = (bool(state.get("repurposing"))
-                    or re_id in runner_reengineer._REPURPOSING)
-    if building:
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår för den här körningen — vänta tills det är "
                  "klart innan du pushar till Drive.")
@@ -8339,7 +8817,7 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     base = _drive_safe_name(base_src or re_id)
     # (char_id, final path, sanitized name, prior file_id) per ready final.
     targets: list[tuple[str, Path, str, str | None]] = []
-    for cid, entry in (state.get(bucket) or {}).items():
+    for cid, entry in deliverables.char_entries(state, variant).items():
         fp = entry.get("final_path")
         if entry.get("status") == "done" and fp and Path(fp).is_file():
             char = store().get_character(cid)
@@ -8352,7 +8830,8 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
     await _ensure_drive_authorized()
 
     async def _one(path: Path, char_name: str, prior: str | None):
-        filename = _drive_final_name(char_name, base, body.variant, re_id)
+        filename = _drive_final_name(char_name, base, variant, re_id,
+                                     label=label)
         return await _drive_push_file(path, [char_name], filename,
                                       prior_file_id=prior)
 
@@ -8376,9 +8855,10 @@ async def reengineer_drive_push_all(re_id: str, body: DrivePushBody) -> dict:
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
             changed = False
+            fresh_entries = deliverables.char_entries(fresh, variant)
             for cid, receipt in pushed.items():
-                if (fresh.get(bucket) or {}).get(cid):
-                    fresh[bucket][cid]["drive"] = receipt
+                if fresh_entries.get(cid):
+                    fresh_entries[cid]["drive"] = receipt
                     changed = True
                 else:
                     receipt["persisted"] = False
@@ -8646,7 +9126,8 @@ def _character_telegram_target(char_id: str, fallback_name: str) -> tuple[str, s
 
 async def _telegram_character_file(source: Path, *, char_id: str,
                                    char_name: str, base: str, variant: str,
-                                   run_id: str) -> dict:
+                                   run_id: str,
+                                   label: str | None = None) -> dict:
     from character_swap import telegram_delivery
     _require_character_telegram()
     name, chat_id = _character_telegram_target(char_id, char_name)
@@ -8654,11 +9135,12 @@ async def _telegram_character_file(source: Path, *, char_id: str,
         # One upload at a time per (run, character, variant): the automatic
         # post-build delivery runs for minutes, and without this a manual
         # click mid-upload posts the same video twice in the channel. Only
-        # THIS target is blocked — other characters stay sendable.
+        # THIS target is blocked — other characters stay sendable, and so is
+        # the same character's OTHER deliverable (the variant is in the key).
         with telegram_delivery.sending(run_id, char_id, variant):
             return await telegram_delivery.send_character_final(
                 source, chat_id=chat_id, char_name=name, base=base,
-                variant=variant, run_id=run_id)
+                variant=variant, run_id=run_id, label=label)
     except telegram_delivery.AlreadySending as exc:
         raise HTTPException(409, str(exc)) from exc
     except FileNotFoundError as exc:
@@ -8677,8 +9159,7 @@ async def job_char_telegram_send(job_id: str, char_id: str,
     jc = job.characters.get(char_id)
     if jc is None:
         raise HTTPException(404, "Character not in this job")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     path = (jc.compiled_video_path if body.variant == "final"
             else jc.repurposed_video_path)
     status = (jc.compile_status if body.variant == "final"
@@ -8697,25 +9178,16 @@ async def job_char_telegram_send(job_id: str, char_id: str,
 @app.post("/api/reengineer/{re_id}/chars/{char_id}/telegram_send")
 async def reengineer_char_telegram_send(re_id: str, char_id: str,
                                         body: TelegramSendBody) -> dict:
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    entry = (state.get(bucket) or {}).get(char_id)
+    variant = _variant(body.variant, state)
+    entry = deliverables.char_entries(state, variant).get(char_id)
     if not entry or entry.get("status") != "done" or not entry.get("final_path"):
         raise HTTPException(
             409, "Ingen färdig video att skicka — bygg finalen först.")
-    building = (
-        state.get("status") == "assembling"
-        or re_id in runner_reengineer._ASSEMBLING
-        if body.variant == "final"
-        else bool(state.get("repurposing"))
-             or re_id in runner_reengineer._REPURPOSING
-    )
-    if building:
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(
             409, "Bygget pågår — vänta tills finalen är klar.")
     base = state.get("title") or state.get("name")
@@ -8724,10 +9196,13 @@ async def reengineer_char_telegram_send(re_id: str, char_id: str,
         base = linked.title if linked else None
     receipt = await _telegram_character_file(
         Path(entry["final_path"]), char_id=char_id, char_name=char_id,
-        base=base or re_id, variant=body.variant, run_id=re_id)
+        base=base or re_id, variant=variant, run_id=re_id,
+        label=deliverables.label_for(state, variant))
     fresh = reengineer_mod.load_state(re_id)
-    if fresh is not None and (fresh.get(bucket) or {}).get(char_id):
-        fresh[bucket][char_id]["telegram"] = receipt
+    fresh_entry = (deliverables.char_entries(fresh, variant).get(char_id)
+                   if fresh is not None else None)
+    if fresh_entry:
+        fresh_entry["telegram"] = receipt
         reengineer_mod.save_state(fresh)
     else:
         receipt["persisted"] = False
@@ -8740,8 +9215,7 @@ async def job_telegram_send_all(job_id: str, body: TelegramSendBody) -> dict:
     job = s.get_job(job_id)
     if job is None:
         raise HTTPException(404, "Job not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    _variant(body.variant)
     _require_character_telegram()
     targets = []
     for cid, jc in job.characters.items():
@@ -8779,22 +9253,14 @@ async def job_telegram_send_all(job_id: str, body: TelegramSendBody) -> dict:
 @app.post("/api/reengineer/{re_id}/telegram_send_all")
 async def reengineer_telegram_send_all(
         re_id: str, body: TelegramSendBody) -> dict:
-    from character_swap import reengineer as reengineer_mod, runner_reengineer
+    from character_swap import reengineer as reengineer_mod
     state = reengineer_mod.load_state(re_id)
     if state is None:
         raise HTTPException(404, "Run not found")
-    if body.variant not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown variant {body.variant!r}")
+    variant = _variant(body.variant, state)
     _require_character_telegram()
-    bucket = "finals" if body.variant == "final" else "repurposed"
-    building = (
-        state.get("status") == "assembling"
-        or re_id in runner_reengineer._ASSEMBLING
-        if body.variant == "final"
-        else bool(state.get("repurposing"))
-             or re_id in runner_reengineer._REPURPOSING
-    )
-    if building:
+    label = deliverables.label_for(state, variant)
+    if deliverables.is_building(state, variant, re_id):
         raise HTTPException(409, "Bygget pågår — vänta tills finalerna är klara.")
     base = state.get("title") or state.get("name")
     if not base and state.get("job_id"):
@@ -8802,7 +9268,7 @@ async def reengineer_telegram_send_all(
         base = linked.title if linked else None
     targets = [
         (cid, Path(entry["final_path"]))
-        for cid, entry in (state.get(bucket) or {}).items()
+        for cid, entry in deliverables.char_entries(state, variant).items()
         if entry.get("status") == "done" and entry.get("final_path")
         and Path(entry["final_path"]).is_file()
     ]
@@ -8812,7 +9278,7 @@ async def reengineer_telegram_send_all(
     async def _one(cid: str, path: Path):
         return await _telegram_character_file(
             path, char_id=cid, char_name=cid, base=base or re_id,
-            variant=body.variant, run_id=re_id)
+            variant=variant, run_id=re_id, label=label)
 
     results = await asyncio.gather(
         *[_one(cid, path) for cid, path in targets],
@@ -8829,9 +9295,10 @@ async def reengineer_telegram_send_all(
     if sent:
         fresh = reengineer_mod.load_state(re_id)
         if fresh is not None:
+            fresh_entries = deliverables.char_entries(fresh, variant)
             for cid, receipt in sent.items():
-                if (fresh.get(bucket) or {}).get(cid):
-                    fresh[bucket][cid]["telegram"] = receipt
+                if fresh_entries.get(cid):
+                    fresh_entries[cid]["telegram"] = receipt
                 else:
                     receipt["persisted"] = False
                     persisted = False
@@ -8849,8 +9316,7 @@ async def editor_telegram_send(edit_id: str,
                                body: TelegramSendBody) -> dict:
     from character_swap import telegram_delivery
     _require_editor_telegram()
-    if body.slot not in ("final", "repurpose"):
-        raise HTTPException(422, f"Unknown slot {body.slot!r}")
+    _variant(body.slot)
     edit_dir = settings.output_dir / "editor" / edit_id
     if not edit_dir.is_dir():
         raise HTTPException(404, f"Edit {edit_id!r} not found")

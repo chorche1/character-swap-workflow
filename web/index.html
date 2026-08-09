@@ -2597,6 +2597,13 @@
                   <span x-show="!r.repurposing">🔁 Repurpose</span>
                   <span x-show="r.repurposing" class="animate-pulse">spegelvänder…</span>
                 </button>
+                <!-- 🎞 Ny version (Hugo 2026-08-10): like Repurpose, but the
+                     scene list is editable. Gated on reCanVersion (n_scenes),
+                     never on r.scenes — the light history row omits it. -->
+                <button x-show="reCanVersion(r)"
+                        class="text-xs px-2.5 py-1 rounded-lg border border-sky-300 dark:border-sky-800 text-sky-700 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950"
+                        title="Bygg en till version av den här reelen med en egen scenlista — ta bort scener, ändra ordning. Originalfinalen rörs inte."
+                        @click="openVersionModal(r)">🎞 Ny version</button>
               </div>
             </div>
             <div class="flex gap-4 flex-wrap">
@@ -2678,6 +2685,90 @@
                 </template>
               </div>
             </div>
+
+            <!-- 🎞 Versions — each an alternative CUT of the same run, built
+                 alongside the finals. The originals above are never touched. -->
+            <template x-for="v of reVersionList(r)" :key="r.re_id+'-ver-'+v.id">
+              <div class="mt-3 border-t border-neutral-200 dark:border-neutral-800 pt-3">
+                <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                  <div class="flex items-center gap-2">
+                    <div class="text-xs font-medium text-sky-600 dark:text-sky-400"
+                         x-text="'🎞 ' + v.name"></div>
+                    <span class="text-[10px] text-neutral-400"
+                          x-text="(v.rows || []).length + ' scener'"></span>
+                    <span x-show="v.settings?.mirror !== false"
+                          class="text-[9px] px-1.5 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300"
+                          title="Den här versionen är spegelvänd">🔁 spegelvänd</span>
+                    <!-- Derived on the server from clip submit times, never a
+                         stored flag: six paths can replace a clip. -->
+                    <span x-show="v.stale"
+                          class="text-[9px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+                          title="Ett klipp den här versionen använder har tagits om sedan den byggdes. Bygg om för att få med det.">ändrad</span>
+                    <span x-show="v.building" class="text-[10px] text-sky-500 animate-pulse">bygger…</span>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <button class="text-xs text-neutral-500 hover:text-sky-600 dark:hover:text-sky-400"
+                            title="Ändra scenlistan eller inställningarna"
+                            @click="openVersionModal(r, v)">✎ ändra</button>
+                    <!-- A ⧉ copy has no clip until it is rendered. Shown only
+                         while such a scene exists, so the credit spend is
+                         always an explicit click. -->
+                    <button x-show="versionPendingScenes(r, v)"
+                            class="text-xs text-amber-600 dark:text-amber-400 hover:underline"
+                            :title="'Rendera klipp för versionens nya scener (kostar ett klipp per karaktär)'"
+                            @click="animateVersionScenes(r, v)"
+                            x-text="`▶ Rendera nya klipp (${versionPendingScenes(r, v)})`"></button>
+                    <button class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline disabled:opacity-40"
+                            :disabled="!!v.building"
+                            title="Bygg om den här versionen med de klipp som finns nu"
+                            @click="rebuildVersion(r, v)">▶ Bygg om</button>
+                    <button x-show="telegramReReadyCount(r, 'version:'+v.id) >= 2"
+                            class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                            :disabled="telegramAllBusy(r.re_id, 'version:'+v.id)"
+                            title="Skicka hela versionen till respektive karaktärs Telegram-kanal"
+                            @click="telegramSendAll(`/api/reengineer/${r.re_id}/telegram_send_all`, r.re_id, 'version:'+v.id)">
+                      <span x-show="!telegramAllBusy(r.re_id, 'version:'+v.id)"
+                            x-text="`➤ Skicka alla (${telegramReReadyCount(r, 'version:'+v.id)})`"></span>
+                      <span x-show="telegramAllBusy(r.re_id, 'version:'+v.id)" class="animate-pulse">⏳ skickar…</span>
+                    </button>
+                    <button class="text-xs text-neutral-400 hover:text-rose-500 disabled:opacity-40"
+                            :disabled="!!v.building"
+                            title="Ta bort versionen och dess videor (körningen rörs inte)"
+                            @click="deleteVersion(r, v)">✕</button>
+                  </div>
+                </div>
+                <div x-show="v.error" class="text-[11px] text-rose-500 mb-2" x-text="v.error"></div>
+                <div class="flex gap-4 flex-wrap">
+                  <template x-for="[cid, f] of Object.entries(v.chars || {})" :key="r.re_id+'-'+v.id+'-'+cid">
+                    <div class="w-44">
+                      <div class="text-xs mb-1" x-text="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + (f.status === 'done' ? '' : ' — ' + (f.error || f.status))"></div>
+                      <!-- Cache-buster on built_at — a rebuild overwrites the
+                           same version_<vid>_<cid>.mp4 path. -->
+                      <video x-show="f.final_url" :src="f.final_url + (v.built_at ? ('?t=' + String(v.built_at).replace(/\D/g, '')) : '')" controls class="w-full rounded-lg border border-sky-200 dark:border-sky-900"></video>
+                      <div x-show="f.warning" class="text-[10px] text-amber-500 mt-0.5" x-text="'⚠ ' + f.warning"></div>
+                      <div class="flex items-center gap-3">
+                        <a x-show="f.final_url" :href="f.final_url + (v.built_at ? ('?t=' + String(v.built_at).replace(/\D/g, '')) : '')" :download="(r.job?.characters?.[cid]?.name || r.char_names?.[cid] || cid) + '-' + (v.name || 'version') + '.mp4'"
+                           class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">↓ download</a>
+                        <button x-show="f.final_url && f.edit_id"
+                                class="text-xs text-violet-600 dark:text-violet-400 hover:underline"
+                                title="Öppna versionen i Editor-tabben"
+                                @click="openEditInEditor(f.edit_id)">✎ Re-edit</button>
+                        <button x-show="f.final_url && f.status === 'done'"
+                                class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline disabled:opacity-40"
+                                :disabled="telegramBusy(r.re_id+':'+cid+':version:'+v.id)"
+                                title="Skicka den här versionen till karaktärens Telegram-kanal"
+                                @click="telegramSend(`/api/reengineer/${r.re_id}/chars/${cid}/telegram_send`, r.re_id+':'+cid+':version:'+v.id, {variant: 'version:'+v.id})"
+                                x-text="telegramLabel(r.re_id+':'+cid+':version:'+v.id, f.telegram)"></button>
+                        <a x-show="telegramReceipt(r.re_id+':'+cid+':version:'+v.id, f.telegram)?.url"
+                           :href="telegramReceipt(r.re_id+':'+cid+':version:'+v.id, f.telegram)?.url" target="_blank"
+                           title="Öppna i Telegram"
+                           class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline">✓ öppna</a>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
 
             <!-- 'animating' removed: the video-phase watcher auto-assembles at
                  the end — a manual click there would overlap the same build -->
@@ -5299,6 +5390,129 @@
                 :disabled="repurposeModal.busy" @click="submitRepurpose()">
           <span x-show="!repurposeModal.busy">🔁 Repurpose (spegelvänd)</span>
           <span x-show="repurposeModal.busy">Startar…</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 🎞 Ny version (Hugo 2026-08-10): another video per character from an
+       EDITED cut of the same run. Deliberately placed AFTER the Repurpose
+       modal — test_repurpose_telegram_toggle slices index.html between
+       x-show="repurposeModal.open" and "Repurpose (spegelvänd)" to assert the
+       auto-send ✓ is inside THAT modal, and anything in between breaks it. -->
+  <div x-show="versionModal.open"
+       @click="versionModal.open = false"
+       @keydown.window.escape="if (versionModal.open) versionModal.open = false"
+       class="fixed inset-0 bg-black/40 z-40 flex items-center justify-center p-4"
+       style="display:none">
+    <div @click.stop
+         class="bg-white dark:bg-neutral-900 rounded-2xl shadow-xl border border-neutral-200 dark:border-neutral-800 w-full max-w-2xl max-h-[85vh] overflow-y-auto">
+      <div class="px-5 py-4 border-b border-neutral-200 dark:border-neutral-800 flex items-center justify-between">
+        <div>
+          <div class="text-sm font-semibold"
+               x-text="versionModal.versionId ? 'Ändra version' : 'Ny version'"></div>
+          <div class="text-xs text-neutral-500 dark:text-neutral-400">
+            Egen scenlista — <span x-text="versionModal.runName"></span>.
+            Originalfinalen rörs inte.
+          </div>
+        </div>
+        <button class="text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200"
+                @click="versionModal.open = false">✕</button>
+      </div>
+
+      <div class="px-5 py-4 space-y-4">
+        <div x-show="versionModal.error"
+             class="text-xs text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950 rounded-lg px-3 py-2"
+             x-text="versionModal.error"></div>
+
+        <label class="block">
+          <span class="text-xs text-neutral-500 dark:text-neutral-400">Namn</span>
+          <input type="text" x-model="versionModal.name" placeholder="Version 2"
+                 class="mt-1 w-full px-3 py-1.5 text-sm rounded-lg border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-950" />
+        </label>
+
+        <div class="space-y-2">
+          <div class="text-sm font-medium"
+               x-text="'Scener — ' + versionModal.rows.length + ' i den här versionen'"></div>
+          <!-- Keyed on the monotonic uid, NEVER the index or the scene_id: a
+               duplicated row shares both, and Alpine then reuses the DOM node
+               so the two rows cross-wire. -->
+          <template x-for="(row, i) in versionModal.rows" :key="'ver-row-'+row.uid">
+            <div class="flex gap-3 items-center border rounded-xl p-2"
+                 :class="row.missing
+                           ? 'border-rose-300 dark:border-rose-800'
+                           : 'border-neutral-200 dark:border-neutral-800'">
+              <img x-show="row.frameUrl" :src="row.frameUrl"
+                   class="w-12 aspect-[9/16] object-cover rounded-lg shrink-0" />
+              <div class="flex-1 min-w-0">
+                <div class="text-xs font-medium truncate"
+                     x-text="'Scen ' + (i + 1) + (row.summary ? ' — ' + row.summary : '')"></div>
+                <div x-show="row.missing" class="text-[10px] text-rose-500">
+                  scenen finns inte kvar i körningen — ta bort raden
+                </div>
+              </div>
+              <div class="flex items-center gap-1 shrink-0">
+                <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-sky-600 disabled:opacity-30"
+                        :disabled="row.missing || versionModal.submitting"
+                        title="Duplicera scenen: samma bild, ny videoprompt → ett nytt klipp. Bilderna kopieras gratis, bara klippet kostar."
+                        @click="duplicateVersionRow(i)">⧉</button>
+                <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-sky-600 disabled:opacity-30"
+                        :disabled="i === 0" title="Flytta upp"
+                        @click="versionRowMove(i, -1)">▲</button>
+                <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-sky-600 disabled:opacity-30"
+                        :disabled="i === versionModal.rows.length - 1" title="Flytta ner"
+                        @click="versionRowMove(i, 1)">▼</button>
+                <button class="text-xs px-1.5 py-1 text-neutral-400 hover:text-rose-500"
+                        title="Ta bort scenen ur den här versionen (körningen rörs inte)"
+                        @click="versionRowRemove(i)">✕</button>
+              </div>
+            </div>
+          </template>
+          <div x-show="!versionModal.rows.length"
+               class="text-xs text-neutral-400 py-3 text-center">
+            Inga scener kvar — versionen behöver minst en.
+          </div>
+
+          <!-- Two ways to add. Both belong to THIS version only; the run's own
+               scene list and its final are untouched either way. -->
+          <div class="flex items-center gap-3 flex-wrap pt-1">
+            <label class="text-xs px-2.5 py-1 rounded-lg border border-dashed border-neutral-300 dark:border-neutral-700 cursor-pointer hover:border-sky-400"
+                   :class="versionModal.submitting ? 'opacity-40 pointer-events-none' : ''"
+                   title="Ladda upp en bild (eller video → mittbildruta). Den swappas för varje karaktär och behöver godkännas — kostar en bild + ett klipp per karaktär.">
+              + bild → swappas
+              <input type="file" accept="image/*,video/*" class="hidden"
+                     @change="addVersionScene($event.target.files); $event.target.value = ''" />
+            </label>
+            <label class="text-xs px-2.5 py-1 rounded-lg border border-dashed border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 cursor-pointer hover:border-emerald-500"
+                   :class="versionModal.submitting ? 'opacity-40 pointer-events-none' : ''"
+                   title="Lägg in ett färdigt klipp precis som det är. Ingen generering, inga krediter — samma klipp i alla karaktärers version.">
+              📥 färdigt klipp
+              <input type="file" accept="video/*" class="hidden"
+                     @change="importVersionClip($event.target.files); $event.target.value = ''" />
+            </label>
+          </div>
+        </div>
+
+        <div class="space-y-2 border-t border-neutral-200 dark:border-neutral-800 pt-3">
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" x-model="versionModal.mirror" class="rounded" />
+            🔁 Spegelvänd (texten förblir rättvänd)
+          </label>
+          <label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" x-model="versionModal.autoTelegramSend" class="rounded" />
+            ➤ Skicka automatiskt till Telegram när den är klar
+          </label>
+        </div>
+      </div>
+
+      <div class="px-5 py-3 border-t border-neutral-200 dark:border-neutral-800 flex items-center justify-end gap-2">
+        <button class="text-xs px-3 py-1.5 rounded-lg border border-neutral-300 dark:border-neutral-700 hover:bg-neutral-100 dark:hover:bg-neutral-800"
+                @click="versionModal.open = false">Avbryt</button>
+        <button class="text-xs px-4 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-40"
+                :disabled="versionModal.submitting || !versionModal.rows.length"
+                @click="saveAndBuildVersion()">
+          <span x-show="!versionModal.submitting">🎞 Bygg versionen</span>
+          <span x-show="versionModal.submitting">Startar…</span>
         </button>
       </div>
     </div>
