@@ -3465,7 +3465,11 @@ class CompileVideosBody(BaseModel):
     target_wpm: float = Field(default=190.0, ge=80, le=400)
     threshold_db: float = -24.0
     min_silence_secs: float = Field(default=0.4, ge=0.05, le=5.0)
+    # Hugo 2026-08-10: the pad around speech is ASYMMETRIC — `pad_secs` is the
+    # room kept BEFORE speech resumes, `pad_end_secs` the room kept AFTER it
+    # stops (a phrase's tail needs more breathing room than its head).
     pad_secs: float = Field(default=0.1, ge=0.0, le=1.0)
+    pad_end_secs: float = Field(default=0.15, ge=0.0, le=1.0)
     # Opt-in word-gap trim (replaces level interior trim when on). max_gap =
     # the spoken-pause length that triggers a cut.
     enable_gap_trim: bool = False
@@ -3554,6 +3558,7 @@ async def compile_job_videos(job_id: str, body: CompileVideosBody,
         enable_wpm_normalize=body.enable_wpm_normalize,
         target_wpm=body.target_wpm, threshold_db=body.threshold_db,
         min_silence_secs=body.min_silence_secs, pad_secs=body.pad_secs,
+        pad_end_secs=body.pad_end_secs,
         enable_gap_trim=body.enable_gap_trim, gap_max_secs=body.gap_max_secs,
         voice_override=body.voice_override,
         enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
@@ -3627,6 +3632,7 @@ async def repurpose_job_videos(job_id: str, body: RepurposeVideosBody,
         enable_wpm_normalize=body.enable_wpm_normalize,
         target_wpm=body.target_wpm, threshold_db=body.threshold_db,
         min_silence_secs=body.min_silence_secs, pad_secs=body.pad_secs,
+        pad_end_secs=body.pad_end_secs,
         enable_gap_trim=body.enable_gap_trim, gap_max_secs=body.gap_max_secs,
         voice_override=body.voice_override,
         enable_voice_swap=body.enable_voice_swap, char_ids=body.char_ids,
@@ -4079,7 +4085,8 @@ async def editor_trim_silences(
     file: UploadFile = File(...),
     threshold_db: float = Form(-24.0),
     min_silence_secs: float = Form(0.4),
-    pad_secs: float = Form(0.1),
+    pad_secs: float = Form(0.1),          # room kept BEFORE speech resumes
+    pad_end_secs: float = Form(0.15),     # room kept AFTER speech stops
 ) -> dict:
     """Synchronous silence-trim. Saves the trimmed video under
     `output/editor/<edit_id>/trimmed.mp4` and returns a MediaGeneration-shaped
@@ -4103,6 +4110,7 @@ async def editor_trim_silences(
             threshold_db=threshold_db,
             min_silence_secs=min_silence_secs,
             pad_secs=pad_secs,
+            pad_end_secs=pad_end_secs,
             job_id=edit_id,
         )
     except RuntimeError as e:
@@ -4171,7 +4179,8 @@ async def editor_auto_edit(
     file: UploadFile = File(...),
     threshold_db: float = Form(-24.0),
     min_silence_secs: float = Form(0.4),
-    pad_secs: float = Form(0.1),
+    pad_secs: float = Form(0.1),          # room kept BEFORE speech resumes
+    pad_end_secs: float = Form(0.15),     # room kept AFTER speech stops (Hugo 2026-08-10)
     voice_id: str | None = Form(None),     # ElevenLabs voice_id for voice swap (optional)
     template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
@@ -4235,7 +4244,7 @@ async def editor_auto_edit(
             trim_summary = await asyncio.to_thread(
                 video_edit.trim_silences, current, trimmed,
                 threshold_db=threshold_db, min_silence_secs=min_silence_secs,
-                pad_secs=pad_secs, job_id=edit_id,
+                pad_secs=pad_secs, pad_end_secs=pad_end_secs, job_id=edit_id,
             )
         except RuntimeError as e:
             raise HTTPException(500, f"Trim failed: {e}")
@@ -4377,6 +4386,7 @@ async def editor_auto_edit(
         "threshold_db": threshold_db,
         "min_silence_secs": min_silence_secs,
         "pad_secs": pad_secs,
+        "pad_end_secs": pad_end_secs,
     }
     try:
         gen = MediaGeneration(
@@ -4433,7 +4443,8 @@ async def editor_multi_auto_edit(
     script: str = Form(...),
     threshold_db: float = Form(-24.0),
     min_silence_secs: float = Form(0.4),
-    pad_secs: float = Form(0.1),
+    pad_secs: float = Form(0.1),          # room kept BEFORE speech resumes
+    pad_end_secs: float = Form(0.15),     # room kept AFTER speech stops (Hugo 2026-08-10)
     voice_id: str | None = Form(None),
     template: str = Form("capcut-bluebox"),
     overrides: str | None = Form(None),
@@ -4607,7 +4618,7 @@ async def editor_multi_auto_edit(
             trim_summary = await asyncio.to_thread(
                 video_edit.trim_silences, concat_out, trimmed,
                 threshold_db=threshold_db, min_silence_secs=min_silence_secs,
-                pad_secs=pad_secs, job_id=edit_id,
+                pad_secs=pad_secs, pad_end_secs=pad_end_secs, job_id=edit_id,
             )
         except RuntimeError as e:
             raise HTTPException(500, f"Trim failed: {e}")
@@ -4762,6 +4773,7 @@ async def editor_multi_auto_edit(
             "threshold_db": threshold_db,
             "min_silence_secs": min_silence_secs,
             "pad_secs": pad_secs,
+            "pad_end_secs": pad_end_secs,
             "overrides": overrides_parsed,
         }
         gen = MediaGeneration(
@@ -4827,7 +4839,11 @@ class EditorRepurposeBody(BaseModel):
     target_wpm: float = Field(default=190.0, ge=80, le=400)
     threshold_db: float = Field(default=-24.0, ge=-60, le=0)
     min_silence_secs: float = Field(default=0.4, ge=0.05, le=5)
+    # Hugo 2026-08-10: the pad around speech is ASYMMETRIC — `pad_secs` is the
+    # room kept BEFORE speech resumes, `pad_end_secs` the room kept AFTER it
+    # stops (a phrase's tail needs more breathing room than its head).
     pad_secs: float = Field(default=0.1, ge=0, le=1)
+    pad_end_secs: float = Field(default=0.15, ge=0, le=1)
     enable_gap_trim: bool = False
     gap_max_secs: float = Field(default=0.35, ge=0.05, le=3)
     playback_speed: float = Field(default=1.0, ge=0.5, le=2.0)
@@ -4876,7 +4892,8 @@ async def editor_repurpose(edit_id: str, body: EditorRepurposeBody,
         enable_trim=body.enable_trim, enable_captions=body.enable_captions,
         enable_wpm_normalize=body.enable_wpm_normalize, target_wpm=body.target_wpm,
         threshold_db=body.threshold_db, min_silence_secs=body.min_silence_secs,
-        pad_secs=body.pad_secs, enable_gap_trim=body.enable_gap_trim,
+        pad_secs=body.pad_secs, pad_end_secs=body.pad_end_secs,
+        enable_gap_trim=body.enable_gap_trim,
         gap_max_secs=body.gap_max_secs, playback_speed=body.playback_speed,
         enable_voice_swap=body.enable_voice_swap, voice_override=body.voice_override,
         settings_snapshot=body.model_dump(),
@@ -6073,6 +6090,9 @@ class ReAssembleSettingsBody(BaseModel):
     threshold_db: float | None = Field(default=None, ge=-60, le=0)
     min_silence_secs: float | None = Field(default=None, ge=0.05, le=5)
     pad_secs: float | None = Field(default=None, ge=0, le=1)
+    # Room kept AFTER speech stops (Hugo 2026-08-10) — `pad_secs` is the room
+    # kept BEFORE it resumes. Merges into assemble_settings like its sibling.
+    pad_end_secs: float | None = Field(default=None, ge=0, le=1)
     # Opt-in word-gap trim (replaces the level interior trim when on) +
     # the spoken-pause length that triggers a cut. Both merge into
     # assemble_settings via _store_assemble_settings (keys live in
