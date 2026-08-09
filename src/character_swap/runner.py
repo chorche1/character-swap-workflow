@@ -1464,6 +1464,21 @@ def _character_gender(char_id: str) -> str | None:
     return ch.gender if ch else None
 
 
+def _chain_summary(models: list[str], upto_idx: int) -> str:
+    """"veo-3.1-fast ×3 → kling-v3 → grok-imagine-1.5" — the models actually
+    walked, in order, repeats collapsed into a count.
+
+    Used in the loud failure so the message says how hard the clip was tried.
+    Reads `models[:upto_idx + 1]`, i.e. only the legs that really ran."""
+    walked: list[tuple[str, int]] = []
+    for m in models[:upto_idx + 1]:
+        if walked and walked[-1][0] == m:
+            walked[-1] = (m, walked[-1][1] + 1)
+        else:
+            walked.append((m, 1))
+    return " → ".join(f"{m} ×{n}" if n > 1 else m for m, n in walked)
+
+
 async def _animate_one_video(
     job: Job, jc: JobCharacter, video: VideoVariant, movement_prompt: str,
     duration_secs: int | None = None, end_image: Path | None = None,
@@ -1660,33 +1675,15 @@ async def _animate_one_video(
     movement_prompt = reengineer.with_no_adlib(movement_prompt)
     prompt_text = movement_prompt
     phase = "submit"
-    # Content-policy / NSFW fallback — resolved per (CHOSEN MODEL, LANGUAGE).
-    #
-    # VEO + SPANISH (Hugo 2026-08-04, always on): a refused Spanish
-    # veo-3.1-fast clip retries ONCE on kling-v3. Veo is where the 🗣 redirect
-    # sends every Spanish clip and where fal's checker kills 46% of them
-    # (11 of 24 in j_619e0a2cf2), and Kling keeps the 🎯 end pose, matches the
-    # rest of the reel, and is measured 0.953 on Spanish against Veo's 0.992.
-    # A refused GERMAN clip gets no rescue — Kling is 0.48 on German, so it
-    # would only be re-rejected by the language net.
-    #
-    # EVERY OTHER CLIP — OFF by default since 2026-08-03 (Hugo: "ta bort
-    # fallbacken till en annan modell om ett klipp failar"). A clip its model
-    # refuses on moderation grounds FAILS LOUDLY with the real reason, so the
-    # user can reword or retry, instead of quietly coming back rendered on a
-    # different provider — which made one clip in a reel look and sound unlike
-    # its neighbours, dropped any resolved end frame, and (since the 🗣 redirect)
-    # would have moved a German/Spanish clip off the one model trusted with its
-    # language. `VIDEO_MODERATION_FALLBACK=1` restores the old rescue for them,
-    # unchanged: retry ONCE on grok-imagine-1.5, and if that ALSO refuses, fail
-    # loudly naming both.
+    # Content-policy / NSFW recovery, in the order runner_media builds it:
+    # `1 + VIDEO_REFUSAL_RETRIES` UNCHANGED takes on the clip's own model (the
+    # refusal is stochastic — Hugo 2026-08-06), then the REROUTE CHAIN, one take
+    # per model: Kling 3.0, then Grok (Hugo 2026-08-10). GERMAN clips get no
+    # reroute at all — Kling is measured 0.48 on German, so a rescued clip would
+    # only be re-rejected by the wrong-language net; they fail loudly after
+    # their unchanged takes. See runner_media.VIDEO_FALLBACK_CHAIN for the
+    # measurements behind the order and what a reroute costs.
     fb_lang = lang_spec.code if lang_spec else None
-    fb_model = runner_media.video_fallback_model(video_model, language=fb_lang)
-    fb_drops_end = bool(fb_model) and bool(end_image) and (
-        runner_media.fallback_drops_end_frame(video_model, language=fb_lang))
-    # A refused clip is first re-submitted UNCHANGED on its own model
-    # (VIDEO_REFUSAL_RETRIES, Hugo 2026-08-06) and only then handed to the
-    # rescue above — see runner_media.video_attempt_models for why that order.
     models_to_try = runner_media.video_attempt_models(
         video_model, language=fb_lang)
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
@@ -1812,7 +1809,16 @@ async def _animate_one_video(
             # fail path with their real reason.
             next_model = (models_to_try[_model_idx + 1]
                           if _model_idx + 1 < len(models_to_try) else None)
-            if next_model and runner_media.triggers_fallback(active_model, e):
+            refused = runner_media.triggers_fallback(active_model, e)
+            if refused:
+                # Count EVERY refused take, reroute legs included, and persist
+                # it before the next take starts (Hugo 2026-08-10: "hur vet jag
+                # att något retryar?"). The clip goes straight back to
+                # PROCESSING, so without this the UI cannot tell a retrying clip
+                # from an ordinary slow render — and a counter written only on
+                # the way out would be missing for the whole wait.
+                video.refusal_takes += 1
+            if next_model and refused:
                 if next_model == active_model:
                     # Plain re-submit on the SAME model — nothing about the
                     # request changes, so this is NOT a fallback: leave
@@ -1822,37 +1828,52 @@ async def _animate_one_video(
                     _replace_video(job, jc, video)
                     await _emit(job.job_id, "video.refusal_retry",
                                 char_id=jc.char_id, video_id=video.video_id,
-                                model=active_model, reason=str(e))
+                                model=active_model, reason=str(e),
+                                refusal_takes=video.refusal_takes)
                     continue
-                video.fallback_model = fb_model
-                video.fallback_dropped_end_frame = fb_drops_end
+                # A reroute leg. Both facts are resolved for THIS leg, never
+                # once up front: the chain has more than one target, and a clip
+                # can walk Veo → Kling (pose kept) and then Kling → Grok (pose
+                # lost) in a single run.
+                leg_drops_end = bool(end_image) and runner_media.drops_end_frame(
+                    active_model, next_model)
+                video.fallback_model = next_model
+                # OR, never assignment: a pose already dropped on an earlier leg
+                # stays dropped for the rest of the clip's life.
+                video.fallback_dropped_end_frame = (
+                    video.fallback_dropped_end_frame or leg_drops_end)
                 video.status = VideoStatus.PROCESSING
                 _replace_video(job, jc, video)
                 await _emit(job.job_id, "video.fallback",
                             char_id=jc.char_id, video_id=video.video_id,
-                            model=fb_model, reason=str(e),
-                            dropped_end_frame=fb_drops_end)
-                if fb_drops_end:
+                            model=next_model, reason=str(e),
+                            dropped_end_frame=video.fallback_dropped_end_frame,
+                            refusal_takes=video.refusal_takes)
+                if leg_drops_end:
                     logger.warning(
-                        "job %s char %s video %s: falling back to %s — the "
+                        "job %s char %s video %s: rerouting %s → %s — the "
                         "resolved end frame is DROPPED (%s has no end-frame "
                         "input)", job.job_id, jc.char_id, video.video_id,
-                        fb_model, fb_model)
+                        active_model, next_model, next_model)
                 continue
             video.status = VideoStatus.ERROR
             base = f"submit: {e}" if phase == "submit" else str(e)
             if video.fallback_model and content_policy.is_content_rejection(e):
-                # The fallback was tried and ALSO refused on content grounds —
-                # say so plainly (both providers blocked the clip).
-                video.error = (f"content-policy: reservmodellen {fb_model} "
-                               f"nekades också ({phase}): {e}")
+                # Every leg was tried and the last one ALSO refused on content
+                # grounds — name the whole walked chain, so the failure reads as
+                # "three providers will not render this clip" (change the START
+                # FRAME) rather than "one unlucky call".
+                video.error = (f"content-policy: reservmodellen {active_model} "
+                               f"nekades också — hela kedjan nekade klippet "
+                               f"({_chain_summary(models_to_try, _model_idx)}) "
+                               f"({phase}): {e}")
             elif video.fallback_model:
-                # We fell back but it failed for a NON-content reason (timeout /
-                # network / fal balance) — report the REAL cause, never a false
-                # content block (Hugo: fail loud, real reason).
-                video.error = f"reservmodellen {fb_model} misslyckades ({phase}): {e}"
-            elif (takes := models_to_try.count(active_model)) > 1 and \
-                    runner_media.triggers_fallback(active_model, e):
+                # We rerouted but this leg failed for a NON-content reason
+                # (timeout / network / fal balance) — report the REAL cause,
+                # never a false content block (Hugo: fail loud, real reason).
+                video.error = (f"reservmodellen {active_model} misslyckades "
+                               f"({phase}): {e}")
+            elif (takes := models_to_try.count(active_model)) > 1 and refused:
                 # Refused on every unchanged re-submit and no rescue applies.
                 # Name the take count so the failure reads as "this model will
                 # not render this clip", not "one unlucky call" — that is the

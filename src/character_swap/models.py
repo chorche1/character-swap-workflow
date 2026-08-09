@@ -240,6 +240,16 @@ class VideoVariant(BaseModel):
     # end pose beats no clip, but the loss must never be silent). Surfaced as an
     # explicit "slutposen tappades" note next to the ⇄ chip.
     fallback_dropped_end_frame: bool = False
+    # How many takes of this clip a provider has REFUSED so far (Hugo
+    # 2026-08-10: "hur vet jag att något retryar?"). Counted across the whole
+    # attempt list — the unchanged re-submits on the chosen model AND the
+    # reroute legs — and persisted rather than derived, because the retry loop
+    # is the only place that knows a refusal happened: the clip goes straight
+    # back to PROCESSING, which is indistinguishable from an ordinary render.
+    # Drives the amber "nekad ×N — försöker igen" chip in the clip strips while
+    # the clip is in flight, and stays afterwards so a clip that took four takes
+    # can be told from one that sailed through. 0 = never refused.
+    refusal_takes: int = 0
     # 🗣 LANGUAGE REDIRECT (Hugo 2026-08-03). Every clip of a language-flagged
     # character renders on runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL whatever the
     # run picked, because the picked model can't be trusted off English (Kling

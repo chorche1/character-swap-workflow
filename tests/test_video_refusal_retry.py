@@ -40,6 +40,7 @@ from character_swap.models import (
 
 VEO = "veo-3.1-fast"
 KLING = "kling-v3"
+GROK = "grok-imagine-1.5"
 
 _MODERATION = "fal submit failed: 400 rejected — flagged as nsfw content"
 _NO_MEDIA = (
@@ -134,13 +135,14 @@ def test_default_is_four_extra_takes(monkeypatch):
     assert type(settings).model_fields["video_refusal_retries"].default == 4
 
 
-def test_takes_come_before_the_rescue(_retries, _rescue_off):
-    """A Spanish Veo clip: three unchanged Veo takes, THEN Kling. Ordering is
-    the point — a clip that passes on take 2 keeps Veo's 0.992 Spanish and
-    still matches the rest of a 🗣 reel, where every other clip is on Veo."""
+def test_takes_come_before_the_rescue(_retries):
+    """A Spanish Veo clip: three unchanged Veo takes, THEN the reroute chain.
+    Ordering is the point — a clip that passes on take 2 keeps Veo's 0.992
+    Spanish and still matches the rest of a 🗣 reel, where every other clip is
+    on Veo."""
     _retries(2)
     assert runner_media.video_attempt_models(VEO, language="es") == [
-        VEO, VEO, VEO, KLING]
+        VEO, VEO, VEO, KLING, GROK]
 
 
 def test_no_rescue_still_gets_the_extra_takes(_retries, _rescue_off):
@@ -152,10 +154,13 @@ def test_no_rescue_still_gets_the_extra_takes(_retries, _rescue_off):
     assert runner_media.video_attempt_models(KLING) == [KLING, KLING, KLING]
 
 
-def test_zero_disables_and_restores_one_take_per_model(_retries, _rescue_off):
+def test_zero_disables_and_restores_one_take_per_model(_retries):
+    """0 takes away the unchanged re-submits, never the reroute — the two knobs
+    are independent."""
     _retries(0)
-    assert runner_media.video_attempt_models(VEO, language="es") == [VEO, KLING]
-    assert runner_media.video_attempt_models(KLING) == [KLING]
+    assert runner_media.video_attempt_models(VEO, language="es") == [
+        VEO, KLING, GROK]
+    assert runner_media.video_attempt_models(KLING) == [KLING, GROK]
 
 
 def test_negative_value_is_clamped(_retries, _rescue_off):
@@ -242,7 +247,7 @@ def test_veo_empty_output_is_also_resubmitted(
 # --- 3. the takes precede the rescue in the real runner ---------------------
 
 def test_spanish_veo_exhausts_its_takes_before_kling(
-        monkeypatch, tmp_path, _retries, _rescue_off, _speaks):
+        monkeypatch, tmp_path, _retries, _speaks):
     _retries(2)
     _speaks("es")
     job, jc, video = _job_one_clip(tmp_path, video_model=VEO)
@@ -263,6 +268,9 @@ def test_spanish_veo_exhausts_its_takes_before_kling(
     assert calls == [VEO, VEO, VEO, KLING], "three Veo takes, then the rescue"
     assert video.status == VideoStatus.DONE
     assert video.fallback_model == KLING     # only the LAST leg is a fallback
+    # Grok is never reached: the clip rendered on the first reroute leg.
+    assert GROK not in calls
+    assert video.refusal_takes == 3
 
 
 # --- 4. only genuine refusals are re-submitted ------------------------------

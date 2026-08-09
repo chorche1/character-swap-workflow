@@ -1252,17 +1252,12 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     # Content-policy / NSFW fallback (Hugo 2026-07-14): a direct clip rejected
     # on moderation grounds retries ONCE on the fallback model before giving up
     # — same rescue as the per-character swap clips in runner._animate_one_video,
-    # and resolved the same way: a SPANISH Veo clip always falls back to
-    # kling-v3 (Hugo 2026-08-04), everything else only with
-    # VIDEO_MODERATION_FALLBACK=1 (off since 2026-08-03 — a refused clip fails
-    # loudly instead). A direct clip has no per-character 🗣 flag, so the RUN's
-    # language gates it — the same value that built `prompt` above. Direct clips
-    # never carry an end frame, so no end-frame degradation is possible here
-    # either way.
-    # A refused clip is first re-submitted UNCHANGED on its own model
-    # (VIDEO_REFUSAL_RETRIES, Hugo 2026-08-06) before the rescue above gets it.
-    fb_model = runner_media.video_fallback_model(
-        model, language=state.get("language") or None)
+    # and resolved the same way: `1 + VIDEO_REFUSAL_RETRIES` unchanged takes on
+    # the chosen model, then the reroute chain (Kling, then Grok — Hugo
+    # 2026-08-10), with GERMAN excluded from the reroute entirely. A direct clip
+    # has no per-character 🗣 flag, so the RUN's language gates it — the same
+    # value that built `prompt` above. Direct clips never carry an end frame, so
+    # no end-frame degradation is possible here either way.
     models_to_try = runner_media.video_attempt_models(
         model, language=state.get("language") or None)
     for _midx, active_model in enumerate(models_to_try):
@@ -1300,24 +1295,25 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
                                      "model": active_model})
                     continue
                 _log.warning("reengineer %s: direct clip scene %s rejected on "
-                             "content policy by %s — retrying on %s",
-                             re_id, scene_id, active_model, fb_model)
+                             "content policy by %s — rerouting to %s",
+                             re_id, scene_id, active_model, next_model)
                 await events.publish(job.job_id,
                                      {"kind": "direct.clip.fallback",
                                       "job_id": job.job_id,
-                                      "scene_id": scene_id, "model": fb_model})
+                                      "scene_id": scene_id,
+                                      "model": next_model})
                 continue
             _log.exception("reengineer %s: direct clip for scene %s failed",
                            re_id, scene_id)
             err = f"{type(e).__name__}: {e}"
-            if active_model == fb_model and model != fb_model:
-                # Distinguish a genuine content refusal by the fallback from a
-                # transient/billing failure on that leg (Hugo: real reason).
+            if active_model != model:
+                # We are on a REROUTE leg. Distinguish a genuine content refusal
+                # there from a transient/billing failure (Hugo: real reason).
                 if content_policy.is_content_rejection(e):
-                    err = (f"content-policy: reservmodellen {fb_model} "
+                    err = (f"content-policy: reservmodellen {active_model} "
                            f"nekades också: {e}")
                 else:
-                    err = f"reservmodellen {fb_model} misslyckades: {err}"
+                    err = f"reservmodellen {active_model} misslyckades: {err}"
             elif (takes := models_to_try.count(active_model)) > 1 and \
                     runner_media.triggers_fallback(active_model, e):
                 # Refused on every unchanged re-submit, no rescue applies —

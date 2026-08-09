@@ -2518,6 +2518,27 @@ function studio() {
       };
     },
 
+    // "Hur vet jag att något retryar?" (Hugo 2026-08-10). A refused clip goes
+    // straight back to PROCESSING, which on screen is indistinguishable from an
+    // ordinary slow render — so the only way to see a retry was to read the
+    // server log. `refusal_takes` counts every take a provider refused, so:
+    //   in flight  → amber "nekad ×N, försöker igen (tagning N+1)"
+    //   done       → grey "gick igenom på tagning N+1", which explains why that
+    //                one clip took five minutes
+    //   failed     → nothing here; the red explainer panel already says it, and
+    //                two red messages about the same clip is noise.
+    clipRetryNote(vv) {
+      const n = (vv && vv.refusal_takes) || 0;
+      if (!n || !['pending', 'processing'].includes(vv.status)) return '';
+      return `⏳ nekad ×${n} — försöker igen (tagning ${n + 1})`;
+    },
+
+    clipTakesNote(vv) {
+      const n = (vv && vv.refusal_takes) || 0;
+      if (!n || vv.status !== 'done') return '';
+      return `↻ gick igenom på tagning ${n + 1}`;
+    },
+
     // Compact label for the tight per-scene clip strip, where the full panel
     // doesn't fit — same classification, one or two words.
     clipFailShort(vv) {

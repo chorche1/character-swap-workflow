@@ -221,12 +221,50 @@ VIDEO_MODERATION_FALLBACK_MODEL = "grok-imagine-1.5"
 # the language net then has to reject anyway: slower, more expensive, same
 # outcome. English clips are not redirected to Veo in the first place.
 #
-# Scope: ONLY (model ∈ VEO_VIDEO_MODELS) AND (language ∈ VEO_FALLBACK_LANGUAGES).
-# Every other clip still fails LOUDLY on a content refusal unless
-# VIDEO_MODERATION_FALLBACK=1 — Hugo's 2026-08-03 default is untouched.
+# Scope note (superseded 2026-08-10 by VIDEO_FALLBACK_CHAIN below): this rescue
+# used to be the ONLY always-on one, for (model ∈ VEO_VIDEO_MODELS) AND
+# (language ∈ VEO_FALLBACK_LANGUAGES). Kling 3.0 is now simply the FIRST leg of
+# the chain every non-German clip walks, so the Spanish case keeps exactly the
+# model, order and measurements above — it is no longer a special case in code.
 VEO_VIDEO_MODELS: frozenset[str] = frozenset({"veo-3.1-fast"})
 VEO_MODERATION_FALLBACK_MODEL = "kling-v3"
 VEO_FALLBACK_LANGUAGES: frozenset[str] = frozenset({"es"})
+
+# THE REROUTE CHAIN (Hugo 2026-08-10: "för alla utom de tyska ska det
+# automatiskt reroutas till andra modeller efter dessa försök, kling och sedan
+# grok"). After the unchanged re-submits on its own model (VIDEO_REFUSAL_RETRIES)
+# a refused clip walks this list, ONE take per model, and only fails once every
+# leg has refused it.
+#
+# ORDER IS THE MEASUREMENT, not a preference. Kling 3.0 first because a rescued
+# clip has to fit the reel it lands in: it is IN END_FRAME_VIDEO_MODELS so a 🎯
+# end pose survives, it is the runs' own default model so the clip looks and
+# sounds like its neighbours, and it refuses only 0-7% of its own calls (measured
+# per day 08-03…08-09) against Veo's 32-79%. Grok last because it is the most
+# permissive stack in the app (a different provider entirely, xAI via fal) but
+# drops the end pose and announces itself in a reel — a last resort, which is
+# what it always was.
+#
+# GERMAN IS EXCLUDED (Hugo's carve-out, unchanged from 2026-08-04): Kling scores
+# 0.48 mean word-similarity on German against 1.00 English / 0.93 Spanish from
+# the same runs — that gap is the entire reason SPOKEN_LANGUAGE_VIDEO_MODEL
+# exists. Rerouting a German clip there ships one the wrong-language net has to
+# reject anyway: slower, dearer, same outcome. A refused German clip therefore
+# still fails LOUDLY after its unchanged takes.
+#
+# WHAT THIS COSTS, stated plainly because Hugo turned this exact rescue OFF on
+# 2026-08-03 and is now turning it back on with eyes open: a rescued clip is
+# rendered by a different provider than its neighbours (visibly and audibly), a
+# Grok leg loses any resolved 🎯 end pose (flagged, never silent — see
+# `drops_end_frame`), and for a 🗣 character it renders off
+# SPOKEN_LANGUAGE_VIDEO_MODEL. The trade he chose: a clip that exists beats a
+# clip that does not.
+VIDEO_FALLBACK_CHAIN: tuple[str, ...] = (VEO_MODERATION_FALLBACK_MODEL,
+                                         VIDEO_MODERATION_FALLBACK_MODEL)
+
+# Languages whose refused clips get NO reroute at all — see the German note
+# above. The 🗣 flag's ISO code; None (English) is never in here.
+NO_FALLBACK_LANGUAGES: frozenset[str] = frozenset({"de"})
 
 # Veo's SECOND refusal shape — fal `no_media_generated` (2026-08-04). Veo does
 # not always answer a prompt it dislikes with `content_policy_violation`;
@@ -299,60 +337,52 @@ def language_clip_truncated(secs: float | int | None) -> bool:
     return secs is not None and language_clip_secs(secs) < secs
 
 
-def _veo_rescue_applies(chosen_model: str | None, language: str | None) -> bool:
-    """True when the always-on Veo rescue covers this (model, language) pair.
+def video_fallback_chain(chosen_model: str | None = None, *,
+                         language: str | None = None) -> list[str]:
+    """The ordered models a refused clip is rerouted to after its own model has
+    refused every unchanged take — `VIDEO_FALLBACK_CHAIN` minus the model it is
+    already on, empty when no reroute applies.
 
-    BOTH have to hold: Veo is the only model with a rescue that ignores the env
-    flag, and Spanish is the only language Kling 3.0 is measured good enough to
-    take. `language` is the 🗣 flag's ISO code ("es"/"de"), None for English.
+    Hugo 2026-08-10: every clip EXCEPT a German one walks Kling → Grok. German
+    gets nothing (Kling is measured 0.48 on it); `VIDEO_MODERATION_FALLBACK=0`
+    turns the reroute off for everyone, which is then the German behaviour for
+    the whole run.
+
+    The chosen model is filtered out rather than repeated: it has already had
+    `1 + VIDEO_REFUSAL_RETRIES` takes by the time this list is walked, so
+    another one of the same is not a reroute — it is the take budget over
+    again. SINGLE SOURCE OF TRUTH for both runners' attempt loops.
     """
-    return (chosen_model in VEO_VIDEO_MODELS
-            and (language or "") in VEO_FALLBACK_LANGUAGES)
+    if (language or "") in NO_FALLBACK_LANGUAGES:
+        return []
+    from character_swap.config import settings
+    if not settings.video_moderation_fallback:
+        return []
+    return [m for m in VIDEO_FALLBACK_CHAIN if m != chosen_model]
 
 
 def video_fallback_model(chosen_model: str | None = None, *,
                          language: str | None = None) -> str | None:
-    """The model a refused clip on `chosen_model` is retried on, or None when
-    no rescue applies.
-
-    VEO + SPANISH (Hugo 2026-08-04): a refused Spanish `veo-3.1-fast` clip
-    ALWAYS retries on `VEO_MODERATION_FALLBACK_MODEL` (Kling 3.0), env flag or
-    not — Veo is where the 🗣 redirect puts every Spanish clip and where fal's
-    checker kills 46% of them, and Kling keeps the 🎯 end pose, matches the rest
-    of the reel, and scores 0.953 on Spanish against Veo's 0.992. A refused
-    GERMAN Veo clip gets NO rescue: Kling is measured 0.48 on German, so a
-    rescue would only be re-rejected by the language net. See the VEO_*
-    constants above for the full measurement.
-
-    EVERY OTHER CLIP keeps Hugo's 2026-08-03 default: no rescue, the clip FAILS
-    LOUDLY with the real reason so it can be reworded or retried, because the
-    generic rescue silently moved a clip onto a different provider (one clip in
-    a reel looking and sounding unlike its neighbours), undid the language
-    redirect, and dropped any resolved end frame. `VIDEO_MODERATION_FALLBACK=1`
-    restores that older rescue for them.
-
-    Called with no arguments this answers only for the generic path — kept for
-    back-compat with callers that have neither model nor language in hand.
+    """The FIRST model a refused clip on `chosen_model` reroutes to, or None
+    when no reroute applies. Thin reader over `video_fallback_chain` — kept
+    because callers that only need "is there a rescue, and what does it look
+    like" (cost previews, log lines) predate the chain.
     """
-    if _veo_rescue_applies(chosen_model, language):
-        return VEO_MODERATION_FALLBACK_MODEL
-    from character_swap.config import settings
-    if not settings.video_moderation_fallback:
-        return None
-    return VIDEO_MODERATION_FALLBACK_MODEL
+    chain = video_fallback_chain(chosen_model, language=language)
+    return chain[0] if chain else None
 
 
 def video_attempt_models(chosen_model: str, *,
                          language: str | None = None) -> list[str]:
     """The ordered list of models one clip is attempted on, refusal by refusal.
 
-    `[chosen] * (1 + VIDEO_REFUSAL_RETRIES)` followed by the rescue model when
-    one applies — so a REFUSED clip is first re-submitted UNCHANGED on its own
-    model (Hugo 2026-08-06) and only moves to another provider once its own has
-    refused it every time. Ordering is deliberate: a Spanish Veo clip that
-    passes on take 2 keeps Veo's 0.992 speech fidelity and still looks and
-    sounds like the rest of a 🗣 reel, where every OTHER clip is on Veo too —
-    the Kling rescue (0.953) is the last resort it always was, not the first.
+    `[chosen] * (1 + VIDEO_REFUSAL_RETRIES)` followed by `video_fallback_chain`
+    — so a REFUSED clip is first re-submitted UNCHANGED on its own model (Hugo
+    2026-08-06) and only then rerouted, one take per rescue model (Hugo
+    2026-08-10). Ordering is deliberate: a Spanish Veo clip that passes on take
+    2 keeps Veo's 0.992 speech fidelity and still looks and sounds like the rest
+    of a 🗣 reel, where every OTHER clip is on Veo too — Kling (0.953) is the
+    last resort it always was, not the first, and Grok is behind it.
     Costs ~60 s per extra take, which is the trade Hugo chose.
     SINGLE SOURCE OF TRUTH for both runners' attempt loops.
 
@@ -362,27 +392,28 @@ def video_attempt_models(chosen_model: str, *,
     """
     from character_swap.config import settings
     models = [chosen_model] * (1 + max(0, settings.video_refusal_retries))
-    fb = video_fallback_model(chosen_model, language=language)
-    if fb and fb != chosen_model:
-        models.append(fb)
+    models.extend(video_fallback_chain(chosen_model, language=language))
     return models
+
+
+def drops_end_frame(from_model: str, to_model: str) -> bool:
+    """True when moving a clip from `from_model` to `to_model` LOSES a resolved
+    🎯 end pose — the source honors end frames and the target does not.
+
+    Per LEG, because the chain has more than one: Veo → Kling keeps the pose,
+    Kling → Grok loses it, and a clip can walk both in one run. A caller that
+    computed this once up front would flag the wrong leg.
+    """
+    return supports_end_frame(from_model) and not supports_end_frame(to_model)
 
 
 def fallback_drops_end_frame(chosen_model: str, *,
                              language: str | None = None) -> bool:
-    """True when falling back from `chosen_model` would LOSE a resolved end
-    frame — i.e. the chosen model honors end frames but the fallback it would
-    actually land on does not. Callers use this to flag the degradation loudly
-    instead of shipping a silently different clip.
-
-    Resolves the fallback for THIS clip, so it correctly answers False for the
-    Veo → Kling 3.0 rescue (both interpolate start→end) while still answering
-    True for the generic → grok-imagine-1.5 one.
-    """
-    fb = (VEO_MODERATION_FALLBACK_MODEL
-          if _veo_rescue_applies(chosen_model, language)
-          else VIDEO_MODERATION_FALLBACK_MODEL)
-    return supports_end_frame(chosen_model) and not supports_end_frame(fb)
+    """True when the FIRST reroute leg out of `chosen_model` would lose a
+    resolved end frame. Thin reader over `drops_end_frame` for callers that
+    only need the up-front answer; the runners flag per leg."""
+    fb = video_fallback_model(chosen_model, language=language)
+    return bool(fb) and drops_end_frame(chosen_model, fb)
 
 
 def video_duration_spec(model: str) -> dict:

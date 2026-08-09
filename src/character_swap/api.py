@@ -533,11 +533,18 @@ def _job_to_dict(job: Job) -> dict:
                         "qc_rejects": _qc_rejects_dicts(vv.qc_rejects),
                         # User-imported clip (Hugo 2026-06-21) → UI badge.
                         "imported": vv.imported,
-                        # Content-policy fallback to grok-imagine-1.5 (Hugo
-                        # 2026-07-14) → ⇄ chip on the clip, plus an explicit
-                        # note when that fallback cost the clip its end pose.
+                        # Content-policy reroute (Hugo 2026-07-14; a CHAIN
+                        # since 2026-08-10 — Kling, then Grok) → ⇄ chip on the
+                        # clip naming the leg it landed on, plus an explicit
+                        # note when a leg cost the clip its end pose.
                         "fallback_model": vv.fallback_model,
                         "fallback_dropped_end_frame": vv.fallback_dropped_end_frame,
+                        # How many takes a provider REFUSED (Hugo 2026-08-10:
+                        # "hur vet jag att något retryar?"). A retrying clip is
+                        # back in PROCESSING and otherwise looks exactly like a
+                        # slow render, so this is what the amber "nekad ×N —
+                        # försöker igen" chip is driven from.
+                        "refusal_takes": vv.refusal_takes,
                         # 🗣 language redirect (Hugo 2026-08-03): this clip
                         # rendered on the language model instead of the picked
                         # one, and possibly at a snapped length. Surfaced so the

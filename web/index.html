@@ -762,6 +762,14 @@
                       <span x-show="vv.imported"
                             class="ml-1 text-emerald-600 dark:text-emerald-400"
                             title="Eget importerat klipp">📥</span>
+                      <span x-show="clipRetryNote(vv)"
+                            class="ml-1 text-amber-600 dark:text-amber-400 animate-pulse"
+                            title="Innehållskontrollen nekade den förra tagningen — samma prompt och bild skickas om oförändrad, och därefter till reservmodellerna (Kling, sedan Grok)."
+                            x-text="clipRetryNote(vv)"></span>
+                      <span x-show="clipTakesNote(vv)"
+                            class="ml-1 text-slate-500"
+                            title="Klippet blev nekat några gånger innan det gick igenom."
+                            x-text="clipTakesNote(vv)"></span>
                       <span x-show="vv.fallback_model"
                             class="ml-1 text-violet-600 dark:text-violet-400"
                             :title="'NSFW/content-policy: klippet gjordes om på reservmodellen ' + vv.fallback_model">⇄</span>
@@ -2115,9 +2123,22 @@
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).qc_status === 'failed'"
                                    class="text-[8px] text-rose-400 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'QC: ' + ((reClipForVariant(jc, v.variant_id) || {}).qc_reason || 'klippet säger något annat än repliken')">⚠ QC: säger annat än repliken</div>
-                              <!-- NSFW/content-policy fallback (Hugo 2026-07-14):
-                                   the chosen model refused this clip, so it was
-                                   re-rendered on grok-imagine-1.5. -->
+                              <!-- A refused clip is being re-submitted right now
+                                   (Hugo 2026-08-10). Without this the retry is
+                                   invisible: the clip is simply back in
+                                   "processing" and looks like a slow render. -->
+                              <div x-show="clipRetryNote(reClipForVariant(jc, v.variant_id))"
+                                   class="text-[8px] text-amber-400 font-medium leading-tight mt-0.5 animate-pulse cursor-help"
+                                   title="Innehållskontrollen nekade den förra tagningen. Kontrollen är inte deterministisk, så samma prompt och bild skickas om oförändrad — och därefter till reservmodellerna (Kling, sedan Grok)."
+                                   x-text="clipRetryNote(reClipForVariant(jc, v.variant_id))"></div>
+                              <div x-show="clipTakesNote(reClipForVariant(jc, v.variant_id))"
+                                   class="text-[8px] text-slate-500 leading-tight mt-0.5 cursor-help"
+                                   title="Klippet blev nekat några gånger innan det gick igenom — därför tog just det här klippet längre tid."
+                                   x-text="clipTakesNote(reClipForVariant(jc, v.variant_id))"></div>
+                              <!-- NSFW/content-policy reroute (Hugo 2026-07-14;
+                                   a chain since 2026-08-10): the chosen model
+                                   refused this clip, so it was re-rendered on
+                                   the leg named here. -->
                               <div x-show="(reClipForVariant(jc, v.variant_id) || {}).fallback_model"
                                    class="text-[8px] text-violet-500 font-medium leading-tight mt-0.5 cursor-help"
                                    :title="'NSFW/content-policy: klippet gjordes om på reservmodellen ' + ((reClipForVariant(jc, v.variant_id) || {}).fallback_model || '')">⇄ NSFW-reserv: <span x-text="(reClipForVariant(jc, v.variant_id) || {}).fallback_model || ''"></span></div>
@@ -2316,8 +2337,16 @@
                           <a :href="reengineerClipFor(r, sc, cid).video.url" target="_blank"
                              class="text-indigo-500 hover:underline" title="Förhandsvisa klippet">▶</a>
                         </template>
-                        <span x-show="['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)"
+                        <span x-show="['pending','processing'].includes(reengineerClipFor(r, sc, cid)?.video?.status)
+                                      && !clipRetryNote(reengineerClipFor(r, sc, cid)?.video)"
                               class="text-amber-500" title="Renderas…">⏳</span>
+                        <!-- A refused clip re-submitting itself reads as an
+                             ordinary ⏳ otherwise (Hugo 2026-08-10). Replaces
+                             the plain spinner rather than sitting next to it. -->
+                        <span x-show="clipRetryNote(reengineerClipFor(r, sc, cid)?.video)"
+                              class="text-amber-400 animate-pulse cursor-help"
+                              title="Innehållskontrollen nekade förra tagningen — klippet skickas om oförändrat, sedan till reservmodellerna (Kling, därefter Grok)."
+                              x-text="'↻ nekad ×' + (reengineerClipFor(r, sc, cid)?.video?.refusal_takes || 0)"></span>
                         <!-- Compact strip: the classified cause in words, not
                              a bare ✕ behind a tooltip (Hugo 2026-08-03). The
                              full panel sits under the clip in the strip above. -->

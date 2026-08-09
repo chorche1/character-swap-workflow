@@ -489,15 +489,31 @@ class Settings(BaseSettings):
     # ($0.22/h vs $0.36/h) and is faster. whisper-1 stays the automatic
     # fallback on any Scribe failure, so this is never a single point of
     # failure — see video_edit._transcribe_scribe.
-    # Content-policy fallback for VIDEO clips. OFF since 2026-08-03 (Hugo:
-    # "ta bort fallbacken till en annan modell om ett klipp failar") — a clip
-    # its model refuses now FAILS LOUDLY with the real reason instead of being
-    # re-rendered on a different provider. Mirrors the image side's
-    # SWAP_MODERATION_FALLBACK, which has been opt-in since 2026-06-12 for the
-    # same reason: a silent provider switch produces a clip that doesn't match
-    # the rest of the reel. Set to 1 to restore the old rescue.
+    # The REROUTE CHAIN switch for refused VIDEO clips. ON since 2026-08-10
+    # (Hugo: "för alla utom de tyska ska det automatiskt reroutas till andra
+    # modeller efter dessa försök, kling och sedan grok") — after its own model
+    # has refused every unchanged take, a clip walks
+    # runner_media.VIDEO_FALLBACK_CHAIN, one take per model, and only fails once
+    # every leg refused it. GERMAN clips are excluded in the resolver, not here:
+    # Kling scores 0.48 on German, so a rescue would only be re-rejected by the
+    # wrong-language net.
+    #
+    # This reverses the 2026-08-03 default ("ta bort fallbacken till en annan
+    # modell om ett klipp failar"), with the same tradeoffs still true and now
+    # accepted: a rescued clip is rendered by a different provider than its
+    # neighbours, a Grok leg drops any 🎯 end pose (flagged, never silent), and a
+    # 🗣 clip leaves SPOKEN_LANGUAGE_VIDEO_MODEL. What changed is the refusal
+    # rate — Veo refused 79% of its calls on 08-08 and 70% on 08-09, so "fails
+    # loudly" had become the common outcome rather than the rare one.
+    #
+    # 0 turns the reroute off for EVERY clip (including the Spanish Veo → Kling
+    # leg, which was flag-independent while it was a special case): the whole
+    # run then behaves the way German still does.
+    #
+    # The image side's SWAP_MODERATION_FALLBACK is untouched and stays opt-in —
+    # Hugo's "100% GPT Image 2" directive is a separate decision.
     video_moderation_fallback: bool = Field(
-        default=False, validation_alias="VIDEO_MODERATION_FALLBACK")
+        default=True, validation_alias="VIDEO_MODERATION_FALLBACK")
 
     # How many times a REFUSED clip is re-submitted UNCHANGED on its own model
     # before the fallback (or the loud failure) takes over — Hugo 2026-08-06,
