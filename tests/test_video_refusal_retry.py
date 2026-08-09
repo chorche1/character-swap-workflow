@@ -9,8 +9,10 @@ frame passing sometimes and refused other times.
 
 Before this, `models_to_try` was `[chosen] + [rescue?]`: ONE take per model, so
 a refused clip either jumped straight to another provider or died. Now the
-chosen model gets `1 + VIDEO_REFUSAL_RETRIES` takes (default 2 extra) BEFORE
-the rescue, which keeps a recovered clip on the model its reel is built on.
+chosen model gets `1 + VIDEO_REFUSAL_RETRIES` takes (4 extra since 2026-08-10,
+2 before that) BEFORE the rescue, which keeps a recovered clip on the model its
+reel is built on. The tests below set the knob explicitly rather than leaning on
+the default, so the number can move without rewriting the suite.
 
 What this must NOT do:
   * change the prompt between takes (that is the whole point),
@@ -123,12 +125,13 @@ def _run(coro):
 
 # --- 1. the resolver ---------------------------------------------------------
 
-def test_default_is_two_extra_takes(monkeypatch):
-    """Hugo's pick: at the measured ~50% per-take pass rate, two extra takes
-    recover ~75% of the stochastic refusals."""
+def test_default_is_four_extra_takes(monkeypatch):
+    """Hugo raised it from 2 to 4 on 2026-08-10: Veo's measured per-call refusal
+    rate had climbed to 79% (08-08) / 70% (08-09), where 3 takes still lose ~34%
+    of clips and 5 takes lose ~17%."""
     from character_swap.config import settings
     monkeypatch.delenv("VIDEO_REFUSAL_RETRIES", raising=False)
-    assert type(settings).model_fields["video_refusal_retries"].default == 2
+    assert type(settings).model_fields["video_refusal_retries"].default == 4
 
 
 def test_takes_come_before_the_rescue(_retries, _rescue_off):
