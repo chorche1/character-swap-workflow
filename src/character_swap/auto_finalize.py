@@ -52,7 +52,9 @@ _DEFAULT_COMPILE_SETTINGS: dict = {
     "target_wpm": 190.0,
     "threshold_db": -24.0,
     "min_silence_secs": 0.4,
+    # Asymmetric pad (Hugo 2026-08-10): before speech resumes / after it stops.
     "pad_secs": 0.1,
+    "pad_end_secs": 0.15,
     "enable_gap_trim": False,
     "gap_max_secs": 0.35,
     "voice_override": None,

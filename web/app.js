@@ -218,6 +218,10 @@ function studio() {
       thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
       minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
       padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
+      // The pad around speech is ASYMMETRIC (Hugo 2026-08-10): padSecs is the
+      // room kept BEFORE speech resumes, padEndSecs the room kept AFTER it
+      // stops — a phrase's tail needs more breathing room than its head.
+      padEndSecs: 0.15,
       enableGapTrim: false,   // opt-in word-gap trim (replaces level interior trim)
       gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
       trimming: false,
@@ -316,6 +320,7 @@ function studio() {
         thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
         minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.30)
         padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
+        padEndSecs: 0.15,       // Hugo 2026-08-10: room AFTER speech stops
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
@@ -359,6 +364,7 @@ function studio() {
         thresholdDb: -24,       // Hugo 2026-06-21: editor-wide standard (was -23)
         minSilenceSecs: 0.4,    // Hugo 2026-06-21: editor-wide standard (was 0.20)
         padSecs: 0.1,           // Hugo 2026-06-21: editor-wide standard (was 0.05)
+        padEndSecs: 0.15,       // Hugo 2026-08-10: room AFTER speech stops
         enableGapTrim: false,   // opt-in word-gap trim (replaces level trim)
         gapMaxSecs: 0.35,       // spoken-pause length that triggers a cut
         targetWpm: 190,
@@ -403,6 +409,7 @@ function studio() {
         thresholdDb: -24,
         minSilenceSecs: 0.4,
         padSecs: 0.12,          // Hugo 2026-07-19 (was 0.1)
+        padEndSecs: 0.15,       // Hugo 2026-08-10: room AFTER speech stops
         enableGapTrim: false,
         gapMaxSecs: 0.35,
         targetWpm: 190,
@@ -2253,6 +2260,7 @@ function studio() {
       if ('threshold_db' in s) o.thresholdDb = s.threshold_db;
       if ('min_silence_secs' in s) o.minSilenceSecs = s.min_silence_secs;
       if ('pad_secs' in s) o.padSecs = s.pad_secs;
+      if ('pad_end_secs' in s) o.padEndSecs = s.pad_end_secs;
       if ('enable_gap_trim' in s) o.enableGapTrim = s.enable_gap_trim;
       if ('gap_max_secs' in s) o.gapMaxSecs = s.gap_max_secs;
       if ('voice_override' in s) o.voiceOverride = s.voice_override || '';
@@ -2328,6 +2336,7 @@ function studio() {
         threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -23)),
         min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.20)),
         pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.05)),
+        pad_end_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padEndSecs) ? +s.padEndSecs : 0.15)),
         enable_gap_trim: !!s.enableGapTrim,
         gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
         enable_voice_swap: !!s.enableVoiceSwap,
@@ -2456,6 +2465,7 @@ function studio() {
         threshold_db: Math.min(0, Math.max(-60, Number.isFinite(+s.thresholdDb) ? +s.thresholdDb : -24)),
         min_silence_secs: Math.min(5, Math.max(0.05, Number(s.minSilenceSecs) || 0.4)),
         pad_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padSecs) ? +s.padSecs : 0.1)),
+        pad_end_secs: Math.min(1, Math.max(0, Number.isFinite(+s.padEndSecs) ? +s.padEndSecs : 0.15)),
         enable_gap_trim: !!s.enableGapTrim,
         gap_max_secs: Math.min(3, Math.max(0.05, Number(s.gapMaxSecs) || 0.35)),
         enable_voice_swap: !!s.enableVoiceSwap,
@@ -3316,6 +3326,7 @@ function studio() {
         fd.append('threshold_db', this.editor.thresholdDb);
         fd.append('min_silence_secs', this.editor.minSilenceSecs);
         fd.append('pad_secs', this.editor.padSecs);
+        fd.append('pad_end_secs', this.editor.padEndSecs);
         const r = await fetch('/api/editor/trim_silences', { method: 'POST', body: fd });
         if (!r.ok) { this.notifyError('Trim failed: ' + await r.text()); return; }
         const data = await r.json();
@@ -3734,6 +3745,7 @@ function studio() {
           threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
           min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
           pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
+          pad_end_secs: Number.isFinite(+this.compileSettings.padEndSecs) ? +this.compileSettings.padEndSecs : 0.15,
           enable_gap_trim: !!this.compileSettings.enableGapTrim,
           gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
           // Resolve one-off forces captions OFF — don't let that transform
@@ -3793,6 +3805,7 @@ function studio() {
         threshold_db: Number.isFinite(+this.compileSettings.thresholdDb) ? +this.compileSettings.thresholdDb : -23,
         min_silence_secs: Number.isFinite(+this.compileSettings.minSilenceSecs) ? +this.compileSettings.minSilenceSecs : 0.30,
         pad_secs: Number.isFinite(+this.compileSettings.padSecs) ? +this.compileSettings.padSecs : 0.05,
+        pad_end_secs: Number.isFinite(+this.compileSettings.padEndSecs) ? +this.compileSettings.padEndSecs : 0.15,
         enable_gap_trim: !!this.compileSettings.enableGapTrim,
         gap_max_secs: Math.min(3, Math.max(0.05, Number.isFinite(+this.compileSettings.gapMaxSecs) ? +this.compileSettings.gapMaxSecs : 0.35)),
         char_ids: [charId],
@@ -4332,6 +4345,7 @@ function studio() {
         fd.append('threshold_db', this.editor.thresholdDb);
         fd.append('min_silence_secs', this.editor.minSilenceSecs);
         fd.append('pad_secs', this.editor.padSecs);
+        fd.append('pad_end_secs', this.editor.padEndSecs);
         fd.append('template', this.editor.template);
         if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
         fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');
@@ -4388,6 +4402,7 @@ function studio() {
         fd.append('threshold_db', this.editor.thresholdDb);
         fd.append('min_silence_secs', this.editor.minSilenceSecs);
         fd.append('pad_secs', this.editor.padSecs);
+        fd.append('pad_end_secs', this.editor.padEndSecs);
         fd.append('template', this.editor.template);
         if (this.editor.voiceId) fd.append('voice_id', this.editor.voiceId);
         fd.append('enable_trim', this.editor.enableTrim ? 'true' : 'false');

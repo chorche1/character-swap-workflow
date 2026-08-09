@@ -404,14 +404,22 @@ def _detect_silences(input_path: Path, threshold_db: float = -23.0,
 
 def _invert_silences(silences: list[tuple[float, float]],
                      total_duration: float,
-                     pad_secs: float = 0.05) -> list[tuple[float, float]]:
+                     pad_secs: float = 0.05,
+                     pad_end_secs: float | None = None,
+                     ) -> list[tuple[float, float]]:
     """Return list of (start, end) speech-keep ranges by inverting silences.
-    Adds a tiny `pad_secs` either side of each INTERIOR keep range so words
-    don't get clipped — but NOT on the first keep range. Leading silence is
-    fully discarded so the clip starts exactly on speech, matching Hugo's
-    "no gap at the start" expectation. Trailing silence is similarly fully
-    cut (loop runs only while there's content after the last silence).
+    Adds a tiny pad either side of each INTERIOR keep range so words don't get
+    clipped — but NOT on the first keep range. Leading silence is fully
+    discarded so the clip starts exactly on speech, matching Hugo's "no gap at
+    the start" expectation. Trailing silence is similarly fully cut (loop runs
+    only while there's content after the last silence).
+
+    The pad is ASYMMETRIC (Hugo 2026-08-10): `pad_secs` is the room kept
+    BEFORE speech resumes, `pad_end_secs` the room kept AFTER speech stops —
+    a phrase's tail needs more breathing room than its head. `None` mirrors
+    `pad_secs`, so every legacy caller keeps its symmetric behaviour.
     """
+    end_pad = pad_secs if pad_end_secs is None else pad_end_secs
     keep: list[tuple[float, float]] = []
     cursor = 0.0
     first_keep = True
@@ -421,7 +429,7 @@ def _invert_silences(silences: list[tuple[float, float]],
             # leading-silence remnant). Subsequent keeps still get the
             # pre-pad so mid-sentence pauses keep their natural in-breath.
             pre_pad = 0.0 if first_keep else pad_secs
-            keep.append((max(0.0, cursor - pre_pad), min(total_duration, s_start + pad_secs)))
+            keep.append((max(0.0, cursor - pre_pad), min(total_duration, s_start + end_pad)))
             first_keep = False
         cursor = s_end
     if cursor < total_duration:
@@ -584,8 +592,12 @@ def trim_silences(input_path: Path, output_path: Path, *,
                   threshold_db: float = -23.0,
                   min_silence_secs: float = 0.4,
                   pad_secs: float = 0.05,
+                  pad_end_secs: float | None = None,
                   job_id: str | None = None) -> dict:
     """Remove silent gaps from `input_path`. Writes to `output_path`.
+
+    `pad_secs` is the room kept BEFORE speech resumes, `pad_end_secs` the room
+    kept AFTER speech stops (None mirrors `pad_secs`) — see `_invert_silences`.
 
     Returns a summary {original_duration, trimmed_duration, n_cuts}."""
     with record(phase="editor_trim", model="ffmpeg-silencedetect",
@@ -606,7 +618,7 @@ def trim_silences(input_path: Path, output_path: Path, *,
                     "trimmed_duration": round(duration, 2),
                     "n_cuts": 0, "saved_secs": 0.0}
         silences = _detect_silences(input_path, threshold_db, min_silence_secs)
-        keep = _invert_silences(silences, duration, pad_secs)
+        keep = _invert_silences(silences, duration, pad_secs, pad_end_secs)
         entry["n_silences"] = len(silences)
         entry["n_keep_segments"] = len(keep)
         if not keep:
@@ -2140,11 +2152,17 @@ def remap_words_through_keeps(
 
 def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
                           max_gap_secs: float = 0.35,
-                          pad_secs: float = 0.05) -> list[tuple[float, float]]:
+                          pad_secs: float = 0.05,
+                          pad_end_secs: float | None = None,
+                          ) -> list[tuple[float, float]]:
     """Pure keep-range builder for the word-gap trim. Returns the speech
     ranges to KEEP after collapsing every inter-word pause longer than
-    `max_gap_secs` down to `pad_secs` on each side, and dropping the leading
+    `max_gap_secs` down to the pad on each side, and dropping the leading
     silence before the first word and the trailing room tone after the last.
+
+    Asymmetric like `_invert_silences` (Hugo 2026-08-10): `pad_secs` is kept
+    BEFORE a word starts, `pad_end_secs` AFTER a word ends (None mirrors
+    `pad_secs`).
 
     Robust against loud room tone (Kling): it keys on WORD boundaries, not
     audio energy, so a pause is a pause even when the floor sits ~2 dB below
@@ -2152,6 +2170,7 @@ def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
     """
     if total_duration <= 0:
         return []
+    end_pad = pad_secs if pad_end_secs is None else pad_end_secs
     # Clamp to the clip and DROP words that start past EOF. Whisper can
     # hallucinate timestamps far beyond the file on trailing room tone (the
     # exact Kling case this targets); an unclamped out-of-range word would push
@@ -2176,12 +2195,12 @@ def _word_gap_keep_ranges(words: list[Word], total_duration: float, *,
     for i in range(1, len(ws)):
         gap = ws[i].start - ws[i - 1].end
         if gap > max_gap_secs:
-            s = ws[i - 1].end + pad_secs
+            s = ws[i - 1].end + end_pad
             e = min(ws[i].start - pad_secs, total_duration)
             if e - s > 0.02:
                 removed.append((s, e))
     # Trailing room tone after the last word.
-    trail_start = min(total_duration, ws[-1].end + pad_secs)
+    trail_start = min(total_duration, ws[-1].end + end_pad)
     if total_duration - trail_start > 0.05:
         removed.append((trail_start, total_duration))
 
@@ -2225,6 +2244,7 @@ def _shift_words_to_keeps(words: list[Word],
 
 def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
                    max_gap_secs: float = 0.35, pad_secs: float = 0.05,
+                   pad_end_secs: float | None = None,
                    job_id: str | None = None) -> tuple[dict, list[Word]]:
     """Opt-in WORD-based interior trim: cut every spoken pause longer than
     `max_gap_secs` using Whisper word timestamps, plus the leading silence and
@@ -2248,7 +2268,8 @@ def trim_word_gaps(input_path: Path, output_path: Path, words: list[Word], *,
         duration = _probe_duration(input_path)
         entry["n_words"] = len(words)
         keep = (_word_gap_keep_ranges(words, duration, max_gap_secs=max_gap_secs,
-                                      pad_secs=pad_secs)
+                                      pad_secs=pad_secs,
+                                      pad_end_secs=pad_end_secs)
                 if len(words) >= 2 and duration > 0 else [])
         removed_secs = (duration - sum(b - a for a, b in keep)) if keep else 0.0
         if not keep or removed_secs < 0.05:
@@ -2596,6 +2617,7 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
                    threshold_db: float = -23.0,
                    min_silence_secs: float = 0.30,
                    pad_secs: float = 0.05,
+                   pad_end_secs: float | None = None,
                    job_id: str | None = None) -> dict:
     """Audio-onset trim + interior/trailing silence trim + scale + concat of
     N clips in ONE libx264 generation (2026-06-12).
@@ -2611,8 +2633,9 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
       - Leading silence is ALWAYS cut per clip (audio onset, ≥0.05s lead) —
         Hugo's universal entry-trim rule, independent of `enable_interior_trim`.
       - `enable_interior_trim` collapses interior pauses ≥ `min_silence_secs`
-        (with `pad_secs` kept around each cut) and drops trailing silence —
-        the "Trim silences" toggle.
+        (keeping `pad_secs` before speech resumes and `pad_end_secs` after it
+        stops — None mirrors `pad_secs`) and drops trailing silence — the
+        "Trim silences" toggle.
       - Audio-less clips pass through whole; mixed sets get synth silence so
         the concat layout stays uniform (same as concat_videos).
     Boundary nuance vs the old chain: a pause spanning a clip boundary used
@@ -2710,7 +2733,8 @@ def assemble_clips(video_paths: list[Path], output_path: Path, *,
             if enable_interior_trim:
                 interior = [s for s in silences
                             if (s[1] - s[0]) >= min_silence_secs]
-                keep = _invert_silences(interior, duration, pad_secs)
+                keep = _invert_silences(interior, duration, pad_secs,
+                                        pad_end_secs)
                 # The 0.05s onset pass catches short leads the interior
                 # filter ignores. Drop keeps that END before the onset (a
                 # sub-50ms head click + its pad would otherwise survive as

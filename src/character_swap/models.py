@@ -586,8 +586,8 @@ class MediaGeneration(BaseModel):
     # saved multi-clip Editor reel needs to be re-opened AND repurposed —
     #   {edit_id, n_clips, clip_paths: [ordered ORIGINAL uploads],
     #    settings: {template, voice_id, enable_*, target_wpm, playback_speed,
-    #               threshold_db, min_silence_secs, pad_secs, gap_max_secs,
-    #               overrides},
+    #               threshold_db, min_silence_secs, pad_secs, pad_end_secs,
+    #               gap_max_secs, overrides},
     #    repurpose: None | {status, edit_id, video_path, error, settings}}
     # Persisted as one JSON column in SQLite (the generations table uses
     # enumerated columns, not the jobs' model_json blob) so future Editor

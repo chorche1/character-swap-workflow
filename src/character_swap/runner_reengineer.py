@@ -1671,7 +1671,11 @@ ASSEMBLE_DEFAULTS: dict = {
     # also the opt-in word-gap trim below.
     "threshold_db": -24.0,
     "min_silence_secs": 0.4,
+    # The pad is ASYMMETRIC (Hugo 2026-08-10): 0.1 s kept BEFORE speech
+    # resumes, 0.15 s AFTER it stops — a phrase's tail needs more room than
+    # its head. Both are tunable in the ⚙ panel.
     "pad_secs": 0.1,
+    "pad_end_secs": 0.15,
     # Opt-in word-gap trim (Hugo 2026-06-17): when ON, the level interior
     # trim is replaced by a Whisper-word-boundary pause cut — robust against
     # Kling room tone. Default OFF; max_gap tunable in the ⚙ panel.
@@ -2213,6 +2217,7 @@ async def _do_assemble(re_id: str, state: dict, *,
                 threshold_db=cfg["threshold_db"],
                 min_silence_secs=cfg["min_silence_secs"],
                 pad_secs=cfg["pad_secs"],
+                pad_end_secs=cfg["pad_end_secs"],
                 enable_gap_trim=cfg["enable_gap_trim"],
                 gap_max_secs=cfg["gap_max_secs"],
                 voice_id=voice_id,
@@ -2432,6 +2437,7 @@ async def _do_repurpose(re_id: str, state: dict) -> None:
                 threshold_db=cfg["threshold_db"],
                 min_silence_secs=cfg["min_silence_secs"],
                 pad_secs=cfg["pad_secs"],
+                pad_end_secs=cfg["pad_end_secs"],
                 enable_gap_trim=cfg["enable_gap_trim"],
                 gap_max_secs=cfg["gap_max_secs"],
                 voice_id=voice_id,

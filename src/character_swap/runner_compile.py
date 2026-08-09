@@ -353,6 +353,10 @@ async def run_editor_pipeline(
     threshold_db: float,
     min_silence_secs: float,
     pad_secs: float,
+    # Room kept AFTER speech stops (Hugo 2026-08-10) — `pad_secs` is the room
+    # kept BEFORE it resumes. None mirrors `pad_secs` (symmetric, pre-split
+    # behaviour) so an older caller is never silently retuned.
+    pad_end_secs: float | None = None,
     voice_id: str | None,
     enable_transcribe: bool = True,
     enable_gap_trim: bool = False,
@@ -446,6 +450,7 @@ async def run_editor_pipeline(
             threshold_db=threshold_db,
             min_silence_secs=min_silence_secs,
             pad_secs=pad_secs,
+            pad_end_secs=pad_end_secs,
             job_id=edit_id,
         )
         clip_keeps = (asm or {}).get("clip_keeps")
@@ -493,7 +498,8 @@ async def run_editor_pipeline(
                     video_edit.trim_silences, current, trimmed,
                     threshold_db=threshold_db,
                     min_silence_secs=min_silence_secs,
-                    pad_secs=pad_secs, job_id=edit_id,
+                    pad_secs=pad_secs, pad_end_secs=pad_end_secs,
+                    job_id=edit_id,
                 )
                 current = trimmed
             except RuntimeError as trim_err:
@@ -781,6 +787,7 @@ async def _compile_one_character(
     threshold_db: float,
     min_silence_secs: float,
     pad_secs: float,
+    pad_end_secs: float | None = None,
     voice_override: str | None,
     enable_voice_swap: bool = True,
     enable_transcribe: bool = True,
@@ -888,7 +895,8 @@ async def _compile_one_character(
             enable_trim=enable_trim, enable_captions=enable_captions,
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
-            pad_secs=pad_secs, voice_id=effective_voice_id,
+            pad_secs=pad_secs, pad_end_secs=pad_end_secs,
+            voice_id=effective_voice_id,
             enable_transcribe=enable_transcribe,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
             playback_speed=playback_speed, mirror_h=slot.mirror_h,
@@ -1008,6 +1016,9 @@ async def compile_job_videos(
     threshold_db: float = -24.0,
     min_silence_secs: float = 0.4,
     pad_secs: float = 0.1,
+    # Hugo 2026-08-10: the pad around speech is asymmetric — 0.1 s kept BEFORE
+    # speech resumes, 0.15 s AFTER it stops.
+    pad_end_secs: float | None = 0.15,
     voice_override: str | None = None,
     enable_voice_swap: bool = False,
     char_ids: list[str] | None = None,
@@ -1053,7 +1064,8 @@ async def compile_job_videos(
             enable_trim=enable_trim, enable_captions=enable_captions,
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
-            pad_secs=pad_secs, voice_override=voice_override,
+            pad_secs=pad_secs, pad_end_secs=pad_end_secs,
+            voice_override=voice_override,
             enable_voice_swap=enable_voice_swap,
             enable_transcribe=enable_transcribe,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
@@ -1102,6 +1114,7 @@ async def repurpose_editor_job(
     threshold_db: float = -24.0,
     min_silence_secs: float = 0.4,
     pad_secs: float = 0.1,
+    pad_end_secs: float | None = 0.15,   # Hugo 2026-08-10 (see compile_job_videos)
     enable_gap_trim: bool = False,
     gap_max_secs: float = 0.35,
     playback_speed: float = 1.0,
@@ -1171,7 +1184,8 @@ async def repurpose_editor_job(
             enable_trim=enable_trim, enable_captions=enable_captions,
             enable_wpm_normalize=enable_wpm_normalize, target_wpm=target_wpm,
             threshold_db=threshold_db, min_silence_secs=min_silence_secs,
-            pad_secs=pad_secs, voice_id=eff_voice,
+            pad_secs=pad_secs, pad_end_secs=pad_end_secs,
+            voice_id=eff_voice,
             enable_gap_trim=enable_gap_trim, gap_max_secs=gap_max_secs,
             playback_speed=playback_speed, mirror_h=True,
             script_hint=(gen.prompt or None),
