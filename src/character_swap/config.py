@@ -438,6 +438,23 @@ class Settings(BaseSettings):
     # is not usable here — measured "english" on a plainly German clip.)
     video_qc_language_threshold: float = Field(
         default=0.6, validation_alias="VIDEO_QC_LANGUAGE_THRESHOLD")
+    # The SECOND wrong-language signal (Hugo 2026-08-09), and the durable one.
+    # The threshold above needs the ENGLISH source line to compare against, so
+    # it is armed only when localization actually rewrote something — which is
+    # exactly what fails when a prompt shape cannot be read. This one asks the
+    # transcript itself which language it is in, and needs no prompt at all.
+    #
+    # `video_qc.detect_spoken_language` scores stop-word frequency for
+    # {en, es, de} and returns the winner's MARGIN over the runner-up; below
+    # this value it abstains. Measured over 439 dialogue lines from Hugo's
+    # 🗣-flagged characters, 0.05 is where false positives reach zero while all
+    # ten genuine English leaks are still caught — the lines it rescues are
+    # real German ones that tie at 0.00 ("Nummer eins, Reis. Gekochter Reis
+    # schimmelt schneller…"). Independently, over every final's words.json on
+    # disk it classifies 89 known-good reels correctly and flags exactly the
+    # four of the documented 2026-08-06 leak.
+    video_qc_language_margin: float = Field(
+        default=0.05, validation_alias="VIDEO_QC_LANGUAGE_MARGIN")
     swap_qc_price_usd: float = Field(default=0.04, validation_alias="SWAP_QC_PRICE_USD")
     # QC on generated video CLIPS: Whisper-vs-expected-dialogue (catches
     # garbled TTS like "baking goda") + frame-sampled vision check for

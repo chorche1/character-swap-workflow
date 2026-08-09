@@ -1734,15 +1734,22 @@ async def _animate_one_video(
                 if verdict is None:
                     video.qc_status = "skipped"
                     video.qc_reason = None
+                    video.wrong_language = False
                     break
                 if verdict.passed:
                     video.qc_status = "passed"
                     video.qc_reason = None
                     wrong_language = False
+                    video.wrong_language = False
                     break
                 video.qc_status = "failed"
                 video.qc_reason = verdict.reason
                 wrong_language = verdict.wrong_language
+                # Persist it (Hugo 2026-08-09): a wrong-language take must be
+                # distinguishable from a garbled one AFTER the fact, because
+                # the build gate blocks on the first and deliberately ships
+                # the second. Cleared on a passing retry just above.
+                video.wrong_language = verdict.wrong_language
                 # ANY missed line on a language-flagged character buys a retry,
                 # even when the fuzzy speech check is flag-only
                 # (max_attempts == 1). Measured on re_b3170d2118: of the 8

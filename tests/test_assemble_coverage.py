@@ -261,3 +261,96 @@ def test_do_assemble_skips_uninvolved_char(monkeypatch, tmp_path):
     assert updates["finals"]["cA"]["status"] == "done"
     assert updates["status"] == "done"                  # not partial_success
     assert len(calls) == 1                              # one build, for cA only
+
+
+# --- a clip that speaks the WRONG LANGUAGE never enters a final -------------
+#
+# Hugo 2026-08-09, "stoppa båda": the manual "Bygg ihop igen" too, not only
+# the ⚡ auto build. Nothing read qc_* before this — `_all_videos_successful`
+# tests VideoStatus.DONE and nothing else, so a clip QC had heard speaking
+# English was compiled and Telegram-delivered exactly like a clean one.
+
+
+def _wrong_lang_clip(vid, variant, path):
+    row = _clip_row(vid, variant, VideoStatus.DONE, path)
+    row.qc_status = "failed"
+    row.qc_reason = "fel språk: klippet talar engelska, inte German"
+    row.wrong_language = True
+    return row
+
+
+def test_a_wrong_language_clip_is_a_hard_gap(tmp_path):
+    """It is DONE and on disk, so every presence check passes — the flag is
+    the only thing that separates it from a good clip."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+    job = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                _wrong_lang_clip("vd2", "v2", str(c2))])
+
+    gaps = runner_reengineer._assembly_gaps(_state(), job)
+    assert [g["reason"] for g in gaps["hard"]] == ["klippet talar fel språk"]
+    assert gaps["pending"] == []                 # not waitable — only a redo
+
+    # _collect_clips must agree exactly, or the gate and the build disagree.
+    clips, _d, missing, waitable = runner_reengineer._collect_clips(
+        _state(), job.characters["cA"])
+    assert len(clips) == 1
+    assert missing == ["scen 2 (klippet talar fel språk)"]
+    assert waitable is False
+
+
+def test_a_garbled_clip_still_builds(tmp_path):
+    """The distinction that matters. A GARBLED take shares qc_status="failed"
+    and DOES ship with its ⚠ chip — Hugo's deliberate 2026-07-03 flag-only
+    setting. Blocking on qc_status instead of the stored flag would silently
+    reverse that decision."""
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+    garbled = _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))
+    garbled.qc_status = "failed"
+    garbled.qc_reason = "dialogue mismatch (similarity 0.31)"
+    job = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)), garbled])
+
+    gaps = runner_reengineer._assembly_gaps(_state(), job)
+    assert gaps["hard"] == [] and gaps["pending"] == []
+    clips, _d, missing, _w = runner_reengineer._collect_clips(
+        _state(), job.characters["cA"])
+    assert len(clips) == 2 and missing == []
+
+
+def test_auto_build_refuses_a_wrong_language_clip(tmp_path):
+    """The ⚡ auto chain — compile + auto-Telegram — reads the same flag."""
+    from character_swap import auto_finalize
+    c1 = tmp_path / "c1.mp4"; c1.write_bytes(b"x")
+    c2 = tmp_path / "c2.mp4"; c2.write_bytes(b"x")
+
+    clean = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                  _clip_row("vd2", "v2", VideoStatus.DONE, str(c2))])
+    assert auto_finalize._all_videos_successful(clean) is True
+
+    leaked = _job([_clip_row("vd1", "v1", VideoStatus.DONE, str(c1)),
+                   _wrong_lang_clip("vd2", "v2", str(c2))])
+    assert auto_finalize._all_videos_successful(leaked) is False
+
+
+def test_the_refusal_names_the_real_reason_per_gap():
+    """What the user READS. "Saknar färdigt klipp" is right for a failed take
+    and wrong for a clip that rendered fine and speaks the wrong language —
+    the file is on disk, so telling Hugo it is missing sends him looking for
+    the wrong thing (2026-08-09)."""
+    from character_swap.api import _assembly_refusal_message as msg
+    only_lang = msg({"hard": [{"name": "Frank", "label": "scen 2",
+                               "reason": "klippet talar fel språk"}],
+                     "pending": [], "dirty": []})
+    assert "fel språk" in only_lang
+    assert "Saknar färdigt klipp" not in only_lang
+
+    # …and the generic wording survives for the case that produced it, with
+    # both reasons named separately when they occur together.
+    both = msg({"hard": [{"name": "Frank", "label": "scen 2",
+                          "reason": "klippet talar fel språk"},
+                         {"name": "Helene", "label": "scen 5",
+                          "reason": "klippet saknas/misslyckades"}],
+                "pending": [], "dirty": []})
+    assert "fel språk" in both and "Saknar färdigt klipp" in both
+    assert "Frank: scen 2" in both and "Helene: scen 5" in both

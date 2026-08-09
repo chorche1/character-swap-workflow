@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -330,3 +331,137 @@ def test_language_retries_are_off_for_unflagged_characters(monkeypatch, tmp_path
     assert len(takes) == 1                       # flag-only: no re-render
     assert video.status == VideoStatus.DONE      # clip kept, marked ⚠
     assert video.qc_status == "failed"
+
+
+# --- 4. THE DURABLE NET: ask the AUDIO, not the prompt -----------------------
+#
+# Every check above needs the ENGLISH source line, which only exists when
+# localization managed to READ the prompt. So the whole net is armed exactly
+# when nothing went wrong, and blind whenever a prompt shape defeats the
+# extractor — which is the 2026-07-31, 08-02, 08-06, 08-08 and 08-09 incidents,
+# five variations on one theme. `detect_spoken_language` asks the transcript
+# instead: no prompt, so no quote character, verb or label can disarm it.
+
+
+def _heard_only(monkeypatch, text):
+    """Transcript with NO expected line to score against (similarity 0.0) —
+    the state a clip is in when its prompt could not be parsed."""
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (False, text, 0.0, "english", text))
+
+
+def test_a_flagged_clip_is_transcribed_even_with_no_readable_line(monkeypatch):
+    """`_transcribe` used to return None the moment `expected` was empty, so a
+    flagged clip whose prompt failed to parse got qc_status="skipped" — 18 of
+    18 in re_165ac37c1f, indistinguishable from a silent B-roll shot."""
+    _qc_on(monkeypatch)
+    seen: list[tuple] = []
+
+    def rec(video, expected, **kw):
+        seen.append((expected, kw.get("language")))
+        return (False, "Der beste Tee für den Darm ist Jasmintee heute", 0.0,
+                "german", "Der beste Tee für den Darm ist Jasmintee heute")
+    monkeypatch.setattr(video_qc, "_transcribe", rec)
+
+    v = video_qc.inspect_clip(Path("/x.mp4"),
+                              movement_prompt="SHOT — he pours the tea.",
+                              expected_language="de")
+    assert seen == [("", "de")]                  # transcribed anyway, hinted
+    assert v is not None and v.passed            # …and NOT reported as skipped
+
+
+def test_an_english_transcript_is_wrong_language_with_no_source_line(monkeypatch):
+    """THE durable one. No `original_speech`, no readable prompt — exactly the
+    state the ” bug produced — and the clip is still caught."""
+    _qc_on(monkeypatch)
+    _heard_only(monkeypatch,
+                "The best tea for intestines is jasmine tea and this one is "
+                "the best for your gut")
+    v = video_qc.inspect_clip(Path("/x.mp4"),
+                              movement_prompt="SHOT — he pours the tea.",
+                              expected_language="de")
+    assert v is not None and not v.passed and v.wrong_language is True
+    assert "fel språk" in v.reason and "German" in v.reason
+
+
+def test_the_clip_hugo_reported_is_caught(monkeypatch):
+    """re_165ac37c1f, Ching 🇪🇸, clip 6 — the one English clip in an otherwise
+    perfectly Spanish reel ("lite engelskt tal"). Verbatim Scribe transcript."""
+    _qc_on(monkeypatch)
+    _heard_only(monkeypatch, "This juice hits your insides like the reset "
+                             "button nobody told you existed")
+    v = video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="he pours.",
+                              expected_language="es")
+    assert v is not None and v.wrong_language is True
+
+
+def test_a_correct_translation_is_never_flagged_by_the_classifier(monkeypatch):
+    """Zero false positives is the whole licence for this check. These are
+    verbatim transcripts of clips that came out RIGHT."""
+    _qc_on(monkeypatch)
+    for lang, text in (
+        ("de", "Streue Natron auf Orangen und sieh einfach zu, was passiert. "
+               "Apotheken hassen das"),
+        ("de", "Nummer eins, Reis. Gekochter Reis schimmelt schneller als du "
+               "denkst wirklich"),
+        ("es", "Pon bicarbonato de sodio en las naranjas y solo mira lo que "
+               "sucede. Las farmacias"),
+        ("es", "Guarda esto y comenta detox y te enviaré el ingrediente "
+               "secreto que añado"),
+    ):
+        _heard_only(monkeypatch, text)
+        v = video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="he pours.",
+                                  expected_language=lang)
+        assert v is not None and v.wrong_language is False, text
+
+
+def test_the_classifier_abstains_on_a_line_too_short_to_judge(monkeypatch):
+    """"Un vaso de agua" and "Mix two cups of orange" are 4-word clips where a
+    word-frequency count is noise. Abstaining costs a missed flag; guessing
+    costs a re-render of a correct clip."""
+    _qc_on(monkeypatch)
+    for text in ("Un vaso de agua", "Mix two cups of orange"):
+        _heard_only(monkeypatch, text)
+        v = video_qc.inspect_clip(Path("/x.mp4"), movement_prompt="he pours.",
+                                  expected_language="es")
+        assert v is not None and v.wrong_language is False, text
+
+
+def test_an_english_character_is_never_language_classified(monkeypatch):
+    """The unflagged path must be untouched: no hint, no classification, and
+    with no expected line `_transcribe` still returns None → skipped."""
+    _qc_on(monkeypatch)
+    calls: list = []
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: calls.append(k) or None)
+    v = video_qc.inspect_clip(Path("/x.mp4"),
+                              movement_prompt="SHOT — he pours the tea.")
+    assert v is None                             # skipped, exactly as before
+    assert calls and calls[0].get("language") is None
+
+
+def test_transcribe_runs_for_a_flagged_clip_with_no_expected_line(monkeypatch):
+    """The guard INSIDE `_transcribe`, not `inspect_clip`'s call to it. The
+    old `if not expected.strip(): return None` is what made every unreadable
+    flagged clip come back as qc_status="skipped"; the classifier above cannot
+    run without a transcript, so this is the load-bearing half."""
+    from character_swap import video_edit as _ve
+    cfg = __import__("character_swap.config", fromlist=["settings"]).settings
+    monkeypatch.setattr(type(cfg), "openai_api_key",
+                        property(lambda self: "sk-test"), raising=False)
+    passes: list = []
+
+    def fake(video, *, job_id=None, language=None, script_hint=None):
+        passes.append(language)
+        return ([SimpleNamespace(text="Der", start=0.0, end=0.1),
+                 SimpleNamespace(text="Tee", start=0.1, end=0.2)], "german")
+    monkeypatch.setattr(_ve, "transcribe_detailed", fake)
+
+    # 🗣 flagged, nothing to score against → still transcribed (both passes).
+    got = video_qc._transcribe(Path("/x.mp4"), "", language="de")
+    assert got is not None and passes == [None, "de"]
+
+    # An ENGLISH character with no line stays exactly as before: no call.
+    passes.clear()
+    assert video_qc._transcribe(Path("/x.mp4"), "") is None
+    assert passes == []

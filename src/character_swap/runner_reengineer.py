@@ -1758,6 +1758,16 @@ def _collect_clips(
         # Prefer a user-imported take over a generated one (Hugo 2026-06-21).
         video = runner.pick_clip_for_variant(jc, vid_variant)
         if video is not None:
+            if video.wrong_language:
+                # QC heard this clip speak the WRONG LANGUAGE. It must never
+                # enter a final (Hugo 2026-08-09, "stoppa båda" — the manual
+                # build too, not just ⚡ auto). Distinct from a merely GARBLED
+                # take, which shares `qc_status="failed"` and DOES ship with
+                # its ⚠ chip — that is Hugo's deliberate flag-only setting, so
+                # the two are told apart by the stored flag, never by parsing
+                # the reason. Not waitable: only a re-render changes it.
+                missing.append(f"scen {e['idx'] + 1} (klippet talar fel språk)")
+                continue
             clips.append(Path(video.final_video_path))
             dialogues.append(_clip_dialogue(video, e))
             continue
@@ -2082,7 +2092,12 @@ def _assembly_gaps(state: dict, job: Job) -> dict:
             # Route through pick_clip_for_variant so this presence check stays
             # IDENTICAL to _collect_clips (the "mirror exactly" invariant —
             # both now prefer an imported take) (review 2026-06-21).
-            if runner.pick_clip_for_variant(jc, vid) is not None:
+            take = runner.pick_clip_for_variant(jc, vid)
+            if take is not None:
+                # Mirrors _collect_clips: a clip QC heard speaking the wrong
+                # language is a HARD gap, not a shippable one (2026-08-09).
+                if take.wrong_language:
+                    _gap(hard, cid, name, e, "klippet talar fel språk")
                 continue
             rows = [vv for vv in jc.videos if vv.source_variant_id == vid]
             if not rows or any(vv.status in {VideoStatus.PENDING,

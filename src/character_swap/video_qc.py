@@ -162,6 +162,68 @@ def speech_similarity(expected: str, heard: str) -> float:
     return SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
+# Frequency-ranked FUNCTION words. Content words are useless here — a Spanish
+# clip about "matcha" and an English one share the noun — but the words that
+# glue a sentence together are near-disjoint across these three languages and
+# appear several times in any real spoken line.
+#
+# This is the answer to the structural half of every language leak so far
+# (Hugo 2026-08-09). Every earlier net reads the PROMPT, so a prompt shape the
+# extractor cannot parse disarms the translator and its guard together — that
+# is the 2026-07-31, 08-02, 08-06, 08-08 and 08-09 incidents, five variations
+# on one theme. Asking the AUDIO what language it is in cannot fail that way,
+# because it never looks at a prompt at all. It also covers the one case no
+# prompt-side fix can ever reach: the model ignoring a perfectly correct
+# prompt (Kling leaks English on roughly 1 in 100 Spanish clips, and one such
+# clip shipped inside an otherwise-Spanish reel in re_165ac37c1f).
+_LANG_STOPWORDS: dict[str, frozenset[str]] = {
+    "en": frozenset({
+        "the", "and", "you", "your", "this", "that", "for", "with", "is", "it",
+        "a", "of", "to", "in", "on", "will", "my", "me", "i", "are", "best",
+        "if", "so", "but", "just", "what", "they", "not", "have", "do"}),
+    "es": frozenset({
+        "el", "la", "los", "las", "de", "que", "y", "en", "un", "una", "para",
+        "con", "esto", "esta", "te", "tu", "es", "por", "lo", "se", "mejor",
+        "más", "si", "no", "del", "al", "me", "mi", "tus", "como"}),
+    "de": frozenset({
+        "der", "die", "das", "und", "ist", "für", "mit", "den", "ein", "eine",
+        "du", "dein", "deine", "ich", "nicht", "auf", "zu", "in", "beste",
+        "wenn", "dann", "auch", "sich", "es", "am", "im", "von", "dir"}),
+}
+# Below this many tokens the frequencies are noise, so the classifier abstains
+# rather than guessing. Short lines ("Un vaso de agua") are exactly where a
+# stop-word count is least reliable and where a false "spoke English" verdict
+# would cost a needless re-render.
+_LANG_MIN_TOKENS = 8
+
+
+def detect_spoken_language(text: str) -> tuple[str | None, float]:
+    """Best guess at the language of a TRANSCRIPT, and its confidence margin.
+
+    Returns `(code, margin)` where `margin` is the winning language's
+    stop-word rate minus the runner-up's, or `(None, 0.0)` when the text is too
+    short to judge or contains no function word at all. Callers gate on the
+    margin (`settings.video_qc_language_margin`) — the margin, not the rate, is
+    what separates "this is English" from "this is a short line that happens to
+    contain 'no'".
+
+    Deliberately NOT the STT engine's own `language` field: measured on Hugo's
+    clips, whisper-1 called 4 of 20 German clips English and Scribe called 3 of
+    20 Dutch or English, so gating on it would re-render correct clips. This
+    looks at the words that were actually heard."""
+    toks = [t for t in
+            (w.strip(".,!?;:\"'“”„«»¡¿()").lower() for w in (text or "").split())
+            if t]
+    if len(toks) < _LANG_MIN_TOKENS:
+        return None, 0.0
+    rate = {code: sum(1 for t in toks if t in words) / len(toks)
+            for code, words in _LANG_STOPWORDS.items()}
+    ranked = sorted(rate.items(), key=lambda kv: -kv[1])
+    if ranked[0][1] == 0:
+        return None, 0.0
+    return ranked[0][0], round(ranked[0][1] - ranked[1][1], 4)
+
+
 def check_speech(video: Path, expected: str, *, app_job_id: str | None = None
                  ) -> tuple[bool, str, float] | None:
     """Transcribe the clip and compare to the expected dialogue. Returns
@@ -196,9 +258,19 @@ def _transcribe(video: Path, expected: str, *, app_job_id: str | None = None,
     or English. `detected` is returned for display only.
 
     English characters pass no hint, so they still cost exactly one call.
+
+    A 🗣 character is transcribed even with NO expected line (Hugo 2026-08-09).
+    That combination — orders speech, nothing readable to check against — used
+    to return None here, which became `qc_status="skipped"`: 18 of 18 clips in
+    re_165ac37c1f, indistinguishable from a genuinely silent shot, on exactly
+    the clips whose prompt had failed to localize. The transcript is what
+    `detect_spoken_language` needs, and it needs no expected line at all.
+    English characters are unaffected — no hint, no expected line, still None.
     """
     from character_swap.config import settings
-    if not expected.strip() or not settings.openai_api_key:
+    if not settings.openai_api_key:
+        return None
+    if not expected.strip() and not language:
         return None
     try:
         from character_swap import video_edit
@@ -349,7 +421,32 @@ def inspect_clip(video: Path, *, movement_prompt: str,
                         f"English."),
                     wrong_language=True,
                 )
-        if not ok:
+        # THE SHAPE-INDEPENDENT NET (Hugo 2026-08-09). Everything above needs
+        # the ENGLISH source line, which only exists when localization managed
+        # to READ the prompt — so it is armed precisely when nothing went
+        # wrong, and blind when the prompt shape defeated the extractor. Ask
+        # the transcript itself instead: it needs no prompt, so no quote
+        # character, verb list or label can disarm it, and it is the only
+        # check that can see a model ignoring a perfectly correct prompt.
+        if spec is not None:
+            heard_lang, margin = detect_spoken_language(heard_unhinted)
+            if (heard_lang == "en"
+                    and margin >= settings.video_qc_language_margin):
+                return ClipVerdict(
+                    passed=False,
+                    reason=(f"fel språk: klippet talar engelska, inte "
+                            f"{spec.name_en} (ordanalys, marginal "
+                            f"{margin:.2f}) — hörde “{heard_unhinted[:100]}”"),
+                    corrective_hint=(
+                        f"CRITICAL: every spoken word must be in "
+                        f"{spec.name_en}. The previous take spoke ENGLISH. "
+                        f"Speak {spec.name_en} only — never English."),
+                    wrong_language=True,
+                )
+        # Only meaningful when there IS an expected line — a flagged clip with
+        # no readable one reaches here having been language-checked above, and
+        # scoring it against "" would fail every clip at similarity 0.00.
+        if expected.strip() and not ok:
             return ClipVerdict(
                 passed=False,
                 reason=(f"dialogue mismatch (similarity {sim:.2f}): expected "

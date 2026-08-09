@@ -6548,8 +6548,28 @@ def _assembly_refusal_message(gaps: dict) -> str:
 
     parts: list[str] = []
     if gaps["hard"]:
-        parts.append("Saknar färdigt klipp (ta om scenen/klippet): "
-                     + _by_char(gaps["hard"]) + ".")
+        # Group by REASON, not into one bucket (Hugo 2026-08-09). "Saknar
+        # färdigt klipp" is right for a failed/missing take and plainly WRONG
+        # for a clip that rendered fine and speaks the wrong language — the
+        # file is right there, so a message telling him it is missing sends
+        # him looking for the wrong thing. Every gap already carries its own
+        # reason; the generic wording is now just the fallback for the
+        # missing-clip case that produced it.
+        _WORDING = {
+            "klippet talar fel språk":
+                "Klipp på fel språk (ta om klippet): ",
+            "välj vem som ska bytas ut":
+                "Välj vem som ska bytas ut: ",
+            "ingen godkänd bild":
+                "Ingen godkänd bild (godkänn en variant): ",
+        }
+        by_reason: dict[str, list[dict]] = {}
+        for g in gaps["hard"]:
+            by_reason.setdefault(g.get("reason") or "", []).append(g)
+        for reason, items in by_reason.items():
+            lead = _WORDING.get(reason,
+                                "Saknar färdigt klipp (ta om scenen/klippet): ")
+            parts.append(lead + _by_char(items) + ".")
     if gaps["pending"]:
         parts.append("Klipp renderas fortfarande (vänta): "
                      + _by_char(gaps["pending"]) + ".")

@@ -123,6 +123,15 @@ def _all_videos_successful(job: Job) -> bool:
         for v in jc.videos:
             if v.status != VideoStatus.DONE:
                 return False       # pending / failed / errored → not all good
+            if v.wrong_language:
+                # DONE, on disk, and QC heard it speak the wrong language
+                # (Hugo 2026-08-09). "Alla videor blir lyckade" cannot mean a
+                # clip that says the English source line inside a 🇪🇸/🇩🇪 reel,
+                # and nothing here read qc_* before today — a flagged clip was
+                # compiled and Telegram-delivered exactly like a clean one.
+                # A GARBLED take still passes: it stays shippable with its ⚠
+                # chip by Hugo's own 2026-07-03 flag-only setting.
+                return False
             saw_done_video = True
         if _uncovered_approvals(jc):
             return False           # an approved image with no clip of its own

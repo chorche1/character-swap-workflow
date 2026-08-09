@@ -208,6 +208,15 @@ class VideoVariant(BaseModel):
     qc_status: str | None = None
     qc_reason: str | None = None
     qc_attempts: int = 0
+    # The LAST QC verdict was specifically "spoke the wrong language" (Hugo
+    # 2026-08-09), kept as its own flag rather than parsed back out of the
+    # Swedish `qc_reason` prose. A wrong-language clip must never enter a
+    # final — `_assembly_gaps` reports it as a HARD gap and `auto_finalize`
+    # refuses to build — while a merely GARBLED take stays shippable with its
+    # ⚠ chip, which is Hugo's deliberate 2026-07-03 flag-only setting. Those
+    # two live in the same `qc_status="failed"`, so the distinction has to be
+    # stored, not inferred.
+    wrong_language: bool = False
     # Every clip QC rejected before this take's final result (Hugo 2026-06-20),
     # snapshotted before the next take overwrote it. Empty for clips that
     # passed first try.
