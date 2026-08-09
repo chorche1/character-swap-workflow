@@ -2327,8 +2327,14 @@ async def repurpose(re_id: str, *,
         return
     _REPURPOSING.add(re_id)
     built = False
+    # Exactly the characters this pass wrote an entry for — NOT the ones that
+    # were picked (Hugo 2026-08-10: "bara de nya repurpose videorna skickas").
+    # The two differ: a picked character that `_char_is_uninvolved` skips is
+    # never built, and if an earlier repurpose left a `done` entry in the
+    # bucket, sending by the PICK would re-post that stale copy to its channel.
+    rebuilt: list[str] = []
     try:
-        await _do_repurpose(re_id, state, char_ids=char_ids)
+        rebuilt = await _do_repurpose(re_id, state, char_ids=char_ids)
         built = True
     except Exception as e:
         _log.exception("reengineer %s repurpose failed", re_id)
@@ -2347,6 +2353,14 @@ async def repurpose(re_id: str, *,
         _REPURPOSING.discard(re_id)
 
     if not built:
+        return
+    if not rebuilt:
+        # Nothing was rebuilt (every picked character turned out uninvolved).
+        # This MUST return before the send: `_send_reengineer_bucket` reads an
+        # EMPTY char_ids list as "no filter at all", so handing it one would
+        # re-post the run's entire existing repurpose bucket.
+        _log.info("reengineer %s: repurpose built nothing — nothing to send",
+                  re_id)
         return
     if not _repurpose_auto_send(state):
         # The modal's "skicka automatiskt" was unticked (Hugo 2026-08-09): the
@@ -2369,13 +2383,16 @@ async def repurpose(re_id: str, *,
     try:
         from character_swap import auto_finalize
         await auto_finalize.send_reengineer_repurposed(
-            re_id, char_ids=char_ids)
+            re_id, char_ids=rebuilt)
     except Exception:
         _log.exception("reengineer %s repurpose Telegram send failed", re_id)
 
 
 async def _do_repurpose(re_id: str, state: dict, *,
-                        char_ids: list[str] | None = None) -> None:
+                        char_ids: list[str] | None = None) -> list[str]:
+    """Build the mirrored copies. Returns the characters an entry was written
+    for THIS pass — the caller delivers exactly those, never the whole bucket
+    (which, after a filtered build, also holds older copies)."""
     job = store().get_job(state["job_id"])
     if job is None:
         raise RuntimeError("underlying job disappeared")
@@ -2488,11 +2505,13 @@ async def _do_repurpose(re_id: str, state: dict, *,
     # have outdated) and let the new entries win per character. The unfiltered
     # path keeps its exact previous behaviour: a full replacement, so a stale
     # entry for a character no longer in the run still disappears.
+    rebuilt = list(repurposed)
     if only:
         existing = (reengineer.load_state(re_id) or {}).get("repurposed") or {}
         repurposed = {**existing, **repurposed}
     _update(re_id, repurposed=repurposed, repurposing=False,
             repurposed_at=_now())
+    return rebuilt
     # NOTE: the Telegram auto-send lives in repurpose(), after the
     # _REPURPOSING guard is released — never here.
 
