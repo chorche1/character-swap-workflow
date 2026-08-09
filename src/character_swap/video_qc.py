@@ -428,7 +428,24 @@ def inspect_clip(video: Path, *, movement_prompt: str,
         # the transcript itself instead: it needs no prompt, so no quote
         # character, verb list or label can disarm it, and it is the only
         # check that can see a model ignoring a perfectly correct prompt.
-        if spec is not None:
+        #
+        # It is a net for the case where NOTHING ELSE CAN SPEAK — never an
+        # override of positive evidence (adversarial review, 2026-08-09). A
+        # clip that already matches its expected TRANSLATED line said the
+        # right words, whatever a stop-word count makes of the transcript, and
+        # a word count is exactly the wrong instrument for a mangled one:
+        # measured on the shipped path, Scribe renders vd_dff759's genuinely
+        # German audio as "Lege a Friction Knob Block for ten seconds unter
+        # deine Zunge and sieh dir an, was passiert" — real German words with
+        # English filler between them, scoring ('en', 0.0588). That clip
+        # matches its German line at 0.62 against a 0.35 threshold, i.e. it
+        # PASSES cleanly today; without this guard the classifier alone would
+        # convert it into two wasted re-renders and then a hard build block on
+        # a clip that was fine. Over the 214 German + 150 Spanish clips on
+        # disk it is the only such flip (0.48%), with three more within 0.05
+        # of the gate — a margin bump would not have been robust, and this is
+        # not a threshold question but a precedence one.
+        if spec is not None and not (expected.strip() and ok):
             heard_lang, margin = detect_spoken_language(heard_unhinted)
             if (heard_lang == "en"
                     and margin >= settings.video_qc_language_margin):

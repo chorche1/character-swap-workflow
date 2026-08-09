@@ -465,3 +465,57 @@ def test_transcribe_runs_for_a_flagged_clip_with_no_expected_line(monkeypatch):
     passes.clear()
     assert video_qc._transcribe(Path("/x.mp4"), "") is None
     assert passes == []
+
+
+def test_a_garbled_foreign_clip_is_never_called_wrong_language(monkeypatch):
+    """The classifier is a NET, never an override of positive evidence
+    (adversarial review, 2026-08-09).
+
+    Verbatim Scribe output for vd_dff759, whose audio is genuinely German:
+    real German words with English filler between them. A stop-word count
+    calls that English (margin 0.06, over the 0.05 gate) — but the clip
+    matches its expected GERMAN line at 0.62 against a 0.35 threshold, i.e.
+    it passes cleanly. Without the precedence guard the classifier alone
+    turns a fine clip into two wasted re-renders and then a hard build block.
+    Measured over the 214 German + 150 Spanish clips on disk, this was the
+    only such flip — and three more sat within 0.05 of the gate, so a margin
+    bump would not have been robust."""
+    _qc_on(monkeypatch)
+    heard = ("Lege a Friction Knob Block for ten seconds unter deine Zunge "
+             "and sieh dir an, was passiert")
+    line = ("Lege frischen Knoblauch für zehn Sekunden unter deine Zunge und "
+            "sieh dir an, was passiert.")
+    # The classifier on its own DOES call this English — that is the trap.
+    assert video_qc.detect_spoken_language(heard)[0] == "en"
+
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (True, heard, 0.62, "german", heard))
+    v = video_qc.inspect_clip(Path("/x.mp4"),
+                              movement_prompt=f'says: "{line}"',
+                              expected_language="de")
+    assert v is not None and v.passed and v.wrong_language is False
+
+    # …but the SAME transcript with no expected line to vouch for it — the
+    # unreadable-prompt case this net exists for — is still caught.
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (False, heard, 0.0, "german", heard))
+    v2 = video_qc.inspect_clip(Path("/x.mp4"),
+                               movement_prompt="SHOT — he pours.",
+                               expected_language="de")
+    assert v2 is not None and v2.wrong_language is True
+
+
+def test_a_failing_similarity_still_lets_the_classifier_speak(monkeypatch):
+    """The guard is "did the clip say the right words", not "was there a
+    line". A clip with an expected line it does NOT match is exactly as
+    unvouched-for as one with no line at all."""
+    _qc_on(monkeypatch)
+    english = ("The best tea for intestines is jasmine tea and this one is "
+               "the best for your gut")
+    monkeypatch.setattr(video_qc, "_transcribe",
+                        lambda *a, **k: (False, english, 0.05, "english",
+                                         english))
+    v = video_qc.inspect_clip(Path("/x.mp4"),
+                              movement_prompt='says: "Der beste Tee"',
+                              expected_language="de")
+    assert v is not None and v.wrong_language is True
