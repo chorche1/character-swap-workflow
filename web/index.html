@@ -2329,10 +2329,20 @@
                                 class="text-rose-500 cursor-help"
                                 :title="(jc.end_frame_errors || {})[sc.scene_id]"
                                 x-text="'✕ ' + jc.name"></span>
-                          <!-- skeleton only while a shared-pose swap is generating -->
-                          <span x-show="!(jc.end_frame_upload_urls || {})[sc.scene_id] && !(jc.end_frame_urls || {})[sc.scene_id] && !(jc.end_frame_errors || {})[sc.scene_id] && reSceneEndFrameUrl(r, sc)"
+                          <!-- Skelett BARA när något faktiskt genererar. Förr
+                               visades det så fort bilden saknades, vilket fick
+                               en swap som aldrig kördes att se ut som en evig
+                               laddning (Hugo 2026-08-11). -->
+                          <span x-show="!(jc.end_frame_upload_urls || {})[sc.scene_id] && !(jc.end_frame_urls || {})[sc.scene_id] && !(jc.end_frame_errors || {})[sc.scene_id] && reSceneEndFrameUrl(r, sc) && reEndFrameGenerating(r)"
                                 class="inline-block w-14 h-24 skeleton rounded"
                                 :title="jc.name + ' — genererar slutbild…'"></span>
+                          <!-- Saknas och inget är på gång → säg det, med en knapp
+                               som skapar den. Tystnad här kostade en hel körnings
+                               slutposer utan att någon märkte det. -->
+                          <button x-show="reEndFrameMissing(r, sc, jc)"
+                                  class="w-14 h-24 rounded border border-dashed border-amber-400/70 text-amber-500 text-[9px] leading-tight flex items-center justify-center text-center px-1 hover:bg-amber-50 dark:hover:bg-amber-950"
+                                  :title="'Slutbilden för ' + jc.name + ' saknas — swappen kördes aldrig. Klicka för att skapa den för alla karaktärer i scenen.'"
+                                  @click="reengineerRegenEndFrame(r, sc)">↻ saknas</button>
                           <span class="text-neutral-400 max-w-[3.5rem] truncate" x-text="jc.name" :title="jc.name"></span>
                           <div class="flex items-center gap-1">
                             <label class="text-emerald-500 hover:underline cursor-pointer"

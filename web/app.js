@@ -2422,6 +2422,31 @@ function studio() {
       await this.refreshReengineer(run.re_id);
     },
 
+    // Är karaktärens slutbild verkligen på väg, eller bara borta?
+    // (Hugo 2026-08-11: "varför är det fortfarande vitt här")
+    //
+    // Skelettet betydde "genererar…" så fort en delad pose fanns men bilden
+    // saknades — utan att fråga om något faktiskt genererade. Kördes swappen
+    // aldrig, eller dog den med servern, stod rutan kvar och ljög i evighet.
+    // Slutposer skapas BARA under swap-fasen (_kick_char) och av ↻-knappen,
+    // så i vilket annat körningsläge som helst är en saknad bild fast, inte
+    // på gång.
+    reEndFrameGenerating(run) {
+      return ['swapping', 'awaiting_person_choice'].includes(run?.status);
+    },
+
+    // Sant när posen finns men den här karaktärens swap saknas UTAN att vara
+    // på väg och utan att ha felat — precis det läge som förr såg ut som en
+    // evig laddning. Ett fel har sin egen röda markering; en egen uppladdad
+    // slutbild slår allt.
+    reEndFrameMissing(run, sc, jc) {
+      if (!this.reSceneEndFrameUrl(run, sc)) return false;
+      if ((jc.end_frame_upload_urls || {})[sc.scene_id]) return false;
+      if ((jc.end_frame_urls || {})[sc.scene_id]) return false;
+      if ((jc.end_frame_errors || {})[sc.scene_id]) return false;
+      return !this.reEndFrameGenerating(run);
+    },
+
     async reengineerRegenEndFrame(run, sc) {
       const r = await fetch(
         `/api/jobs/${run.job_id}/scenes/${sc.scene_id}/regen_end_frame`,
