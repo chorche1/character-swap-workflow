@@ -36,15 +36,20 @@ metadata-server identity, so branch 1 keeps working unchanged if this ever runs
 on a cloud VM. The client never shells out to `gcloud` — it only reads the
 credentials that command leaves behind.
 
-STATUS — READ THIS BEFORE TRUSTING THE FILE. Everything here was written
-against Google's documented Veo-on-Vertex REST flow, but unlike
-`clients/google_veo.py` (every field of which was verified live) NONE of it has
-been exercised against a real project: there were no Vertex credentials on this
-machine when it was written. The request shaping, the chain wiring and the
-error handling are unit-tested; the WIRE FORMAT is not. First run with real
-credentials must be treated as the verification, and `veo_host_chain()` leaves
-this host out entirely until `VERTEX_PROJECT_ID` and a usable identity are both
-present, so an unverified path cannot silently swallow a production clip.
+STATUS — VERIFIED LIVE 2026-08-10 against project gen-lang-client-0942298729:
+submit accepted, operation polled, an 8 s 1080x1920 clip with audio downloaded
+from the inline base64 form, and the RAI-filter path exercised for real.
+
+BUT — THE FINDING THAT DECIDES WHERE THIS HOST BELONGS: **Vertex applies
+STRICTER content filtering than the Gemini API on the same model.** Frank's
+shirtless start frame, which the Gemini API rendered 5 times out of 5, was
+filtered here on BOTH attempts ("1 videos were filtered out because they
+violated Vertex AI's usage guidelines … Support codes: 15236754"), while a
+fully-clothed frame rendered first try. So Vertex is NOT the answer for the
+shirtless half of this app's cast; it is real extra capacity for everything
+else, which is why it sits LAST in the chain — it only ever sees clips the
+other two hosts already refused. Vertex states plainly that a filtered video is
+not billed.
 
 API (documented shape):
   POST https://{LOC}-aiplatform.googleapis.com/v1/projects/{PROJ}/locations/
@@ -75,7 +80,12 @@ from character_swap.config import settings
 
 _log = logging.getLogger("vertex_veo")
 
-MODEL = "veo-3.1-fast-generate-preview"
+# NOT the same id as the Gemini API path. Vertex serves the GA build
+# (`-generate-001`); `-generate-preview`, which is what generativelanguage
+# answers to, 404s here — probed 2026-08-10 across six candidate ids, and
+# `veo-3.1-fast-generate-001` and `veo-3.1-generate-001` were the only two
+# that existed. Do not "unify" these two constants.
+MODEL = "veo-3.1-fast-generate-001"
 _SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 
 _ALLOWED_DURATIONS = (4, 6, 8)
