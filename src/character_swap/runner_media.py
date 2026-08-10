@@ -356,6 +356,36 @@ def language_clip_truncated(secs: float | int | None) -> bool:
     return secs is not None and language_clip_secs(secs) < secs
 
 
+# THE HOST FALLBACK, which is a different thing from the reroute chain below
+# (Hugo 2026-08-10, from the first live run on the Google path). Google's Veo
+# quota is per KEY and per TIER: on Tier 1 it ran out after a handful of clips
+# and every remaining submit came back 429 RESOURCE_EXHAUSTED — not a refusal,
+# not a balance problem, just a limit that only time or a tier upgrade lifts.
+#
+# A quota wall must NOT kill the run. The same model is available on fal, which
+# renders these clips too — it just refuses far more of them (46% vs Google's
+# handful) — so a clip that cannot get in at Google is better off spending its
+# takes at fal than failing. This is the ONE case where changing host is right;
+# it is deliberately NOT part of `video_fallback_chain`, which exists for
+# CONTENT refusals and would otherwise send a quota-blocked clip to Kling and
+# Grok, off the model its reel is built on and (for a 🗣 character) off the only
+# model trusted with its language.
+VIDEO_HOST_FALLBACK: dict[str, str] = {"veo-3.1-fast-google": "veo-3.1-fast"}
+
+
+def video_host_fallback(chosen_model: str | None) -> str | None:
+    """The OTHER host of the same model, for when this one won't accept work
+    at all (quota). None when there is no alternative host or its key is
+    missing — a fallback we cannot actually reach is worse than none, because
+    it turns one clear error into two."""
+    fb = VIDEO_HOST_FALLBACK.get(chosen_model or "")
+    if not fb:
+        return None
+    from character_swap.config import settings
+    provider = (VIDEO_MODELS.get(fb) or {}).get("provider")
+    return fb if provider and settings.has_provider(provider) else None
+
+
 def video_fallback_chain(chosen_model: str | None = None, *,
                          language: str | None = None) -> list[str]:
     """The ordered models a refused clip is rerouted to after its own model has

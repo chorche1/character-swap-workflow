@@ -1464,6 +1464,17 @@ def _character_gender(char_id: str) -> str | None:
     return ch.gender if ch else None
 
 
+def _is_quota_error(exc: BaseException) -> bool:
+    """True when a provider refused to ACCEPT the job for quota/rate reasons.
+
+    Deliberately narrow, and deliberately NOT part of
+    `content_policy.is_content_rejection`: a quota wall says nothing about the
+    clip, so it must neither consume a refusal take nor route the clip onto a
+    different MODEL. It only moves it to the other HOST of the same model."""
+    from character_swap.clients.google_veo import GoogleVeoQuotaError
+    return isinstance(exc, GoogleVeoQuotaError)
+
+
 def _chain_summary(models: list[str], upto_idx: int) -> str:
     """"veo-3.1-fast ×3 → kling-v3 → grok-imagine-1.5" — the models actually
     walked, in order, repeats collapsed into a count.
@@ -1686,6 +1697,13 @@ async def _animate_one_video(
     fb_lang = lang_spec.code if lang_spec else None
     models_to_try = runner_media.video_attempt_models(
         video_model, language=fb_lang)
+    # HOST fallback, distinct from the reroute chain above (Hugo 2026-08-10).
+    # Google's Veo quota is per key and per tier; when it runs out every submit
+    # 429s and the clip never even reaches the model. That is not a refusal and
+    # must not consume the take budget — the clip is simply moved to the OTHER
+    # host of the SAME model, which still renders it (fal just refuses more of
+    # them). Once per clip: if fal will not take it either, the real error wins.
+    host_fallback = runner_media.video_host_fallback(video_model)
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
     # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
     # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment
@@ -1704,6 +1722,13 @@ async def _animate_one_video(
                 attempt += 1
                 video.qc_attempts = attempt
                 phase = "submit"
+                if active_model != video_model:
+                    # Whatever moved us off the picked model — a content
+                    # reroute or the quota host-swap — the job id we are about
+                    # to store belongs to THIS provider, and _eff_video_model
+                    # resolves the resume poll from `fallback_model`. A stale
+                    # value here polls the wrong endpoint and 404s.
+                    video.fallback_model = active_model
                 provider_job_id = await asyncio.to_thread(
                     pipeline.submit_video,
                     image=Path(approved.path),
@@ -1807,8 +1832,43 @@ async def _animate_one_video(
             # refusal — see runner_media.triggers_fallback. Timeouts, network
             # errors and fal balance failures are NOT refusals and keep the loud
             # fail path with their real reason.
+            # QUOTA — the host will not accept work at all. Append the OTHER
+            # host's attempts to the list this loop is walking (it reads the
+            # live list, so the extension is picked up) and carry on. No take
+            # is spent: nothing about this clip was judged, it was never let
+            # in. The remaining same-host entries are walked first and fail in
+            # milliseconds, because the first quota error trips a shared pause
+            # in the client.
+            quota = _is_quota_error(e)
+            if quota and host_fallback:
+                # Splice the other host in RIGHT HERE, not at the end: the
+                # content reroute chain (Kling, then Grok) sits after this
+                # point, and a quota-blocked clip must not be pushed onto a
+                # different MODEL while the same one is available elsewhere.
+                # The dead host's remaining takes are dropped — they cannot
+                # succeed while the quota is out.
+                rest = [m for m in models_to_try[_model_idx + 1:]
+                        if m != active_model]
+                models_to_try[_model_idx + 1:] = runner_media.video_attempt_models(
+                    host_fallback, language=fb_lang) + rest
+                logger.warning(
+                    "job %s char %s video %s: %s is out of quota — this clip "
+                    "will finish on %s (same model, other host)",
+                    job.job_id, jc.char_id, video.video_id, active_model,
+                    host_fallback)
+                await _emit(job.job_id, "video.host_fallback",
+                            char_id=jc.char_id, video_id=video.video_id,
+                            model=host_fallback, reason=str(e)[:300])
+                host_fallback = None          # once per clip
             next_model = (models_to_try[_model_idx + 1]
                           if _model_idx + 1 < len(models_to_try) else None)
+            if quota and next_model:
+                # Walk on WITHOUT charging a take. The remaining same-host
+                # entries fail in milliseconds (the client's shared pause), so
+                # this costs nothing and lands on the other host's entries.
+                video.status = VideoStatus.PROCESSING
+                _replace_video(job, jc, video)
+                continue
             refused = runner_media.triggers_fallback(active_model, e)
             if refused:
                 # Count EVERY refused take, reroute legs included, and persist

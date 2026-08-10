@@ -86,6 +86,50 @@ _SUBMIT_GATE = threading.BoundedSemaphore(
 # and nothing stops a second process from sharing it).
 _RETRY_WAITS = (20, 45, 90)
 
+# ACCOUNT-LEVEL QUOTA BREAKER, mirroring fal_kling's balance breaker and added
+# for the same reason (Hugo 2026-08-10, from a live run): the quota is per KEY,
+# so once it is exhausted EVERY sibling clip is going to 429 too. Without a
+# shared breaker each of them independently walked the full backoff ladder —
+# measured 162 s, 322 s and 486 s per clip on a 9-clip batch, i.e. the run spent
+# ~45 minutes discovering the same fact nine times over. The first clip to hit
+# the wall now trips this and the rest fail in milliseconds, which is what lets
+# the runner move them to the fal host while the batch is still alive.
+#
+# It EXPIRES rather than latching: the Gemini rate limit is a moving window, so
+# a pause that never lifts would hold a long run hostage after the limit has
+# already recovered — the exact failure fal_kling documents for its own lock.
+_QUOTA_BLOCK_SECS = 600.0
+_quota_block: dict = {"at": 0.0, "detail": ""}
+_quota_lock = threading.Lock()
+
+
+def _quota_blocked_for() -> float:
+    """Seconds left on the shared quota pause, 0 when submits may proceed."""
+    with _quota_lock:
+        at = _quota_block["at"]
+        if not at:
+            return 0.0
+        left = _QUOTA_BLOCK_SECS - (time.monotonic() - at)
+        if left <= 0:
+            _quota_block["at"] = 0.0
+            return 0.0
+        return left
+
+
+def _trip_quota_block(detail: str) -> None:
+    with _quota_lock:
+        _quota_block["at"] = time.monotonic()
+        _quota_block["detail"] = detail[:300]
+    _log.warning("google_veo: quota exhausted — pausing submits for %.0fs so "
+                 "sibling clips fail fast instead of each walking the backoff "
+                 "ladder", _QUOTA_BLOCK_SECS)
+
+
+def clear_quota_block() -> None:
+    """Lift the pause immediately (used by tests and by a manual ↻)."""
+    with _quota_lock:
+        _quota_block["at"] = 0.0
+
 
 class GoogleVeoQuotaError(RuntimeError):
     """Google refused the SUBMIT for quota/rate reasons, not content.
@@ -196,6 +240,15 @@ def submit_image_to_video(
         job_id=app_job_id, duration_secs=dur,
     ) as payload:
         payload["end_frame"] = end_image is not None
+        left = _quota_blocked_for()
+        if left:
+            # A sibling already proved the key is out of quota. Fail NOW with
+            # the same error type, so the runner can move this clip to the
+            # other host instead of the batch spending minutes per clip
+            # re-discovering it.
+            raise GoogleVeoQuotaError(
+                f"google veo quota exhausted (paused {left:.0f}s more): "
+                f"{_quota_block['detail']}")
         with _SUBMIT_GATE:
             last = ""
             for i, wait in enumerate((0, *_RETRY_WAITS)):
@@ -220,6 +273,7 @@ def submit_image_to_video(
                         f"google veo submit failed ({r.status_code}): {last}")
                 _log.warning("google_veo: quota 429 on submit (attempt %d) — "
                              "backing off", i + 1)
+            _trip_quota_block(last)
             raise GoogleVeoQuotaError(
                 f"google veo quota exhausted after {len(_RETRY_WAITS)} retries: "
                 f"{last}")

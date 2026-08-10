@@ -87,6 +87,16 @@ class _Resp:
         return self._payload
 
 
+@pytest.fixture(autouse=True)
+def _no_quota_pause():
+    """The quota breaker is module-global BY DESIGN (it is an account-level
+    fact, and it outlives a single clip on purpose). That makes it leak between
+    tests, so every test starts from a clear one."""
+    google_veo.clear_quota_block()
+    yield
+    google_veo.clear_quota_block()
+
+
 @pytest.fixture
 def _key(monkeypatch):
     from character_swap.config import settings
@@ -288,3 +298,183 @@ def test_pipeline_waits_on_the_google_client(monkeypatch, tmp_path):
                             dest=dest, model="veo-3.1-fast-google")
     # The operation NAME is the provider job id — not a fal request_id.
     assert seen["operation"] == "models/x/operations/z"
+
+
+# --- 6. a quota wall must not take the whole batch down with it -------------
+
+def test_first_quota_error_makes_siblings_fail_fast(monkeypatch, _key, _frames):
+    """THE LIVE FAILURE (2026-08-10). Nine clips each walked the full backoff
+    ladder independently — measured 162 s, 322 s and 486 s — so the run spent
+    ~45 minutes learning the same fact nine times. The quota is per KEY: once
+    one clip proves it is gone, the rest must fail in milliseconds so the
+    runner can move them to the other host while the batch is alive."""
+    start, _ = _frames
+    monkeypatch.setattr(google_veo, "_RETRY_WAITS", ())
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        return _Resp(429, {"error": {"code": 429,
+                                     "message": "You exceeded your current quota"}})
+    monkeypatch.setattr(google_veo.httpx, "post", fake_post)
+
+    with pytest.raises(google_veo.GoogleVeoQuotaError):
+        google_veo.submit_image_to_video(image=start, prompt="a", duration_secs=8)
+    first = len(calls)
+    # A sibling clip: no HTTP at all, and it still gets the quota error type so
+    # the runner takes the same branch.
+    with pytest.raises(google_veo.GoogleVeoQuotaError):
+        google_veo.submit_image_to_video(image=start, prompt="b", duration_secs=8)
+    assert len(calls) == first, "the sibling must not re-probe a dead quota"
+
+
+def test_the_pause_expires(monkeypatch, _key, _frames):
+    """It must NOT latch. The Gemini limit is a moving window, and a pause that
+    never lifts holds a long run hostage after the limit has recovered — the
+    exact failure fal_kling documents for its own account lock."""
+    start, _ = _frames
+    monkeypatch.setattr(google_veo, "_RETRY_WAITS", ())
+    monkeypatch.setattr(google_veo, "_QUOTA_BLOCK_SECS", 0.0)
+    _capture(monkeypatch, status=429,
+             payload={"error": {"message": "You exceeded your current quota"}})
+    with pytest.raises(google_veo.GoogleVeoQuotaError):
+        google_veo.submit_image_to_video(image=start, prompt="a", duration_secs=8)
+    assert google_veo._quota_blocked_for() == 0.0
+
+
+def test_host_fallback_points_at_fal(monkeypatch):
+    """Same model, other host. NOT part of the content reroute chain: a
+    quota-blocked clip must not be sent to Kling or Grok, off the model its
+    reel is built on and off the only model trusted with its language."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "fal_api_key",
+                        property(lambda self: "k"), raising=False)
+    assert runner_media.video_host_fallback("veo-3.1-fast-google") == "veo-3.1-fast"
+    # No alternative host for anything else.
+    assert runner_media.video_host_fallback("kling-v3") is None
+    assert runner_media.video_host_fallback("veo-3.1-fast") is None
+    # The chain for CONTENT refusals is untouched by any of this.
+    assert "veo-3.1-fast" not in runner_media.video_fallback_chain(
+        "veo-3.1-fast-google")
+
+
+def test_host_fallback_needs_the_other_key(monkeypatch):
+    """A fallback we cannot reach turns one clear error into two."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "fal_api_key",
+                        property(lambda self: ""), raising=False)
+    assert runner_media.video_host_fallback("veo-3.1-fast-google") is None
+
+
+def test_quota_error_is_not_a_refusal_for_the_runner():
+    """The predicate the runner branches on. If a quota error ever read as a
+    refusal it would spend all five takes re-submitting into the wall and then
+    fail the clip as if its content were blocked."""
+    from character_swap import runner
+    quota = google_veo.GoogleVeoQuotaError("google veo quota exhausted")
+    assert runner._is_quota_error(quota)
+    assert not runner._is_quota_error(RuntimeError("flagged as nsfw content"))
+    assert not runner_media.triggers_fallback("veo-3.1-fast-google", quota)
+
+
+# --- 7. the runner really moves the clip, end to end ------------------------
+
+def _job_one_clip(tmp_path):
+    from character_swap.models import (
+        CharStatus, GeneratedImage, Job, JobCharacter, VariantStatus,
+        VideoStatus, VideoVariant)
+    img = GeneratedImage(variant_id="v1", path=str(tmp_path / "v1.png"),
+                         prompt="B", scene_id="s1", status=VariantStatus.READY)
+    Path(img.path).write_bytes(b"img")
+    jc = JobCharacter(char_id="cA", name="A",
+                      source_image_path=str(tmp_path / "c.png"),
+                      status=CharStatus.APPROVED, images=[img],
+                      approved_variant_ids=["v1"], approved_variant_id="v1")
+    (tmp_path / "c.png").write_bytes(b"c")
+    scene = tmp_path / "s.png"; scene.write_bytes(b"s")
+    job = Job(job_id="j1", title="t", scene_id="s1",
+              scene_image_path=str(scene), scene_ids=["s1"],
+              scene_image_paths=[str(scene)],
+              video_model="veo-3.1-fast-google", characters={"cA": jc})
+    v = VideoVariant(video_id="vd1", grok_job_id="",
+                     status=VideoStatus.PENDING, source_variant_id="v1")
+    jc.videos = [v]
+    return job, jc, v
+
+
+def test_quota_moves_the_clip_to_fal_instead_of_killing_it(monkeypatch, tmp_path):
+    """THE POINT OF THE WHOLE BRANCH. Google's quota ran out mid-run and every
+    remaining clip died. The same model is available on fal, so the clip should
+    finish there rather than fail — and it must NOT spend refusal takes on the
+    way, because nothing about it was ever judged."""
+    import asyncio
+    from character_swap import runner
+    from character_swap.config import settings
+    from character_swap.models import VideoStatus
+
+    monkeypatch.setattr(type(settings), "fal_api_key",
+                        property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "video_qc_enabled",
+                        property(lambda self: False), raising=False)
+    monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_replace_video", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_maybe_complete_char", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_output_dir", lambda j, c: tmp_path)
+    monkeypatch.setattr(runner.video_qc, "inspect_clip", lambda *a, **k: None)
+
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(runner, "_emit", _noop)
+
+    job, jc, video = _job_one_clip(tmp_path)
+    tried = []
+
+    def fake_submit(**kw):
+        tried.append(kw["model"])
+        if kw["model"] == "veo-3.1-fast-google":
+            raise google_veo.GoogleVeoQuotaError("google veo quota exhausted")
+        return "fal-req-1"
+    monkeypatch.setattr(runner.pipeline, "submit_video", fake_submit)
+    monkeypatch.setattr(runner.pipeline, "wait_for_video",
+                        lambda **kw: Path(kw["dest"]).write_bytes(b"clip"))
+
+    asyncio.run(runner._animate_one_video(job, jc, video, "he waves"))
+
+    assert "veo-3.1-fast" in tried, "the clip must be retried on the other host"
+    assert video.status == VideoStatus.DONE
+    # The stored host must match the job id we kept, or the resume poll 404s.
+    assert video.fallback_model == "veo-3.1-fast"
+    # A quota wall is not a refusal: no take was charged against the content.
+    assert video.refusal_takes == 0
+
+
+def test_quota_with_no_fal_key_fails_with_the_real_reason(monkeypatch, tmp_path):
+    """Without the other host there is nowhere to go — and the message must
+    still say QUOTA, not pretend the content was blocked."""
+    import asyncio
+    from character_swap import runner
+    from character_swap.config import settings
+    from character_swap.models import VideoStatus
+
+    monkeypatch.setattr(type(settings), "fal_api_key",
+                        property(lambda self: ""), raising=False)
+    monkeypatch.setattr(type(settings), "video_qc_enabled",
+                        property(lambda self: False), raising=False)
+    for name in ("_persist", "_replace_video", "_maybe_complete_char"):
+        monkeypatch.setattr(runner, name, lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_output_dir", lambda j, c: tmp_path)
+
+    async def _noop(*a, **k):
+        return None
+    monkeypatch.setattr(runner, "_emit", _noop)
+    job, jc, video = _job_one_clip(tmp_path)
+    monkeypatch.setattr(
+        runner.pipeline, "submit_video",
+        lambda **kw: (_ for _ in ()).throw(
+            google_veo.GoogleVeoQuotaError("google veo quota exhausted")))
+
+    asyncio.run(runner._animate_one_video(job, jc, video, "he waves"))
+
+    assert video.status == VideoStatus.ERROR
+    assert "quota" in (video.error or "").lower()
+    assert video.refusal_takes == 0
