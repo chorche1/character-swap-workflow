@@ -250,6 +250,15 @@ class VideoVariant(BaseModel):
     # the clip is in flight, and stays afterwards so a clip that took four takes
     # can be told from one that sailed through. 0 = never refused.
     refusal_takes: int = 0
+    # This clip failed because the HOST was out of quota, not because anything
+    # about it was judged (Hugo 2026-08-10). Measured on Tier 1: Google accepts
+    # ~13 Veo videos and then refuses everything for hours, so a 40-clip run
+    # cannot finish in one pass however patiently each clip waits. The flag is
+    # what lets `runner.drain_quota_blocked` come back later and finish the run
+    # unattended, and it is deliberately STORED rather than parsed back out of
+    # the Swedish error prose — the drainer must never pick up a clip that
+    # failed for a content or network reason and re-bill it forever.
+    quota_blocked: bool = False
     # 🗣 LANGUAGE REDIRECT (Hugo 2026-08-03). Every clip of a language-flagged
     # character renders on runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL whatever the
     # run picked, because the picked model can't be trusted off English (Kling

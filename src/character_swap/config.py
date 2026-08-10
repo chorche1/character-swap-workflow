@@ -262,6 +262,15 @@ class Settings(BaseSettings):
     # the quota. The client does wait, and measurement says the window
     # reopens. Set to 1 only when a daily quota is genuinely spent and the
     # reel has to ship that day.
+    # How often the quota drainer comes back for clips Google refused to accept
+    # (runner.drain_quota_blocked). Google's Tier 1 Veo bucket refills over
+    # HOURS — measured 2026-08-10: 14 accepted submits against 46 refusals in a
+    # day, in two short bursts — so this is a patient background sweep, not a
+    # retry loop. Each pass stops at the first clip that is still blocked, so a
+    # shut window costs one call, not one per parked clip.
+    veo_quota_drain_secs: int = Field(
+        default=900, validation_alias="VEO_QUOTA_DRAIN_SECS")
+
     veo_host_fallback: bool = Field(
         default=False, validation_alias="VEO_HOST_FALLBACK")
 

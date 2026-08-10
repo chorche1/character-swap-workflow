@@ -722,6 +722,10 @@ async def lifespan(app: FastAPI):
     # forget: watchers run for as long as the runs do.
     from character_swap import runner_reengineer
     runner_reengineer._spawn(runner_reengineer.resume_all(), "reengineer-resume")
+    # Clips Google refused to ACCEPT (quota, not content) are parked rather
+    # than failed; this sweep finishes those runs unattended once the window
+    # reopens — hours later, on Tier 1 (Hugo 2026-08-10).
+    runner.start_quota_drainer()
     try:
         yield
     finally:

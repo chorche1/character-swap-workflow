@@ -499,3 +499,92 @@ def test_quota_with_no_fal_key_fails_with_the_real_reason(monkeypatch, tmp_path)
     assert video.status == VideoStatus.ERROR
     assert "quota" in (video.error or "").lower()
     assert video.refusal_takes == 0
+
+
+# --- 8. the quota drainer finishes the run later ----------------------------
+
+def _parked_job(tmp_path, *, n=2, blocked=True):
+    from character_swap.models import (
+        CharStatus, GeneratedImage, Job, JobCharacter, VariantStatus,
+        VideoStatus, VideoVariant)
+    jc = JobCharacter(char_id="cA", name="A",
+                      source_image_path=str(tmp_path / "c.png"),
+                      status=CharStatus.APPROVED)
+    (tmp_path / "c.png").write_bytes(b"c")
+    for i in range(n):
+        img = GeneratedImage(variant_id=f"v{i}", path=str(tmp_path / f"v{i}.png"),
+                             prompt="p", scene_id="s1", status=VariantStatus.READY)
+        Path(img.path).write_bytes(b"i")
+        jc.images.append(img)
+        jc.videos.append(VideoVariant(
+            video_id=f"vd{i}", grok_job_id="", status=VideoStatus.ERROR,
+            source_variant_id=f"v{i}", quota_blocked=blocked,
+            error="google veo quota exhausted"))
+    jc.approved_variant_ids = [f"v{i}" for i in range(n)]
+    scene = tmp_path / "s.png"; scene.write_bytes(b"s")
+    return Job(job_id="jq", title="t", scene_id="s1",
+               scene_image_path=str(scene), scene_ids=["s1"],
+               scene_image_paths=[str(scene)], movement_prompt="m",
+               video_model="veo-3.1-fast-google", characters={"cA": jc})
+
+
+def test_only_quota_blocked_clips_are_parked(monkeypatch, tmp_path):
+    """A clip that failed on CONTENT or a network error must never be picked
+    up — the drainer would re-bill it forever against a wall that is not there."""
+    from character_swap import runner
+    job = _parked_job(tmp_path, n=2)
+    job.characters["cA"].videos[1].quota_blocked = False
+    monkeypatch.setattr(runner, "store", lambda: type("S", (), {
+        "list_jobs": staticmethod(lambda: [job])})())
+    assert runner.quota_blocked_clips() == [("jq", "cA", "vd0")]
+
+
+def test_a_pass_stops_at_the_first_still_blocked_clip(monkeypatch, tmp_path):
+    """The window is shut or it is not. Walking all 40 parked clips into a shut
+    window is exactly the hammering that re-arms the pause for everyone."""
+    import asyncio
+    from character_swap import runner
+    job = _parked_job(tmp_path, n=4)
+    monkeypatch.setattr(runner, "store", lambda: type("S", (), {
+        "list_jobs": staticmethod(lambda: [job]),
+        "get_job": staticmethod(lambda jid: job)})())
+    tried = []
+
+    async def fake_retry(job_id, char_id, video_id):
+        tried.append(video_id)          # still blocked: nothing changes
+    monkeypatch.setattr(runner, "retry_one_video", fake_retry)
+
+    n = asyncio.run(runner.drain_quota_blocked_once())
+    assert n == 1 and tried == ["vd0"]
+
+
+def test_a_pass_continues_while_clips_get_through(monkeypatch, tmp_path):
+    """When the window HAS reopened the whole backlog drains in one pass."""
+    import asyncio
+    from character_swap import runner
+    from character_swap.models import VideoStatus
+    job = _parked_job(tmp_path, n=3)
+    monkeypatch.setattr(runner, "store", lambda: type("S", (), {
+        "list_jobs": staticmethod(lambda: [job]),
+        "get_job": staticmethod(lambda jid: job)})())
+
+    async def fake_retry(job_id, char_id, video_id):
+        v = next(x for x in job.characters["cA"].videos if x.video_id == video_id)
+        v.quota_blocked = False
+        v.status = VideoStatus.DONE
+    monkeypatch.setattr(runner, "retry_one_video", fake_retry)
+
+    assert asyncio.run(runner.drain_quota_blocked_once()) == 3
+    assert runner.quota_blocked_clips() == []
+
+
+def test_the_flag_survives_a_restart(tmp_path):
+    """It is stored, not inferred from the Swedish error prose: a restart mid-
+    wait must not strand the run."""
+    from character_swap.models import VideoVariant
+    import json as _json
+    v = VideoVariant(video_id="v", grok_job_id="", quota_blocked=True)
+    assert VideoVariant.model_validate(
+        _json.loads(v.model_dump_json())).quota_blocked is True
+    assert VideoVariant.model_validate(
+        {"video_id": "x", "grok_job_id": ""}).quota_blocked is False

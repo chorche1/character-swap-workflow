@@ -1917,6 +1917,10 @@ async def _animate_one_video(
                         active_model, next_model, next_model)
                 continue
             video.status = VideoStatus.ERROR
+            # A quota wall is not this clip's fault and not its final word:
+            # mark it so `drain_quota_blocked` can finish the run later,
+            # unattended, once the window reopens.
+            video.quota_blocked = _is_quota_error(e)
             base = f"submit: {e}" if phase == "submit" else str(e)
             if video.fallback_model and content_policy.is_content_rejection(e):
                 # Every leg was tried and the last one ALSO refused on content
@@ -1969,6 +1973,7 @@ async def _animate_one_video(
         return
 
     video.status = VideoStatus.DONE
+    video.quota_blocked = False
     video.completed_at = datetime.utcnow()
     video.final_video_path = str(dest)
     _replace_video(job, jc, video)
@@ -2304,6 +2309,7 @@ async def _salvage_timed_out_video(job: Job, jc: JobCharacter, idx: int) -> bool
         _replace_video(job, jc, video)
         return False
     video.status = VideoStatus.DONE
+    video.quota_blocked = False
     video.completed_at = datetime.utcnow()
     video.final_video_path = str(dest)
     video.qc_status = "skipped"
@@ -2678,6 +2684,91 @@ async def resume_pending(job_id: str) -> None:
                 _maybe_complete_char(job, jc)
 
 
+# --- quota drainer ----------------------------------------------------------
+#
+# Google's Veo quota on Tier 1 is a small bucket that refills over hours, not a
+# per-request limit: measured 2026-08-10 on Hugo's key, it accepted 3 clips at
+# 03:22 UTC, refused everything until 07:03, took ~10 more, then refused
+# everything again for the rest of the morning — 14 accepted submits against 46
+# refusals across the day. No amount of per-clip patience finishes a 40-clip run
+# against that, so the clips that could not get in are PARKED
+# (`VideoVariant.quota_blocked`) and this loop comes back for them.
+#
+# Hugo's choice over the alternatives: not fal (that is where these clips get
+# refused, and leaving is what he asked to stop), and not a manual ↻ per clip.
+# The run simply finishes a few hours later, unattended, entirely on Google.
+_QUOTA_DRAIN_TASK: asyncio.Task | None = None
+
+
+def quota_blocked_clips() -> list[tuple[str, str, str]]:
+    """Every parked (job_id, char_id, video_id), across all jobs.
+
+    Reads from the store rather than memory so a server restart mid-wait does
+    not strand a run — the flag is persisted for exactly that reason."""
+    out: list[tuple[str, str, str]] = []
+    for job in store().list_jobs():
+        for cid, jc in job.characters.items():
+            for v in jc.videos:
+                if v.quota_blocked and v.status in {VideoStatus.FAILED,
+                                                    VideoStatus.ERROR}:
+                    out.append((job.job_id, cid, v.video_id))
+    return out
+
+
+async def drain_quota_blocked_once() -> int:
+    """Retry every parked clip once. Returns how many were attempted.
+
+    Deliberately sequential: the whole reason they are parked is that the host
+    would not take them in parallel, and a burst is what refills the wall. The
+    first clip to come back quota-blocked AGAIN ends the pass — the window is
+    still shut, and hammering it just re-arms the pause for everyone."""
+    parked = quota_blocked_clips()
+    if not parked:
+        return 0
+    logger.info("quota drainer: %d clip(s) parked, retrying", len(parked))
+    tried = 0
+    for job_id, char_id, video_id in parked:
+        try:
+            await retry_one_video(job_id, char_id, video_id)
+        except Exception:                      # noqa: BLE001 — never die here
+            logger.exception("quota drainer: retry of %s failed", video_id)
+        tried += 1
+        job = store().get_job(job_id)
+        jc = (job.characters.get(char_id) if job else None)
+        v = next((x for x in (jc.videos if jc else [])
+                  if x.video_id == video_id), None)
+        if v is not None and v.quota_blocked:
+            logger.info("quota drainer: still blocked after %d clip(s) — "
+                        "the window has not reopened, stopping this pass", tried)
+            break
+    return tried
+
+
+async def drain_quota_blocked(interval_secs: int | None = None) -> None:
+    """Background loop: keep coming back until nothing is parked.
+
+    Sleeps FIRST, so a clip that just failed is not retried into the same shut
+    window it failed against a second ago."""
+    every = interval_secs or max(60, settings.veo_quota_drain_secs)
+    while True:
+        await asyncio.sleep(every)
+        try:
+            if quota_blocked_clips():
+                await drain_quota_blocked_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:                      # noqa: BLE001 — a background
+            logger.exception("quota drainer pass failed")   # loop must not die
+
+
+def start_quota_drainer() -> None:
+    """Start the loop once per process (called from the app lifespan)."""
+    global _QUOTA_DRAIN_TASK
+    if _QUOTA_DRAIN_TASK is not None and not _QUOTA_DRAIN_TASK.done():
+        return
+    _QUOTA_DRAIN_TASK = asyncio.create_task(drain_quota_blocked())
+
+
 async def retry_failed_videos(job_id: str, char_id: str | None = None) -> None:
     """Re-submit every FAILED/ERROR video on the job (optionally one char's)
     in parallel — the "↻ retry all failed" button. Each slot goes through
@@ -2736,6 +2827,7 @@ async def _resume_video(job: Job, jc: JobCharacter, video: VideoVariant) -> None
         return
 
     video.status = VideoStatus.DONE
+    video.quota_blocked = False
     video.completed_at = datetime.utcnow()
     video.final_video_path = str(dest)
     _replace_video(job, jc, video)
