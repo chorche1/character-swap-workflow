@@ -3875,7 +3875,7 @@ def _models_payload() -> dict:
         # The model every 🗣 language-flagged character's clips are forced onto
         # (Hugo 2026-08-03), so the UI can name it in the redirect chip without
         # hardcoding the slug.
-        "language_video_model": runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL,
+        "language_video_model": runner_media.language_video_model(),
     }
 
 

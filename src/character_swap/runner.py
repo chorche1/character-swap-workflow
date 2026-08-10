@@ -1373,7 +1373,7 @@ def _language_video_model(char_id: str) -> str | None:
     lang = _character_language(char_id)
     if not lang or lang not in reengineer.SPOKEN_LANGUAGES:
         return None
-    return runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+    return runner_media.language_video_model()
 
 
 def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
@@ -1399,7 +1399,7 @@ def _eff_video_model(job: Job, jc: JobCharacter, video: VideoVariant) -> str:
     # endpoint-scoped, so it would 404). `language_model_redirect` holds what
     # the user picked; the clip itself ran on the language model.
     if video.language_model_redirect:
-        return runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+        return runner_media.language_video_model()
     target = video.source_variant_id or jc.approved_variant_id
     return _eff_video_model_for_variant(job, jc, target)
 
@@ -1697,13 +1697,6 @@ async def _animate_one_video(
     fb_lang = lang_spec.code if lang_spec else None
     models_to_try = runner_media.video_attempt_models(
         video_model, language=fb_lang)
-    # HOST fallback, distinct from the reroute chain above (Hugo 2026-08-10).
-    # Google's Veo quota is per key and per tier; when it runs out every submit
-    # 429s and the clip never even reaches the model. That is not a refusal and
-    # must not consume the take budget — the clip is simply moved to the OTHER
-    # host of the SAME model, which still renders it (fal just refuses more of
-    # them). Once per clip: if fal will not take it either, the real error wins.
-    host_fallback = runner_media.video_host_fallback(video_model)
     # WRONG-LANGUAGE budget (Hugo 2026-08-02). Separate from `max_attempts`,
     # which Hugo runs at 1 (flag-only) for the fuzzy garbled-speech check: a
     # 🇪🇸/🇩🇪 character whose clip came out ENGLISH is unusable, not a judgment
@@ -1840,26 +1833,6 @@ async def _animate_one_video(
             # milliseconds, because the first quota error trips a shared pause
             # in the client.
             quota = _is_quota_error(e)
-            if quota and host_fallback:
-                # Splice the other host in RIGHT HERE, not at the end: the
-                # content reroute chain (Kling, then Grok) sits after this
-                # point, and a quota-blocked clip must not be pushed onto a
-                # different MODEL while the same one is available elsewhere.
-                # The dead host's remaining takes are dropped — they cannot
-                # succeed while the quota is out.
-                rest = [m for m in models_to_try[_model_idx + 1:]
-                        if m != active_model]
-                models_to_try[_model_idx + 1:] = runner_media.video_attempt_models(
-                    host_fallback, language=fb_lang) + rest
-                logger.warning(
-                    "job %s char %s video %s: %s is out of quota — this clip "
-                    "will finish on %s (same model, other host)",
-                    job.job_id, jc.char_id, video.video_id, active_model,
-                    host_fallback)
-                await _emit(job.job_id, "video.host_fallback",
-                            char_id=jc.char_id, video_id=video.video_id,
-                            model=host_fallback, reason=str(e)[:300])
-                host_fallback = None          # once per clip
             next_model = (models_to_try[_model_idx + 1]
                           if _model_idx + 1 < len(models_to_try) else None)
             if quota and next_model:

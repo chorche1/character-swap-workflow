@@ -57,6 +57,13 @@ def _fallback_on(monkeypatch):
                         property(lambda self: True), raising=False)
     monkeypatch.setattr(type(settings), "video_refusal_retries",
                         property(lambda self: 0), raising=False)
+    # Pin the Veo host chain to Google alone. Since 2026-08-10 the chain
+    # starts at fal (VEO_HOST_ORDER="fal,google", Hugo's temporary
+    # capacity workaround), and this file is about what happens once a
+    # clip's own model has run out of takes — not about which host it
+    # starts on, which is locked in test_google_veo.py.
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
 
 
 def _job_one_clip(tmp_path, *, video_model="kling-v3"):

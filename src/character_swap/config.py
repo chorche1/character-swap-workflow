@@ -268,6 +268,31 @@ class Settings(BaseSettings):
     # day, in two short bursts — so this is a patient background sweep, not a
     # retry loop. Each pass stops at the first clip that is still blocked, so a
     # shut window costs one call, not one per parked clip.
+    # THE VEO HOST CHAIN, in order (Hugo 2026-08-10, explicitly TEMPORARY:
+    # "du kan använda fal idag och testa en gång via fal per klipp, om det inte
+    # går igenom så gå till gemini api om det finns quota. Annars gå till
+    # Vertex. Det här ska bara vara tillfälligt tills jag har mycket högre
+    # gränser på gemini api").
+    #
+    # Why this order and not the measured-best one: Google refuses these clips
+    # far less (5/5 on frames fal refuses 90-100% of the time), but its Tier 1
+    # quota accepts ~14 videos a day — measured — which cannot carry five
+    # 40-clip runs. fal has no such ceiling. So fal takes the FIRST swing at
+    # every clip and Google's scarce capacity is spent only on what fal
+    # refuses, which is where it is worth spending.
+    #
+    # Set to "google" alone the day the Gemini limits are raised; that restores
+    # the 2026-08-10 measurement-driven default in one env var.
+    veo_host_order: str = Field(default="fal,google",
+                                validation_alias="VEO_HOST_ORDER")
+
+    # Takes per host before moving to the next. fal gets exactly ONE (Hugo:
+    # "testa en gång via fal per klipp") — its refusals are heavily
+    # image-driven, so a second identical take there is far less likely to
+    # help than moving on. The last host in the chain uses the normal
+    # VIDEO_REFUSAL_RETRIES budget, since there is nowhere left to go.
+    veo_fal_takes: int = Field(default=1, validation_alias="VEO_FAL_TAKES")
+
     veo_quota_drain_secs: int = Field(
         default=900, validation_alias="VEO_QUOTA_DRAIN_SECS")
 

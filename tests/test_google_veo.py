@@ -344,45 +344,70 @@ def test_the_pause_expires(monkeypatch, _key, _frames):
     assert google_veo._quota_blocked_for() == 0.0
 
 
-def test_host_fallback_points_at_fal(monkeypatch):
-    """Same model, other host. NOT part of the content reroute chain: a
-    quota-blocked clip must not be sent to Kling or Grok, off the model its
-    reel is built on and off the only model trusted with its language."""
+def test_the_host_chain_is_fal_then_google(monkeypatch):
+    """Hugo 2026-08-10, explicitly temporary: one swing at fal, then Google.
+    fal has no daily ceiling but refuses 46% of these clips; Google refuses
+    almost none but accepted ~14 videos a day on Tier 1. So fal takes the
+    first swing and Google's scarce capacity is spent on what fal refuses."""
     from character_swap.config import settings
-    monkeypatch.setattr(type(settings), "fal_api_key",
-                        property(lambda self: "k"), raising=False)
-    monkeypatch.setattr(type(settings), "veo_host_fallback",
-                        property(lambda self: True), raising=False)
-    assert runner_media.video_host_fallback("veo-3.1-fast-google") == "veo-3.1-fast"
-    # No alternative host for anything else.
-    assert runner_media.video_host_fallback("kling-v3") is None
-    assert runner_media.video_host_fallback("veo-3.1-fast") is None
-    # The chain for CONTENT refusals is untouched by any of this.
-    assert "veo-3.1-fast" not in runner_media.video_fallback_chain(
-        "veo-3.1-fast-google")
+    for key in ("fal_api_key", "gemini_api_key"):
+        monkeypatch.setattr(type(settings), key,
+                            property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "fal,google"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_fal_takes",
+                        property(lambda self: 1), raising=False)
+    monkeypatch.setattr(type(settings), "video_refusal_retries",
+                        property(lambda self: 2), raising=False)
+    assert runner_media.veo_host_chain() == ["veo-3.1-fast",
+                                             "veo-3.1-fast-google"]
+    assert runner_media.language_video_model() == "veo-3.1-fast"
+    # ONE fal take, then Google's full budget — there is nowhere after Google.
+    assert runner_media.video_attempt_models("veo-3.1-fast", language="de") == [
+        "veo-3.1-fast"] + ["veo-3.1-fast-google"] * 3
 
 
-def test_host_fallback_needs_the_other_key(monkeypatch):
-    """A fallback we cannot reach turns one clear error into two."""
+def test_a_clip_already_on_google_does_not_start_over_at_fal(monkeypatch):
+    """A resumed or hand-retried clip continues from the host it is ON. Sending
+    it back to fal would spend a take where it was already refused."""
     from character_swap.config import settings
-    monkeypatch.setattr(type(settings), "veo_host_fallback",
-                        property(lambda self: True), raising=False)
+    for key in ("fal_api_key", "gemini_api_key"):
+        monkeypatch.setattr(type(settings), key,
+                            property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "fal,google"), raising=False)
+    monkeypatch.setattr(type(settings), "video_refusal_retries",
+                        property(lambda self: 1), raising=False)
+    # The CONTENT reroute chain (Kling, then Grok) still follows — that is a
+    # separate mechanism and untouched by the host order.
+    assert runner_media.video_attempt_models("veo-3.1-fast-google")[:3] == [
+        "veo-3.1-fast-google", "veo-3.1-fast-google", "kling-v3"]
+
+
+def test_an_unreachable_host_is_dropped_from_the_chain(monkeypatch):
+    """A host whose key is missing must never occupy a leg — it would turn one
+    clear error into two."""
+    from character_swap.config import settings
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: ""), raising=False)
-    assert runner_media.video_host_fallback("veo-3.1-fast-google") is None
-
-
-def test_host_fallback_is_off_by_default(monkeypatch):
-    """Hugo declined it: fal is where 46% of these clips get refused, so a run
-    that quietly finishes half its clips there is worse than one that waits."""
-    from character_swap.config import settings
-    monkeypatch.delenv("VEO_HOST_FALLBACK", raising=False)
-    assert type(settings).model_fields["veo_host_fallback"].default is False
-    monkeypatch.setattr(type(settings), "fal_api_key",
+    monkeypatch.setattr(type(settings), "gemini_api_key",
                         property(lambda self: "k"), raising=False)
-    monkeypatch.setattr(type(settings), "veo_host_fallback",
-                        property(lambda self: False), raising=False)
-    assert runner_media.video_host_fallback("veo-3.1-fast-google") is None
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "fal,google"), raising=False)
+    assert runner_media.veo_host_chain() == ["veo-3.1-fast-google"]
+    assert runner_media.language_video_model() == "veo-3.1-fast-google"
+
+
+def test_google_only_restores_the_measured_default(monkeypatch):
+    """The one env var that undoes the workaround the day the Gemini limits
+    are raised."""
+    from character_swap.config import settings
+    for key in ("fal_api_key", "gemini_api_key"):
+        monkeypatch.setattr(type(settings), key,
+                            property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
+    assert runner_media.veo_host_chain() == ["veo-3.1-fast-google"]
 
 
 def test_quota_error_is_not_a_refusal_for_the_runner():
@@ -421,7 +446,8 @@ def _job_one_clip(tmp_path):
     return job, jc, v
 
 
-def test_quota_moves_the_clip_to_fal_instead_of_killing_it(monkeypatch, tmp_path):
+def test_quota_walks_on_to_the_next_host_instead_of_killing_the_clip(
+        monkeypatch, tmp_path):
     """THE POINT OF THE WHOLE BRANCH. Google's quota ran out mid-run and every
     remaining clip died. The same model is available on fal, so the clip should
     finish there rather than fail — and it must NOT spend refusal takes on the
@@ -433,8 +459,8 @@ def test_quota_moves_the_clip_to_fal_instead_of_killing_it(monkeypatch, tmp_path
 
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: "k"), raising=False)
-    monkeypatch.setattr(type(settings), "veo_host_fallback",
-                        property(lambda self: True), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google,fal"), raising=False)
     monkeypatch.setattr(type(settings), "video_qc_enabled",
                         property(lambda self: False), raising=False)
     monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
@@ -479,6 +505,8 @@ def test_quota_with_no_fal_key_fails_with_the_real_reason(monkeypatch, tmp_path)
 
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: ""), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
     monkeypatch.setattr(type(settings), "video_qc_enabled",
                         property(lambda self: False), raising=False)
     for name in ("_persist", "_replace_video", "_maybe_complete_char"):

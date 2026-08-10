@@ -305,7 +305,7 @@ def test_language_flagged_characters_still_get_their_model(wired):
               characters={cid: JobCharacter(char_id=cid, name=cid,
                                             source_image_path="x.png")
                           for cid in st["character_ids"]})
-    lang_model = api.runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+    lang_model = api.runner_media.language_video_model()
     for cid in ("ch_new_es", "ch_new_de"):
         assert runner._eff_video_model_for_variant(
             job, job.characters[cid], None) == lang_model
@@ -333,7 +333,13 @@ def test_preflight_refuses_when_the_redirect_target_has_no_key(wired,
     """A 🗣 cast renders on the redirect target whatever the run's own model
     is, so its key is what has to be checked. Before this, an all-Spanish run
     passed every gate and died inside a worker thread an hour later."""
-    lang_model = api.runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+    # Pin the Veo host chain to ONE host: with the fal-first chain (2026-08-10)
+    # a missing key on the first host is no longer fatal — the clip simply
+    # starts on the next one. What must still refuse is a run whose ONLY
+    # reachable redirect target has no key.
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
+    lang_model = api.runner_media.language_video_model()
     missing = api.runner_media.VIDEO_MODELS[lang_model]["provider"]
     monkeypatch.setattr(type(settings), "has_provider",
                         lambda self, p: p != missing)
@@ -349,7 +355,7 @@ def test_preflight_ignores_the_language_model_for_an_english_cast(wired,
     """The mirror case: an English-only cast must not be blocked by a key it
     will never use. (Kling and Veo happen to share the fal provider, so the
     run is moved onto a non-fal model to make the two separable.)"""
-    lang_model = api.runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+    lang_model = api.runner_media.language_video_model()
     missing = api.runner_media.VIDEO_MODELS[lang_model]["provider"]
     wired["states"]["re_parent"]["video_model"] = "grok-imagine"
     for e in wired["states"]["re_parent"]["scenes"]:

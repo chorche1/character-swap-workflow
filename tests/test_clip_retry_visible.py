@@ -252,6 +252,11 @@ def test_summary_covers_the_real_chain(monkeypatch):
     from character_swap.config import settings
     monkeypatch.setattr(type(settings), "video_refusal_retries",
                         property(lambda self: 4), raising=False)
-    models = runner_media.video_attempt_models("veo-3.1-fast", language="es")
+    # Pin the host chain to Google alone: this test is about how the SUMMARY
+    # renders a walked chain, not about the fal-first host order.
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
+    models = runner_media.video_attempt_models("veo-3.1-fast-google",
+                                               language="es")
     assert runner._chain_summary(models, len(models) - 1) == (
-        "veo-3.1-fast ×5 → kling-v3 → grok-imagine-1.5")
+        "veo-3.1-fast-google ×5 → kling-v3 → grok-imagine-1.5")

@@ -23,7 +23,11 @@ from character_swap.models import (
     VideoVariant,
 )
 
-LANG_MODEL = runner_media.SPOKEN_LANGUAGE_VIDEO_MODEL
+# Resolved, not the bare constant: the redirect target is the first reachable
+# entry in the Veo HOST CHAIN since 2026-08-10 (VEO_HOST_ORDER — Hugo's
+# temporary fal-first capacity workaround). This file is about the redirect
+# itself, which host it lands on is locked in test_google_veo.py.
+LANG_MODEL = runner_media.language_video_model()
 
 
 class _Store:

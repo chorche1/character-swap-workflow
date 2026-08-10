@@ -59,6 +59,17 @@ _BALANCE = ("fal fal-ai/kling-video/v3/standard/image-to-video submit failed: "
 
 # --- fixtures ----------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _single_veo_host(monkeypatch):
+    """Pin the Veo host chain to Google alone. The chain starts at fal since
+    2026-08-10 (Hugo's temporary capacity workaround); this file is about the
+    unchanged re-submit and the rescue that follows it, so it describes one
+    host at a time — the chain itself is locked in test_google_veo.py."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "veo_host_order",
+                        property(lambda self: "google"), raising=False)
+
+
 @pytest.fixture
 def _retries(monkeypatch):
     """Set VIDEO_REFUSAL_RETRIES for one test."""

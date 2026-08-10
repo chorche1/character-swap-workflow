@@ -332,7 +332,18 @@ def triggers_fallback(chosen_model: str, exc: BaseException) -> bool:
 # support are identical, the refusals are not. Old clips keep whatever slug
 # they were submitted under, so resume/salvage still polls the right host —
 # that is the whole reason this is a NEW slug rather than a repointed one.
+# The DEFAULT host; `language_video_model()` is what callers should use, since
+# the chain is configurable and its first entry is what a clip actually starts
+# on. Kept as a constant because a dozen call sites and tests read it.
 SPOKEN_LANGUAGE_VIDEO_MODEL = "veo-3.1-fast-google"
+
+
+def language_video_model() -> str:
+    """The host every 🗣 clip STARTS on — the first reachable entry in the Veo
+    host chain (`VEO_HOST_ORDER`). Falls back to the constant above when no
+    host is configured, so the redirect can never resolve to nothing."""
+    chain = veo_host_chain()
+    return chain[0] if chain else SPOKEN_LANGUAGE_VIDEO_MODEL
 
 
 def language_clip_secs(secs: float | int | None) -> int:
@@ -356,40 +367,62 @@ def language_clip_truncated(secs: float | int | None) -> bool:
     return secs is not None and language_clip_secs(secs) < secs
 
 
-# THE HOST FALLBACK — OFF by default (Hugo 2026-08-10: "jag vill inte använda
-# fal, fixa problemet hos google").
+# THE VEO HOST CHAIN (Hugo 2026-08-10, explicitly temporary — see
+# config.veo_host_order for why the order is what it is).
 #
-# It exists because Google's Veo quota is per KEY and per TIER, and when it runs
-# out every submit 429s. The first answer was to move the clip to fal, which
-# hosts the same model. Hugo declined it: fal is where 46% of these clips get
-# refused, which is the whole reason the path moved to Google, and a run that
-# quietly finishes half its clips on the host he left is worse than one that
-# waits. The client waits the quota out instead (see google_veo._RETRY_WAITS),
-# because the window measurably reopens — the key that refused every submit at
-# 03:45 UTC on 2026-08-10 was accepting them again by 07:03 the same morning.
-#
-# Kept behind a flag rather than deleted: if a daily quota is ever genuinely
-# exhausted mid-run, `VEO_HOST_FALLBACK=1` is the one lever that finishes the
-# reel that day. It is NOT part of `video_fallback_chain` — that one is for
-# CONTENT refusals and would send a quota-blocked clip to Kling or Grok, off
-# the model its reel is built on and off the only model trusted with its
-# language.
-VIDEO_HOST_FALLBACK: dict[str, str] = {"veo-3.1-fast-google": "veo-3.1-fast"}
+# Veo 3.1 Fast is reachable on two hosts today: fal (`veo-3.1-fast`) and
+# Google's own API (`veo-3.1-fast-google`). They differ ONLY in who moderates
+# and who rate-limits — same model, same speech, same 🎯 end-frame support:
+#   fal     refuses 46% of these clips (measured over 127 identical frames)
+#           but has no practical daily ceiling.
+#   Google  refuses almost none of them (5/5 on frames fal refuses 90-100% of
+#           the time) but accepted ~14 videos a day on Tier 1 — measured, and
+#           not enough for five 40-clip runs.
+# So a clip takes ONE swing at fal and only what fal refuses spends Google's
+# scarce capacity. A third host (Vertex) slots in here the moment it has
+# credentials — it is the same model again, with per-project quotas that can
+# actually be raised.
+_VEO_HOST_SLUGS: dict[str, str] = {
+    "fal": "veo-3.1-fast",
+    "google": "veo-3.1-fast-google",
+}
 
 
-def video_host_fallback(chosen_model: str | None) -> str | None:
-    """The OTHER host of the same model when this one won't accept work at all
-    (quota) — or None, which is the default. Returns None when the flag is off,
-    when there is no alternative host, or when its key is missing: a fallback we
-    cannot reach turns one clear error into two."""
+def veo_host_chain() -> list[str]:
+    """Model slugs for the Veo hosts, in the configured order, keeping only
+    the ones whose provider key is actually present.
+
+    A host we cannot reach must never appear: it would consume a leg of the
+    chain and turn one clear error into two."""
     from character_swap.config import settings
-    if not settings.veo_host_fallback:
-        return None
-    fb = VIDEO_HOST_FALLBACK.get(chosen_model or "")
-    if not fb:
-        return None
-    provider = (VIDEO_MODELS.get(fb) or {}).get("provider")
-    return fb if provider and settings.has_provider(provider) else None
+    out: list[str] = []
+    for name in (settings.veo_host_order or "").split(","):
+        slug = _VEO_HOST_SLUGS.get(name.strip().lower())
+        if not slug or slug in out:
+            continue
+        provider = (VIDEO_MODELS.get(slug) or {}).get("provider")
+        if provider and settings.has_provider(provider):
+            out.append(slug)
+    return out or [_VEO_HOST_SLUGS["google"]]
+
+
+def veo_host_takes(slug: str, *, is_last: bool) -> int:
+    """How many takes a clip gets on one host before moving on.
+
+    fal gets exactly one (Hugo): its refusals are image-driven, so a second
+    identical take there is far less likely to help than moving on. The LAST
+    host keeps the full VIDEO_REFUSAL_RETRIES budget — there is nowhere left
+    to go, so patience is all that is left."""
+    from character_swap.config import settings
+    if is_last:
+        return 1 + max(0, settings.video_refusal_retries)
+    if slug == _VEO_HOST_SLUGS["fal"]:
+        return max(1, settings.veo_fal_takes)
+    return 1 + max(0, settings.video_refusal_retries)
+
+
+def is_veo_host(slug: str | None) -> bool:
+    return slug in set(_VEO_HOST_SLUGS.values())
 
 
 def video_fallback_chain(chosen_model: str | None = None, *,
@@ -446,7 +479,21 @@ def video_attempt_models(chosen_model: str, *,
     that leg may set `VideoVariant.fallback_model`).
     """
     from character_swap.config import settings
-    models = [chosen_model] * (1 + max(0, settings.video_refusal_retries))
+    if is_veo_host(chosen_model):
+        # Veo walks its HOST chain first: one swing at fal, then Google's
+        # takes (Hugo 2026-08-10). The chain starts at whichever host this
+        # clip is already on, so a resumed or manually-retried clip does not
+        # start over at the top.
+        chain = veo_host_chain()
+        if chosen_model in chain:
+            chain = chain[chain.index(chosen_model):]
+        else:
+            chain = [chosen_model]
+        models: list[str] = []
+        for i, host in enumerate(chain):
+            models += [host] * veo_host_takes(host, is_last=i == len(chain) - 1)
+    else:
+        models = [chosen_model] * (1 + max(0, settings.video_refusal_retries))
     models.extend(video_fallback_chain(chosen_model, language=language))
     return models
 
