@@ -712,10 +712,12 @@ class Settings(BaseSettings):
             "higgsfield": bool(self.higgsfield_api_key and self.higgsfield_api_secret),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal":        bool(self.fal_api_key),
-            # Vertex needs BOTH a project and a readable key file; a
-            # half-configured host must never occupy a leg of the Veo chain.
-            "vertex":     bool(self.vertex_project_id
-                               and self.vertex_credentials_file),
+            # Vertex needs a project; WHICH identity it uses (the user's own
+            # ADC or a service-account key file) is decided by
+            # vertex_veo.configured(), which the Veo chain also gates on. This
+            # check deliberately does not demand a key file — requiring one
+            # here made an ADC-authenticated Vertex invisible to the chain.
+            "vertex":     bool(self.vertex_project_id),
         }.get(provider, False)
 
 

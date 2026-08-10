@@ -265,3 +265,19 @@ def test_the_token_is_cached_not_reminted_per_clip(monkeypatch, tmp_path):
     assert vertex_veo._access_token() == "t"
     assert vertex_veo._access_token() == "t"
     assert len(mints) == 1
+
+
+def test_adc_alone_makes_the_provider_available(monkeypatch, tmp_path):
+    """REGRESSION (2026-08-10, caught on the live wire-up). `has_provider`
+    demanded a key file, so an ADC-authenticated Vertex was configured,
+    reachable and completely invisible to the chain — the host silently did
+    not exist."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "vertex_project_id",
+                        property(lambda self: "proj-1"), raising=False)
+    monkeypatch.setattr(type(settings), "vertex_credentials_file",
+                        property(lambda self: ""), raising=False)
+    assert settings.has_provider("vertex") is True
+    monkeypatch.setattr(type(settings), "vertex_project_id",
+                        property(lambda self: ""), raising=False)
+    assert settings.has_provider("vertex") is False
