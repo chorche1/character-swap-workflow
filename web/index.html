@@ -31,6 +31,10 @@
     .card:hover { box-shadow: 0 10px 30px -10px rgba(0,0,0,.25); }
     .dropzone { transition: background-color .15s ease, border-color .15s ease; }
     .dropzone.dragover { background-color: rgb(238 242 255); border-color: rgb(99 102 241); }
+    /* "eget klipp" är en textetikett, inte en ruta — den behöver en egen
+       markering som syns utan att flytta något i den täta klippremsan. */
+    .clipdrop { outline: 2px dashed rgb(16 185 129); outline-offset: 2px;
+                border-radius: 4px; background-color: rgb(16 185 129 / 0.12); }
     .dark .dropzone.dragover { background-color: rgb(30 27 75); border-color: rgb(129 140 248); }
     [x-cloak] { display: none !important; }
     .step-num {
@@ -804,7 +808,10 @@
                            genereringen blir klar). -->
                       <label x-show="importingClipKey !== (cid + '|' + vv.video_id) && !['pending','processing'].includes(vv.status)"
                              class="text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
-                             title="Ersätt det här klippet med ett eget importerat klipp">📥 importera
+                             @dragover="onClipDragOver($event)"
+                             @dragleave="onClipDragLeave($event)"
+                             @drop.prevent="importSwapClipFile(cid, vv.video_id, clipFileFromDrop($event))"
+                             title="Ersätt det här klippet med ett eget importerat klipp — klicka eller släpp en video här">📥 importera
                         <input type="file" accept="video/*" class="hidden"
                                @change="importSwapClip(cid, vv.video_id, $event)">
                       </label>
@@ -2107,7 +2114,10 @@
                                      renderas (skulle skrivas över när det blir klart). -->
                                 <label x-show="importingClipKey !== (cid + '|' + v.variant_id) && !['pending','processing'].includes(reClipForVariant(jc, v.variant_id).status)"
                                        class="text-[9px] text-emerald-600 dark:text-emerald-400 hover:underline leading-tight cursor-pointer"
-                                       title="Ersätt det här klippet med ett eget importerat klipp">📥 eget klipp
+                                       @dragover="onClipDragOver($event)"
+                                       @dragleave="onClipDragLeave($event)"
+                                       @drop.prevent="importReClipFile(r, sc, cid, v.variant_id, clipFileFromDrop($event))"
+                                       title="Ersätt det här klippet med ett eget importerat klipp — klicka eller släpp en video här">📥 eget klipp
                                   <input type="file" accept="video/*" class="hidden"
                                          @change="importReClip(r, sc, cid, v.variant_id, $event)">
                                 </label>
@@ -5561,7 +5571,10 @@
             </label>
             <label class="text-xs px-2.5 py-1 rounded-lg border border-dashed border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 cursor-pointer hover:border-emerald-500"
                    :class="versionModal.submitting ? 'opacity-40 pointer-events-none' : ''"
-                   title="Lägg in ett färdigt klipp precis som det är. Ingen generering, inga krediter — samma klipp i alla karaktärers version.">
+                   @dragover="onClipDragOver($event)"
+                   @dragleave="onClipDragLeave($event)"
+                   @drop.prevent="importVersionClip([clipFileFromDrop($event)].filter(Boolean))"
+                   title="Lägg in ett färdigt klipp precis som det är. Ingen generering, inga krediter — samma klipp i alla karaktärers version. Klicka eller släpp en video här.">
               📥 färdigt klipp
               <input type="file" accept="video/*" class="hidden"
                      @change="importVersionClip($event.target.files); $event.target.value = ''" />

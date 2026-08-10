@@ -3646,6 +3646,10 @@ function studio() {
     async importReClip(run, sc, cid, variantId, ev) {
       const file = ev?.target?.files?.[0];
       if (ev?.target) ev.target.value = '';   // allow re-picking the same file
+      return this.importReClipFile(run, sc, cid, variantId, file);
+    },
+
+    async importReClipFile(run, sc, cid, variantId, file) {
       if (!file) return;
       const key = cid + '|' + variantId;
       this.importingClipKey = key;
@@ -7594,9 +7598,62 @@ function studio() {
     // Replace ONE Swap step-5 clip with the user's own imported video
     // (Hugo 2026-06-21). The imported clip is used like a generated one when
     // step 6 compiles the final.
+    // --- släpp en video på "eget klipp" (Hugo 2026-08-11) --------------------
+    //
+    // Filväljaren var enda vägen in; att dra en fil dit kändes självklart och
+    // gjorde ingenting. Delad av alla tre importknapparna (Swap steg 5, klipp-
+    // remsan i Reengineer, 🎞 versionsmodalen) så gesten betyder samma sak
+    // överallt.
+    //
+    // preventDefault() sker BARA för filsläpp. Biblioteket har egna interna
+    // dragningar (ordna om bilder, dra in en bild i ett jobb) som bär egna
+    // dataTransfer-typer; att alltid preventDefault:a hade fått etiketten att
+    // se släppbar ut för dem och svalt släppet. Samma regel som
+    // onImageReorderOver redan följer.
+    _dragHasFiles(ev) {
+      const t = ev?.dataTransfer?.types;
+      return !!t && Array.prototype.indexOf.call(t, 'Files') !== -1;
+    },
+
+    onClipDragOver(ev) {
+      if (!this._dragHasFiles(ev)) return;
+      ev.preventDefault();
+      ev.currentTarget.classList.add('clipdrop');
+    },
+
+    onClipDragLeave(ev) {
+      ev.currentTarget.classList.remove('clipdrop');
+    },
+
+    // Plocka ut videofilen ur ett släpp, eller säg ifrån varför inte.
+    // `file.type` är TOMT för en del containrar (.mkv, och allt som dras från
+    // vissa appar), så filändelsen får agera skyddsnät — att avvisa en giltig
+    // video för att webbläsaren inte kände igen mime-typen vore värre än att
+    // släppa igenom en udda fil och låta servern säga ifrån.
+    clipFileFromDrop(ev) {
+      ev.currentTarget?.classList?.remove('clipdrop');
+      const files = ev?.dataTransfer?.files;
+      const file = files && files[0];
+      if (!file) return null;
+      const looksVideo = /^video\//.test(file.type || '')
+        || /\.(mp4|mov|m4v|webm|mkv|avi|mpe?g|qt)$/i.test(file.name || '');
+      if (!looksVideo) {
+        this.notifyError(`"${file.name}" är ingen video — släpp en videofil.`);
+        return null;
+      }
+      if (files.length > 1) {
+        this.notifyInfo(`Släppte ${files.length} filer — använder "${file.name}".`);
+      }
+      return file;
+    },
+
     async importSwapClip(charId, videoId, ev) {
       const file = ev?.target?.files?.[0];
       if (ev?.target) ev.target.value = '';
+      return this.importSwapClipFile(charId, videoId, file);
+    },
+
+    async importSwapClipFile(charId, videoId, file) {
       if (!file || !this.job) return;
       const key = charId + '|' + videoId;
       this.importingClipKey = key;
