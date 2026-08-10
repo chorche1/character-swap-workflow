@@ -283,7 +283,20 @@ class Settings(BaseSettings):
     #
     # Set to "google" alone the day the Gemini limits are raised; that restores
     # the 2026-08-10 measurement-driven default in one env var.
-    veo_host_order: str = Field(default="fal,google",
+    # VERTEX AI — the third Veo host (Hugo 2026-08-10). Same model as the
+    # Gemini API path, but the quota is a per-project, per-region Google Cloud
+    # quota you can SEE in the console and raise through a normal request,
+    # instead of one that lifts only when a spend threshold is crossed. Vertex
+    # does not accept API keys (measured: "API keys are not supported by this
+    # API"), so it needs a service-account JSON key with the "Vertex AI User"
+    # role. Unset = the host is simply absent from the chain.
+    vertex_project_id: str = Field(default="", validation_alias="VERTEX_PROJECT_ID")
+    vertex_location: str = Field(default="us-central1",
+                                 validation_alias="VERTEX_LOCATION")
+    vertex_credentials_file: str = Field(
+        default="", validation_alias="VERTEX_CREDENTIALS_FILE")
+
+    veo_host_order: str = Field(default="fal,google,vertex",
                                 validation_alias="VEO_HOST_ORDER")
 
     # Takes per host before moving to the next. fal gets exactly ONE (Hugo:
@@ -699,6 +712,10 @@ class Settings(BaseSettings):
             "higgsfield": bool(self.higgsfield_api_key and self.higgsfield_api_secret),
             "elevenlabs": bool(self.elevenlabs_api_key),
             "fal":        bool(self.fal_api_key),
+            # Vertex needs BOTH a project and a readable key file; a
+            # half-configured host must never occupy a leg of the Veo chain.
+            "vertex":     bool(self.vertex_project_id
+                               and self.vertex_credentials_file),
         }.get(provider, False)
 
 

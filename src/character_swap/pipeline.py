@@ -910,6 +910,19 @@ def submit_video(
             duration_secs=effective_dur, end_image=end_image,
             generate_audio=audio, app_job_id=job_id,
         )
+    if model == "veo-3.1-fast-vertex":
+        # Veo 3.1 Fast on Vertex AI — same model, service-account auth, and a
+        # per-project quota that can actually be raised. Returns the operation
+        # name as the provider job id, like the Gemini path.
+        from character_swap.clients import vertex_veo
+        return vertex_veo.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur,
+            aspect_ratio=effective_ar,
+            generate_audio=generate_audio if generate_audio is not None else True,
+            end_image=end_image,
+            app_job_id=job_id,
+        )
     if model == "veo-3.1-fast-google":
         # Veo 3.1 Fast on GOOGLE'S OWN API — the default Veo path since
         # 2026-08-10 (see clients/google_veo.py for the measurement that moved
@@ -1090,6 +1103,10 @@ def wait_for_video(
     if model == "kling-v3":
         from character_swap.clients import fal_kling
         fal_kling.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
+    elif model == "veo-3.1-fast-vertex":
+        from character_swap.clients import vertex_veo
+        vertex_veo.wait_for_video(operation=job_id, dest=dest,
+                                  app_job_id=app_job_id)
     elif model == "veo-3.1-fast-google":
         from character_swap.clients import google_veo
         google_veo.wait_for_video(operation=job_id, dest=dest,

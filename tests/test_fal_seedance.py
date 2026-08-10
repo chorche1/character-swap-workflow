@@ -91,7 +91,8 @@ def test_end_frame_capability_set():
     # Google via `instances[0].lastFrame` (verified live 2026-08-10, which is
     # why moving the default Veo path to Google costs no 🎯 end pose).
     assert runner_media.END_FRAME_VIDEO_MODELS == frozenset(
-        {"kling-v3", "seedance-2.0", "veo-3.1-fast", "veo-3.1-fast-google"})
+        {"kling-v3", "seedance-2.0", "veo-3.1-fast", "veo-3.1-fast-google",
+         "veo-3.1-fast-vertex"})
     assert runner_media.supports_end_frame("seedance-2.0") is True
     assert runner_media.supports_end_frame("kling-v3") is True
     assert runner_media.supports_end_frame("veo-3.1-fast") is True

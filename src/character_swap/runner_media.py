@@ -88,6 +88,13 @@ VIDEO_MODELS: dict[str, dict] = {
     # (verified live, not assumed), native audio always on. Bills on
     # GEMINI_API_KEY — the PAID tier; the free tier serves no video models.
     "veo-3.1-fast-google":  {"label": "Veo 3.1 Fast",                    "provider": "gemini",     "price_setting": "google_veo_price_usd",   "duration_options": [4, 6, 8], "duration_default": 8, "end_frame": True},
+    # Veo 3.1 Fast on VERTEX AI (clients/vertex_veo.py) — the same model a
+    # third time, reached with a service account instead of an API key. The
+    # point is the QUOTA: per project and region, visible in the Cloud Console
+    # and raised by request, rather than gated behind a spend threshold. Absent
+    # from the picker and from the host chain until VERTEX_PROJECT_ID and a
+    # credentials file are both set. Bills on the Google Cloud project.
+    "veo-3.1-fast-vertex":  {"label": "Veo 3.1 Fast (Vertex)",           "provider": "vertex",     "price_setting": "google_veo_price_usd",   "duration_options": [4, 6, 8], "duration_default": 8, "end_frame": True},
     # Grok Imagine 1.5 routed through fal.ai (image-to-video) — xAI's newest
     # Grok video model. Integer duration 3–15s, native synced audio ALWAYS on,
     # renders at settings.grok_fal_resolution (default 720p). No end-frame on
@@ -385,6 +392,7 @@ def language_clip_truncated(secs: float | int | None) -> bool:
 _VEO_HOST_SLUGS: dict[str, str] = {
     "fal": "veo-3.1-fast",
     "google": "veo-3.1-fast-google",
+    "vertex": "veo-3.1-fast-vertex",
 }
 
 
@@ -401,8 +409,15 @@ def veo_host_chain() -> list[str]:
         if not slug or slug in out:
             continue
         provider = (VIDEO_MODELS.get(slug) or {}).get("provider")
-        if provider and settings.has_provider(provider):
-            out.append(slug)
+        if not provider or not settings.has_provider(provider):
+            continue
+        if provider == "vertex":
+            # Stricter than a key check: the JSON file must actually exist, or
+            # every clip routed here dies at token-mint time.
+            from character_swap.clients import vertex_veo
+            if not vertex_veo.configured():
+                continue
+        out.append(slug)
     return out or [_VEO_HOST_SLUGS["google"]]
 
 
