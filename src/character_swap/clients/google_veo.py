@@ -82,9 +82,18 @@ _ALLOWED_ASPECTS = ("9:16", "16:9")
 # reach the runner's refusal machinery, which would burn a take on it.
 _SUBMIT_GATE = threading.BoundedSemaphore(
     max(1, settings.google_veo_concurrency))
-# Backoff for a 429 that slips past the gate anyway (the tier limit is per key,
-# and nothing stops a second process from sharing it).
-_RETRY_WAITS = (20, 45, 90)
+# Backoff for a 429. PATIENT ON PURPOSE (Hugo 2026-08-10: "jag vill inte
+# använda fal, fixa problemet hos google"). The Gemini quota is a moving
+# window, not a wall: the run that died at 03:45 UTC was submitting happily
+# again by 07:03 the same morning, on the same key and the same tier. So the
+# correct response to a 429 is to WAIT — a stalled batch that finishes late is
+# worth incomparably more than clips that fail while the quota is merely busy.
+#
+# The ladder is bounded by the runner's own video-phase timeout (1 h), which
+# stays the real ceiling: ~25 min of waiting per clip leaves room for the
+# render itself. A clip that cannot get in within that is a genuinely
+# exhausted daily quota, and only then does it fail with the real reason.
+_RETRY_WAITS = (30, 60, 120, 240, 480, 480)
 
 # ACCOUNT-LEVEL QUOTA BREAKER, mirroring fal_kling's balance breaker and added
 # for the same reason (Hugo 2026-08-10, from a live run): the quota is per KEY,
@@ -98,9 +107,26 @@ _RETRY_WAITS = (20, 45, 90)
 # It EXPIRES rather than latching: the Gemini rate limit is a moving window, so
 # a pause that never lifts would hold a long run hostage after the limit has
 # already recovered — the exact failure fal_kling documents for its own lock.
-_QUOTA_BLOCK_SECS = 600.0
+# Siblings WAIT it out (see _wait_out_quota_block) rather than failing: measured
+# 2026-08-10, the key that refused every submit at 03:45 UTC was accepting them
+# again by 07:03 the same morning.
+_QUOTA_BLOCK_SECS = 120.0
 _quota_block: dict = {"at": 0.0, "detail": ""}
 _quota_lock = threading.Lock()
+
+
+def _wait_out_quota_block() -> None:
+    """Sleep until the shared quota pause lifts.
+
+    A sibling that hits the pause WAITS rather than failing (Hugo 2026-08-10).
+    The point of the shared pause is to stop 40 clips hammering an exhausted
+    quota in parallel — not to fail them. They queue up behind it and go on
+    rendering once the window reopens, which measurement says it does."""
+    while True:
+        left = _quota_blocked_for()
+        if left <= 0:
+            return
+        time.sleep(min(left, 15.0))
 
 
 def _quota_blocked_for() -> float:
@@ -240,15 +266,10 @@ def submit_image_to_video(
         job_id=app_job_id, duration_secs=dur,
     ) as payload:
         payload["end_frame"] = end_image is not None
-        left = _quota_blocked_for()
-        if left:
-            # A sibling already proved the key is out of quota. Fail NOW with
-            # the same error type, so the runner can move this clip to the
-            # other host instead of the batch spending minutes per clip
-            # re-discovering it.
-            raise GoogleVeoQuotaError(
-                f"google veo quota exhausted (paused {left:.0f}s more): "
-                f"{_quota_block['detail']}")
+        # A sibling already found the quota busy — queue behind its pause
+        # instead of hammering the same wall in parallel. This is where a
+        # 40-clip batch serialises itself down to something the quota accepts.
+        _wait_out_quota_block()
         with _SUBMIT_GATE:
             last = ""
             for i, wait in enumerate((0, *_RETRY_WAITS)):

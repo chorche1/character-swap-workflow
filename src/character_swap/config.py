@@ -254,6 +254,17 @@ class Settings(BaseSettings):
     # NOT a content refusal and must never reach the runner's refusal
     # machinery, which would spend the clip's take budget on it.
     # Raise this if Google lifts the key's tier; watch for 429s in the log.
+    # Move a quota-blocked Veo clip to the OTHER host of the same model (fal).
+    # OFF by default (Hugo 2026-08-10: "jag vill inte använda fal, fixa
+    # problemet hos google") — fal is where 46% of these clips get refused,
+    # which is why the path moved to Google in the first place, so a run that
+    # quietly finishes half its clips there is worse than one that waits out
+    # the quota. The client does wait, and measurement says the window
+    # reopens. Set to 1 only when a daily quota is genuinely spent and the
+    # reel has to ship that day.
+    veo_host_fallback: bool = Field(
+        default=False, validation_alias="VEO_HOST_FALLBACK")
+
     google_veo_concurrency: int = Field(
         default=3, validation_alias="GOOGLE_VEO_CONCURRENCY")
     # fal's own content-moderation dial on the Veo 3.1 endpoints: "1" (strictest)

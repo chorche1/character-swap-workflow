@@ -302,30 +302,32 @@ def test_pipeline_waits_on_the_google_client(monkeypatch, tmp_path):
 
 # --- 6. a quota wall must not take the whole batch down with it -------------
 
-def test_first_quota_error_makes_siblings_fail_fast(monkeypatch, _key, _frames):
-    """THE LIVE FAILURE (2026-08-10). Nine clips each walked the full backoff
-    ladder independently — measured 162 s, 322 s and 486 s — so the run spent
-    ~45 minutes learning the same fact nine times. The quota is per KEY: once
-    one clip proves it is gone, the rest must fail in milliseconds so the
-    runner can move them to the other host while the batch is alive."""
+def test_a_sibling_waits_out_the_pause_instead_of_hammering_it(
+        monkeypatch, _key, _frames):
+    """THE LIVE FAILURE (2026-08-10) and Hugo's answer to it. Nine clips each
+    walked the backoff ladder independently — measured 162 s, 322 s and 486 s —
+    so the run spent ~45 minutes learning the same per-key fact nine times, and
+    then the clips FAILED. The quota is a moving window (the key that refused
+    everything at 03:45 UTC was accepting submits again by 07:03), so a sibling
+    must queue behind the shared pause and go on rendering, not die."""
     start, _ = _frames
     monkeypatch.setattr(google_veo, "_RETRY_WAITS", ())
+    monkeypatch.setattr(google_veo, "_QUOTA_BLOCK_SECS", 0.05)
     calls = []
 
     def fake_post(url, headers=None, json=None, timeout=None):
         calls.append(1)
-        return _Resp(429, {"error": {"code": 429,
-                                     "message": "You exceeded your current quota"}})
+        if len(calls) == 1:
+            return _Resp(429, {"error": {"message": "You exceeded your current quota"}})
+        return _Resp(200, {"name": "models/x/operations/ok"})
     monkeypatch.setattr(google_veo.httpx, "post", fake_post)
 
     with pytest.raises(google_veo.GoogleVeoQuotaError):
         google_veo.submit_image_to_video(image=start, prompt="a", duration_secs=8)
-    first = len(calls)
-    # A sibling clip: no HTTP at all, and it still gets the quota error type so
-    # the runner takes the same branch.
-    with pytest.raises(google_veo.GoogleVeoQuotaError):
-        google_veo.submit_image_to_video(image=start, prompt="b", duration_secs=8)
-    assert len(calls) == first, "the sibling must not re-probe a dead quota"
+    assert google_veo._quota_blocked_for() > 0, "the wall must be shared"
+    # The sibling waits the pause out and then SUCCEEDS — it is not failed.
+    op = google_veo.submit_image_to_video(image=start, prompt="b", duration_secs=8)
+    assert op == "models/x/operations/ok"
 
 
 def test_the_pause_expires(monkeypatch, _key, _frames):
@@ -349,6 +351,8 @@ def test_host_fallback_points_at_fal(monkeypatch):
     from character_swap.config import settings
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_fallback",
+                        property(lambda self: True), raising=False)
     assert runner_media.video_host_fallback("veo-3.1-fast-google") == "veo-3.1-fast"
     # No alternative host for anything else.
     assert runner_media.video_host_fallback("kling-v3") is None
@@ -361,8 +365,23 @@ def test_host_fallback_points_at_fal(monkeypatch):
 def test_host_fallback_needs_the_other_key(monkeypatch):
     """A fallback we cannot reach turns one clear error into two."""
     from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "veo_host_fallback",
+                        property(lambda self: True), raising=False)
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: ""), raising=False)
+    assert runner_media.video_host_fallback("veo-3.1-fast-google") is None
+
+
+def test_host_fallback_is_off_by_default(monkeypatch):
+    """Hugo declined it: fal is where 46% of these clips get refused, so a run
+    that quietly finishes half its clips there is worse than one that waits."""
+    from character_swap.config import settings
+    monkeypatch.delenv("VEO_HOST_FALLBACK", raising=False)
+    assert type(settings).model_fields["veo_host_fallback"].default is False
+    monkeypatch.setattr(type(settings), "fal_api_key",
+                        property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_fallback",
+                        property(lambda self: False), raising=False)
     assert runner_media.video_host_fallback("veo-3.1-fast-google") is None
 
 
@@ -414,6 +433,8 @@ def test_quota_moves_the_clip_to_fal_instead_of_killing_it(monkeypatch, tmp_path
 
     monkeypatch.setattr(type(settings), "fal_api_key",
                         property(lambda self: "k"), raising=False)
+    monkeypatch.setattr(type(settings), "veo_host_fallback",
+                        property(lambda self: True), raising=False)
     monkeypatch.setattr(type(settings), "video_qc_enabled",
                         property(lambda self: False), raising=False)
     monkeypatch.setattr(runner, "_persist", lambda *a, **k: None)
