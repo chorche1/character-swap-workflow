@@ -245,6 +245,17 @@ class Settings(BaseSettings):
     # pro so clips from different models in one reel share sharpness); 720p is
     # fal's own default (cheaper/faster). fal-routed Veo bills on FAL_API_KEY.
     veo_fal_resolution: str = Field(default="1080p", validation_alias="VEO_FAL_RESOLUTION")
+
+    # How many Veo jobs may be in flight at once on GOOGLE'S own API.
+    # Measured 2026-08-10 on Hugo's key: three concurrent submits ran fine and
+    # the FOURTH came back 429 "You exceeded your current quota". A Reengineer
+    # run fans out dozens of clips at once, so the client gates submits behind
+    # a semaphore of this size instead of letting them fail — a quota 429 is
+    # NOT a content refusal and must never reach the runner's refusal
+    # machinery, which would spend the clip's take budget on it.
+    # Raise this if Google lifts the key's tier; watch for 429s in the log.
+    google_veo_concurrency: int = Field(
+        default=3, validation_alias="GOOGLE_VEO_CONCURRENCY")
     # fal's own content-moderation dial on the Veo 3.1 endpoints: "1" (strictest)
     # … "6" (least strict), fal's default is "4". Set to 6 on Hugo's call
     # 2026-08-04 after the 2026-08-03 failure wave — 33 of 43 failed clips came
@@ -346,6 +357,14 @@ class Settings(BaseSettings):
     grok_video_price_usd: float = Field(default=0.40, validation_alias="GROK_VIDEO_PRICE_USD")
     nano_banana_price_usd: float = Field(default=0.04, validation_alias="NANO_BANANA_PRICE_USD")
     veo_price_usd: float = Field(default=0.50, validation_alias="VEO_PRICE_USD")
+    # Veo 3.1 Fast on GOOGLE'S own API (clients/google_veo.py) — $0.10/s at
+    # 720p and $0.12/s at 1080p with audio included, i.e. an 8 s 1080p clip is
+    # $0.96 against fal's $1.20 (fal: "$0.10 without audio or $0.15 with audio
+    # for 720p or 1080p"). Google also states it only bills a video that was
+    # successfully generated, while fal's FAQ warns a 422 may still be charged
+    # for GPU time — which every one of ~450 post-render refusals spent.
+    google_veo_price_usd: float = Field(
+        default=0.96, validation_alias="GOOGLE_VEO_PRICE_USD")
     kling_price_usd: float = Field(default=0.50, validation_alias="KLING_PRICE_USD")
     flux_price_usd: float = Field(default=0.05, validation_alias="FLUX_PRICE_USD")
     ideogram_price_usd: float = Field(default=0.08, validation_alias="IDEOGRAM_PRICE_USD")

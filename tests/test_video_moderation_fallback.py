@@ -527,7 +527,10 @@ def test_end_pose_is_never_dropped_when_the_rescue_is_off(
 # independent of VIDEO_MODERATION_FALLBACK. GERMAN is deliberately excluded
 # (Kling scores 0.48 on it); every OTHER model keeps the 2026-08-03 default.
 
-VEO = "veo-3.1-fast"
+# The 🗣 language redirect target — Google-hosted since 2026-08-10 (see
+# clients/google_veo.py). Pinned via the constant so this file cannot drift
+# away from where language clips actually render.
+VEO = "veo-3.1-fast-google"
 VEO_FALLBACK = "kling-v3"
 
 

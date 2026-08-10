@@ -86,10 +86,12 @@ def test_registry_seedance_routes_to_fal():
 
 
 def test_end_frame_capability_set():
-    # Single source of truth: Kling 3.0 + Seedance 2.0 + Veo 3.1 Fast interpolate
-    # end frames (Veo 3.1 Fast via its first-last-frame endpoint).
+    # Single source of truth: Kling 3.0 + Seedance 2.0 + BOTH hosts of Veo 3.1
+    # Fast interpolate end frames — fal via its first-last-frame endpoint,
+    # Google via `instances[0].lastFrame` (verified live 2026-08-10, which is
+    # why moving the default Veo path to Google costs no 🎯 end pose).
     assert runner_media.END_FRAME_VIDEO_MODELS == frozenset(
-        {"kling-v3", "seedance-2.0", "veo-3.1-fast"})
+        {"kling-v3", "seedance-2.0", "veo-3.1-fast", "veo-3.1-fast-google"})
     assert runner_media.supports_end_frame("seedance-2.0") is True
     assert runner_media.supports_end_frame("kling-v3") is True
     assert runner_media.supports_end_frame("veo-3.1-fast") is True

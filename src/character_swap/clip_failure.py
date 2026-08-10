@@ -168,6 +168,19 @@ _KINDS: list[tuple[re.Pattern[str], tuple[str, str, str, str]]] = [
         "↻ kör om klippet. Händer det på många klipp samtidigt är det kö hos "
         "leverantören, inte något fel i körningen.",
     )),
+    # MUST precede the generic rate-limit rule: Google's Veo quota is per KEY
+    # and per TIER, so "wait a bit and ↻" is only half the fix — the other half
+    # is a knob (2026-08-10). Measured: the 4th concurrent submit 429s.
+    (re.compile(r"google veo quota", re.I), (
+        "google_veo_quota",
+        "🚦 Googles Veo-kvot är slut för tillfället",
+        "Google tar bara emot ett visst antal samtidiga videojobb per nyckel. "
+        "Klippet nekades INTE på innehåll — det kom aldrig fram, och du "
+        "debiteras inte för det.",
+        "↻ om en stund. Händer det i varje körning: sänk "
+        "GOOGLE_VEO_CONCURRENCY i .env (standard 3) eller be Google höja "
+        "nyckelns tier.",
+    )),
     (re.compile(r"rate.?limit|429|Too Many Requests", re.I), (
         "rate_limit",
         "🚦 Rate-limit hos leverantören",

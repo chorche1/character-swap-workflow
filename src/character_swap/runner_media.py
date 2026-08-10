@@ -79,6 +79,15 @@ VIDEO_MODELS: dict[str, dict] = {
     # (The Gemini-path "veo" / "veo-3-fast" entries were removed 2026-07 — their
     # submit path, google_genai.submit_veo, is an unimplemented stub.)
     "veo-3.1-fast":         {"label": "Veo 3.1 Fast (fal)",              "provider": "fal",        "price_setting": "veo_price_usd",          "duration_options": [4, 6, 8], "duration_default": 8, "end_frame": True},
+    # Veo 3.1 Fast on GOOGLE'S OWN API (clients/google_veo.py) — the DEFAULT
+    # Veo path since 2026-08-10 (Hugo's directive, after the measurement in
+    # that client's docstring: fal's Veo deployment refuses 42-79% of this
+    # app's clips per day while Kling on the same fal key refuses 0-7%, and
+    # five frames fal refuses 90-100% of the time rendered here first try).
+    # Same model, ~20-33% cheaper, honors the 🎯 end pose via `lastFrame`
+    # (verified live, not assumed), native audio always on. Bills on
+    # GEMINI_API_KEY — the PAID tier; the free tier serves no video models.
+    "veo-3.1-fast-google":  {"label": "Veo 3.1 Fast",                    "provider": "gemini",     "price_setting": "google_veo_price_usd",   "duration_options": [4, 6, 8], "duration_default": 8, "end_frame": True},
     # Grok Imagine 1.5 routed through fal.ai (image-to-video) — xAI's newest
     # Grok video model. Integer duration 3–15s, native synced audio ALWAYS on,
     # renders at settings.grok_fal_resolution (default 720p). No end-frame on
@@ -226,7 +235,11 @@ VIDEO_MODERATION_FALLBACK_MODEL = "grok-imagine-1.5"
 # (language ∈ VEO_FALLBACK_LANGUAGES). Kling 3.0 is now simply the FIRST leg of
 # the chain every non-German clip walks, so the Spanish case keeps exactly the
 # model, order and measurements above — it is no longer a special case in code.
-VEO_VIDEO_MODELS: frozenset[str] = frozenset({"veo-3.1-fast"})
+# Both hosts of Veo 3.1 Fast. Membership drives the `no_media_generated`
+# refusal shape in `triggers_fallback` — a fal-ism, but harmless on the Google
+# leg, which reports its own filtering as an explicit error instead.
+VEO_VIDEO_MODELS: frozenset[str] = frozenset({"veo-3.1-fast",
+                                              "veo-3.1-fast-google"})
 VEO_MODERATION_FALLBACK_MODEL = "kling-v3"
 VEO_FALLBACK_LANGUAGES: frozenset[str] = frozenset({"es"})
 
@@ -313,7 +326,13 @@ def triggers_fallback(chosen_model: str, exc: BaseException) -> bool:
 # so the redirect costs no end pose — but it accepts ONLY 4/6/8 s, hence
 # `language_clip_secs` below. SINGLE SOURCE OF TRUTH — read by
 # runner._language_video_model and the api duration/cost previews.
-SPOKEN_LANGUAGE_VIDEO_MODEL = "veo-3.1-fast"
+# Points at the GOOGLE-hosted Veo since 2026-08-10 (Hugo: make Google the
+# default for every Veo clip). The measurement behind the move is in
+# clients/google_veo.py; the model, the speech fidelity and the 🎯 end-frame
+# support are identical, the refusals are not. Old clips keep whatever slug
+# they were submitted under, so resume/salvage still polls the right host —
+# that is the whole reason this is a NEW slug rather than a repointed one.
+SPOKEN_LANGUAGE_VIDEO_MODEL = "veo-3.1-fast-google"
 
 
 def language_clip_secs(secs: float | int | None) -> int:

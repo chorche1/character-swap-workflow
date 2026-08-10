@@ -910,6 +910,23 @@ def submit_video(
             duration_secs=effective_dur, end_image=end_image,
             generate_audio=audio, app_job_id=job_id,
         )
+    if model == "veo-3.1-fast-google":
+        # Veo 3.1 Fast on GOOGLE'S OWN API — the default Veo path since
+        # 2026-08-10 (see clients/google_veo.py for the measurement that moved
+        # it off fal). Returns the long-running OPERATION NAME as the provider
+        # job id; `wait_for_video` polls it. `lastFrame` carries the 🎯 end
+        # pose, so nothing degrades relative to the fal path. Audio is always
+        # on there (the API rejects the field), so the per-call override can
+        # only ever be honored as True.
+        from character_swap.clients import google_veo
+        return google_veo.submit_image_to_video(
+            image=image, prompt=movement_prompt,
+            duration_secs=effective_dur,
+            aspect_ratio=effective_ar,
+            generate_audio=generate_audio if generate_audio is not None else True,
+            end_image=end_image,
+            app_job_id=job_id,
+        )
     if model == "veo-3.1-fast":
         # Veo 3.1 Fast routed through fal.ai (the Gemini path only carries Veo
         # 3 / Veo 3 Fast). Like Kling/Seedance it supports an optional END FRAME
@@ -1073,6 +1090,10 @@ def wait_for_video(
     if model == "kling-v3":
         from character_swap.clients import fal_kling
         fal_kling.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)
+    elif model == "veo-3.1-fast-google":
+        from character_swap.clients import google_veo
+        google_veo.wait_for_video(operation=job_id, dest=dest,
+                                  app_job_id=app_job_id)
     elif model == "veo-3.1-fast":
         from character_swap.clients import fal_veo
         fal_veo.wait_for_video(request_id=job_id, dest=dest, app_job_id=app_job_id)

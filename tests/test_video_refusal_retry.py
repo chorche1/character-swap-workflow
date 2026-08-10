@@ -38,7 +38,10 @@ from character_swap.models import (
     VideoVariant,
 )
 
-VEO = "veo-3.1-fast"
+# The 🗣 language redirect target — Google-hosted since 2026-08-10. These
+# tests exercise the redirect, so they must follow it: a hardcoded fal slug
+# would still pass while describing a host no language clip is sent to.
+VEO = "veo-3.1-fast-google"
 KLING = "kling-v3"
 GROK = "grok-imagine-1.5"
 
