@@ -210,3 +210,58 @@ def test_pipeline_dispatches_and_polls_vertex(monkeypatch, tmp_path):
 
 def test_vertex_keeps_the_end_pose_capability():
     assert runner_media.supports_end_frame("veo-3.1-fast-vertex")
+
+
+# --- 5. the user's own login is a first-class identity ----------------------
+
+def test_adc_alone_is_enough(monkeypatch, tmp_path):
+    """The path Hugo actually uses: one `gcloud auth application-default
+    login` and no service-account key file at all. Requiring a key file here
+    would have meant five Cloud Console pages for the same result."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "vertex_project_id",
+                        property(lambda self: "proj-1"), raising=False)
+    monkeypatch.setattr(type(settings), "vertex_credentials_file",
+                        property(lambda self: ""), raising=False)
+    adc = tmp_path / "adc.json"; adc.write_text("{}")
+    monkeypatch.setattr(vertex_veo, "_ADC_PATH", adc)
+    assert vertex_veo.configured() is True
+    monkeypatch.setattr(vertex_veo, "_ADC_PATH", tmp_path / "gone.json")
+    assert vertex_veo.configured() is False
+
+
+def test_requests_name_the_quota_project(monkeypatch, _configured, tmp_path):
+    """A USER identity owns no project, so Google has nothing to bill or count
+    the quota against and answers 403 without this header."""
+    img = tmp_path / "f.png"; img.write_bytes(b"x")
+    sent = {}
+    monkeypatch.setattr(vertex_veo.httpx, "post",
+                        lambda url, headers=None, json=None, timeout=None:
+                        (sent.update(headers=headers), _Resp(200, {"name": "op"}))[1])
+    vertex_veo.submit_image_to_video(image=img, prompt="p", duration_secs=8)
+    assert sent["headers"]["x-goog-user-project"] == "proj-1"
+
+
+def test_the_token_is_cached_not_reminted_per_clip(monkeypatch, tmp_path):
+    """Minting is a signed round trip to Google. Forty clips must not mean
+    forty of them."""
+    from character_swap.config import settings
+    monkeypatch.setattr(type(settings), "vertex_project_id",
+                        property(lambda self: "p"), raising=False)
+    monkeypatch.setattr(type(settings), "vertex_credentials_file",
+                        property(lambda self: ""), raising=False)
+    adc = tmp_path / "adc.json"; adc.write_text("{}")
+    monkeypatch.setattr(vertex_veo, "_ADC_PATH", adc)
+    mints = []
+
+    class _Creds:
+        token = "t"
+
+        def refresh(self, _req):
+            mints.append(1)
+
+    import google.auth
+    monkeypatch.setattr(google.auth, "default", lambda scopes=None: (_Creds(), "p"))
+    assert vertex_veo._access_token() == "t"
+    assert vertex_veo._access_token() == "t"
+    assert len(mints) == 1

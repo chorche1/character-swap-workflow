@@ -18,12 +18,23 @@ they differ only in who moderates and who rate-limits:
 AUTH is the one real difference in shape: Vertex does not accept API keys. A
 probe on 2026-08-10 returned, verbatim, "API keys are not supported by this
 API. Expected OAuth2 access token or other authentication credentials that
-assert a principal." So this client mints a short-lived OAuth token from a
-SERVICE ACCOUNT key file (`google.oauth2.service_account`, already an indirect
-dependency — no new SDK), caches it until shortly before expiry, and sends it
-as a bearer token. `gcloud` is deliberately not required: it is not installed
-on this machine and a client that shells out to it would break the moment the
-app runs anywhere else.
+assert a principal." So this client mints a short-lived OAuth token and sends
+it as a bearer, caching it until shortly before expiry so a 40-clip batch mints
+once rather than forty times. Two identities are accepted, in order of least
+friction for the user:
+
+  1. the USER'S OWN ADC, from a single `gcloud auth application-default login`
+     — one browser consent, no long-lived private key left on disk. This is the
+     path Hugo actually uses. A user identity has no project of its own, so
+     every request carries `x-goog-user-project`; without it Google has nothing
+     to bill or count the quota against and answers 403.
+  2. a SERVICE-ACCOUNT key file (`VERTEX_CREDENTIALS_FILE`), for a headless or
+     CI machine where nobody can click through a browser prompt.
+
+`google.auth.default` also resolves GOOGLE_APPLICATION_CREDENTIALS and a
+metadata-server identity, so branch 1 keeps working unchanged if this ever runs
+on a cloud VM. The client never shells out to `gcloud` — it only reads the
+credentials that command leaves behind.
 
 STATUS — READ THIS BEFORE TRUSTING THE FILE. Everything here was written
 against Google's documented Veo-on-Vertex REST flow, but unlike
@@ -32,9 +43,8 @@ been exercised against a real project: there were no Vertex credentials on this
 machine when it was written. The request shaping, the chain wiring and the
 error handling are unit-tested; the WIRE FORMAT is not. First run with real
 credentials must be treated as the verification, and `veo_host_chain()` leaves
-this host out entirely until `VERTEX_PROJECT_ID` and a credentials file are
-both configured, so an unverified path cannot silently swallow a production
-clip.
+this host out entirely until `VERTEX_PROJECT_ID` and a usable identity are both
+present, so an unverified path cannot silently swallow a production clip.
 
 API (documented shape):
   POST https://{LOC}-aiplatform.googleapis.com/v1/projects/{PROJ}/locations/
@@ -82,12 +92,30 @@ class VertexNotConfigured(ProviderNotConfigured):
     """Project id or credentials missing — the host is simply not available."""
 
 
+# Where Application Default Credentials land after
+# `gcloud auth application-default login`. Preferred over a service-account key
+# file: it costs the user ONE browser consent instead of five console pages,
+# and it leaves no long-lived private key sitting on disk.
+_ADC_PATH = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+
+
+def _adc_available() -> bool:
+    return _ADC_PATH.is_file()
+
+
 def configured() -> bool:
     """True when this host can actually be reached. `veo_host_chain` gates on
-    it, so a half-configured Vertex never occupies a leg of the chain."""
-    return bool(settings.vertex_project_id
-                and settings.vertex_credentials_file
-                and Path(settings.vertex_credentials_file).is_file())
+    it, so a half-configured Vertex never occupies a leg of the chain.
+
+    Two ways in, checked in the order of least friction: the user's own ADC
+    (one `gcloud auth application-default login`), or an explicit
+    service-account key file for a headless/CI machine where no human can
+    consent to a browser prompt."""
+    if not settings.vertex_project_id:
+        return False
+    if settings.vertex_credentials_file:
+        return Path(settings.vertex_credentials_file).is_file()
+    return _adc_available()
 
 
 def _access_token() -> str:
@@ -98,11 +126,14 @@ def _access_token() -> str:
             return _token["value"]
         if not configured():
             raise VertexNotConfigured(
-                "Vertex is not configured — set VERTEX_PROJECT_ID and point "
+                "Vertex is not configured — set VERTEX_PROJECT_ID and then "
+                "EITHER run `gcloud auth application-default login` (one "
+                "browser consent, nothing left on disk) OR point "
                 "VERTEX_CREDENTIALS_FILE at a service-account JSON key with "
                 "the 'Vertex AI User' role."
             )
         try:
+            import google.auth                              # type: ignore
             from google.oauth2 import service_account       # type: ignore
             from google.auth.transport.requests import Request  # type: ignore
         except ImportError as e:                            # pragma: no cover
@@ -110,14 +141,31 @@ def _access_token() -> str:
                 "google-auth is required for the Vertex path. "
                 "Run `uv add google-auth`."
             ) from e
-        creds = service_account.Credentials.from_service_account_file(
-            settings.vertex_credentials_file, scopes=[_SCOPE])
+        if settings.vertex_credentials_file:
+            creds = service_account.Credentials.from_service_account_file(
+                settings.vertex_credentials_file, scopes=[_SCOPE])
+        else:
+            # The user's own ADC. `google.auth.default` also picks up
+            # GOOGLE_APPLICATION_CREDENTIALS and metadata-server identities, so
+            # this same branch works unchanged on a cloud VM later.
+            creds, _ = google.auth.default(scopes=[_SCOPE])
         creds.refresh(Request())
         _token["value"] = creds.token
         # `expiry` is naive UTC; keep a minute of slack rather than trusting a
         # clock we do not control.
         _token["expires_at"] = now + 3000
         return _token["value"]
+
+
+def _headers(token: str) -> dict[str, str]:
+    """Auth plus the billing/quota project.
+
+    `x-goog-user-project` is required when the credentials are a USER identity
+    (ADC from `gcloud auth application-default login`): without it Google has
+    no project to bill or count the quota against and answers 403. It is
+    harmless on a service account, whose project is implicit."""
+    return {"Authorization": f"Bearer {token}",
+            "x-goog-user-project": settings.vertex_project_id}
 
 
 def _base_url() -> str:
@@ -196,8 +244,7 @@ def submit_image_to_video(
     ) as payload:
         payload["end_frame"] = end_image is not None
         r = httpx.post(f"{_base_url()}:predictLongRunning",
-                       headers={"Authorization": f"Bearer {token}"},
-                       json=body, timeout=180)
+                       headers=_headers(token), json=body, timeout=180)
         if r.status_code != 200:
             raise RuntimeError(
                 f"vertex veo submit failed ({r.status_code}): {r.text[:500]}")
@@ -235,7 +282,7 @@ def wait_for_video(
         status: dict = {}
         while time.monotonic() < deadline:
             r = httpx.post(f"{_base_url()}:fetchPredictOperation",
-                           headers={"Authorization": f"Bearer {token}"},
+                           headers=_headers(token),
                            json={"operationName": operation}, timeout=60)
             if r.status_code != 200:
                 raise RuntimeError(
