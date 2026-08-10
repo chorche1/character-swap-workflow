@@ -1260,7 +1260,14 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
     # no end-frame degradation is possible here either way.
     models_to_try = runner_media.video_attempt_models(
         model, language=state.get("language") or None)
+    # Same quota rule as `runner._animate_one_video` (Hugo 2026-08-11): a host
+    # that answered "quota exhausted" is retired for this clip, not asked four
+    # more times. A direct clip has no VideoVariant, so there is nothing for
+    # `drain_quota_blocked` to park — with no model left it fails, saying so.
+    quota_dead: set[str] = set()
     for _midx, active_model in enumerate(models_to_try):
+        if active_model in quota_dead:
+            continue
         try:
             provider_job_id = await asyncio.to_thread(
                 pipeline.submit_video,
@@ -1280,8 +1287,17 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
                                               "scene_id": scene_id})
             return
         except Exception as e:
-            next_model = (models_to_try[_midx + 1]
-                          if _midx + 1 < len(models_to_try) else None)
+            quota = runner._is_quota_error(e)
+            if quota:
+                quota_dead.add(active_model)
+            next_model = runner_media.next_attempt_model(
+                models_to_try, _midx, quota_dead)
+            if quota and next_model:
+                # No take charged — the host never let the clip in.
+                _log.warning("reengineer %s: direct clip scene %s hit the "
+                             "quota wall on %s — skipping it for %s",
+                             re_id, scene_id, active_model, next_model)
+                continue
             if next_model and runner_media.triggers_fallback(active_model, e):
                 if next_model == active_model:
                     # Unchanged re-submit on the same model — not a fallback.
@@ -1306,7 +1322,11 @@ async def _render_direct_clip(re_id: str, scene_id: str) -> None:
             _log.exception("reengineer %s: direct clip for scene %s failed",
                            re_id, scene_id)
             err = f"{type(e).__name__}: {e}"
-            if active_model != model:
+            if quota:
+                # Never a content block — say which host ran out, so the fix is
+                # "wait for the window / raise the quota", not "new start frame".
+                err = f"kvoten hos {active_model} är slut: {e}"
+            elif active_model != model:
                 # We are on a REROUTE leg. Distinguish a genuine content refusal
                 # there from a transient/billing failure (Hugo: real reason).
                 if content_policy.is_content_rejection(e):

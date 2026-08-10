@@ -513,6 +513,28 @@ def video_attempt_models(chosen_model: str, *,
     return models
 
 
+def next_attempt_model(models: list[str], idx: int,
+                       quota_dead: set[str] | frozenset[str]) -> str | None:
+    """The next model to attempt after position `idx`, SKIPPING every entry for
+    a host that has already answered "quota exhausted" for this clip.
+
+    Hugo 2026-08-11: "om kvoten är slut så cancela istället". A quota wall is
+    per KEY, not per clip — the remaining entries for that host will answer
+    exactly the same way, and each one costs ~25 minutes of backoff to hear it
+    again (measured on re_bc2d243011: 16 clips × 5 Google entries ≈ 2 h of
+    wall-clock, zero frames). Walking on to a DIFFERENT model is the only move
+    that can still produce a clip; when there is no different model left, the
+    caller parks the clip for `runner.drain_quota_blocked` instead.
+
+    SINGLE SOURCE OF TRUTH for both runners' attempt loops, like
+    `video_attempt_models` whose output it walks.
+    """
+    for model in models[idx + 1:]:
+        if model not in quota_dead:
+            return model
+    return None
+
+
 def drops_end_frame(from_model: str, to_model: str) -> bool:
     """True when moving a clip from `from_model` to `to_model` LOSES a resolved
     🎯 end pose — the source honors end frames and the target does not.

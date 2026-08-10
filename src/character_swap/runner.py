@@ -1705,7 +1705,13 @@ async def _animate_one_video(
     lang_retries_left = (max(0, settings.video_qc_language_max_retries)
                          if lang_spec is not None else 0)
     wrong_language = False
+    # Hosts that have answered "quota exhausted" for THIS clip. Their remaining
+    # entries are skipped rather than walked (Hugo 2026-08-11) — see
+    # runner_media.next_attempt_model for what walking them costs.
+    quota_dead: set[str] = set()
     for _model_idx, active_model in enumerate(models_to_try):
+        if active_model in quota_dead:
+            continue
         # A fallback take starts from the clean prompt (drop any QC-retry hint
         # appended while the previous model was failing).
         prompt_text = movement_prompt
@@ -1825,20 +1831,21 @@ async def _animate_one_video(
             # refusal — see runner_media.triggers_fallback. Timeouts, network
             # errors and fal balance failures are NOT refusals and keep the loud
             # fail path with their real reason.
-            # QUOTA — the host will not accept work at all. Append the OTHER
-            # host's attempts to the list this loop is walking (it reads the
-            # live list, so the extension is picked up) and carry on. No take
-            # is spent: nothing about this clip was judged, it was never let
-            # in. The remaining same-host entries are walked first and fail in
-            # milliseconds, because the first quota error trips a shared pause
-            # in the client.
+            # QUOTA — the host will not accept work at all. Retire it for this
+            # clip and jump to the next DIFFERENT model; no take is spent,
+            # because nothing about this clip was judged, it was never let in.
+            # Hugo 2026-08-11 ("om kvoten är slut så cancela istället"): the
+            # remaining same-host entries are SKIPPED, not walked. They used to
+            # be walked on the theory that they would fail in milliseconds
+            # behind the client's shared pause — but that pause expires after
+            # 2 minutes, so in practice each entry walked its own ~25-minute
+            # backoff ladder against a wall we already knew about.
             quota = _is_quota_error(e)
-            next_model = (models_to_try[_model_idx + 1]
-                          if _model_idx + 1 < len(models_to_try) else None)
+            if quota:
+                quota_dead.add(active_model)
+            next_model = runner_media.next_attempt_model(
+                models_to_try, _model_idx, quota_dead)
             if quota and next_model:
-                # Walk on WITHOUT charging a take. The remaining same-host
-                # entries fail in milliseconds (the client's shared pause), so
-                # this costs nothing and lands on the other host's entries.
                 video.status = VideoStatus.PROCESSING
                 _replace_video(job, jc, video)
                 continue
@@ -1895,7 +1902,17 @@ async def _animate_one_video(
             # unattended, once the window reopens.
             video.quota_blocked = _is_quota_error(e)
             base = f"submit: {e}" if phase == "submit" else str(e)
-            if video.fallback_model and content_policy.is_content_rejection(e):
+            if video.quota_blocked:
+                # Nothing about this clip was judged and no model is left to
+                # try (a GERMAN clip has no reroute at all — Hugo: "tyskarna
+                # får bara ha veo"). Say PARKED, not blocked: the red card
+                # otherwise reads exactly like a content refusal, and the two
+                # call for opposite actions — this one needs no new start frame
+                # and no ↻, `drain_quota_blocked` picks it up by itself.
+                video.error = (f"kvoten hos {active_model} är slut — klippet är "
+                               f"parkerat och återupptas automatiskt när kvoten "
+                               f"öppnar igen ({phase}): {e}")
+            elif video.fallback_model and content_policy.is_content_rejection(e):
                 # Every leg was tried and the last one ALSO refused on content
                 # grounds — name the whole walked chain, so the failure reads as
                 # "three providers will not render this clip" (change the START

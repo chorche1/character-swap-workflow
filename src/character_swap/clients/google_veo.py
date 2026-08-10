@@ -107,26 +107,39 @@ _RETRY_WAITS = (30, 60, 120, 240, 480, 480)
 # It EXPIRES rather than latching: the Gemini rate limit is a moving window, so
 # a pause that never lifts would hold a long run hostage after the limit has
 # already recovered — the exact failure fal_kling documents for its own lock.
-# Siblings WAIT it out (see _wait_out_quota_block) rather than failing: measured
-# 2026-08-10, the key that refused every submit at 03:45 UTC was accepting them
-# again by 07:03 the same morning.
+# Siblings FAIL FAST on it (see _refuse_if_quota_blocked) rather than waiting.
 _QUOTA_BLOCK_SECS = 120.0
 _quota_block: dict = {"at": 0.0, "detail": ""}
 _quota_lock = threading.Lock()
 
 
-def _wait_out_quota_block() -> None:
-    """Sleep until the shared quota pause lifts.
+def _refuse_if_quota_blocked() -> None:
+    """Refuse THIS submit immediately while the shared quota pause is live.
 
-    A sibling that hits the pause WAITS rather than failing (Hugo 2026-08-10).
-    The point of the shared pause is to stop 40 clips hammering an exhausted
-    quota in parallel — not to fail them. They queue up behind it and go on
-    rendering once the window reopens, which measurement says it does."""
-    while True:
-        left = _quota_blocked_for()
-        if left <= 0:
-            return
-        time.sleep(min(left, 15.0))
+    Hugo 2026-08-11 ("om kvoten är slut så cancela istället"), replacing the
+    2026-08-10 wait-it-out behaviour. Waiting was the wrong instrument, and the
+    run that proved it is re_bc2d243011: 16 clips that fal had refused rerouted
+    here, met an exhausted daily quota, and then each slept out the pause and
+    walked its OWN ~24-minute backoff ladder — five entries deep, against a wall
+    we already knew about. Two hours of wall-clock, zero frames.
+
+    One 429 is enough. The runner turns this error into "skip every remaining
+    entry for this host" and the clip either reroutes (Kling, for anything but
+    German) or parks for `drain_quota_blocked`. Both finish the run unattended;
+    neither one waits.
+
+    The FIRST clip to meet the wall still walks the full ladder inside
+    `submit` — a 429 is also what a per-minute rate limit looks like, and the
+    ladder is what tells the two apart. This function is only for the siblings,
+    for whom that question is already answered.
+    """
+    left = _quota_blocked_for()
+    if left <= 0:
+        return
+    with _quota_lock:
+        detail = _quota_block["detail"]
+    raise GoogleVeoQuotaError(
+        f"google veo quota exhausted (delad spärr, {left:.0f}s kvar): {detail}")
 
 
 def _quota_blocked_for() -> float:
@@ -266,11 +279,15 @@ def submit_image_to_video(
         job_id=app_job_id, duration_secs=dur,
     ) as payload:
         payload["end_frame"] = end_image is not None
-        # A sibling already found the quota busy — queue behind its pause
-        # instead of hammering the same wall in parallel. This is where a
-        # 40-clip batch serialises itself down to something the quota accepts.
-        _wait_out_quota_block()
+        # A sibling already met the wall — do not walk the same ladder again.
+        # Checked TWICE on purpose: once here, and once more after the gate
+        # hands us a slot. `_SUBMIT_GATE` is held for a clip's WHOLE ladder, so
+        # a queued clip can sit here for ~25 minutes — which is precisely the
+        # window in which the verdict arrives, and the pre-gate check alone
+        # would miss it every time.
+        _refuse_if_quota_blocked()
         with _SUBMIT_GATE:
+            _refuse_if_quota_blocked()
             last = ""
             for i, wait in enumerate((0, *_RETRY_WAITS)):
                 if wait:

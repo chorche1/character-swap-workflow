@@ -302,17 +302,26 @@ def test_pipeline_waits_on_the_google_client(monkeypatch, tmp_path):
 
 # --- 6. a quota wall must not take the whole batch down with it -------------
 
-def test_a_sibling_waits_out_the_pause_instead_of_hammering_it(
+def test_a_sibling_is_refused_immediately_instead_of_waiting(
         monkeypatch, _key, _frames):
-    """THE LIVE FAILURE (2026-08-10) and Hugo's answer to it. Nine clips each
-    walked the backoff ladder independently — measured 162 s, 322 s and 486 s —
-    so the run spent ~45 minutes learning the same per-key fact nine times, and
-    then the clips FAILED. The quota is a moving window (the key that refused
-    everything at 03:45 UTC was accepting submits again by 07:03), so a sibling
-    must queue behind the shared pause and go on rendering, not die."""
+    """THE LIVE FAILURE (2026-08-10) and Hugo's second answer to it
+    (2026-08-11: "om kvoten är slut så cancela istället").
+
+    Round one: nine clips each walked the backoff ladder independently —
+    measured 162 s, 322 s and 486 s — so the run spent ~45 minutes learning the
+    same per-key fact nine times, and then the clips FAILED. The shared pause
+    fixed the duplication and siblings WAITED it out rather than dying.
+
+    Round two, re_bc2d243011: waiting is not enough either. The pause expires
+    after 2 minutes, so a sibling slept it out and then walked its own
+    ~24-minute ladder anyway — sixteen clips, five Veo entries each, two hours,
+    no frames. A sibling is now REFUSED on the spot, and the runner turns that
+    into "retire this host" (reroute to Kling, or park for the drainer). The
+    pause still expires, so the next batch probes the window again.
+    """
     start, _ = _frames
     monkeypatch.setattr(google_veo, "_RETRY_WAITS", ())
-    monkeypatch.setattr(google_veo, "_QUOTA_BLOCK_SECS", 0.05)
+    monkeypatch.setattr(google_veo, "_QUOTA_BLOCK_SECS", 600.0)
     calls = []
 
     def fake_post(url, headers=None, json=None, timeout=None):
@@ -325,9 +334,10 @@ def test_a_sibling_waits_out_the_pause_instead_of_hammering_it(
     with pytest.raises(google_veo.GoogleVeoQuotaError):
         google_veo.submit_image_to_video(image=start, prompt="a", duration_secs=8)
     assert google_veo._quota_blocked_for() > 0, "the wall must be shared"
-    # The sibling waits the pause out and then SUCCEEDS — it is not failed.
-    op = google_veo.submit_image_to_video(image=start, prompt="b", duration_secs=8)
-    assert op == "models/x/operations/ok"
+    with pytest.raises(google_veo.GoogleVeoQuotaError):
+        google_veo.submit_image_to_video(image=start, prompt="b", duration_secs=8)
+    assert calls == [1], \
+        "the sibling must not spend a single call on a wall we already found"
 
 
 def test_the_pause_expires(monkeypatch, _key, _frames):
