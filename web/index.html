@@ -730,7 +730,13 @@
             </div>
             <div class="video-strip">
               <template x-for="vv in jc.videos" :key="vv.video_id">
-                <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden flex flex-col">
+                <!-- Hela kortet är droparea (Hugo 2026-08-11) — se motiveringen
+                     vid Reengineer-klippen: en textetikett går inte att träffa. -->
+                <div class="card border border-neutral-200 dark:border-neutral-800 rounded-xl overflow-hidden flex flex-col"
+                     @dragover="onClipDragOver($event)"
+                     @dragleave="onClipDragLeave($event)"
+                     @drop.prevent="dropSwapClip(cid, vv.video_id, vv.status, $event)"
+                     title="Släpp en video här för att ersätta klippet">
                   <div class="aspect-[9/16] bg-black relative flex items-center justify-center">
                     <template x-if="vv.url">
                       <!-- poster = the swap image (the clip's start frame) +
@@ -2032,7 +2038,15 @@
                                regen modal to re-animate just this clip with an edited
                                motion prompt; the final is then marked "bygg om". -->
                           <template x-if="reClipForVariant(jc, v.variant_id)">
-                            <div class="mt-1 w-28">
+                            <!-- HELA kortet är droparea (Hugo 2026-08-11): en
+                                 9 px hög textetikett går inte att träffa med en
+                                 fil, och missen fick webbläsaren att öppna
+                                 videon i en ny flik. -->
+                            <div class="mt-1 w-28 rounded"
+                                 @dragover="onClipDragOver($event)"
+                                 @dragleave="onClipDragLeave($event)"
+                                 @drop.prevent="dropReClip(r, sc, cid, v.variant_id, $event)"
+                                 title="Släpp en video här för att ersätta klippet">
                               <template x-if="reClipForVariant(jc, v.variant_id).status === 'done' && reClipForVariant(jc, v.variant_id).url">
                                 <!-- poster = the swap image (== Kling's start frame) +
                                      preload="none": Safari refuses to decode more than

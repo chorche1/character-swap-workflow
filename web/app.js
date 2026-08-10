@@ -580,6 +580,7 @@ function studio() {
     _jobRefreshAgain: false,
 
     async init() {
+      this._installFileDropGuard();
       this._loadCollapsed();
       // Validate the stored tab against the tabs that still exist — users
       // who last sat on a removed tab (chat/image/video/avatar/audio/broll)
@@ -7598,6 +7599,52 @@ function studio() {
     // Replace ONE Swap step-5 clip with the user's own imported video
     // (Hugo 2026-06-21). The imported clip is used like a generated one when
     // step 6 compiles the final.
+    // Utan den här vakten NAVIGERAR webbläsaren till filen när ett släpp
+    // missar sitt mål — mitt i en körning kastas du ut ur appen och tappar
+    // vyn (Hugo 2026-08-11: "videon öppnas bara i en ny flik"). Att träffa en
+    // 9 px hög textetikett med en fil är dessutom svårt, så missar är
+    // normalfallet, inte undantaget.
+    //
+    // Vakten sitter på window och kör SIST (släppet bubblar target → window),
+    // så en riktig dropzone hinner alltid först: har någon redan kallat
+    // preventDefault gör vakten ingenting alls.
+    _installFileDropGuard() {
+      window.addEventListener('dragover', (ev) => {
+        if (this._dragHasFiles(ev)) ev.preventDefault();
+      });
+      window.addEventListener('drop', (ev) => {
+        if (!this._dragHasFiles(ev) || ev.defaultPrevented) return;
+        ev.preventDefault();
+        this.notifyInfo('Släpp videon på själva klippet du vill ersätta.');
+      });
+    },
+
+    // Släpp direkt på klippkortet — samma sak som att släppa på etiketten,
+    // men på en yta man faktiskt kan träffa. Ett klipp som renderas just nu
+    // får inte ersättas: den pågående genereringen skulle skriva över filen
+    // när den blir klar, vilket är exakt varför filväljaren är dold då.
+    dropReClip(run, sc, cid, variantId, ev) {
+      const clip = this.reClipForVariant(
+        (run.job?.characters || {})[cid], variantId);
+      if (clip && ['pending', 'processing'].includes(clip.status)) {
+        ev.currentTarget?.classList?.remove('clipdrop');
+        this.notifyError('Klippet renderas just nu — vänta tills det är klart.');
+        return;
+      }
+      const file = this.clipFileFromDrop(ev);
+      if (file) this.importReClipFile(run, sc, cid, variantId, file);
+    },
+
+    dropSwapClip(cid, videoId, status, ev) {
+      if (['pending', 'processing'].includes(status)) {
+        ev.currentTarget?.classList?.remove('clipdrop');
+        this.notifyError('Klippet renderas just nu — vänta tills det är klart.');
+        return;
+      }
+      const file = this.clipFileFromDrop(ev);
+      if (file) this.importSwapClipFile(cid, videoId, file);
+    },
+
     // --- släpp en video på "eget klipp" (Hugo 2026-08-11) --------------------
     //
     // Filväljaren var enda vägen in; att dra en fil dit kändes självklart och

@@ -47,6 +47,27 @@ def test_clip_drop_behavior():
         result.get("failures", []))
 
 
+def test_the_whole_clip_card_is_the_drop_target():
+    """Hugo 2026-08-11: "jag lyckas inte, videon öppnas bara i en ny flik."
+    A 9px text label is not something you can hit with a file, so the drop
+    landed on the page and the browser navigated to the video — out of the app,
+    mid-run. The card itself is the target now, and the window guard below
+    catches whatever still misses."""
+    assert "dropReClip(r, sc, cid, v.variant_id, $event)" in _HTML, (
+        "the Reengineer clip card must take the drop")
+    assert "dropSwapClip(cid, vv.video_id, vv.status, $event)" in _HTML, (
+        "the Swap Step-5 clip card must take the drop")
+
+
+def test_a_missed_drop_cannot_navigate_away():
+    """The guard is what turns a miss from "you lost your page" into "nothing
+    happened". It must be installed at startup, not lazily."""
+    assert "_installFileDropGuard()" in _JS
+    init = _JS.split("async init() {", 1)[1][:400]
+    assert "_installFileDropGuard" in init, (
+        "the guard must be installed in init(), before any drag can happen")
+
+
 def test_all_three_import_controls_accept_a_drop():
     """A helper nothing calls is invisible. Every place that offers "import your
     own clip" must take the drop, or the gesture works in one strip and

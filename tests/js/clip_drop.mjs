@@ -123,4 +123,61 @@ check(typeof s.importSwapClipFile === 'function'
    && typeof s.importReClipFile === 'function',
   'both import paths must expose a file-taking entry point');
 
+// --- the window guard: a missed drop must not navigate away -----------------
+//
+// THE REPORTED FAILURE (Hugo 2026-08-11): "videon öppnas bara i en ny flik".
+// Dropping a file anywhere the app does not handle makes the browser navigate
+// to it, which throws the user out of a running job. Hitting a 9px text label
+// with a file is hard, so misses are the normal case, not the exception.
+{
+  const listeners = {};
+  const realWindow = globalThis.window;
+  globalThis.window = { addEventListener: (k, f) => { (listeners[k] ||= []).push(f); } };
+  s.notifyInfo = () => {};
+  s._installFileDropGuard();
+  globalThis.window = realWindow;
+
+  check((listeners.dragover || []).length === 1 && (listeners.drop || []).length === 1,
+    'the guard must register both dragover and drop on window');
+
+  let prevented = false;
+  listeners.drop[0]({ dataTransfer: { types: ['Files'] }, defaultPrevented: false,
+                      preventDefault: () => { prevented = true; } });
+  check(prevented, 'a MISSED file drop must be swallowed, not navigated to');
+
+  prevented = false;
+  listeners.drop[0]({ dataTransfer: { types: ['Files'] }, defaultPrevented: true,
+                      preventDefault: () => { prevented = true; } });
+  check(!prevented, 'a drop a real dropzone already handled must be left alone');
+
+  prevented = false;
+  listeners.drop[0]({ dataTransfer: { types: ['text/plain'] }, defaultPrevented: false,
+                      preventDefault: () => { prevented = true; } });
+  check(!prevented, 'dragging text around the page must not be intercepted');
+
+  prevented = false;
+  listeners.dragover[0]({ dataTransfer: { types: ['Files'] },
+                          preventDefault: () => { prevented = true; } });
+  check(prevented, 'dragover must be allowed so the drop can land anywhere');
+}
+
+// --- a clip that is rendering must not be replaced ---------------------------
+{
+  const notes = [];
+  s.notifyError = (m) => notes.push(m);
+  let uploaded = false;
+  s.importSwapClipFile = async () => { uploaded = true; };
+  const t = target();
+  const dt = { files: [{ name: 'x.mp4', type: 'video/mp4' }], types: ['Files'] };
+  s.dropSwapClip('cA', 'vd1', 'processing',
+    { dataTransfer: dt, currentTarget: t, preventDefault() {} });
+  check(!uploaded, 'a rendering clip must not be overwritten by a drop');
+  check(notes.length === 1, 'and the refusal must be said, not silent');
+
+  uploaded = false; notes.length = 0;
+  s.dropSwapClip('cA', 'vd1', 'done',
+    { dataTransfer: dt, currentTarget: target(), preventDefault() {} });
+  check(uploaded, 'a finished clip accepts the drop');
+}
+
 console.log(JSON.stringify(failures.length ? { ok: false, failures } : { ok: true }));
