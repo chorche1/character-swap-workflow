@@ -1573,7 +1573,18 @@ function studio() {
         m.useDirector = !!s.use_director && !!this.health.anthropic_key;
         m.skipQc = !!s.skip_qc;
         m.autoMode = !!s.auto_mode;
-        m.autoTelegramSend = !!s.auto_telegram_send;
+        // ALLTID på när modalen öppnas (Hugo 2026-08-11: "gör så att bygg
+        // ihop och skicka till telegram är på som preset"). Övriga
+        // inställningar ärvs från föräldern, men leveransen är ett nytt beslut
+        // per körning — och den säkra riktningen är att skicka: en final som
+        // inte når Telegram är en tyst förlust, en han inte ser förrän han
+        // letar efter den. Vill han hoppa över den för en enskild omkörning
+        // bockar han ur rutan här.
+        //
+        // Det gamla `!!s.auto_telegram_send` gjorde dessutom ett SAKNAT värde
+        // till nej — samma coercion-fälla som repurpose-växeln fick rättad
+        // 2026-08-09, där `=== undefined ? true` är regeln.
+        m.autoTelegramSend = true;
         m.rows = (plan.scenes || []).map(sc => ({
           idx: sc.idx,
           include: !sc.missing_file,
